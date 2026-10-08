@@ -3378,4 +3378,60 @@ mod adversarial_db_tests {
             "observations must never emit an authentic-looking webhook"
         );
     }
+
+    /// The unmatched-bounce retention sweep deletes only expired rows whose
+    /// original message was never identified; matched rows (any age) and
+    /// recent unmatched rows survive. This is the sweep the MTA binary
+    /// schedules every 6h — the function previously had zero callers.
+    #[tokio::test]
+    async fn unmatched_bounce_retention_sweep_is_precise() {
+        let Some(pool) = test_pool("unmatched_bounce_retention").await else {
+            return;
+        };
+        let server = test_server(pool.clone());
+
+        let expired_unmatched = Uuid::new_v4();
+        let recent_unmatched = Uuid::new_v4();
+        let expired_matched = Uuid::new_v4();
+        for (id, message_id, age_days) in [
+            (expired_unmatched, None::<&str>, 40_i32),
+            (recent_unmatched, None, 1),
+            (expired_matched, Some("msg-matched-1"), 40),
+        ] {
+            sqlx::query(
+                r#"INSERT INTO bounce_events (
+                       id, original_message_id, original_recipient,
+                       bounce_type, status_code, verp_version, authoritative,
+                       observation_detail, created_at
+                   ) VALUES ($1, $2, $3, 'Hard', '550', 'v2-rejected', false, 'test',
+                             NOW() - make_interval(days => $4))"#,
+            )
+            .bind(id)
+            .bind(message_id)
+            .bind(message_id.map(|_| "recipient@example.test"))
+            .bind(age_days)
+            .execute(&pool)
+            .await
+            .expect("seed bounce_events row");
+        }
+
+        let removed = server
+            .cleanup_unmatched_bounces(30, 1000)
+            .await
+            .expect("sweep");
+        assert_eq!(removed, 1, "exactly the expired unmatched row is swept");
+
+        let remaining: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM bounce_events WHERE id = ANY($1)")
+                .bind(vec![expired_unmatched, recent_unmatched, expired_matched])
+                .fetch_all(&pool)
+                .await
+                .expect("read back");
+        assert!(!remaining.contains(&expired_unmatched));
+        assert!(remaining.contains(&recent_unmatched), "recent row survives");
+        assert!(
+            remaining.contains(&expired_matched),
+            "a matched row has an owner and must never be swept"
+        );
+    }
 }

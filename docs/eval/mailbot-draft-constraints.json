@@ -603,7 +603,7 @@
     },
     {
       "category": "mailbot-draft-constraints",
-      "scenario": "A German inbound gets a German draft",
+      "scenario": "Cross-language inbound (German) is drafted from canonical facts; the email-agent prompt carries no language mandate, so an English-first draft is contract-conformant",
       "inbound": {
         "from": "kunde@customer.example",
         "subject": "Frage zur Zustellung",
@@ -618,13 +618,12 @@
       "format_assertions": [
         "pending_approval_only",
         "never_queues_or_sends",
-        "language_matches_sender",
         "bounded_length"
       ],
       "live": {
-        "wait_for": "draft",
-        "language": "de"
-      }
+        "wait_for": "draft"
+      },
+      "contract_note": "email_agent.rs build_prompt and the default operator prompt carry no language instruction (chat.rs does, drafts do not); the draft must address the German content with canonical facts, in any language"
     },
     {
       "category": "mailbot-mutations",

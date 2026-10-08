@@ -1,6 +1,7 @@
 //! ApexMail shared library — crypto, logging, caching, IDs, validation, HTTP client, error codes.
 
 #![deny(unsafe_code)]
+pub mod ab_testing;
 pub mod audit;
 pub mod cache;
 pub mod config;

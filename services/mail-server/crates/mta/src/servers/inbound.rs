@@ -2404,6 +2404,33 @@ fn parse_inbound_mirrors(raw: &[u8], envelope_recipient: Option<&str>) -> Inboun
                     .collect::<Vec<_>>()
                     .join(", "),
             ),
+            // Address-typed values must survive the mirror: a `<mailto:…>`
+            // List-Unsubscribe parses as an Address list, and the reply
+            // pipeline's deterministic mailto-unsubscribe arm reads the
+            // JSONB mirror — falling through to `as_text()` (None for
+            // address-typed values) silently dropped the header, so the arm
+            // could never fire on live mail (dogfood 2026-10-06 F-4). Render
+            // each address the way the header reads: `Name <addr>` when a
+            // display name is present, else the bare address.
+            mail_parser::HeaderValue::Address(address) => {
+                let rendered: Vec<String> = address
+                    .iter()
+                    .filter_map(|addr| {
+                        let value = addr.address()?;
+                        Some(match addr.name() {
+                            Some(name) if !name.trim().is_empty() => {
+                                format!("{} <{}>", name.trim(), value)
+                            }
+                            _ => value.to_string(),
+                        })
+                    })
+                    .collect();
+                if rendered.is_empty() {
+                    None
+                } else {
+                    Some(rendered.join(", "))
+                }
+            }
             // Content-Type parses into its own variant; the reply handler's
             // HTML-only detection reads it, so reconstruct "type/subtype"
             // plus the parameters verbatim (e.g. charset, boundary).
@@ -2735,6 +2762,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-4 (live mailbot dogfood 2026-10-06): `List-Unsubscribe:
+    /// <mailto:…>` parses as an Address list, and the mirror's fallback
+    /// (`HeaderValue::as_text()`) is `None` for address-typed values — the
+    /// header silently vanished from `inbound_messages.headers`, so the reply
+    /// pipeline's deterministic mailto-unsubscribe arm (which reads the
+    /// mirror, never the raw MIME) could never fire on live mail. Address
+    /// values must be rendered into the mirror; a plain-text sibling header
+    /// proves the two arms of the same RFC 8058 pair both survive.
+    #[test]
+    fn mirror_preserves_address_typed_list_unsubscribe() {
+        let raw = b"From: Prospect <prospect@example.com>\r\n\
+To: sales@apexmail.ee\r\n\
+Subject: Re: newsletter\r\n\
+Message-ID: <mi-1@example.com>\r\n\
+List-Unsubscribe: <mailto:unsubscribe@apexmail.ee?subject=unsub>\r\n\
+List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+as requested\r\n";
+        let mirrors = parse_inbound_mirrors(raw, Some("sales@apexmail.ee"));
+        let headers = mirrors.headers.expect("headers JSONB populated");
+        let list_unsubscribe = headers["list-unsubscribe"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            list_unsubscribe.contains("mailto:unsubscribe@apexmail.ee"),
+            "the mailto target must survive the mirror: {list_unsubscribe:?}"
+        );
+        assert!(
+            list_unsubscribe.contains("subject=unsub"),
+            "the mailto query survives verbatim: {list_unsubscribe:?}"
+        );
+        assert_eq!(
+            headers["list-unsubscribe-post"], "List-Unsubscribe=One-Click",
+            "the plain-text sibling header still mirrors"
+        );
+    }
 
     #[test]
     fn test_extract_address_angle_brackets() {

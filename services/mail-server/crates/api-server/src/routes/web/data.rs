@@ -17,7 +17,8 @@
 
 use ui_foundation::axum_router::RouteData;
 use ui_foundation::view_data::{
-    BulkActionData, DataCell, DataRowData, FilterSelectData, KpiCardData, ListPageData, TableData,
+    AlertRuleData, AlertRulesPageData, BulkActionData, DataCell, DataRowData, FilterSelectData,
+    KpiCardData, ListPageData, TableData, TenantChoiceData,
 };
 
 use crate::analytics_metrics::SendCohortCounts;
@@ -41,6 +42,8 @@ pub(crate) struct ListQuery {
     pub page: usize,
     /// Optional recency window (days) for the audit list + export.
     pub days: Option<i64>,
+    /// `?edit=<id>` — the alert-rules page's edit target.
+    pub edit: String,
 }
 
 pub(crate) fn parse_list_query(query: Option<&str>) -> ListQuery {
@@ -61,6 +64,7 @@ pub(crate) fn parse_list_query(query: Option<&str>) -> ListQuery {
             "status" => out.status = value,
             "sort" => out.sort = value,
             "stage" => out.stage = value,
+            "edit" => out.edit = value,
             "page" => {
                 out.page = value.parse::<usize>().unwrap_or(1).clamp(1, MAX_PAGE);
             }
@@ -837,6 +841,8 @@ pub(crate) async fn load_ai_drafts_page(
             Option<String>,
             bool,
             chrono::DateTime<chrono::Utc>,
+            Option<String>,
+            Option<String>,
         )>,
         sqlx::Error,
     > = sqlx::query_as(
@@ -845,10 +851,17 @@ pub(crate) async fn load_ai_drafts_page(
         // `first_response` flag drives the card badge. DOGFOOD 2026-10-06:
         // the flag was hardcoded `false` in the row mapping, so the badge
         // could never render no matter what the row said.
-        "SELECT id, tenant_id, from_email, subject, ai_response, classification, \
-                suggested_action->>'objection_class', \
-                COALESCE((suggested_action->>'first_response') = 'true', false), received_at \
-         FROM inbound_messages \
+        // F-6 (live mailbot dogfood 2026-10-06): the review page rendered the
+        // raw tenant id as "Workspace <id>" — an internal identifier in
+        // operator-facing copy. The workspace NAME (falling back to its slug)
+        // is the human label; a deleted/unknown tenant degrades to a short
+        // marker, never the full id.
+        "SELECT i.id, i.tenant_id, i.from_email, i.subject, i.ai_response, i.classification, \
+                i.suggested_action->>'objection_class', \
+                COALESCE((i.suggested_action->>'first_response') = 'true', false), i.received_at, \
+                t.name, t.slug \
+         FROM inbound_messages i \
+         LEFT JOIN tenants t ON t.id = i.tenant_id \
          WHERE pending_approval = true AND ai_response IS NOT NULL \
          ORDER BY COALESCE((suggested_action->>'first_response') = 'true', false) DESC, \
                   received_at ASC \
@@ -870,10 +883,24 @@ pub(crate) async fn load_ai_drafts_page(
                     objection,
                     first_response,
                     received_at,
+                    tenant_name,
+                    tenant_slug,
                 )| {
+                    let tenant_id = tenant.unwrap_or_default();
+                    let tenant_label = tenant_name
+                        .filter(|name| !name.trim().is_empty())
+                        .or_else(|| tenant_slug.filter(|slug| !slug.trim().is_empty()))
+                        .unwrap_or_else(|| {
+                            if tenant_id.is_empty() {
+                                "(unknown workspace)".to_string()
+                            } else {
+                                format!("workspace {}…", &tenant_id[..tenant_id.len().min(8)])
+                            }
+                        });
                     AiDraftData {
                         id,
-                        tenant_id: tenant.unwrap_or_default(),
+                        tenant_id,
+                        tenant_label,
                         from_email: from.unwrap_or_default(),
                         subject: subject.unwrap_or_default(),
                         draft_reply: reply.unwrap_or_default(),
@@ -2087,7 +2114,19 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) ->
                 cells: vec![
                     DataCell::status(&event_type),
                     DataCell::text(recipient.unwrap_or_default()),
-                    DataCell::mono(message_id.unwrap_or_default()),
+                    // The message cell is the console doorway into the
+                    // time-travel timeline (`/messages/{id}/timeline`) — the
+                    // delivery-debugging surface docs/api/endpoints/events.md
+                    // points at. Only real message ids link.
+                    match message_id {
+                        Some(message_id) if uuid::Uuid::parse_str(&message_id).is_ok() => {
+                            DataCell::Link {
+                                href: format!("/messages/{message_id}/timeline"),
+                                text: message_id,
+                            }
+                        }
+                        other => DataCell::mono(other.unwrap_or_default()),
+                    },
                     time_cell(ts),
                 ],
             })
@@ -3030,6 +3069,9 @@ async fn control_plane_route_data(
         "/infrastructure/nodes" => Some(cp_nodes(state, cid).await),
         "/infrastructure/queues" => Some(cp_queues(state, cid).await),
         "/alerts" => Some(cp_alerts(state, q, cid).await),
+        // The rules page is data-backed through `RouteData::alert_rules`
+        // (rules + tenant choices), not the generic list shape.
+        "/alerts/rules" => None,
         "/domains" => Some(cp_domains(state, q, cid).await),
         "/billing/plans" => Some(cp_plans(state, cid).await),
         "/compliance" => Some(cp_compliance(state, cid).await),
@@ -3054,6 +3096,11 @@ async fn control_plane_route_data(
     } else {
         None
     };
+    let alert_rules = if path == "/alerts/rules" {
+        Some(cp_alert_rules(state, q, cid).await)
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit: None,
@@ -3065,6 +3112,7 @@ async fn control_plane_route_data(
         demos,
         demo_viewer: None,
         ai_drafts,
+        alert_rules,
         // The shell identity + impersonation banner are attached by the
         // api-server render pipeline (they need request headers).
         ..RouteData::default()
@@ -4299,12 +4347,137 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data
 }
 
-// /alerts/rules is NOT implemented: there is no alert-rule table or CRUD
-// service, and presenting an empty "rules" surface implied one existed. The
-// route now returns an explicit 501 (see `cp_alert_rules_not_implemented`
-// in app.rs) instead of fabricated page data. This loader was removed with
-// the route's data arm so a future real store must wire itself in
-// deliberately.
+/// Alert-rules page data: the EXISTING evaluated store
+/// (`usage_alert_configs`, migrations 024 + 246) — the same rows the
+/// billing-service maintenance sweep resolves — plus the tenant choices for
+/// the create form and the `?edit=<id>` target.
+///
+/// Every dataset is loaded with the honest-failure contract: a failed query
+/// marks the page `unavailable` (with the correlation reference) instead of
+/// rendering the empty state, so "no rules" never means "query failed".
+async fn cp_alert_rules(state: &AppState, q: &ListQuery, cid: &str) -> AlertRulesPageData {
+    type RuleRow = (
+        String,
+        String,
+        Option<String>,
+        String,
+        i32,
+        String,
+        String,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+    );
+    const RULE_SQL: &str = "SELECT id::text AS id, tenant_id, name, metric_type, \
+         threshold_percent, notification_channel, severity, enabled, last_triggered_at \
+         FROM usage_alert_configs";
+
+    let rules = load_query("cp.alert_rules.list", cid, async {
+        let sql = format!("{RULE_SQL} ORDER BY created_at DESC NULLS LAST, id LIMIT 200");
+        sqlx::query_as::<_, RuleRow>(&sql)
+            .fetch_all(&state.db)
+            .await
+    })
+    .await
+    .rows_or_unavailable();
+    let rules_unavailable = rules.1;
+    let rules: Vec<AlertRuleData> = rules.0.into_iter().map(alert_rule_view).collect();
+
+    let tenants = load_query("cp.alert_rules.tenants", cid, async {
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT id, name FROM tenants ORDER BY COALESCE(name, id) ASC LIMIT 500",
+        )
+        .fetch_all(&state.db)
+        .await
+    })
+    .await
+    .rows_or_unavailable();
+    let tenants_unavailable = tenants.1;
+    let tenants: Vec<TenantChoiceData> = tenants
+        .0
+        .into_iter()
+        .map(|(id, name)| TenantChoiceData {
+            label: name
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| id.clone()),
+            id,
+        })
+        .collect();
+
+    // The edit target is an OPTIONAL dataset: a rule id that vanished (or a
+    // hostile value) renders the list + create form, never an error page.
+    let editing = if q.edit.trim().is_empty() {
+        None
+    } else {
+        let sql = format!("{RULE_SQL} WHERE id = $1::uuid");
+        match load_query("cp.alert_rules.edit", cid, async {
+            sqlx::query_as::<_, RuleRow>(&sql)
+                .bind(q.edit.trim())
+                .fetch_optional(&state.db)
+                .await
+        })
+        .await
+        {
+            LoadState::Loaded(rule) => rule.map(alert_rule_view),
+            // A failed optional read renders the list + create form without
+            // the prefilled editor; the primary list's state already carries
+            // the unavailable banner when the store itself is down.
+            LoadState::Unavailable => None,
+        }
+    };
+
+    let unavailable = rules_unavailable || tenants_unavailable;
+    AlertRulesPageData {
+        rules,
+        tenants,
+        unavailable,
+        unavailable_note: if unavailable {
+            format!(
+                "The rule store query failed; figures below are unknown, not zero. Reference: {cid}."
+            )
+        } else {
+            String::new()
+        },
+        editing,
+    }
+}
+
+fn alert_rule_view(
+    row: (
+        String,
+        String,
+        Option<String>,
+        String,
+        i32,
+        String,
+        String,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
+) -> AlertRuleData {
+    let (
+        id,
+        tenant_id,
+        name,
+        metric_type,
+        threshold_percent,
+        notification_channel,
+        severity,
+        enabled,
+        last_triggered_at,
+    ) = row;
+    AlertRuleData {
+        id,
+        tenant_id,
+        name: name.unwrap_or_default().trim().to_string(),
+        metric_type,
+        threshold_percent,
+        notification_channel,
+        severity,
+        enabled,
+        last_triggered: last_triggered_at.map(|ts| relative_time(Some(ts))),
+    }
+}
 
 async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
@@ -7296,6 +7469,7 @@ mod coverage_loader_tests {
             stage: "proposal".into(),
             page: 2,
             days: Some(30),
+            edit: String::new(),
         };
         assert_eq!(
             filter_query(&q),

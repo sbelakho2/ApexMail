@@ -296,6 +296,33 @@ async fn run_(
         None
     };
 
+    // Unmatched-bounce retention. `bounce_events` rows whose original
+    // message was never identified have no other lifecycle owner: they are
+    // not tied to a send, and nothing else deletes them. Before this loop
+    // existed `cleanup_unmatched_bounces` had zero callers, so the table (and
+    // its indexes) grew without bound. Bounded batches keep each pass short;
+    // 30 days comfortably exceeds the queue-retention window that could
+    // still match a late VERP reply to its original message.
+    if let Some(srv) = bounce_srv.clone() {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(6 * 3600));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; run one sweep at startup so
+            // a restarted service catches up, then settle into the cadence.
+            loop {
+                ticker.tick().await;
+                match srv.cleanup_unmatched_bounces(30, 1000).await {
+                    Ok(0) => {}
+                    Ok(removed) => info!(removed, "pruned unmatched bounce events"),
+                    Err(error) => warn!(
+                        error = %error,
+                        "unmatched-bounce retention sweep failed (non-fatal)"
+                    ),
+                }
+            }
+        });
+    }
+
     // Feedback loop server. Provider registry first: only authoritative
     // ARF/FBL traffic may suppress.
     let fbl_srv = if config.feedback.enabled {

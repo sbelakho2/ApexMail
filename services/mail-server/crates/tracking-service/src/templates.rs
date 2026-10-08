@@ -96,6 +96,47 @@ pub fn render_click_refused_page(reason: &str) -> String {
     )
 }
 
+/// The honest tracking-host-refused page (capability wave 2): a request
+/// arrived on a Host that is neither the platform tracking host nor a
+/// VERIFIED custom tracking domain for the link's workspace. The recipient
+/// and the operator both get the named reason — the request is never
+/// silently bounced to the vendor fallback.
+pub fn render_tracking_domain_refused_page(host: &str, reason: &str) -> String {
+    let host_safe = escape_html(host);
+    let msg = escape_html(reason);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tracking domain not configured - ApexMail</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
+      background-color: #ffffff; color: #000000;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
+    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 480px; text-align: center; }}
+    .icon {{ font-size: 48px; margin-bottom: 20px; }}
+    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
+    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
+    .host {{ color: #000000; font-weight: 700; word-break: break-all; }}
+    .back-link {{ margin-top: 24px; }}
+    .back-link a {{ color: #000000; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#128683;</div>
+    <h1>This tracking domain is not configured</h1>
+    <p>The request arrived on <span class="host">{host_safe}</span>. {msg}</p>
+    {BACK_LINK_HTML}
+  </div>
+</body>
+</html>"#
+    )
+}
+
 pub fn render_success_page(email: &str) -> String {
     let email_safe = escape_html(email);
     format!(

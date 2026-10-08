@@ -57,6 +57,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use analytics::send_time_optimizer::SendTimeOptimizer;
 use apexmail_lib::email_headers::message_category;
 use billing_service::send_admission::{
     AdmissionMeter, SendAdmissionError, SendAdmissionRequest, SendAdmissionService,
@@ -143,6 +144,10 @@ pub struct CampaignExecutor {
     worker_id: String,
     batch_size: i64,
     drain_batch_size: i64,
+    /// Send-time optimization engine (Pro+ feature). `None` (test harnesses,
+    /// optimizers disabled) sends immediately when a campaign asks for STO;
+    /// the production worker binary always injects it.
+    send_time: Option<SendTimeOptimizer>,
 }
 
 /// One claimed scheduled campaign, with its stored audience definition.
@@ -192,6 +197,12 @@ struct CampaignSendContext {
     track_clicks: bool,
     ip_pool: Option<String>,
     throttle_rate: Option<i64>,
+    /// `settings.sendTimeOptimization`: schedule each recipient at their
+    /// optimal engagement window (documented Pro+ contract).
+    send_time_optimization: bool,
+    /// `settings.timezone` (IANA) as a fixed UTC offset for the STO windows;
+    /// `None` falls back to the tenant's own offset.
+    sto_offset_minutes: Option<i32>,
     /// The campaign-level template (None for inline-html campaigns).
     template: Option<TemplateContent>,
     /// Per-arm content for A/B campaigns, keyed by arm_index.
@@ -232,7 +243,14 @@ impl CampaignExecutor {
             worker_id: worker_id.into(),
             batch_size: DEFAULT_BATCH_SIZE,
             drain_batch_size: DRAIN_BATCH_SIZE,
+            send_time: None,
         }
+    }
+
+    /// Attach the send-time optimization engine (`settings.sendTimeOptimization`).
+    pub fn with_send_time_optimizer(mut self, optimizer: SendTimeOptimizer) -> Self {
+        self.send_time = Some(optimizer);
+        self
     }
 
     /// Override the per-tick claim bounds (tests).
@@ -349,11 +367,13 @@ impl CampaignExecutor {
     }
 
     /// Assign the A/B phases for a campaign whose recipients are still
-    /// un-phased: a deterministic hash-ordered sample of
-    /// `ab_config.testPercentage` becomes `test` rows distributed round-robin
-    /// over the arms; the remainder becomes `holdout` and waits for the
-    /// winner. Deterministic ordering makes the split reproducible across
-    /// retries; `phase IS NULL` scoping makes re-runs no-ops.
+    /// un-phased. The assignment is the shared deterministic contract
+    /// (`apexmail_lib::ab_testing::AB_SPLIT_SQL`): a hash of
+    /// `(campaign_id, contact_id)` picks the `test` sample of
+    /// `ab_config.testPercentage` and its arm, so a replay/resend of the
+    /// same audience assigns the same arm to the same contact regardless of
+    /// row order or audience growth; the remainder becomes `holdout` and
+    /// waits for the winner. `phase IS NULL` scoping makes re-runs no-ops.
     async fn split_ab_recipients(
         &self,
         campaign_id: Uuid,
@@ -376,31 +396,12 @@ impl CampaignExecutor {
             return Ok(0);
         }
 
-        let split = sqlx::query(
-            "WITH ranked AS ( \
-                 SELECT id, row_number() OVER (ORDER BY md5(id::text)) - 1 AS rn, \
-                        COUNT(*) OVER () AS total \
-                 FROM campaign_recipients \
-                 WHERE campaign_id = $1 AND phase IS NULL \
-             ) \
-             UPDATE campaign_recipients cr \
-             SET phase = CASE \
-                     WHEN r.rn < CEIL(r.total * $2)::int THEN 'test' \
-                     ELSE 'holdout' \
-                 END, \
-                 arm_index = CASE \
-                     WHEN r.rn < CEIL(r.total * $2)::int THEN (r.rn % $3)::int \
-                     ELSE NULL \
-                 END, \
-                 updated_at = NOW() \
-             FROM ranked r \
-             WHERE cr.id = r.id",
-        )
-        .bind(campaign_id)
-        .bind(test_percentage)
-        .bind(arm_count)
-        .execute(&self.db)
-        .await?;
+        let split = sqlx::query(apexmail_lib::ab_testing::AB_SPLIT_SQL)
+            .bind(campaign_id)
+            .bind(test_percentage)
+            .bind(arm_count)
+            .execute(&self.db)
+            .await?;
 
         if split.rows_affected() > 0 {
             // The test window opens when the split lands.
@@ -413,10 +414,15 @@ impl CampaignExecutor {
     }
 
     /// Record per-arm trials/successes from the events stream and, once the
-    /// test window has elapsed with every test recipient drained, promote the
-    /// winning arm's template onto the holdout recipients. Idempotent: the
-    /// promotion touches only `phase = 'holdout'` rows, and a campaign whose
-    /// ab_config already carries `winnerArm` is skipped.
+    /// test window has elapsed with every test recipient drained, evaluate
+    /// the shared winner rule (`apexmail_lib::ab_testing::decide_winner`:
+    /// per-arm minimum sample + two-proportion z-test at the two-sided 95%
+    /// level). A declared winner is promoted onto the holdout recipients; a
+    /// refusal leaves the holdout held and logs the named reason (the
+    /// experiments API surfaces the same reason and offers the audited
+    /// manual declaration). Idempotent: the promotion touches only
+    /// `phase = 'holdout'` rows, and a campaign whose ab_config already
+    /// carries `winnerArm` is skipped.
     async fn evaluate_ab_tests(&self) -> Result<TickReport, CampaignError> {
         let candidates: Vec<(Uuid, String, serde_json::Value)> = sqlx::query_as(
             "SELECT id, tenant_id, ab_config FROM campaigns \
@@ -445,32 +451,13 @@ impl CampaignExecutor {
                 .unwrap_or(60)
                 .clamp(5, 1440);
 
-            // Record trials/successes for every arm from the events stream.
-            sqlx::query(
-                "WITH per_arm AS ( \
-                     SELECT cr.arm_index AS arm, \
-                            COUNT(*) FILTER (WHERE cr.status = 'sent') AS trials, \
-                            COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = $2) AS successes \
-                     FROM campaign_recipients cr \
-                     LEFT JOIN events e \
-                       ON e.campaign_id = $1::text \
-                      AND e.message_id = cr.message_id::text \
-                     WHERE cr.campaign_id = $1 \
-                       AND cr.phase = 'test' \
-                       AND cr.arm_index IS NOT NULL \
-                     GROUP BY cr.arm_index \
-                 ) \
-                 UPDATE campaign_ab_arms a \
-                 SET trials = per_arm.trials, \
-                     successes = COALESCE(per_arm.successes, 0), \
-                     updated_at = a.updated_at \
-                 FROM per_arm \
-                 WHERE a.campaign_id = $1 AND a.arm_index = per_arm.arm",
-            )
-            .bind(campaign_id)
-            .bind(metric_event)
-            .execute(&self.db)
-            .await?;
+            // Refresh trials/successes for every arm from the events stream
+            // (shared SQL; the API reads the same numbers read-only).
+            sqlx::query(apexmail_lib::ab_testing::AB_OUTCOMES_REFRESH_SQL)
+                .bind(campaign_id)
+                .bind(metric_event)
+                .execute(&self.db)
+                .await?;
 
             // The test phase must be fully drained, and the window must have
             // elapsed since the split.
@@ -496,17 +483,37 @@ impl CampaignExecutor {
                 continue;
             }
 
-            let winner: Option<i32> = sqlx::query_scalar(
-                "SELECT arm_index FROM campaign_ab_arms \
-                 WHERE campaign_id = $1 \
-                 ORDER BY (successes::float8 / GREATEST(trials, 1)) DESC, arm_index ASC \
-                 LIMIT 1",
-            )
-            .bind(campaign_id)
-            .fetch_optional(&self.db)
-            .await?;
-            let Some(winner) = winner else {
-                continue;
+            // The documented, guarded rule — refused below the minimum
+            // per-arm sample or without a significant leader; the holdout
+            // then keeps waiting (the API surfaces the reason).
+            let outcomes: Vec<(i32, i64, i64)> =
+                sqlx::query_as(apexmail_lib::ab_testing::AB_OUTCOMES_SELECT_SQL)
+                    .bind(campaign_id)
+                    .bind(metric_event)
+                    .fetch_all(&self.db)
+                    .await?;
+            let arms: Vec<apexmail_lib::ab_testing::ArmOutcome> = outcomes
+                .into_iter()
+                .map(
+                    |(arm_index, trials, successes)| apexmail_lib::ab_testing::ArmOutcome {
+                        arm_index,
+                        trials,
+                        successes,
+                    },
+                )
+                .collect();
+            let verdict = apexmail_lib::ab_testing::decide_winner(&arms);
+            let (winner, winner_z) = match verdict {
+                apexmail_lib::ab_testing::AbVerdict::Winner { arm_index, z, .. } => (arm_index, z),
+                apexmail_lib::ab_testing::AbVerdict::Refused { code, reason } => {
+                    tracing::info!(
+                        campaign_id = %campaign_id,
+                        reason_code = code,
+                        reason = %reason,
+                        "A/B winner refused; holdout stays held until a manual declaration"
+                    );
+                    continue;
+                }
             };
 
             let promoted = sqlx::query(
@@ -520,14 +527,26 @@ impl CampaignExecutor {
             .await?
             .rows_affected();
 
+            // The decision is persisted with its provenance: which rule ran
+            // (auto), on which metric, with which z — so the results API and
+            // the audit trail can explain the promotion after the facts.
             sqlx::query(
                 "UPDATE campaigns \
-                 SET ab_config = ab_config || jsonb_build_object('winnerArm', $2::int), \
+                 SET ab_config = ab_config || jsonb_build_object( \
+                         'winnerArm', $2::int, \
+                         'winnerSource', 'auto', \
+                         'winnerMetric', $3::text, \
+                         'winnerZ', $4::float8, \
+                         'winnerAt', $5::text \
+                     ), \
                      updated_at = NOW() \
                  WHERE id = $1",
             )
             .bind(campaign_id)
             .bind(winner)
+            .bind(metric_event)
+            .bind(winner_z)
+            .bind(Utc::now().to_rfc3339())
             .execute(&self.db)
             .await?;
 
@@ -544,6 +563,9 @@ impl CampaignExecutor {
                         "campaign_id": campaign_id.to_string(),
                         "winner_arm": winner,
                         "metric": metric_event,
+                        "z": winner_z,
+                        "rule": "two_proportion_z_95",
+                        "source": "auto",
                         "holdout_promoted": promoted,
                     },
                 }),
@@ -552,6 +574,7 @@ impl CampaignExecutor {
             tracing::info!(
                 campaign_id = %campaign_id,
                 winner_arm = winner,
+                winner_z,
                 holdout_promoted = promoted,
                 "A/B test concluded; winner promoted onto the holdout"
             );
@@ -947,6 +970,23 @@ impl CampaignExecutor {
                     .map(str::to_string);
                 let throttle_rate = settings.get("throttleRate").and_then(|v| v.as_i64());
 
+                // Documented `settings` (docs/api/endpoints/campaigns.md):
+                // `sendTimeOptimization` schedules each recipient at their
+                // optimal engagement hour and takes precedence over the
+                // campaign-level distribution; `timezone` is the IANA zone
+                // used to interpret those windows. A malformed timezone
+                // (possible only through a directly seeded row — the API
+                // validates IANA names) falls back to the tenant offset.
+                let send_time_optimization = settings
+                    .get("sendTimeOptimization")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let sto_offset_minutes = settings
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .filter(|tz| tz.parse::<chrono_tz::Tz>().is_ok())
+                    .map(|_| analytics::send_time_optimizer::utc_offset_minutes_from_settings(&settings));
+
                 contexts.insert(
                     id,
                     CampaignSendContext {
@@ -963,6 +1003,8 @@ impl CampaignExecutor {
                         track_clicks,
                         ip_pool,
                         throttle_rate,
+                        send_time_optimization,
+                        sto_offset_minutes,
                         template,
                         arms,
                     },
@@ -1026,7 +1068,28 @@ impl CampaignExecutor {
                         }
                         *remaining -= 1;
                     }
-                    let outcome = self.send_to_recipient(recipient, context).await?;
+                    // `settings.sendTimeOptimization`: resolve this recipient's
+                    // next optimal window and delay the queue row until then.
+                    // A profile-read failure is transient infrastructure: the
+                    // recipient is requeued (the contract is "optimal hour",
+                    // not "immediately") rather than sent at a wrong time.
+                    let scheduled_at = match self.scheduled_send_at(recipient, context).await {
+                        Ok(scheduled_at) => scheduled_at,
+                        Err(error) => {
+                            tracing::warn!(
+                                campaign_id = %recipient.campaign_id,
+                                recipient = %recipient.id,
+                                error = %error,
+                                "send-time optimization failed; recipient requeued"
+                            );
+                            self.requeue_recipient(recipient.id).await?;
+                            report.recipients_deferred += 1;
+                            continue;
+                        }
+                    };
+                    let outcome = self
+                        .send_to_recipient(recipient, context, scheduled_at)
+                        .await?;
                     report.merge(outcome);
                 }
             }
@@ -1034,13 +1097,60 @@ impl CampaignExecutor {
         Ok(report)
     }
 
+    /// The per-recipient optimal send instant when `settings.sendTimeOptimization`
+    /// is on: the next occurrence (strictly in the future) of the recipient's
+    /// top engagement window in the campaign/tenant timezone. `None` means
+    /// "send as soon as possible" (STO off, no optimizer injected, or an
+    /// empty window list).
+    async fn scheduled_send_at(
+        &self,
+        recipient: &ClaimedRecipient,
+        context: &CampaignSendContext,
+    ) -> Result<Option<chrono::DateTime<Utc>>, String> {
+        if !context.send_time_optimization {
+            return Ok(None);
+        }
+        let Some(optimizer) = self.send_time.as_ref() else {
+            // No optimizer injected (test harness / STO-capable deployment
+            // without the engine): sending now is the honest fallback, and
+            // it is logged rather than silent.
+            tracing::warn!(
+                campaign_id = %recipient.campaign_id,
+                "settings.sendTimeOptimization is on but no optimizer is configured; sending immediately"
+            );
+            return Ok(None);
+        };
+
+        // Tenant-scoped profile read (the engine filters events by
+        // tenant_id); the campaign's own timezone overrides the tenant's.
+        let result = optimizer
+            .get_optimal_window_for_tenant_with_offset(
+                &recipient.tenant_id,
+                &recipient.email,
+                context.sto_offset_minutes,
+            )
+            .await
+            .map_err(|error| format!("send-time profile read failed: {error}"))?;
+        let Some(window) = result.windows.first() else {
+            return Ok(None);
+        };
+        Ok(Some(analytics::send_time_optimizer::next_occurrence_utc(
+            Utc::now(),
+            window,
+            result.utc_offset_minutes,
+        )))
+    }
+
     /// The send ladder for ONE recipient: admission (suppression + quota) →
     /// render → one transaction writing `messages` + `email_queue`. Returns
-    /// the tick delta.
+    /// the tick delta. `scheduled_at` (from
+    /// [`Self::scheduled_send_at`]) is the send-time-optimization window; the
+    /// email processor's claim only picks the row up when due.
     async fn send_to_recipient(
         &self,
         recipient: &ClaimedRecipient,
         context: &CampaignSendContext,
+        scheduled_at: Option<chrono::DateTime<Utc>>,
     ) -> Result<TickReport, CampaignError> {
         let idempotency_key = format!(
             "campaign:{}:{}",
@@ -1217,8 +1327,8 @@ impl CampaignExecutor {
              (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, \
               html_body, text_body, status, tags, metadata, scheduled_at, created_at, \
               idempotency_key, message_category) \
-             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, $11, NULL, \
-                     $12, $13, $14) \
+             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, $11, $12, \
+                     $13, $14, $15) \
              ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
         )
         .bind(message_id)
@@ -1232,6 +1342,7 @@ impl CampaignExecutor {
         .bind(&rendered.text)
         .bind(serde_json::json!(["campaign"]))
         .bind(&metadata)
+        .bind(scheduled_at)
         .bind(now)
         .bind(&idempotency_key)
         .bind(&admitted_category)
@@ -1282,7 +1393,7 @@ impl CampaignExecutor {
               \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, \
               status, created_at, updated_at, message_category, campaign_id, contact_id) \
              VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7, $5, $6, $8, $9, \
-                     $10, $11, $12, NULL, 5, 'pending', $13, $13, $14, $15::uuid, $16::uuid)",
+                     $10, $11, $12, $13, 5, 'pending', $14, $14, $15, $16::uuid, $17::uuid)",
         )
         .bind(queue_id)
         .bind(message_id)
@@ -1309,6 +1420,9 @@ impl CampaignExecutor {
             }),
             None => serde_json::json!({}),
         })
+        // Send-time optimization: the processor's claim SQL only picks the
+        // row up when `scheduled_at IS NULL OR scheduled_at <= NOW()`.
+        .bind(scheduled_at)
         .bind(now)
         .bind(&admitted_category)
         .bind(recipient.campaign_id)
@@ -2133,6 +2247,8 @@ mod tests {
             track_clicks: true,
             ip_pool: None,
             throttle_rate: None,
+            send_time_optimization: false,
+            sto_offset_minutes: None,
             arms: std::collections::HashMap::new(),
             from_email: "news@example.test".into(),
             subject: "Campaign subject".into(),
@@ -2164,6 +2280,8 @@ mod tests {
             track_clicks: true,
             ip_pool: None,
             throttle_rate: None,
+            send_time_optimization: false,
+            sto_offset_minutes: None,
             arms: std::collections::HashMap::new(),
             from_email: "news@example.test".into(),
             subject: String::new(),
@@ -2697,6 +2815,720 @@ mod tests {
         assert!(errors.iter().all(|e| e.contains("sender")), "{errors:?}");
         let (status, _) = campaign_status(&pool, no_sender).await;
         assert_eq!(status, "partial", "failures surface as a partial campaign");
+        pool.close().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // A/B experiment execution (brief capabilities-3)
+    // -----------------------------------------------------------------------
+
+    /// Attach a configured A/B experiment: `n_arms` real tenant templates +
+    /// the campaign's `ab_config`. Returns the config as stored.
+    async fn attach_ab_experiment(
+        pool: &PgPool,
+        tenant: &str,
+        campaign: Uuid,
+        test_percentage: f64,
+        n_arms: usize,
+    ) -> Value {
+        let mut arms = Vec::new();
+        for index in 0..n_arms {
+            let template = insert_template(pool, tenant).await;
+            sqlx::query(
+                "INSERT INTO campaign_ab_arms (campaign_id, arm_index, template_id) \
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(campaign)
+            .bind(index as i32)
+            .bind(&template)
+            .execute(pool)
+            .await
+            .expect("insert arm");
+            arms.push(serde_json::json!({"templateId": template}));
+        }
+        let config = serde_json::json!({
+            "arms": arms,
+            "testPercentage": test_percentage,
+            "metric": "open",
+            "waitMinutes": 60,
+        });
+        sqlx::query("UPDATE campaigns SET ab_config = $2 WHERE id = $1")
+            .bind(campaign)
+            .bind(&config)
+            .execute(pool)
+            .await
+            .expect("attach ab config");
+        config
+    }
+
+    /// Contacts with DETERMINISTIC ids (a fixed "seed"): contact N's id is
+    /// `0x5eed…` + N, so the hash split is exactly reproducible across runs
+    /// and assertion bounds are stable.
+    async fn insert_seeded_contacts(
+        pool: &PgPool,
+        tenant: &str,
+        label: &str,
+        count: usize,
+    ) -> Vec<(Uuid, String)> {
+        // Deterministic per (label, index): the SAME label yields the same
+        // ids (reproducible splits), different labels never collide.
+        let label_bits = label
+            .bytes()
+            .fold(0u128, |acc, byte| acc.wrapping_mul(131).wrapping_add(byte.into()));
+        let mut contacts = Vec::new();
+        for index in 0..count {
+            let id = Uuid::from_u128(
+                0x5eed_0000_0000_0000_0000_0000_0000_0000
+                    | ((label_bits & 0xffff_ffff) << 32)
+                    | (index as u128 + 1),
+            );
+            let email = format!("{label}-{index}@ab-seed.test");
+            sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, name, status) \
+                 VALUES ($1, $2, $3, $4, 'active')",
+            )
+            .bind(id)
+            .bind(tenant)
+            .bind(&email)
+            .bind(format!("Seed {index}"))
+            .execute(pool)
+            .await
+            .expect("insert seeded contact");
+            contacts.push((id, email));
+        }
+        contacts
+    }
+
+    fn due_campaign(
+        tenant: &str,
+        campaign: Uuid,
+        list: Uuid,
+        config: Option<&Value>,
+    ) -> DueCampaign {
+        DueCampaign {
+            id: campaign,
+            tenant_id: tenant.to_string(),
+            list_ids: vec![list],
+            exclude_list_ids: Vec::new(),
+            segment_id: None,
+            ab_config: config.cloned(),
+        }
+    }
+
+    async fn ab_assignments(pool: &PgPool, campaign: Uuid) -> Vec<(String, String, i32)> {
+        sqlx::query_as(
+            "SELECT email, phase, COALESCE(arm_index, -1) FROM campaign_recipients \
+             WHERE campaign_id = $1 ORDER BY email",
+        )
+        .bind(campaign)
+        .fetch_all(pool)
+        .await
+        .expect("ab assignments")
+    }
+
+    /// The deterministic per-(experiment, recipient) hash split: the test
+    /// sample lands inside the configured bound, every arm gets a share, a
+    /// replay assigns the SAME arm, and insertion order is irrelevant.
+    #[tokio::test]
+    async fn ab_split_is_deterministic_per_recipient_and_meets_the_configured_bound() {
+        let Some(pool) = fresh_pool("campaigns_ab_split", "ab_split").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-ab-split");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let campaign = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+        let list = insert_list(&pool, &tenant).await;
+        let config = attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
+
+        const RECIPIENTS: usize = 500;
+        let contacts = insert_seeded_contacts(&pool, &tenant, "bound", RECIPIENTS).await;
+        for (contact_id, email) in &contacts {
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact_id)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("seed recipient");
+        }
+        // The same expansion+split the pipeline runs, called directly so the
+        // assertion is about the assignment, not about sends.
+        let due = due_campaign(&tenant, campaign, list, Some(&config));
+        exec.expand_audience(&due).await.expect("expand audience");
+        exec.split_ab_recipients(campaign, due.ab_config.as_ref())
+            .await
+            .expect("split");
+
+        let rows = ab_assignments(&pool, campaign).await;
+        assert_eq!(rows.len(), RECIPIENTS);
+        assert!(
+            rows.iter().all(|(_, phase, _)| phase == "test" || phase == "holdout"),
+            "every recipient is phased"
+        );
+        let test_count = rows.iter().filter(|(_, phase, _)| phase == "test").count();
+        // p = 0.2 over 500 deterministic hashes: hidden inside ±5 points —
+        // the assertion is exact for this fixed seed, not statistically
+        // flaky.
+        assert!(
+            (75..=125).contains(&test_count),
+            "test sample {test_count} outside the 15–25% bound for p=0.2/N=500"
+        );
+        let arm0 = rows.iter().filter(|(_, _, arm)| *arm == 0).count();
+        let arm1 = rows.iter().filter(|(_, _, arm)| *arm == 1).count();
+        assert_eq!(arm0 + arm1, test_count, "every test recipient has an arm");
+        assert!(
+            arm0 > 0 && arm1 > 0,
+            "both arms receive a share (arm0={arm0}, arm1={arm1})"
+        );
+        let arm0_share = arm0 as f64 / test_count as f64;
+        assert!(
+            (0.35..=0.65).contains(&arm0_share),
+            "arm0 share {arm0_share} outside the balanced bound"
+        );
+        // The bucket is persisted as assignment evidence.
+        let missing_buckets: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = $1 AND ab_bucket IS NULL",
+        )
+        .bind(campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("bucket count");
+        assert_eq!(missing_buckets, 0, "every assignment persists its bucket");
+
+        // Replay 1: resetting the phases and re-splitting the SAME audience
+        // assigns the identical arm to every recipient.
+        let before: Vec<(String, String, i32)> = rows.clone();
+        sqlx::query(
+            "UPDATE campaign_recipients SET phase = NULL, arm_index = NULL, ab_bucket = NULL \
+             WHERE campaign_id = $1",
+        )
+        .bind(campaign)
+        .execute(&pool)
+        .await
+        .expect("reset phases");
+        exec.split_ab_recipients(campaign, due.ab_config.as_ref())
+            .await
+            .expect("re-split");
+        assert_eq!(
+            before,
+            ab_assignments(&pool, campaign).await,
+            "a replay assigns the same arm to the same recipient"
+        );
+
+        // Replay 2: rebuilding the audience in REVERSE insertion order still
+        // assigns the same arm — the hash is keyed on (experiment,
+        // contact), not on row order.
+        sqlx::query("DELETE FROM campaign_recipients WHERE campaign_id = $1")
+            .bind(campaign)
+            .execute(&pool)
+            .await
+            .expect("clear recipients");
+        for (contact_id, email) in contacts.iter().rev() {
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact_id)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("re-seed recipient");
+        }
+        exec.split_ab_recipients(campaign, due.ab_config.as_ref())
+            .await
+            .expect("re-split reversed");
+        assert_eq!(
+            before,
+            ab_assignments(&pool, campaign).await,
+            "insertion order must not change the assignment"
+        );
+
+        // Replay 3: the audience GREW (a resend re-expansion adds contacts).
+        // The original recipients keep their arms — the assignment is keyed
+        // on each recipient, never on the audience size or row rank.
+        let extra = insert_seeded_contacts(&pool, &tenant, "bound-extra", 50).await;
+        for (contact_id, email) in &extra {
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact_id)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("seed extra recipient");
+        }
+        sqlx::query(
+            "UPDATE campaign_recipients SET phase = NULL, arm_index = NULL, ab_bucket = NULL \
+             WHERE campaign_id = $1",
+        )
+        .bind(campaign)
+        .execute(&pool)
+        .await
+        .expect("reset phases again");
+        exec.split_ab_recipients(campaign, due.ab_config.as_ref())
+            .await
+            .expect("re-split with a grown audience");
+        let after_growth: Vec<(String, String, i32)> = ab_assignments(&pool, campaign)
+            .await
+            .into_iter()
+            .filter(|(email, _, _)| !email.contains("bound-extra"))
+            .collect();
+        assert_eq!(after_growth.len(), RECIPIENTS);
+        assert_eq!(
+            before, after_growth,
+            "an audience that grows on resend must not re-shuffle existing arms"
+        );
+        pool.close().await;
+    }
+
+    /// The holdout receives NOTHING while the experiment runs: only `test`
+    /// recipients are claimed and enqueued, and the campaign stays `sending`
+    /// (held for the winner).
+    #[tokio::test]
+    async fn ab_holdout_receives_nothing_until_a_winner_is_declared() {
+        let Some(pool) = fresh_pool("campaigns_ab_holdout", "ab_holdout").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-ab-hold");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let campaign = insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+        let list = insert_list(&pool, &tenant).await;
+        attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
+        sqlx::query("UPDATE campaigns SET list_ids = $2::jsonb WHERE id = $1")
+            .bind(campaign)
+            .bind(serde_json::json!([list.to_string()]).to_string())
+            .execute(&pool)
+            .await
+            .expect("attach list");
+        let contacts = insert_seeded_contacts(&pool, &tenant, "holdout", 60).await;
+        for (contact_id, _email) in &contacts {
+            sqlx::query(
+                "INSERT INTO list_subscribers (list_id, contact_id, status) \
+                 VALUES ($1, $2, 'active')",
+            )
+            .bind(list)
+            .bind(contact_id)
+            .execute(&pool)
+            .await
+            .expect("subscribe");
+        }
+
+        let report = exec.tick().await.expect("pipeline tick");
+        assert_eq!(report.campaigns_started, 1);
+        let rows = ab_assignments(&pool, campaign).await;
+        let test_count = rows.iter().filter(|(_, phase, _)| phase == "test").count();
+        let holdout_count = rows
+            .iter()
+            .filter(|(_, phase, _)| phase == "holdout")
+            .count();
+        assert!(test_count > 0 && holdout_count > 0, "split landed");
+        assert_eq!(
+            report.recipients_sent as usize, test_count,
+            "only test recipients are enqueued"
+        );
+
+        // Every holdout row is still queued with no message; every enqueued
+        // message carries the test phase + arm metadata.
+        let holdout_messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM campaign_recipients \
+             WHERE campaign_id = $1 AND phase = 'holdout' \
+               AND (status <> 'queued' OR message_id IS NOT NULL)",
+        )
+        .bind(campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("holdout check");
+        assert_eq!(holdout_messages, 0, "holdout receives nothing");
+        let metas: Vec<Value> =
+            sqlx::query_scalar("SELECT metadata FROM messages WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("message metadata");
+        assert_eq!(metas.len(), test_count);
+        assert!(
+            metas.iter().all(|metadata| {
+                metadata["ab_phase"] == "test" && metadata["ab_arm"].is_i64()
+            }),
+            "every test send carries its arm"
+        );
+
+        // The campaign is held: the experiment is not concluded.
+        let (status, _) = campaign_status(&pool, campaign).await;
+        assert_eq!(status, "sending", "campaign waits for the winner");
+        pool.close().await;
+    }
+
+    /// Seed one arm's observed outcome: `trials` sent test recipients, each
+    /// with a distinct message id, and `successes` of them carrying the
+    /// metric event.
+    async fn seed_arm_outcome(
+        pool: &PgPool,
+        tenant: &str,
+        campaign: Uuid,
+        arm: i32,
+        label: &str,
+        trials: usize,
+        successes: usize,
+    ) {
+        let contacts = insert_seeded_contacts(pool, tenant, label, trials).await;
+        for (index, (contact_id, email)) in contacts.iter().enumerate() {
+            let message_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO campaign_recipients \
+                 (tenant_id, campaign_id, contact_id, email, status, phase, arm_index, message_id) \
+                 VALUES ($1, $2, $3, $4, 'sent', 'test', $5, $6)",
+            )
+            .bind(tenant)
+            .bind(campaign)
+            .bind(contact_id)
+            .bind(email)
+            .bind(arm)
+            .bind(message_id)
+            .execute(pool)
+            .await
+            .expect("seed test recipient");
+            if index < successes {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, campaign_id, event_type, recipient, timestamp) \
+                     VALUES ($1, $2, $3, $4, 'opened', $5, NOW() - INTERVAL '1 minute')",
+                )
+                .bind(format!("evt_{}", Uuid::new_v4().simple()))
+                .bind(tenant)
+                .bind(message_id.to_string())
+                .bind(campaign.to_string())
+                .bind(email)
+                .execute(pool)
+                .await
+                .expect("seed metric event");
+            }
+        }
+    }
+
+    /// Open the experiment's test window: the split stamped the arms at
+    /// `NOW()`, so a test that wants the evaluation to run backdates the
+    /// window clock by two hours (past `waitMinutes = 60`).
+    async fn backdate_ab_window(pool: &PgPool, campaign: Uuid) {
+        sqlx::query(
+            "UPDATE campaign_ab_arms SET updated_at = NOW() - INTERVAL '2 hours' \
+             WHERE campaign_id = $1",
+        )
+        .bind(campaign)
+        .execute(pool)
+        .await
+        .expect("backdate ab window");
+    }
+
+    async fn seed_holdout_recipients(
+        pool: &PgPool,
+        tenant: &str,
+        campaign: Uuid,
+        label: &str,
+        count: usize,
+    ) {
+        let contacts = insert_seeded_contacts(pool, tenant, label, count).await;
+        for (contact_id, email) in contacts {
+            sqlx::query(
+                "INSERT INTO campaign_recipients \
+                 (tenant_id, campaign_id, contact_id, email, status, phase) \
+                 VALUES ($1, $2, $3, $4, 'queued', 'holdout')",
+            )
+            .bind(tenant)
+            .bind(campaign)
+            .bind(contact_id)
+            .bind(email)
+            .execute(pool)
+            .await
+            .expect("seed holdout recipient");
+        }
+    }
+
+    /// Below the minimum per-arm sample the rule REFUSES: no winner is
+    /// recorded and the holdout stays held (the reason is surfaced by the
+    /// experiment API, which runs the same rule).
+    #[tokio::test]
+    async fn ab_winner_is_refused_below_the_minimum_sample() {
+        let Some(pool) = fresh_pool("campaigns_ab_below", "ab_below").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-ab-below");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
+        // 10 trials per arm — below the documented 30-trial floor — with a
+        // huge apparent lead (3/10 vs 0/10).
+        seed_arm_outcome(&pool, &tenant, campaign, 0, "small-a", 10, 3).await;
+        seed_arm_outcome(&pool, &tenant, campaign, 1, "small-b", 10, 0).await;
+        seed_holdout_recipients(&pool, &tenant, campaign, "small-h", 5).await;
+        backdate_ab_window(&pool, campaign).await;
+
+        exec.evaluate_ab_tests().await.expect("evaluate");
+
+        let config: Value = sqlx::query_scalar("SELECT ab_config FROM campaigns WHERE id = $1")
+            .bind(campaign)
+            .fetch_one(&pool)
+            .await
+            .expect("ab config");
+        assert!(
+            config.get("winnerArm").is_none(),
+            "no winner below the minimum sample: {config}"
+        );
+        let holdout_phases: Vec<String> = sqlx::query_scalar(
+            "SELECT phase FROM campaign_recipients WHERE campaign_id = $1 AND email LIKE 'small-h-%'",
+        )
+        .bind(campaign)
+        .fetch_all(&pool)
+        .await
+        .expect("holdout phases");
+        assert!(
+            holdout_phases.iter().all(|phase| phase == "holdout"),
+            "the holdout stays held on a refusal"
+        );
+        pool.close().await;
+    }
+
+    /// Above the sample floor with a significant lead the rule DECLARES the
+    /// winner: it is recorded with its provenance and the holdout is
+    /// promoted onto that arm. A merely leading but non-significant
+    /// difference still refuses.
+    #[tokio::test]
+    async fn ab_winner_is_declared_above_the_sample_with_the_documented_rule() {
+        let Some(pool) = fresh_pool("campaigns_ab_winner", "ab_winner").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-ab-winner");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
+        // 30% vs 10% over 100 trials each: z ≈ 3.5 > 1.96.
+        seed_arm_outcome(&pool, &tenant, campaign, 0, "big-a", 100, 30).await;
+        seed_arm_outcome(&pool, &tenant, campaign, 1, "big-b", 100, 10).await;
+        seed_holdout_recipients(&pool, &tenant, campaign, "big-h", 6).await;
+        backdate_ab_window(&pool, campaign).await;
+
+        exec.evaluate_ab_tests().await.expect("evaluate");
+
+        let config: Value = sqlx::query_scalar("SELECT ab_config FROM campaigns WHERE id = $1")
+            .bind(campaign)
+            .fetch_one(&pool)
+            .await
+            .expect("ab config");
+        assert_eq!(config["winnerArm"], 0, "arm 0 wins: {config}");
+        assert_eq!(config["winnerSource"], "auto");
+        assert_eq!(config["winnerMetric"], "opened");
+        let z = config["winnerZ"].as_f64().expect("winner z recorded");
+        assert!(z >= apexmail_lib::ab_testing::Z_CRITICAL, "z = {z}");
+        let promoted: Vec<(String, i32)> = sqlx::query_as(
+            "SELECT phase, arm_index FROM campaign_recipients \
+             WHERE campaign_id = $1 AND email LIKE 'big-h-%' ORDER BY email",
+        )
+        .bind(campaign)
+        .fetch_all(&pool)
+        .await
+        .expect("holdout phases");
+        assert_eq!(promoted.len(), 6);
+        assert!(
+            promoted.iter().all(|(phase, arm)| phase == "winner" && *arm == 0),
+            "the holdout is promoted onto the winning arm: {promoted:?}"
+        );
+        pool.close().await;
+    }
+
+    /// A leader that is merely ahead (not statistically significant) is
+    /// refused: 20% vs 16% over 100 trials each is z ≈ 0.74.
+    #[tokio::test]
+    async fn ab_winner_is_refused_without_a_significant_leader() {
+        let Some(pool) = fresh_pool("campaigns_ab_tie", "ab_tie").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-ab-tie");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+        attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
+        seed_arm_outcome(&pool, &tenant, campaign, 0, "tie-a", 100, 20).await;
+        seed_arm_outcome(&pool, &tenant, campaign, 1, "tie-b", 100, 16).await;
+        seed_holdout_recipients(&pool, &tenant, campaign, "tie-h", 4).await;
+        backdate_ab_window(&pool, campaign).await;
+
+        exec.evaluate_ab_tests().await.expect("evaluate");
+
+        let config: Value = sqlx::query_scalar("SELECT ab_config FROM campaigns WHERE id = $1")
+            .bind(campaign)
+            .fetch_one(&pool)
+            .await
+            .expect("ab config");
+        assert!(
+            config.get("winnerArm").is_none(),
+            "a non-significant lead must not declare a winner: {config}"
+        );
+        let held: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM campaign_recipients \
+             WHERE campaign_id = $1 AND email LIKE 'tie-h-%' AND phase = 'holdout'",
+        )
+        .bind(campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("holdout count");
+        assert_eq!(held, 4);
+        pool.close().await;
+    }
+
+    /// Wave G: `settings.sendTimeOptimization` is the documented Pro+ contract
+    /// ("Schedule each recipient at their optimal engagement hour"). The drain
+    /// must schedule the queue row at the recipient's next window (here a
+    /// Tuesday 14:00 UTC profile for an offset-0 tenant), and the same
+    /// address's events under ANOTHER tenant must not shift it. Without the
+    /// setting, the queue row keeps scheduled_at NULL (immediate send).
+    #[tokio::test]
+    async fn send_time_optimization_schedules_the_recipient_window() {
+        use chrono::Datelike as _;
+
+        let Some(pool) = fresh_pool("campaigns_sto", "sto").await else {
+            return;
+        };
+        let tenant = fresh_tenant("camp-sto");
+        insert_tenant(&pool, &tenant).await;
+        let other_tenant = fresh_tenant("camp-sto-other");
+        insert_tenant(&pool, &other_tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend)
+            .with_send_time_optimizer(SendTimeOptimizer::without_cache(pool.clone()));
+
+        let email = format!("sto-{}@example.test", &Uuid::new_v4().simple().to_string()[..8]);
+
+        // The recipient's profile under its own tenant: 8 opens at 14:00 UTC
+        // on a Tuesday (2026-06-16). The SAME address under another tenant
+        // carries 20 opens at 09:00 — a leak would make 09:00 dominant, so
+        // the 14:00 assertion below doubles as the tenant-scoping proof.
+        for (tenant_id, hour, count) in [
+            (&tenant, 14, 8u32),
+            (&other_tenant, 9, 20u32),
+        ] {
+            for _ in 0..count {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp) \
+                     VALUES ($1, $2, $3, 'opened', $4, \
+                             TIMESTAMPTZ '2026-06-16 00:00:00+00' \
+                                 + make_interval(hours => $5))",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(tenant_id)
+                .bind(Uuid::new_v4().to_string())
+                .bind(&email)
+                .bind(hour as i32)
+                .execute(&pool)
+                .await
+                .expect("seed event");
+            }
+        }
+
+        // STO campaign: due now, optimization on.
+        let sto_campaign =
+            insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+        let sto_list = insert_list(&pool, &tenant).await;
+        let contact = insert_contact(&pool, &tenant, &email, "active").await;
+        subscribe(&pool, sto_list, contact).await;
+        sqlx::query(
+            "UPDATE campaigns SET list_ids = $2::jsonb, settings = $3::jsonb WHERE id = $1",
+        )
+        .bind(sto_campaign)
+        .bind(serde_json::json!([sto_list.to_string()]).to_string())
+        .bind(serde_json::json!({ "sendTimeOptimization": true }).to_string())
+        .execute(&pool)
+        .await
+        .expect("attach STO settings");
+
+        // Control campaign WITHOUT the setting → immediate scheduling.
+        let plain_email =
+            format!("plain-{}@example.test", &Uuid::new_v4().simple().to_string()[..8]);
+        let plain_campaign =
+            insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
+        let plain_list = insert_list(&pool, &tenant).await;
+        let plain_contact = insert_contact(&pool, &tenant, &plain_email, "active").await;
+        subscribe(&pool, plain_list, plain_contact).await;
+        sqlx::query("UPDATE campaigns SET list_ids = $2::jsonb WHERE id = $1")
+            .bind(plain_campaign)
+            .bind(serde_json::json!([plain_list.to_string()]).to_string())
+            .execute(&pool)
+            .await
+            .expect("attach plain list");
+
+        let report = exec.tick().await.expect("STO tick");
+        assert_eq!(report.recipients_sent, 2);
+
+        // The optimized row carries the next Tuesday 14:00 UTC occurrence.
+        let scheduled: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT eq.scheduled_at FROM email_queue eq \
+             JOIN contacts c ON c.id = eq.contact_id \
+             WHERE c.email = $1",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("optimized queue row");
+        let scheduled = scheduled.expect("STO must set a scheduled window");
+        assert!(
+            scheduled > Utc::now(),
+            "the window must be in the future: {scheduled}"
+        );
+        assert_eq!(
+            scheduled.time(),
+            chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+            "profile peak at 14:00 UTC must be the scheduled local hour"
+        );
+        assert_eq!(
+            scheduled.date_naive().weekday().num_days_from_monday(),
+            1,
+            "the profile's Tuesday peak must be the scheduled weekday ({scheduled})"
+        );
+
+        // messages.scheduled_at mirrors the queue's window.
+        let message_scheduled: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT scheduled_at FROM messages WHERE tenant_id = $1 AND to_emails = $2",
+        )
+        .bind(&tenant)
+        .bind(serde_json::json!([email]))
+        .fetch_one(&pool)
+        .await
+        .expect("message row");
+        assert_eq!(message_scheduled, Some(scheduled));
+
+        // The control row is NOT delayed.
+        let plain_scheduled: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT eq.scheduled_at FROM email_queue eq \
+             JOIN contacts c ON c.id = eq.contact_id \
+             WHERE c.email = $1",
+        )
+        .bind(&plain_email)
+        .fetch_one(&pool)
+        .await
+        .expect("plain queue row");
+        assert_eq!(plain_scheduled, None, "without STO the send is immediate");
+
         pool.close().await;
     }
 }

@@ -26,6 +26,8 @@ import java.util.concurrent.Flow;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmailsSendRequestTest {
@@ -99,6 +101,94 @@ class EmailsSendRequestTest {
         return """
             {"message":{"id":"msg_123","messageId":"smtp_123","status":"queued","recipients":1,"scheduledAt":"2026-05-01T09:00:00Z","createdAt":"2026-04-29T12:00:00Z"}}
             """;
+    }
+
+    private static Map<String, Object> params(Object... keyValues) {
+        Map<String, Object> map = new HashMap<>();
+        for (int i = 0; i < keyValues.length; i += 2) {
+            map.put((String) keyValues[i], keyValues[i + 1]);
+        }
+        return map;
+    }
+
+    /** Template sends (docs/api/endpoints/messages.md): template_id names a
+     *  stored template that supplies subject/html/text, rendered with
+     *  template_data — a template-only send omits the content keys. */
+    @Test
+    void templateOnlySendSerializesTemplateFieldsAndOmitsEmptyContent() {
+        CapturingHttpClient httpClient = new CapturingHttpClient(successResponse());
+
+        try (ApexMailClient client = new ApexMailClient(
+            "am_test_0123456789abcdef",
+            "https://api.apexmail.ee",
+            Duration.ofSeconds(5),
+            httpClient
+        )) {
+            client.emails().send(params(
+                "from", "hello@example.com",
+                "to", "user@example.com",
+                "template_id", "tpl_1",
+                "template_data", Map.of("name", "Ada")
+            ));
+
+            String body = httpClient.lastRequestBody();
+            assertTrue(body.contains("\"template_id\":\"tpl_1\""), body);
+            assertTrue(body.contains("\"template_data\":{\"name\":\"Ada\"}"), body);
+            assertFalse(body.contains("\"subject\""), body);
+            assertFalse(body.contains("\"html\""), body);
+            assertFalse(body.contains("\"text\""), body);
+
+            // The typed SendRequest constructor also allows template-only sends.
+            client.emails().send(new Emails.SendRequest(
+                "hello@example.com",
+                "user@example.com",
+                null,
+                null,
+                null,
+                "tpl_2",
+                null,
+                null,
+                null,
+                null,
+                null
+            ));
+            assertTrue(httpClient.lastRequestBody().contains("\"template_id\":\"tpl_2\""),
+                httpClient.lastRequestBody());
+        }
+    }
+
+    /** Shapes the server refuses (template_data without a template_id, or a
+     *  non-object template_data) are refused client-side before any request. */
+    @Test
+    void templateShapeViolationsAreRefusedClientSide() {
+        CapturingHttpClient httpClient = new CapturingHttpClient(successResponse());
+
+        try (ApexMailClient client = new ApexMailClient(
+            "am_test_0123456789abcdef",
+            "https://api.apexmail.ee",
+            Duration.ofSeconds(5),
+            httpClient
+        )) {
+            assertThrows(IllegalArgumentException.class, () -> client.emails().send(params(
+                "from", "hello@example.com",
+                "to", "user@example.com",
+                "subject", "Hi",
+                "text", "body",
+                "template_data", Map.of("name", "Ada")
+            )));
+            assertThrows(IllegalArgumentException.class, () -> client.emails().send(params(
+                "from", "hello@example.com",
+                "to", "user@example.com",
+                "template_id", "tpl_1",
+                "template_data", List.of("not", "an", "object")
+            )));
+            assertThrows(IllegalArgumentException.class, () -> client.emails().send(params(
+                "from", "hello@example.com",
+                "to", "user@example.com",
+                "text", "body"
+            )));
+            assertNull(httpClient.lastRequest(), "refused shapes must not reach the wire");
+        }
     }
 
     private static final class CapturingHttpClient extends HttpClient {

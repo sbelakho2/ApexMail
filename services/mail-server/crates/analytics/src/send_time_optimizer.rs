@@ -26,7 +26,10 @@ const COLD_START_DAY: u32 = 2; // Tuesday (0=Mon)
 
 pub struct SendTimeOptimizer {
     pool: sqlx::PgPool,
-    redis: deadpool_redis::Pool,
+    /// Result cache. `None` disables caching entirely (a valid production
+    /// configuration with no Redis AND the hermetic test seam); the engine
+    /// still produces the correct window from the tenant-scoped profile.
+    redis: Option<deadpool_redis::Pool>,
     /// HMAC-SHA256 key for salted email hashing (O-11.5).
     /// Empty string disables HMAC (falls back to bare SHA-256).
     hmac_key: String,
@@ -36,7 +39,7 @@ impl SendTimeOptimizer {
     pub fn new(pool: sqlx::PgPool, redis: deadpool_redis::Pool) -> Self {
         Self {
             pool,
-            redis,
+            redis: Some(redis),
             hmac_key: String::new(),
         }
     }
@@ -49,36 +52,19 @@ impl SendTimeOptimizer {
     ) -> Self {
         Self {
             pool,
-            redis,
+            redis: Some(redis),
             hmac_key,
         }
     }
 
-    /// Get optimal send window for a recipient, with caching.
-    ///
-    /// UTC-only (offset 0) — see [`get_optimal_window_for_tenant`] for the
-    /// tenant-timezone-aware variant.
-    pub async fn get_optimal_window(&self, email: &str) -> anyhow::Result<BulkOptimizationResult> {
-        let email_hash = hash_email(email, &self.hmac_key);
-        let cache_key = format!("sto:{email_hash}");
-
-        if let Ok(cached) = self.get_cached(&cache_key).await {
-            return Ok(cached);
+    /// Create an optimizer without a result cache. Every call recomputes from
+    /// the database; the profile itself is always tenant-scoped.
+    pub fn without_cache(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool,
+            redis: None,
+            hmac_key: String::new(),
         }
-
-        let profile = self.build_recipient_profile(email, 0).await?;
-        let windows = compute_optimal_windows_at_offset(&profile, 0);
-
-        let result = BulkOptimizationResult {
-            email_hash: email_hash.clone(),
-            windows: windows.clone(),
-            confidence: profile.total_events as f64 / (profile.total_events as f64 + 100.0),
-            profile_age_days: profile.profile_age_days,
-            utc_offset_minutes: 0,
-        };
-
-        self.set_cached(&cache_key, &result, 86400).await.ok();
-        Ok(result)
     }
 
     /// Get optimal send window for a recipient in the TENANT'S timezone (F5).
@@ -87,22 +73,52 @@ impl SendTimeOptimizer {
     /// tenant's offset (from `tenants.settings` — see
     /// [`utc_offset_minutes_from_settings`]) shifts both the hour extraction
     /// and the cold-start hour; the result labels the applied offset.
+    ///
+    /// The profile query is tenant-scoped: the same recipient address under a
+    /// different tenant contributes no events (wave G removed the previous
+    /// tenant-less entry point, whose query leaked cross-tenant events into a
+    /// score).
     pub async fn get_optimal_window_for_tenant(
         &self,
         tenant_id: &str,
         email: &str,
     ) -> anyhow::Result<BulkOptimizationResult> {
+        self.get_optimal_window_for_tenant_with_offset(tenant_id, email, None)
+            .await
+    }
+
+    /// [`get_optimal_window_for_tenant`] with an explicit UTC-offset override
+    /// (minutes).
+    ///
+    /// Used when a caller holds a more specific timezone than the tenant
+    /// record — the campaign send path passes `settings.timezone` here, the
+    /// documented "IANA timezone used to interpret send-time-optimization
+    /// windows" knob. `None` resolves the offset from `tenants.settings`.
+    pub async fn get_optimal_window_for_tenant_with_offset(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        utc_offset_minutes_override: Option<i32>,
+    ) -> anyhow::Result<BulkOptimizationResult> {
         let email_hash = hash_email(email, &self.hmac_key);
-        // Tenant-scoped key: the same recipient under a different tenant can
-        // resolve a different offset (and must not poison the other's cache).
-        let cache_key = format!("sto:{tenant_id}:{email_hash}");
+
+        let offset = match utc_offset_minutes_override {
+            Some(offset) => offset.clamp(-1440, 1440),
+            None => self.tenant_utc_offset_minutes(tenant_id).await?,
+        };
+
+        // Tenant- AND offset-scoped key: the same recipient under a different
+        // tenant (or a different applied timezone) can resolve a different
+        // window and must not poison the other's cache.
+        let cache_key = format!("sto:{tenant_id}:{offset}:{email_hash}");
 
         if let Ok(cached) = self.get_cached(&cache_key).await {
             return Ok(cached);
         }
 
-        let offset = self.tenant_utc_offset_minutes(tenant_id).await?;
-        let profile = self.build_recipient_profile(email, offset).await?;
+        let profile = self
+            .build_recipient_profile(tenant_id, email, offset)
+            .await?;
         let windows = compute_optimal_windows_at_offset(&profile, offset);
 
         let result = BulkOptimizationResult {
@@ -138,25 +154,32 @@ impl SendTimeOptimizer {
 
     /// Build recipient profile from engagement data.
     ///
+    /// TENANT-SCOPED (wave G): `events.tenant_id = $1` is part of both
+    /// predicates, so the same recipient address in another tenant can never
+    /// contribute events to this profile.
+    ///
     /// `utc_offset_minutes` shifts the hour/day-of-week extraction into the
     /// tenant's local time (F5):`timestamp AT TIME ZONE 'UTC'` pins the
     /// wall-clock reading to UTC regardless of the session timezone, then the
     /// interval (parameterised, not string-interpolated) moves it local.
     async fn build_recipient_profile(
         &self,
+        tenant_id: &str,
         email: &str,
         utc_offset_minutes: i32,
     ) -> anyhow::Result<RecipientProfile> {
         let rows = sqlx::query_as::<_, (i32, i32, i64)>(
             "SELECT EXTRACT(HOUR FROM (timestamp AT TIME ZONE 'UTC') \
-                 + make_interval(mins => $2))::int as hour, \
+                 + make_interval(mins => $3))::int as hour, \
              EXTRACT(DOW FROM (timestamp AT TIME ZONE 'UTC') \
-                 + make_interval(mins => $2))::int as dow, \
+                 + make_interval(mins => $3))::int as dow, \
              COUNT(*) as cnt \
              FROM events \
-             WHERE recipient = $1 AND event_type IN ('opened', 'clicked') \
+             WHERE tenant_id = $1 AND recipient = $2 \
+               AND event_type IN ('opened', 'clicked') \
              GROUP BY hour, dow",
         )
+        .bind(tenant_id)
         .bind(email)
         .bind(utc_offset_minutes)
         .fetch_all(&self.pool)
@@ -186,12 +209,14 @@ impl SendTimeOptimizer {
             }
         }
 
-        // Get profile age
-        let first_event: Option<(chrono::DateTime<Utc>,)> =
-            sqlx::query_as("SELECT MIN(timestamp) FROM events WHERE recipient = $1")
-                .bind(email)
-                .fetch_optional(&self.pool)
-                .await?;
+        // Get profile age (same tenant scope as the histogram above).
+        let first_event: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
+            "SELECT MIN(timestamp) FROM events WHERE tenant_id = $1 AND recipient = $2",
+        )
+        .bind(tenant_id)
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
 
         let age_days = first_event
             .map(|(t,)| (Utc::now() - t).num_days() as u32)
@@ -206,7 +231,10 @@ impl SendTimeOptimizer {
     }
 
     async fn get_cached(&self, key: &str) -> anyhow::Result<BulkOptimizationResult> {
-        let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let Some(pool) = self.redis.as_ref() else {
+            anyhow::bail!("cache disabled");
+        };
+        let mut conn = pool.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let val: String = redis::cmd("GET").arg(key).query_async(&mut *conn).await?;
         Ok(serde_json::from_str(&val)?)
     }
@@ -217,7 +245,10 @@ impl SendTimeOptimizer {
         val: &BulkOptimizationResult,
         ttl_secs: u64,
     ) -> anyhow::Result<()> {
-        let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let Some(pool) = self.redis.as_ref() else {
+            anyhow::bail!("cache disabled");
+        };
+        let mut conn = pool.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let json = serde_json::to_string(val)?;
         redis::cmd("SET")
             .arg(key)
@@ -228,6 +259,59 @@ impl SendTimeOptimizer {
             .await?;
         Ok(())
     }
+}
+
+/// The next UTC instant at which the recipient's local clock is inside
+/// [`OptimalSendWindow`] (window hour, window weekday), strictly after `now`.
+///
+/// The window was computed in the tenant's local time; `utc_offset_minutes`
+/// is the same offset the profile was bucketed with. The search looks at most
+/// seven days ahead — a window always recurs within a week — and returns an
+/// exact minute boundary (seconds and below zeroed). `offset_minutes` is
+/// applied as a fixed offset: the engine standardises on a single offset per
+/// tenant (see `utc_offset_minutes_from_settings`), so no DST history is
+/// involved.
+pub fn next_occurrence_utc(
+    now: chrono::DateTime<Utc>,
+    window: &OptimalSendWindow,
+    utc_offset_minutes: i32,
+) -> chrono::DateTime<Utc> {
+    use chrono::{Datelike as _, TimeZone as _, Timelike as _};
+
+    let offset = chrono::FixedOffset::east_opt(utc_offset_minutes * 60)
+        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+    let local_now = now.with_timezone(&offset).naive_local();
+    let target_day = window.day.min(6) as i64; // 0 = Monday, matching DAY_PRIORS.
+    let target_hour = window.hour.min(23) as u32;
+
+    // Days from today to the target weekday (0 when today IS the target day).
+    let today_ordinal = local_now.weekday().num_days_from_monday() as i64;
+    let mut day_delta = (target_day - today_ordinal).rem_euclid(7) as i64;
+
+    let candidate_for = |day_delta: i64| -> chrono::DateTime<Utc> {
+        let date = (local_now + chrono::Duration::days(day_delta)).date();
+        let naive = date.and_hms_opt(target_hour, 0, 0).expect("valid clock");
+        // Local wall-clock → UTC: subtract the offset.
+        let local = offset.from_local_datetime(&naive).single().unwrap_or_else(|| {
+            // A fixed offset has no gaps/ambiguity; the fallback is defensive.
+            offset.from_local_datetime(&naive).earliest().expect("offset")
+        });
+        local.with_timezone(&Utc)
+    };
+
+    let mut candidate = candidate_for(day_delta);
+    if candidate <= now {
+        day_delta += 7;
+        candidate = candidate_for(day_delta);
+    }
+    // Defensive: the caller needs a strictly future instant.
+    while candidate <= now {
+        candidate = candidate + chrono::Duration::days(7);
+    }
+    candidate
+        .with_second(0)
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or(candidate)
 }
 
 /// Bayesian smoothing:posterior = (observed + α × prior × N) / (total + α × N).
@@ -559,5 +643,80 @@ mod tests {
     fn test_settings_offset_iana_takes_precedence() {
         let settings = serde_json::json!({ "timezone": "UTC", "utc_offset_minutes": 480 });
         assert_eq!(utc_offset_minutes_from_settings(&settings), 0);
+    }
+
+    // ── wave G: next window occurrence ────────────────────────────────
+
+    fn window(hour: u32, day: u32) -> OptimalSendWindow {
+        OptimalSendWindow {
+            hour,
+            day,
+            score: 0.1,
+            confidence: 0.5,
+        }
+    }
+
+    #[test]
+    fn next_occurrence_picks_today_when_the_window_is_still_ahead() {
+        // Monday 2026-06-15 07:00 UTC; target Monday 10:00 local (+0).
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_occurrence_utc(now, &window(10, 0), 0);
+        assert_eq!(
+            next.to_rfc3339(),
+            "2026-06-15T10:00:00+00:00",
+            "the same local day must be used when the hour is still ahead"
+        );
+    }
+
+    #[test]
+    fn next_occurrence_rolls_a_week_when_todays_window_passed() {
+        // Monday 2026-06-15 11:00 UTC; target Monday 10:00 local (+0).
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_occurrence_utc(now, &window(10, 0), 0);
+        assert_eq!(next.to_rfc3339(), "2026-06-22T10:00:00+00:00");
+    }
+
+    #[test]
+    fn next_occurrence_respects_the_tenant_offset() {
+        // Monday 2026-06-15 09:00 UTC = 11:00 at +02:00; the Monday 10:00
+        // LOCAL window is still ahead (11:00 local → today's 10:00 passed,
+        // so next Monday), while a 14:00 local window is later today.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let monday_14 = window(14, 0);
+        let next = next_occurrence_utc(now, &monday_14, 120);
+        assert_eq!(next.to_rfc3339(), "2026-06-15T12:00:00+00:00");
+
+        let monday_10 = window(10, 0);
+        let rolled = next_occurrence_utc(now, &monday_10, 120);
+        assert_eq!(rolled.to_rfc3339(), "2026-06-22T08:00:00+00:00");
+    }
+
+    #[test]
+    fn next_occurrence_chooses_the_correct_weekday() {
+        // Wednesday 2026-06-17 08:00 UTC; target Tuesday (day=1) 09:00 (+0):
+        // the next Tuesday is 2026-06-23.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-17T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_occurrence_utc(now, &window(9, 1), 0);
+        assert_eq!(next.to_rfc3339(), "2026-06-23T09:00:00+00:00");
+    }
+
+    #[test]
+    fn next_occurrence_handles_negative_offsets_across_midnight() {
+        // Window Tuesday 01:00 local at -05:00 = Tuesday 06:00 UTC.
+        // Monday 2026-06-15 23:00 UTC = Monday 18:00 local; the next Tuesday
+        // 01:00 local is 2026-06-16 06:00 UTC.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T23:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_occurrence_utc(now, &window(1, 1), -300);
+        assert_eq!(next.to_rfc3339(), "2026-06-16T06:00:00+00:00");
     }
 }

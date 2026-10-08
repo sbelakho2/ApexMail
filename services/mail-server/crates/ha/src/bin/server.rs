@@ -19,6 +19,20 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+/// The circuit that guards a health-check component's dependency.
+///
+/// `database` and `redis` have dedicated circuits; the replication probe is
+/// a database round trip and reports to the database circuit. Components
+/// without an outbound dependency (disk, memory, persistence-schema) have no
+/// circuit.
+fn circuit_for_component(component: &str) -> Option<&'static str> {
+    match component {
+        "database" | "replication" => Some("database"),
+        "redis" => Some("redis"),
+        _ => None,
+    }
+}
+
 fn init_tracing() -> Option<TracingGuard> {
     if is_otlp_enabled() {
         let config = OtlpConfig {
@@ -145,6 +159,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tracing::warn!(status = %health.overall, region = %health.region, "Health check reported non-healthy state");
                 }
                 for component in &health.components {
+                    // Feed the per-component outcome to the matching
+                    // circuit breaker. Without this the CircuitBreakerService
+                    // counters never moved: nothing reported outcomes, so
+                    // every circuit stayed CLOSED with zero calls and the
+                    // /api/v1/circuit-breakers surface was inert.
+                    if let Some(circuit) = circuit_for_component(&component.name) {
+                        match component.status {
+                            HealthStatus::Healthy => {
+                                if let Err(e) = s.circuit_breaker.report_success(circuit).await {
+                                    error!(circuit, error = %e, "circuit success report failed");
+                                }
+                            }
+                            HealthStatus::Unhealthy => {
+                                if let Err(e) = s.circuit_breaker.report_failure(circuit).await {
+                                    error!(circuit, error = %e, "circuit failure report failed");
+                                }
+                            }
+                            // Degraded/Unknown hold the breaker state: a
+                            // slowness signal must not open a circuit that
+                            // guards availability, and it must not count as
+                            // a success either.
+                            _ => {}
+                        }
+                    }
                     match gate.observe(&component.name, &component.status) {
                         ha::failover::HealthObservation::ReportFailure => {
                             info!(

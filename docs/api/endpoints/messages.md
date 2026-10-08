@@ -80,11 +80,11 @@ or a display form (`Sender Name <sender@example.com>`).
 | `reply_to` | string | | Reply-to email address |
 | `cc` | string[] | | CC recipients (max 50) |
 | `bcc` | string[] | | BCC recipients (max 50) |
-| `subject` | string | ✓* | Email subject (* unless template provides) |
-| `html` | string | ✓* | HTML body (* unless template or text provides) |
+| `subject` | string | ✓* | Email subject (* unless `template_id` provides it) |
+| `html` | string | ✓* | HTML body (* unless `template_id` or `text` provides it) |
 | `text` | string | | Plain text body |
-| `template_id` | string | | Template UUID to use |
-| `template_data` | object | | Variables for template rendering |
+| `template_id` | string | | Stored template id; the template supplies subject/html/text, rendered with `template_data` |
+| `template_data` | object | | Template variables (every variable the template references must be supplied) |
 | `headers` | object | | Custom email headers |
 | `attachments` | array | | File attachments (max 20, 25 MB each, 50 MB total) |
 | `metadata` | object | | Custom metadata (returned in webhooks) |
@@ -271,7 +271,10 @@ X-API-Key: {{api_key}}
 
 ## Send Batch Messages
 
-Send multiple messages in a single API call (up to 1000 per batch).
+Send multiple messages in a single API call. Every item is a full send
+request (the same fields as `POST /v1/messages`, including `template_id` /
+`template_data` template sends) and is validated independently: a refused
+item never blocks the accepted ones.
 
 ### Request
 
@@ -287,24 +290,18 @@ Content-Type: application/json
 {
   "messages": [
     {
-      "to": "user1@example.com",
+      "to": ["user1@example.com"],
       "from": "sender@yourcompany.com",
       "subject": "Hello User 1",
       "html": "<p>Hi User 1!</p>"
     },
     {
-      "to": "user2@example.com",
+      "to": ["user2@example.com"],
       "from": "sender@yourcompany.com",
-      "subject": "Hello User 2",
-      "html": "<p>Hi User 2!</p>"
+      "template_id": "tpl_welcome000000000001",
+      "template_data": { "firstName": "User 2" }
     }
-  ],
-  "defaults": {
-    "from": "sender@yourcompany.com",
-    "trackOpens": true,
-    "trackClicks": true,
-    "tags": ["batch-send"]
-  }
+  ]
 }
 ```
 
@@ -312,54 +309,55 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `messages` | array | ✓ | Array of message objects (max: 1000) |
-| `defaults` | object | | Default values applied to all messages |
+| `messages` | array | ✓ | Array of message objects (same shape as `POST /v1/messages`) |
+
+The batch size is capped by the deployment's configured limit
+(`API_MESSAGES_MAX_BATCH_SIZE`, **100 by default**); an over-limit batch is
+rejected with `400 BAD_REQUEST` before any item is processed.
 
 ### Response
 
 ```json
 {
-  "batchId": "batch_xyz789",
-  "totalAccepted": 2,
-  "totalRejected": 0,
-  "messages": [
+  "accepted": 2,
+  "rejected": 0,
+  "results": [
     {
+      "index": 0,
       "id": "msg_abc001",
-      "to": "user1@example.com",
       "status": "queued"
     },
     {
+      "index": 1,
       "id": "msg_abc002",
-      "to": "user2@example.com",
       "status": "queued"
     }
-  ],
-  "errors": []
+  ]
 }
 ```
 
+Accepted items carry their message `id` and the queued/scheduled `status`;
+the per-item `id` is omitted for rejected items.
+
 ### Partial Success Response
+
+A batch with a refused item answers `200 OK` with the partial results — the
+accepted messages are queued, the refused item carries its named error:
 
 ```json
 {
-  "batchId": "batch_xyz789",
-  "totalAccepted": 1,
-  "totalRejected": 1,
-  "messages": [
+  "accepted": 1,
+  "rejected": 1,
+  "results": [
     {
+      "index": 0,
       "id": "msg_abc001",
-      "to": "user1@example.com",
       "status": "queued"
-    }
-  ],
-  "errors": [
+    },
     {
       "index": 1,
-      "to": "invalid-email",
-      "error": {
-        "code": "invalid_email",
-        "message": "Invalid email address format"
-      }
+      "status": "rejected",
+      "error": "template not found: tpl_missing0000000000000000"
     }
   ]
 }
@@ -402,14 +400,16 @@ been crossed and the API answers
 
 ### Using Templates
 
-Reference a template by ID and provide variables:
+Reference a stored template by id and provide its variables. The template
+supplies the subject, HTML body and text body; a template-only send may omit
+`subject`, `html` and `text` entirely:
 
 ```json
 {
-  "to": "user@example.com",
+  "to": ["user@example.com"],
   "from": "sender@yourcompany.com",
-  "template_id": "tmpl_welcome_001",
-  "variables": {
+  "template_id": "tpl_welcome000000000001",
+  "template_data": {
     "firstName": "John",
     "accountUrl": "https://app.yourcompany.com",
     "supportEmail": "support@yourcompany.com"
@@ -417,22 +417,46 @@ Reference a template by ID and provide variables:
 }
 ```
 
+Precedence rules:
+
+- The request sends the **tenant-scoped** template named by `template_id`.
+  Another tenant's template id (or an unknown one) is answered with
+  `404 NOT_FOUND` and the message `"template not found: <id>"`; nothing is
+  queued.
+- The stored template supplies `subject`, `html` and `text`. An explicit
+  request `subject`, `html` or `text` **overrides the corresponding rendered
+  field**; the overriding subject is still merge-resolved with
+  `template_data`. `template_data` variables the template does not reference
+  are ignored.
+- Every variable the template references must be supplied. A missing
+  variable is a `422 VALIDATION_ERROR` naming each missing variable
+  (`"template variable 'firstName' is missing from template_data"`); the
+  request is refused before anything is rendered into a message or queued.
+- `template_data` must be a JSON object; scalar or array values are rejected
+  with `422`. Supplying `template_data` without `template_id` is also a 422.
+- Template sends flow through the same validation, consent, suppression,
+  quota, idempotency and queueing path as any other send. The rendered
+  subject/html/text are what is persisted and delivered (never the raw
+  template).
+
 ### Template Syntax
 
-Templates use Handlebars syntax:
+Templates use simple handlebars-style variable substitution:
 
 ```html
-<h1>Welcome, {{firstName}}!</h1>
-<p>Your account is ready at <a href="{{accountUrl}}">{{accountUrl}}</a></p>
-
-{{#if isPremium}}
-<p>Thank you for choosing Premium!</p>
-{{/if}}
-
-{{#each products}}
-<li>{{this.name}} - ${{this.price}}</li>
-{{/each}}
+<h1>Welcome, {{ firstName }}!</h1>
+<p>Your account is ready at <a href="{{ accountUrl }}">{{ accountUrl }}</a></p>
+<p>Questions? Write to {{ support.email }}</p>
 ```
+
+- `{{ variable }}` and dotted/dashed paths (`{{ user.firstName }}`,
+  `{{ contact.first-name }}`) are resolved from `template_data`.
+- Values interpolated into HTML are HTML-escaped and URLs are sanitized.
+  The subject and plain-text body substitute without HTML escaping.
+- Merge fields that are not present in `template_data` are refused up front
+  (see above) — the literal `{{ variable }}` text is never delivered.
+- Conditionals and loops are not supported (`{{#if}}` / `{{#each}}` and
+  similar block helpers are not part of the template syntax).
 
 ---
 
@@ -450,8 +474,8 @@ response = requests.post(
         'Content-Type': 'application/json',
     },
     json={
-        'to': [{'email': 'user@example.com'}],
-        'from': {'email': 'hello@yourcompany.com', 'name': 'Your Company'},
+        'to': ['user@example.com'],
+        'from': 'Your Company <hello@yourcompany.com>',
         'subject': 'Welcome!',
         'html': '<h1>Hello World</h1>',
     }
@@ -468,10 +492,24 @@ curl -X POST https://api.apexmail.ee/v1/messages \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "to": [{"email": "user@example.com"}],
-    "from": {"email": "hello@yourcompany.com", "name": "Your Company"},
+    "to": ["user@example.com"],
+    "from": "Your Company <hello@yourcompany.com>",
     "subject": "Welcome!",
     "html": "<h1>Hello World</h1>"
+  }'
+```
+
+Template send:
+
+```bash
+curl -X POST https://api.apexmail.ee/v1/messages \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "to": ["user@example.com"],
+    "from": "hello@yourcompany.com",
+    "template_id": "tpl_welcome000000000001",
+    "template_data": {"firstName": "John"}
   }'
 ```
 
@@ -481,10 +519,13 @@ curl -X POST https://api.apexmail.ee/v1/messages \
 
 | Plan | Requests/Second | Batch Size |
 |------|-----------------|------------|
-| Free | 1 | 100 |
-| Starter | 10 | 500 |
-| Growth | 50 | 1000 |
-| Enterprise | Custom | Custom |
+| Free | 1 | 100 (deployment default) |
+| Starter | 10 | 100 (deployment default) |
+| Growth | 50 | 100 (deployment default) |
+| Enterprise | Custom | 100 (deployment default) |
+
+The batch-size cap is enforced server-side (`API_MESSAGES_MAX_BATCH_SIZE`)
+regardless of plan; deployments may raise it.
 
 Rate limit headers:
 ```
@@ -499,9 +540,9 @@ X-RateLimit-Reset: 1705312800
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
-| `VALIDATION_ERROR` | 400 | Invalid email address, missing fields, or attachment exceeds 25MB |
+| `VALIDATION_ERROR` | 400 / 422 | Invalid email address, missing fields, or attachment exceeds 25MB. 422 is used for send-option and template contract refusals (`template_data` shapes, missing template variables) — named in `error.details`, nothing queued |
 | `DOMAIN_NOT_VERIFIED` | 400 | Sender domain not verified |
-| `NOT_FOUND` | 404 | Template ID doesn't exist |
+| `NOT_FOUND` | 404 | Template ID doesn't exist (or belongs to another tenant) |
 | `ALL_RECIPIENTS_SUPPRESSED` | 400 | All recipients are on suppression list |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |
 | `UNAUTHORIZED` | 401 | API key is missing or invalid |

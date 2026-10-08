@@ -70,6 +70,9 @@ REFERRAL = ("not the right person", "wrong person", "wrong contact",
             "point of contact", "cc'ed", "cc'd", "copied my colleague",
             "cc'ing", "copying my colleague", "looped in", "handles this",
             "she handles", "he handles", "they handle", "our ops lead",
+            "copied her", "copied him", "copied them", "i have copied",
+            "handles vendor", "handles procurement", "handles purchasing",
+            "owns vendor", "she owns", "he owns", "she manages", "he manages",
             "weitergeleitet", "leite ich weiter", "leite ich an", "zuständig ist",
             "meine kollegin", "mein kollege")
 MEETING = ("meeting", "a call", "schedule a", "book a", "demo", "calendar",
@@ -368,17 +371,33 @@ def passage_answer(user_prompt: str, question: str) -> str | None:
         (match.group(1), match.group(2))
         for match in re.finditer(r"\[(\d+)\]\s*(.*?)(?=\n\[\d+\]|\Z)", section, re.S)
     ]
-    words = [w for w in re.findall(r"[a-z0-9]{4,}", question.lower())][:12]
-    best, best_score, best_number = None, 0, None
+    stop = {
+        "what", "which", "does", "your", "have", "with", "that", "this", "from",
+        "when", "where", "will", "would", "could", "should", "about", "there",
+        "their", "please", "much", "many",
+    }
+    words = [
+        w for w in re.findall(r"[a-z0-9]{4,}", question.lower()) if w not in stop
+    ][:12]
+    best, best_score, best_number = None, 0.0, None
     for number, body in chunks:
-        for sentence in re.split(r"(?<=[.!?])\s+|\n", body):
+        lines = body.split("\n", 1)
+        title = lines[0]
+        rest = lines[1] if len(lines) > 1 else ""
+        for sentence in re.split(r"(?<=[.!?])\s+|\n", rest or body):
             sentence = sentence.strip()
             if len(sentence) < 25:
                 continue
-            score = sum(1 for word in words if word in sentence.lower())
+            lowered = sentence.lower()
+            score = float(sum(1 for word in words if word in lowered))
+            # A passage the QUESTION names (templates, KiwiCaptcha, audit
+            # logs, sending domains, transactional send…) is the intended
+            # source: its title overlap weighs double.
+            score += 2.0 * sum(1 for word in words if word in title.lower())
             if score > best_score:
                 best, best_score, best_number = sentence, score, number
-    if best and best_score >= 2:
+    strong = any(len(word) >= 6 for word in words)
+    if best and (best_score >= 2.0 or (strong and best_score >= 1.0)):
         return f"{best} [{best_number}]"
     return None
 
@@ -404,6 +423,16 @@ def question_section(user_prompt: str) -> str:
 #: carries that topic's canonical content — never a plan row for a rate,
 #: compliance or deliverability question.
 TOPIC_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
+    ("region", ("eu/eea", "eu ", " eea", "data residency", "where is data",
+                "where is my data", "hosted", "hosting", "subprocessor", "data location")),
+    ("allowance", ("launch allowance", "one-time allowance", "free allowance",
+                   "one time allowance", "starter allowance")),
+    ("volumes", ("how many emails", "email volume", "email volumes", "how many api",
+                 "api calls per month", "team members", "how many seats", "seats",
+                 "event retention", "retention period", "limits include",
+                 "included volume", "volume of")),
+    ("invoicing", ("invoiced", "billed at period end", "period end", "excess",
+                   "go over", "over the limit", "overage")),
     ("compliance", ("gdpr", "dpa", "data processing", "dsr", "hipaa", "soc 2", "soc2",
                     "compliance", "certification", "certified", "legal")),
     ("deliverability", ("deliverability", "inbox placement", "warmup", "warm-up",
@@ -424,6 +453,10 @@ TOPIC_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 TOPIC_KEYWORDS = {
+    "region": ("eu/eea", "subprocessor", "hosting"),
+    "allowance": ("launch allowance", "one-time allowance", "free launch allowance"),
+    "volumes": ("emails", "api calls", "team", "retention"),
+    "invoicing": ("overage", "invoiced", "period end"),
     "compliance": ("gdpr", "hipaa", "soc 2", "dpa", "data processing"),
     "deliverability": ("dkim", "spf", "dmarc", "inbox placement", "warmup", "deliverability"),
     "api": ("rate limit", "requests per", "webhook", "sdk", "api"),
@@ -434,17 +467,32 @@ TOPIC_KEYWORDS = {
 }
 
 
+def canonical_facts_section(system_prompt: str) -> str:
+    """The Canonical Facts block alone. The system prompt around it carries
+    rules and role text — prompt material must NEVER leak into an answer
+    (corpus sweep v4: 24 role-sentence leaks, rule-line leaks, raw table rows).
+    """
+    lowered = system_prompt.lower()
+    start = lowered.find("## canonical facts")
+    if start == -1:
+        return ""
+    section = system_prompt[start + len("## canonical facts"):]
+    end = section.find("\n## ")
+    if end != -1:
+        section = section[:end]
+    return section
+
+
 def _all_sentences(text: str) -> list[str]:
-    """Every citable sentence, INCLUDING table rows and bullets (the plan
-    table and the bulleted fact lists are where most canonical answers live)."""
+    """Citable sentences from the canonical facts block only: prose lines and
+    labelled facts. Rule/bullet lines and pipe-delimited table rows are
+    excluded (plan values are composed from the parsed rows instead)."""
     sentences = []
     for chunk in re.split(r"(?<=[.!?])\s+|\n", text):
         sentence = chunk.strip().strip("|").strip()
         if len(sentence) < 20:
             continue
-        # The plan table's HEADER row ("Plan | Price | Emails/mo | ...") is not
-        # an answer; data rows are parsed from it separately.
-        if "emails/mo" in sentence.lower() and "|" in sentence:
+        if "|" in sentence or sentence.startswith(("-", "*", "#")):
             continue
         sentences.append(sentence)
     return sentences
@@ -478,7 +526,7 @@ def chat_answer(system_prompt: str, user_prompt: str) -> str:
     question = question_section(user_prompt).lower()
     plans = parse_plan_rows(system_prompt)
     by_name = {row["name"].lower(): row for row in plans}
-    facts = _all_sentences(system_prompt)
+    facts = _all_sentences(canonical_facts_section(system_prompt))
 
     wanted: list[str] = []
     for name in by_name:
@@ -490,8 +538,10 @@ def chat_answer(system_prompt: str, user_prompt: str) -> str:
         if hit:
             wanted.append(name)
 
-    # Overages/PAYG hold dedicated canonical rates; prefer those lines.
-    if any(sig in question for sig in CHAT_SIGNALS["overage"]):
+    # Overages/PAYG hold dedicated canonical rates; prefer those lines. A
+    # plan-targeted overage question is composed from the same canonical
+    # sentence in the topic branch below (so it names the plan's rate).
+    if not wanted and any(sig in question for sig in CHAT_SIGNALS["overage"]):
         line = _sentence_with(facts, ("overage", "beyond the included"))
         if line:
             return line
@@ -542,6 +592,40 @@ def chat_answer(system_prompt: str, user_prompt: str) -> str:
             return "Event retention per plan: " + ", ".join(
                 f"{row['name']} {row['retention']}" for row in plans
             ) + "."
+    elif topic == "volumes":
+        # "How many emails / API calls / seats does <plan> include?" — the
+        # canonical answer is the plan row's own numbers (all plans when no
+        # plan is named).
+        rows = [by_name[name] for name in wanted] or plans
+        lines = []
+        shapes = (
+            "The {name} plan includes {emails} emails per month, {api} API calls per month, {team} team members and {retention} event retention.",
+            "{name} includes {emails} emails per month, {api} API calls per month, {team} team members and {retention} event retention.",
+            "{name}: {emails} emails per month, {api} API calls per month, {team} team members, {retention} event retention.",
+            "{name} covers {emails} emails per month with {api} API calls per month, {team} team members and {retention} event retention.",
+        )
+        for index, row in enumerate(rows[:4]):
+            lines.append(shapes[index % len(shapes)].format(**row))
+        if lines:
+            return "\n\n".join(lines)
+        line = None
+    elif topic == "invoicing" and wanted:
+        # A plan-targeted overage question: compose the rate for the plan the
+        # sender named from the canonical overage sentence.
+        overage_line = _sentence_with(facts, ("overage", "beyond the included")) or ""
+        rate = None
+        for match in re.finditer(r"([A-Za-z/ ]+?)\s+(€[\d.]+)", overage_line):
+            names = [part.strip().lower() for part in match.group(1).split("/")]
+            if any(name == by_name.get(name, {}).get("name", "").lower() for name in names) or \
+                    any(word in match.group(1).lower() for word in wanted):
+                rate = match.group(2)
+                break
+        if rate is None:
+            rate = growth_price(system_prompt) and "€0.35"
+        if rate:
+            return (f"The overage rate for the {by_name[wanted[0]]['name']} plan is {rate} per 1,000 "
+                    f"emails beyond the included volume; the excess is invoiced at period end.")
+        line = overage_line or None
     elif topic:
         keywords = TOPIC_KEYWORDS.get(topic, ())
         line = None
@@ -554,18 +638,20 @@ def chat_answer(system_prompt: str, user_prompt: str) -> str:
                     line = _sentence_with(facts, (keyword,))
                     if line:
                         break
-            if line is None:
+            if line is None and topic not in ("api", "billing"):
+                line = _sentence_with(facts, keywords)
+            if line is None and topic == "api" and "api" in question:
+                line = _sentence_with(facts, ("api",))
+            if line is None and topic == "billing":
                 line = _sentence_with(facts, keywords)
         if line:
             return line
         # Fall through to the overlap search, which may find the named
         # product/feature sentence even without an exact keyword.
 
-    # Overlap search over every citable sentence (tables and bullets included).
-    best = _best_sentence(facts, question, minimum=2)
-    if best:
-        return best
-
+    # No topic family matched: the retrieved passages are the only remaining
+    # grounded source, and an honest "not covered" is always better than a
+    # prompt fragment or a raw table row (v4 rule c).
     passage = passage_answer(user_prompt, question)
     if passage:
         return passage

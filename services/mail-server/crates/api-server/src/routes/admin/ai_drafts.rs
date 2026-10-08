@@ -50,6 +50,23 @@ struct DraftDto {
     received_at: String,
 }
 
+/// The CP drafts list, with the defense-in-depth tenant scope.
+///
+/// `$1` (`is_system_tenant`) is the operator flag: a system-tenant caller
+/// (the control-plane gate's ONLY admitted caller) reviews every tenant's
+/// queue. Any other caller — reachable only if the gate were ever bypassed —
+/// is restricted by `tenant_id = $2` inside the SQL itself, so another
+/// tenant's rows can never be selected, whatever the middleware did.
+const LIST_DRAFTS_SQL: &str = r#"
+        SELECT id, tenant_id, from_email, subject, ai_response, received_at
+        FROM inbound_messages
+        WHERE pending_approval = true
+          AND ai_response IS NOT NULL
+          AND ($1 OR tenant_id = $2)
+        ORDER BY received_at ASC
+        LIMIT 100
+"#;
+
 /// `inbound_messages.id` is the canonical VARCHAR(26) MTA identifier
 /// (`inb_<22 hex>` — migration 088), never a UUID. Every statement below
 /// binds it as text: a `$1::uuid` cast makes the comparison invalid
@@ -60,6 +77,7 @@ async fn list_drafts(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["*"])?;
+    let (is_system_tenant, tenant_id) = draft_scope(&state, &auth).await?;
 
     let rows: Vec<(
         String,
@@ -68,18 +86,11 @@ async fn list_drafts(
         Option<String>,
         Option<String>,
         chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
-        r#"
-        SELECT id, tenant_id, from_email, subject, ai_response, received_at
-        FROM inbound_messages
-        WHERE pending_approval = true
-          AND ai_response IS NOT NULL
-        ORDER BY received_at ASC
-        LIMIT 100
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await?;
+    )> = sqlx::query_as(LIST_DRAFTS_SQL)
+        .bind(is_system_tenant)
+        .bind(&tenant_id)
+        .fetch_all(&state.db)
+        .await?;
 
     let drafts: Vec<DraftDto> = rows
         .into_iter()
@@ -98,6 +109,26 @@ async fn list_drafts(
     ))
 }
 
+/// Defense-in-depth scope for every CP drafts statement: the system-tenant
+/// operator manages the platform queue across tenants; any other caller is
+/// pinned to its own tenant by the SQL predicate, so a future regression in
+/// the upstream gate cannot turn a tenant credential into a cross-tenant
+/// read or write. Mirrors `require_system_tenant`'s membership test (the
+/// literal `system` id, else `tenants.slug = 'system'`).
+async fn draft_scope(state: &AppState, auth: &AuthUser) -> Result<(bool, String), ApiError> {
+    let is_system = if auth.tenant_id == "system" {
+        true
+    } else {
+        crate::routes::web::is_system_tenant(state, &auth.tenant_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "draft scope: system-tenant lookup failed");
+                ApiError::Internal("authentication error".into())
+            })?
+    };
+    Ok((is_system, auth.tenant_id.clone()))
+}
+
 #[derive(Debug, Deserialize)]
 struct ApproveBody {
     /// Operator note recorded in the audit log.
@@ -110,12 +141,15 @@ struct ApproveBody {
 /// approve/reject the winner across concurrent callers (the row lock
 /// serialises them; the loser's UPDATE matches nothing). The id is bound
 /// as the canonical VARCHAR identifier — never cast to UUID (audit F11).
+/// `$2`/`$3` carry the same defense-in-depth tenant scope as the list: a
+/// caller outside the system tenant can only ever consume its own rows.
 const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
     UPDATE inbound_messages
     SET pending_approval = false, processed_at = NOW()
     WHERE id = $1
       AND pending_approval = true
       AND ai_response IS NOT NULL
+      AND ($2 OR tenant_id = $3)
     RETURNING tenant_id, from_email, subject, ai_response,
               (suggested_action->>'first_response') = 'true',
               received_at,
@@ -188,6 +222,10 @@ pub(crate) async fn approve_draft_core(
     // without its approval record (audit F11 + external-audit P1).
     let mut tx = state.db.begin().await?;
 
+    // Defense-in-depth tenant scope (see `draft_scope`): the system-tenant
+    // operator manages any tenant's draft; anyone else only their own.
+    let (is_system_tenant, caller_tenant) = draft_scope(state, auth).await?;
+
     // Claim the draft atomically: exactly one approve/reject wins.
     let row: Option<(
         Option<String>,
@@ -199,6 +237,8 @@ pub(crate) async fn approve_draft_core(
         Option<String>,
     )> = sqlx::query_as(CLAIM_DRAFT_FOR_APPROVAL_SQL)
         .bind(&id)
+        .bind(is_system_tenant)
+        .bind(&caller_tenant)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -440,6 +480,7 @@ const REJECT_DRAFT_SQL: &str = r#"
     SET pending_approval = false, processed_at = NOW()
     WHERE id = $1
       AND pending_approval = true
+      AND ($2 OR tenant_id = $3)
     RETURNING tenant_id
 "#;
 
@@ -471,8 +512,13 @@ pub(crate) async fn reject_draft_core(
     // record or not at all, leaving the draft pending and rejectable.
     let mut tx = state.db.begin().await?;
 
+    // Same defense-in-depth tenant scope as the approve claim.
+    let (is_system_tenant, caller_tenant) = draft_scope(state, auth).await?;
+
     let routed_tenant_id: Option<(Option<String>,)> = sqlx::query_as(REJECT_DRAFT_SQL)
         .bind(&id)
+        .bind(is_system_tenant)
+        .bind(&caller_tenant)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -602,11 +648,16 @@ mod approval_db_tests {
     }
 
     async fn insert_draft(pool: &sqlx::PgPool, id: &str, pending: bool) {
+        insert_draft_for(pool, id, "test-f11-tenant", pending).await;
+    }
+
+    async fn insert_draft_for(pool: &sqlx::PgPool, id: &str, tenant: &str, pending: bool) {
         sqlx::query(
             "INSERT INTO inbound_messages (id, tenant_id, from_email, subject, ai_response, pending_approval) \
-             VALUES ($1, 'test-f11-tenant', 'customer@x.ee', 'Re: invoice', 'please approve', $2)",
+             VALUES ($1, $2, 'customer@x.ee', 'Re: invoice', 'please approve', $3)",
         )
         .bind(id)
+        .bind(tenant)
         .bind(pending)
         .execute(pool)
         .await
@@ -642,6 +693,31 @@ mod approval_db_tests {
         ),
         sqlx::Error,
     > {
+        // Same scope the handler passes for a NON-system caller: the draft
+        // helper row belongs to `test-f11-tenant`, so the claim succeeds.
+        claim_as(pool, id, false, "test-f11-tenant").await
+    }
+
+    async fn claim_as(
+        pool: &sqlx::PgPool,
+        id: &str,
+        is_system_tenant: bool,
+        caller_tenant: &str,
+    ) -> Result<
+        (
+            sqlx::PgTransaction<'static>,
+            Option<(
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<bool>,
+                chrono::DateTime<chrono::Utc>,
+                Option<String>,
+            )>,
+        ),
+        sqlx::Error,
+    > {
         let mut tx = pool.begin().await?;
         let row = sqlx::query_as::<
             _,
@@ -656,6 +732,8 @@ mod approval_db_tests {
             ),
         >(CLAIM_DRAFT_FOR_APPROVAL_SQL)
         .bind(id)
+        .bind(is_system_tenant)
+        .bind(caller_tenant)
         .fetch_optional(&mut *tx)
         .await?;
         Ok((tx, row))
@@ -701,6 +779,106 @@ mod approval_db_tests {
         pool.close().await;
     }
 
+    /// Defense-in-depth (dogfood scope extension 2026-10-07): every CP
+    /// drafts statement carries the tenant predicate in SQL, so even IF the
+    /// system-tenant gate were bypassed, a caller could only ever list,
+    /// claim or reject its OWN tenant's rows. The system-tenant operator's
+    /// cross-tenant queue is preserved by the `$is_system` arm.
+    #[tokio::test]
+    async fn another_tenants_draft_is_unreachable_without_the_system_tenant(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = isolated_pool("tenant_scope").await else {
+            eprintln!(
+                "skipping another_tenants_draft_is_unreachable_without_the_system_tenant: \
+                 TEST_DATABASE_URL not set"
+            );
+            return Ok(());
+        };
+        // Two distinct canonical-shaped ids (VARCHAR(26), `inb_` + 22 hex).
+        let a = canonical_draft_id();
+        let b = format!("inb_{}", "fedcba9876543210fedcba");
+        assert_ne!(a, b);
+        insert_draft_for(&pool, &a, "tenant-a", true).await;
+        insert_draft_for(&pool, &b, "tenant-b", true).await;
+
+        type ListRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        );
+
+        // LIST as tenant A: A's row is visible, B's never.
+        let listed: Vec<ListRow> = sqlx::query_as(LIST_DRAFTS_SQL)
+            .bind(false)
+            .bind("tenant-a")
+            .fetch_all(&pool)
+            .await
+            .expect("tenant-scoped list");
+        let ids: Vec<&str> = listed.iter().map(|row| row.0.as_str()).collect();
+        assert!(ids.contains(&a.as_str()), "own draft must be listed");
+        assert!(
+            !ids.contains(&b.as_str()),
+            "another tenant's draft must never be listed: {ids:?}"
+        );
+
+        // CLAIM as tenant A against B's draft id: nothing matches, and B
+        // stays pending (the uncommitted claim rolls back).
+        let (tx, row) = claim_as(&pool, &b, false, "tenant-a").await?;
+        assert!(
+            row.is_none(),
+            "a non-system caller must not claim another tenant's draft"
+        );
+        tx.rollback().await?;
+        assert_eq!(
+            pending_state(&pool, &b).await,
+            (true, false),
+            "B's draft must stay pending after the refused claim"
+        );
+
+        // REJECT as tenant A against B's draft id: nothing matches either.
+        let rejected: Option<(Option<String>,)> = sqlx::query_as(REJECT_DRAFT_SQL)
+            .bind(&b)
+            .bind(false)
+            .bind("tenant-a")
+            .fetch_optional(&pool)
+            .await
+            .expect("tenant-scoped reject");
+        assert!(
+            rejected.is_none(),
+            "a non-system caller must not reject another tenant's draft"
+        );
+        assert_eq!(
+            pending_state(&pool, &b).await,
+            (true, false),
+            "B's draft must stay pending after the refused reject"
+        );
+
+        // The system-tenant operator (the gate's admitted caller) still sees
+        // the whole platform queue.
+        let all: Vec<ListRow> = sqlx::query_as(LIST_DRAFTS_SQL)
+            .bind(true)
+            .bind("system")
+            .fetch_all(&pool)
+            .await
+            .expect("system-tenant list");
+        let all_ids: Vec<&str> = all.iter().map(|row| row.0.as_str()).collect();
+        assert!(
+            all_ids.contains(&a.as_str()) && all_ids.contains(&b.as_str()),
+            "the operator queue must keep both tenants' drafts: {all_ids:?}"
+        );
+
+        let _ = sqlx::query("DELETE FROM inbound_messages WHERE id IN ($1, $2)")
+            .bind(&a)
+            .bind(&b)
+            .execute(&pool)
+            .await;
+        pool.close().await;
+        Ok(())
+    }
+
     /// Concurrent approvals: exactly one claim wins, so exactly one reply
     /// can be enqueued. Each racing attempt is a full approval flow
     /// (claim -> enqueue -> commit): the loser's UPDATE blocks on the
@@ -727,6 +905,8 @@ mod approval_db_tests {
                 ),
             >(CLAIM_DRAFT_FOR_APPROVAL_SQL)
             .bind(&id)
+            .bind(false)
+            .bind("test-f11-tenant")
             .fetch_optional(&mut *tx)
             .await
             .expect("claim query");

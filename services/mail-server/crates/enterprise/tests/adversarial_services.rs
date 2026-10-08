@@ -1112,8 +1112,9 @@ db_test!(
 
 db_test!(template_approval_spam_gate_review_and_stats, pool, {
     // Reject threshold 40: a spammy template is rejected automatically, never
-    // silently approved.
-    let svc = TemplateApprovalService::new(pool.clone(), 10, 40);
+    // silently approved. (There is no auto-approve threshold — audit M-01 —
+    // so the constructor carries only the auto-REJECT score.)
+    let svc = TemplateApprovalService::new(pool.clone(), 40);
     let tenant = t26();
     seed_tenant(&pool, &tenant).await;
 

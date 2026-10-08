@@ -14,7 +14,8 @@
 
 use crate::leptos_views;
 use crate::view_data::{
-    CampaignEditData, FormFieldData, ListEditData, ListPageData, MfaSetupData, SalesPageData,
+    AlertRulesPageData, CampaignEditData, FormFieldData, ListEditData, ListPageData, MfaSetupData,
+    SalesPageData,
 };
 
 /// Server-loaded page data for one route request.
@@ -51,6 +52,13 @@ pub struct RouteData {
     pub demo_viewer: Option<crate::view_data::DemoViewerData>,
     /// Control-plane AI-drafts review data (`/reviews/ai-drafts`).
     pub ai_drafts: Option<crate::view_data::AiDraftsPageData>,
+    /// Control-plane alert-rules management data (`/alerts/rules`).
+    ///
+    /// Present means the loader read the evaluated store
+    /// (`usage_alert_configs`, migrations 024 + 246) — the same rows the
+    /// billing-service sweep evaluates — plus the tenant choices for the
+    /// create form. Its `unavailable` flag is the honest failure state.
+    pub alert_rules: Option<AlertRulesPageData>,
     /// Authenticated session identity for the console header (display name,
     /// email, REAL plan label). `None` (or a `None` `plan_label`) renders no
     /// plan label — the shell never fabricates one.
@@ -1632,6 +1640,7 @@ fn web_route_page_name(path: &str) -> &'static str {
         p if p.starts_with("/domains/") => "Domain Detail",
         p if p.starts_with("/inbox-placement/") && p.ends_with("/edit") => "Edit Placement Test",
         p if p.starts_with("/inbox-placement/") => "Placement Test Detail",
+        p if p.starts_with("/messages/") && p.ends_with("/timeline") => "Message Timeline",
         p if p.starts_with("/templates/") && p.ends_with("/edit") => "Edit Template",
         p if p.starts_with("/templates/") => "Template Detail",
         _ => "ApexMail",
@@ -1687,12 +1696,11 @@ pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
         "/compliance" => ("Compliance", "Trust workflows and policy operations."),
         "/compliance/gdpr" => ("GDPR Compliance", "Data protection request handling."),
         "/alerts" => ("Alerts", "Incident triage and fleet risk signals."),
-        // CP honesty: there is no alert-rule store in this deployment; the
-        // route returns 501 at the HTTP layer and must not be described as a
-        // working rules surface.
+        // CP honesty: the rules page manages the evaluated usage-alert store
+        // the maintenance sweep reads — a rule fired there lands on /alerts.
         "/alerts/rules" => (
             "Alert Rules",
-            "Not implemented in this deployment: there is no alert-rule store.",
+            "Threshold rules evaluated against live usage; fired rules appear on Alerts.",
         ),
         "/settings" => ("Settings", "Control-plane configuration."),
         "/cp/security" | "/settings/security" => (
@@ -1742,24 +1750,6 @@ fn render_inner(
 fn data_backed_inner(path: &str, data: Option<&RouteData>) -> Option<String> {
     let list = data.and_then(|d| d.list.as_ref())?;
     Some(leptos_views::data_list_page(list, &list_noun(path)))
-}
-
-/// Honest not-implemented inner page for `/alerts/rules`.
-///
-/// The route stays registered because the SSR manifest requires a view for
-/// every route, but there is no alert-rule store or CRUD service in this
-/// deployment, so rendering the old static rule list implied a backing store
-/// that does not exist. The api-server returns 501 at the HTTP layer for the
-/// same path; this view keeps direct SSR rendering (and the unit tests)
-/// honest and points operators back to `/alerts`.
-fn alert_rules_not_implemented_inner() -> String {
-    "<section class=\"mx-auto max-w-2xl py-16 text-center\">\
-        <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">Control Plane</p>\
-        <h1 class=\"mt-4 text-3xl font-bold tracking-tighter text-surface-950\">Alert rules are not implemented</h1>\
-        <p class=\"mt-4 text-sm font-medium text-surface-600\">There is no alert-rule store or rule-management API in this deployment, so there is nothing to list or edit here. Alerting policy is enforced by the fleet alerting engine.</p>\
-        <a href=\"/alerts\" class=\"mt-8 inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-brand-700\">Back to Alerts</a>\
-        </section>"
-        .to_string()
 }
 
 /// Single-word noun for pagination storage keys / summary copy, derived
@@ -1926,6 +1916,13 @@ fn render_web(
         // state (the api-server loader owns the real rows).
         "/settings/suppressions" => data_backed_inner("/settings/suppressions", data)
             .unwrap_or_else(leptos_views::web_settings_suppressions_page),
+        // /messages/{id}/timeline — the time-travel debugging page. The
+        // api-server renders the real reconstruction through the data path;
+        // this static skeleton is the honest fallback (and backs the route
+        // inventory/render sweep like every other detail route).
+        p if p.starts_with("/messages/") && p.ends_with("/timeline") => {
+            leptos_views::web_message_timeline_page()
+        }
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
             match data.and_then(|d| d.campaign_editor.as_ref()) {
                 Some(editor) => leptos_views::web_campaign_edit_page_with_data(editor),
@@ -2066,10 +2063,12 @@ fn render_control_plane(
             .unwrap_or_else(leptos_views::control_plane_gdpr_page),
         "/alerts" => data_backed_inner("/alerts", data)
             .unwrap_or_else(leptos_views::control_plane_alerts_page),
-        // The rule store does not exist (the HTTP layer returns 501), so this
-        // view must not render a data-backed "rule list" that implies one
-        // exists. Operators get the honest page with a link back to Alerts.
-        "/alerts/rules" => alert_rules_not_implemented_inner(),
+        // The real management surface for the evaluated usage-alert store;
+        // the loader supplies the rules + tenant choices, and the static
+        // fallback renders the honest empty state (never fabricated rules).
+        "/alerts/rules" => {
+            leptos_views::control_plane_alert_rules_page(data.and_then(|d| d.alert_rules.as_ref()))
+        }
         "/settings" => leptos_views::control_plane_settings_page(),
         "/settings/security" => match data.and_then(|d| d.mfa_setup.as_ref()) {
             Some(setup) => leptos_views::control_plane_security_page_with_setup(Some(
@@ -3098,8 +3097,113 @@ mod tests {
     /// There is no alert-rule store; `/alerts/rules` must never render a rule
     /// list that implies one exists. It points operators back to `/alerts`.
     #[test]
-    fn alert_rules_route_renders_an_honest_not_implemented_page() {
-        let data = sample_route_data(1);
+    fn alert_rules_route_renders_the_real_management_surface() {
+        // Static fallback (no server data): the REAL page with its honest
+        // empty state and a working create form — never a 501.
+        let html = render_route("control-plane", "/alerts/rules")
+            .expect("control-plane /alerts/rules must render");
+        assert!(
+            html.contains("Alert Rules"),
+            "the page must title the real surface"
+        );
+        assert!(
+            html.contains("No alert rules yet — create one"),
+            "the empty state must be the honest one"
+        );
+        assert!(
+            html.contains("action=\"/web/admin/alert-rules\""),
+            "the create form must post to the registered CP route"
+        );
+        assert!(
+            !html.to_lowercase().contains("not implemented"),
+            "the 501 copy must be gone"
+        );
+        assert!(
+            !html.contains("Alert rules are not implemented"),
+            "the old honest-page pin must be replaced by the real surface"
+        );
+
+        // Data-backed: real rule rows replace the empty state.
+        let data = RouteData {
+            alert_rules: Some(crate::view_data::AlertRulesPageData {
+                rules: vec![crate::view_data::AlertRuleData {
+                    id: "rule-1".into(),
+                    tenant_id: "tenant-abc".into(),
+                    name: "Emails near plan limit".into(),
+                    metric_type: "emails".into(),
+                    threshold_percent: 80,
+                    notification_channel: "both".into(),
+                    severity: "critical".into(),
+                    enabled: true,
+                    last_triggered: Some("2 hours ago".into()),
+                }],
+                tenants: vec![crate::view_data::TenantChoiceData {
+                    id: "tenant-abc".into(),
+                    label: "Acme Workspace".into(),
+                }],
+                unavailable: false,
+                unavailable_note: String::new(),
+                editing: None,
+            }),
+            ..Default::default()
+        };
+        let html = render_route_with_data(
+            "control-plane",
+            "/alerts/rules",
+            None,
+            None,
+            &[],
+            Some(&data),
+        )
+        .expect("control-plane /alerts/rules must render with data");
+        assert!(html.contains("Emails near plan limit"));
+        assert!(html.contains("tenant-abc"));
+        assert!(html.contains("Emails sent ≥ 80% of the plan limit"));
+        assert!(html.contains(">critical<"));
+        assert!(html.contains("/alerts/rules?edit=rule-1"));
+        assert!(
+            html.contains("action=\"/web/admin/alert-rules/rule-1/toggle\"")
+                && html.contains("action=\"/web/admin/alert-rules/rule-1/delete\""),
+            "row actions must post to the registered per-rule routes"
+        );
+        assert!(!html.contains("No alert rules yet"));
+    }
+
+    /// The edit state (`?edit=<id>`) renders the prefilled edit form; a rule
+    /// with no operator name falls back to its metric instead of an empty
+    /// cell.
+    #[test]
+    fn alert_rules_page_renders_the_edit_form_and_legacy_names() {
+        let data = RouteData {
+            alert_rules: Some(crate::view_data::AlertRulesPageData {
+                rules: vec![crate::view_data::AlertRuleData {
+                    id: "rule-legacy".into(),
+                    tenant_id: "tenant-legacy".into(),
+                    name: String::new(),
+                    metric_type: "api_calls".into(),
+                    threshold_percent: 90,
+                    notification_channel: "webhook".into(),
+                    severity: "warning".into(),
+                    enabled: false,
+                    last_triggered: None,
+                }],
+                tenants: vec![],
+                unavailable: false,
+                unavailable_note: String::new(),
+                editing: Some(crate::view_data::AlertRuleData {
+                    id: "rule-legacy".into(),
+                    tenant_id: "tenant-legacy".into(),
+                    name: "API calls at 90%".into(),
+                    metric_type: "api_calls".into(),
+                    threshold_percent: 90,
+                    notification_channel: "webhook".into(),
+                    severity: "warning".into(),
+                    enabled: false,
+                    last_triggered: None,
+                }),
+            }),
+            ..Default::default()
+        };
         let html = render_route_with_data(
             "control-plane",
             "/alerts/rules",
@@ -3109,19 +3213,10 @@ mod tests {
             Some(&data),
         )
         .expect("control-plane /alerts/rules must render");
-
-        assert!(
-            html.contains("Alert rules are not implemented"),
-            "the page must say the surface is not implemented"
-        );
-        assert!(
-            html.contains("Back to Alerts"),
-            "the only useful navigation is back to /alerts"
-        );
-        assert!(
-            !html.contains("no_overlapping") && !html.contains("escalation thresholds"),
-            "the stale rule-policy copy must be gone"
-        );
+        assert!(html.contains("action=\"/web/admin/alert-rules/rule-legacy/update\""));
+        assert!(html.contains("value=\"API calls at 90%\""));
+        // The unnamed legacy row shows an explicit fallback, not a blank cell.
+        assert!(html.contains("Unnamed rule (API calls)"));
     }
 
     #[test]

@@ -355,14 +355,14 @@ mod tests {
         let snap = snapshot(json!({
             "sla_guarantee": true,
             "hipaa_compliance": true,
-            "time_travel_debugging": true,
-            "ab_testing": true
+            "custom_retention": true,
+            "custom_tracking_domain": true
         }));
         for key in [
             FeatureKey::SlaGuarantee,
             FeatureKey::HipaaCompliance,
-            FeatureKey::TimeTravelDebugging,
-            FeatureKey::AbTesting,
+            FeatureKey::CustomRetention,
+            FeatureKey::CustomTrackingDomain,
             FeatureKey::WhiteLabel,
         ] {
             let error = snap
@@ -411,26 +411,44 @@ mod tests {
 
     #[test]
     fn unimplemented_capacity_is_refused() {
-        let snap = snapshot(json!({"max_retention_days": 730, "max_subaccounts": 100}));
-        for key in [CapacityKey::RetentionDays, CapacityKey::Subaccounts] {
-            assert!(
-                matches!(
-                    snap.require_capacity(key, 1),
-                    Err(EntitlementError::NotRuntimeEnforced { .. })
-                ),
-                "{} is not runtime-enforced",
-                key.field_name()
-            );
-            // Presentation still exposes the raw advertised number.
-            assert_eq!(
-                snap.capacity(key),
-                if key == CapacityKey::RetentionDays {
-                    730
-                } else {
-                    100
-                }
-            );
-        }
+        let snap = snapshot(json!({"max_retention_days": 730}));
+        assert!(
+            matches!(
+                snap.require_capacity(CapacityKey::RetentionDays, 1),
+                Err(EntitlementError::NotRuntimeEnforced { .. })
+            ),
+            "max_retention_days is not runtime-enforced until the retention-editing surface lands"
+        );
+        // Presentation still exposes the raw advertised number.
+        assert_eq!(snap.capacity(CapacityKey::RetentionDays), 730);
+    }
+
+    /// Capability wave 1: `max_subaccounts` is a REAL capacity gate now, so
+    /// the Business boundary (limit 10) passes at 10 and refuses 11, while
+    /// Enterprise's -1 is unlimited.
+    #[test]
+    fn subaccount_capacity_is_runtime_enforced() {
+        let business = snapshot(json!({"subaccounts": true, "max_subaccounts": 10}));
+        assert!(business
+            .require_capacity(CapacityKey::Subaccounts, 10)
+            .is_ok());
+        let error = business
+            .require_capacity(CapacityKey::Subaccounts, 11)
+            .expect_err("cap+1 must be refused");
+        assert_eq!(
+            error,
+            EntitlementError::CapacityExceeded {
+                capacity: "max_subaccounts",
+                limit: 10,
+                requested: 11,
+                plan: "growth".into(),
+            }
+        );
+
+        let enterprise = snapshot(json!({"subaccounts": true, "max_subaccounts": -1}));
+        assert!(enterprise
+            .require_capacity(CapacityKey::Subaccounts, 1_000_000)
+            .is_ok());
     }
 
     #[test]
@@ -462,8 +480,12 @@ mod tests {
         // Unknown names never apply.
         assert!(!snap.apply_override("ai_chat", &json!(true)));
         // Non-runtime-enforced fields never apply, regardless of value.
-        assert!(!snap.apply_override("time_travel_debugging", &json!(true)));
+        assert!(!snap.apply_override("custom_retention", &json!(true)));
         assert!(!snap.apply_override("sla_guarantee", &json!(true)));
+        // A capability that has since become RuntimeEnforced (time-travel
+        // debugging) is override-able like any other real gate.
+        assert!(snap.apply_override("time_travel_debugging", &json!(true)));
+        assert!(snap.require_feature(FeatureKey::TimeTravelDebugging).is_ok());
     }
 
     #[test]
@@ -495,11 +517,19 @@ mod tests {
         assert!(webhooks.granted);
         assert_eq!(webhooks.class, "RuntimeEnforced");
 
-        let unimplemented = view
+        let ttd = view
             .features
             .iter()
             .find(|f| f.key == "time_travel_debugging")
             .expect("ttd row");
+        assert!(!ttd.granted, "this fixture's plan does not grant ttd");
+        assert_eq!(ttd.class, "RuntimeEnforced");
+
+        let unimplemented = view
+            .features
+            .iter()
+            .find(|f| f.key == "custom_retention")
+            .expect("retention row");
         assert!(!unimplemented.granted);
         assert_eq!(unimplemented.class, "NotYetImplemented");
 

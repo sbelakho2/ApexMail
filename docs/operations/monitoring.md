@@ -166,6 +166,36 @@ ApexMail implements multi-channel alerting with escalation policies for differen
 
 Alert rules are defined in [deploy/alerting-rules.yml](../../deploy/alerting-rules.yml).
 
+### Control-plane usage alert rules (`/alerts/rules`)
+
+Fleet/infrastructure alerting above is Prometheus/Alertmanager configuration.
+Tenant usage thresholds are a separate, operator-managed layer:
+
+- **Where**: the control plane's `/alerts/rules` page (system-tenant +
+  CP-session gated) and the matching `GET/POST/PATCH/DELETE
+  /v1/admin/alerts/rules` JSON API (`*` scope, system tenant). Both manage the
+  SAME store — `usage_alert_configs` (migrations 024 + 246) — so the page and
+  the API cannot diverge.
+- **What is evaluated**: each enabled rule names a tenant, a metric the
+  evaluator can resolve (`emails` or `api_calls`), a threshold percentage of
+  the tenant's plan limit, a severity (`info`/`warning`/`critical`), and a
+  notification channel (`email`, `webhook`, or both). Metrics the sweep cannot
+  resolve are rejected at create time instead of stored as rules that never
+  fire.
+- **When**: the billing-service maintenance sweep (`process_usage_alerts`,
+  every 5 minutes) reads the enabled rules, compares them with live usage for
+  the current billing period, and fires on threshold.
+- **Where the incident lands**: a fired rule upserts an incident row into
+  `system_alerts` (`source = 'usage_alert'`, fingerprint = the rule id), which
+  is what the CP `/alerts` page, its SSE stream, and dashboard risk counts
+  render. Channel delivery (email queue / tenant webhook) rides the same
+  firing with a one-hour cooldown; the control-plane incident is recorded
+  regardless of channel delivery, so a rule whose webhook is down still shows
+  up where operators look.
+- **Mutations**: create/edit/enable/disable/delete on the page post to
+  `/web/admin/alert-rules*` (CSRF-protected PRG) and are audit-logged under
+  the `alert_rule` resource.
+
 ---
 
 ## Dashboards

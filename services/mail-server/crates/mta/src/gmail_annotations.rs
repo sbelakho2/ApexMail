@@ -1,12 +1,32 @@
 //! Gmail Annotations – schema.org JSON‑LD for promotion cards & deals.
+//!
+//! # Wiring (where the effect actually happens)
+//!
+//! `GmailAnnotationsService::generate_annotations` produces the
+//! `<script type="application/ld+json">…</script>` block. The live
+//! injection point is `worker-processors`' `prepare_email` (see
+//! `crates/worker-processors/src/email/processor.rs`): when the queue
+//! row's server-side `metadata.gmail_annotations` object is present, the
+//! generated block is inserted into the message HTML `<head>` before the
+//! message is handed to any transport. The documented campaign API
+//! (`docs/security/advanced-analytics.md`) feeds that metadata field; a
+//! configuration that fails validation is logged and never blocks the
+//! send.
+//!
+//! The deserialization shape below accepts the DOCUMENTED payload
+//! (camelCase, `organization` as a `{name,…}` object, `deal` with
+//! `discountDescription`/`availabilityEnds`) as well as the legacy
+//! snake_case form.
 
 use serde::{Deserialize, Serialize};
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromotionCardProduct {
     pub name: String,
+    #[serde(alias = "image_url")]
     pub image_url: String,
     pub price: f64,
     pub currency: String,
@@ -15,28 +35,65 @@ pub struct PromotionCardProduct {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DealBadge {
+    #[serde(alias = "discount_code")]
     pub discount_code: Option<String>,
+    /// The documented API spelling is `discountDescription`; plain
+    /// `description` is accepted for callers built against the internal
+    /// field name.
+    #[serde(alias = "discountDescription")]
     pub description: String,
+    #[serde(alias = "start_date")]
     pub start_date: Option<String>,
+    /// The documented API spelling is `availabilityEnds`.
+    #[serde(alias = "availabilityEnds", alias = "end_date")]
     pub end_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GmailAnnotationConfig {
+    #[serde(alias = "logo_url")]
     pub logo_url: Option<String>,
+    #[serde(alias = "featured_image_url")]
     pub featured_image_url: Option<String>,
     pub deal: Option<DealBadge>,
+    #[serde(default)]
     pub products: Vec<PromotionCardProduct>,
+    #[serde(alias = "go_to_action")]
     pub go_to_action: Option<GoToAction>,
+    /// Accepts both the documented `{"name": "…"}` object and a bare string.
+    #[serde(default, deserialize_with = "deserialize_organization")]
     pub organization: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoToAction {
     pub name: String,
     pub url: String,
     pub description: Option<String>,
+}
+
+/// Deserialize `organization` from either a string or the documented
+/// `{"name": …}` object (other keys such as `url`/`logoUrl` are ignored).
+fn deserialize_organization<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Organization {
+        Name(String),
+        Object { name: Option<String> },
+    }
+
+    Ok(match Option::<Organization>::deserialize(deserializer)? {
+        None => None,
+        Some(Organization::Name(name)) => Some(name),
+        Some(Organization::Object { name }) => name,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +261,10 @@ impl GmailAnnotationsService {
 
         if let Some(ref logo) = config.logo_url {
             json["image"] = serde_json::json!(logo);
+        } else if let Some(ref featured) = config.featured_image_url {
+            // The documented "featured image" is the promotion preview image
+            // when no brand logo is configured.
+            json["image"] = serde_json::json!(featured);
         }
 
         // Deal
@@ -327,6 +388,74 @@ pub fn create_gmail_annotations_service() -> GmailAnnotationsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The payload shape published in `docs/security/advanced-analytics.md`
+    /// (camelCase, `organization` as an object, `deal` with
+    /// `discountDescription`/`availabilityEnds`) must deserialize into the
+    /// config the injection point consumes. Previously the struct only
+    /// accepted snake_case, so the documented API payload could never be
+    /// turned into annotations.
+    #[test]
+    fn documented_camel_case_payload_deserializes() {
+        let payload = serde_json::json!({
+            "organization": { "name": "Acme Store", "url": "https://acme.com" },
+            "featuredImageUrl": "https://acme.com/promo-banner.png",
+            "deal": {
+                "discountDescription": "25% off everything",
+                "discountCode": "SAVE25",
+                "availabilityEnds": "2025-02-28T00:00:00Z"
+            },
+            "goToAction": { "name": "Shop Now", "url": "https://acme.com/sale" },
+            "products": [{
+                "name": "Premium Widget",
+                "imageUrl": "https://acme.com/widget.png",
+                "price": 49.99,
+                "currency": "USD",
+                "url": "https://acme.com/widget"
+            }]
+        });
+        let config: GmailAnnotationConfig =
+            serde_json::from_value(payload).expect("documented payload must deserialize");
+
+        assert_eq!(config.organization.as_deref(), Some("Acme Store"));
+        assert_eq!(
+            config.featured_image_url.as_deref(),
+            Some("https://acme.com/promo-banner.png")
+        );
+        assert_eq!(config.products.len(), 1);
+        assert_eq!(config.products[0].image_url, "https://acme.com/widget.png");
+        assert_eq!(config.deal.as_ref().unwrap().description, "25% off everything");
+        assert_eq!(
+            config.deal.as_ref().unwrap().discount_code.as_deref(),
+            Some("SAVE25")
+        );
+        assert_eq!(
+            config.deal.as_ref().unwrap().end_date.as_deref(),
+            Some("2025-02-28T00:00:00Z")
+        );
+
+        let result = GmailAnnotationsService::new().generate_annotations(&config);
+        assert!(result.validation.valid, "{:?}", result.validation.errors);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.json_ld).expect("valid JSON-LD");
+        assert_eq!(parsed["image"], "https://acme.com/promo-banner.png");
+        assert!(parsed.get("discountCode").is_none());
+        assert_eq!(parsed["offers"][0]["discountCode"], "SAVE25");
+    }
+
+    /// The legacy snake_case shape keeps working (callers built against the
+    /// internal field names).
+    #[test]
+    fn legacy_snake_case_payload_still_deserializes() {
+        let payload = serde_json::json!({
+            "logo_url": "https://example.com/logo.png",
+            "organization": "Example Corp",
+            "products": []
+        });
+        let config: GmailAnnotationConfig = serde_json::from_value(payload).unwrap();
+        assert_eq!(config.logo_url.as_deref(), Some("https://example.com/logo.png"));
+        assert_eq!(config.organization.as_deref(), Some("Example Corp"));
+    }
 
     #[test]
     fn test_generate_annotations_with_deal() {

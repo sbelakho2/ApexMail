@@ -83,6 +83,30 @@ async fn insert_inbound(db: &sqlx::PgPool, id: &str, tenant: Option<&str>, raw: 
     .expect("insert inbound message");
 }
 
+/// [`insert_inbound`] with the inbound-dedup identity set: the tenant-scoped
+/// RFC 5322 Message-ID mirror column (`inbound_messages.message_id_header`).
+async fn insert_inbound_with_identity(
+    db: &sqlx::PgPool,
+    id: &str,
+    tenant: Option<&str>,
+    raw: &[u8],
+    message_id: &str,
+) {
+    sqlx::query(
+        "INSERT INTO inbound_messages (id, tenant_id, raw_message, raw_size, is_verp_reply, \
+         processed, processing, pending_approval, message_id_header) \
+         VALUES ($1, $2, $3, $4, false, false, false, false, $5)",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(raw)
+    .bind(raw.len() as i64)
+    .bind(message_id)
+    .execute(db)
+    .await
+    .expect("insert inbound message with identity");
+}
+
 async fn cleanup_inbound(db: &sqlx::PgPool, id: &str) {
     sqlx::query("DELETE FROM inbound_messages WHERE id = $1")
         .bind(id)
@@ -488,6 +512,79 @@ async fn worker_classified_rows_still_receive_their_draft() {
     );
 
     cleanup_inbound(&db, &id).await;
+}
+
+/// A re-delivered message (same tenant + same RFC 5322 Message-ID) must NOT
+/// produce a second draft: the review queue holds ONE copy, and the duplicate
+/// is terminally declined with a named note so it cannot be re-claimed.
+/// Live mailbot dogfood 2026-10-06: the identical bytes delivered twice
+/// created two rows AND two drafts (both pending_approval = true).
+#[tokio::test]
+async fn duplicate_delivery_gets_no_second_draft() {
+    let _serial = ENV_SERIAL.lock().await;
+    let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
+    let Some(db) = shared_pool().await else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let _serial_db = serial_lock(&db_url).await;
+    let port = spawn_mock_llm(GOOD_REPLY).await;
+    let _env = EnvGuard::with_mock_llm(port);
+    let cfg = agent_config(&std::env::var("TEST_DATABASE_URL").unwrap());
+    let answerer = Arc::new(EmailAnswerer::new(cfg).expect("agent"));
+
+    let tenant = unique("tn_em");
+    let sender = unique_sender("dup.delivery");
+    let message_id = format!("<dup-{}@relay.test>", uuid::Uuid::new_v4().simple());
+    let raw = mime(&sender, "Re: proposal", "Can we schedule a call Thursday at 10?", &[]);
+
+    // First delivery: the draft.
+    let first = unique("em_dup_first");
+    insert_inbound_with_identity(&db, &first, Some(&tenant), &raw, &message_id).await;
+    let _ = answerer.process_batch().await;
+    let (_, first_pending, first_draft, _) = row_state(&db, &first).await;
+    assert!(first_pending, "the first delivery drafts");
+    assert!(first_draft.is_some());
+
+    // Second delivery: identical Message-ID, new row.
+    let second = unique("em_dup_second");
+    insert_inbound_with_identity(&db, &second, Some(&tenant), &raw, &message_id).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let (done, _, _, _) = row_state(&db, &second).await;
+        if done || std::time::Instant::now() > deadline {
+            break;
+        }
+        let _ = answerer.process_batch().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let (done, pending, response, tokens) = row_state(&db, &second).await;
+    assert!(done, "the duplicate is terminally processed");
+    assert!(
+        !pending,
+        "the duplicate must never become a second pending draft"
+    );
+    let note = response.expect("duplicate note");
+    assert!(
+        note.contains("duplicate delivery"),
+        "the duplicate is named, not silently dropped: {note}"
+    );
+    assert_eq!(tokens, Some(0), "a duplicate spends no model tokens");
+
+    // Exactly ONE pending draft exists for this tenant+Message-ID identity.
+    let drafts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM inbound_messages \
+         WHERE tenant_id = $1 AND message_id_header = $2 AND pending_approval = true",
+    )
+    .bind(&tenant)
+    .bind(&message_id)
+    .fetch_one(&db)
+    .await
+    .expect("draft count");
+    assert_eq!(drafts, 1, "a re-delivery creates exactly one draft");
+
+    cleanup_inbound(&db, &first).await;
+    cleanup_inbound(&db, &second).await;
 }
 
 // ── Loop guards decline without drafting ────────────────────────────────────

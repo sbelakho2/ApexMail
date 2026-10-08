@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Template sends.** `client.emails().send(...)` accepts
+  `template_id`/`templateId` + `template_data`/`templateData`: the stored
+  template supplies subject/html/text, rendered with the supplied variables,
+  and a template-only send may omit subject/html/text. An explicit
+  subject/html/text overrides the rendered field. `template_data` without a
+  template id (or a non-object `template_data`) is refused client-side,
+  naming the contract.
+
 ### Fixed
 
 - **`analytics().volume()` could not parse its own response (SDK-JAVA-2).**

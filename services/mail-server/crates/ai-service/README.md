@@ -8,6 +8,14 @@
 > Routes registered: /health /suggest /optimize-time /content/score /models
 > /predict /train /training/jobs/:id /evaluate /domains/dns-records /chat
 > /admin/reindex /admin/chat/history.
+>
+> `/chat` is scoped by the REQUIRED `x-apexmail-tenant-id` header, and
+> `/admin/chat/history` by BOTH that header and the REQUIRED
+> `x-apexmail-user-id` header: assistant history is per USER (the console
+> sessions are per-user and `docs/user-guide/assistant.md` promises
+> conversations are visible only to the user they belong to), so a request
+> without the user identity is refused rather than returning every
+> teammate's turns.
 
 > **STATUS — READ BEFORE RELYING ON THIS CRATE**
 > NOT DEPLOYED: this crate's server binary is not in the deployment Dockerfile or compose files, and no production service depends on it. Compile/test target only.

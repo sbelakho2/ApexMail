@@ -4,10 +4,10 @@ A custom tracking domain allows you to use your own domain for open and click tr
 
 ## Why Use a Custom Tracking Domain
 
-- **Brand consistency** — tracked links show your domain, not `track.apexmail.ee`.
-- **Deliverability** — links from your domain are less likely to be flagged as suspicious.
-- **DMARC/SPF** — tracking redirects don't affect your main domain's email authentication.
-- **Trust** — recipients see your brand in URLs they click.
+- Brand consistency: tracked links show your domain, not `track.apexmail.ee`.
+- Deliverability: links from your domain are less likely to be flagged as suspicious.
+- DMARC/SPF: tracking redirects don't affect your main domain's email authentication.
+- Trust: recipients see your brand in URLs they click.
 
 ## How Tracking Works
 
@@ -28,9 +28,25 @@ Add a CNAME record to your DNS:
 
 This configures `email.example.com` as your tracking domain.
 
-Then in the dashboard: **Domains → [your domain] → Tracking → Use custom tracking domain** and enter `email.example.com`.
+Then in the dashboard: **Domains → [your domain] → Custom tracking domain**
+(`/domains/{domain-id}/tracking`) and enter `email.example.com`. The same
+lifecycle is available on the API:
 
-After DNS propagation, tracked links will use:
+| Action | Endpoint |
+|---|---|
+| Create | `POST /v1/tracking-domains` (`{"domain": "email.example.com"}`) |
+| List / read | `GET /v1/tracking-domains`, `GET /v1/tracking-domains/:id` |
+| Required DNS record | `GET /v1/tracking-domains/:id/dns-records` |
+| Verify (live DNS check) | `POST /v1/tracking-domains/:id/verify` |
+| Delete | `DELETE /v1/tracking-domains/:id` |
+
+A tracking domain is `pending` until a verification run finds the CNAME
+resolving to the platform tracking host; a mismatching record is stored as
+`failed` with the exact reason. The console page shows the CNAME value to
+publish and the current state, and a DNS outage is reported as unavailable
+(never as a failure).
+
+After DNS propagation and verification, tracked links will use:
 
 ```
 https://email.example.com/e/abc123def456
@@ -42,15 +58,24 @@ Instead of:
 https://track.apexmail.ee/e/abc123def456
 ```
 
+An unverified, deleted, or unknown tracking host is refused with a named
+page — links are never silently bounced to another domain.
+
 ## SSL/TLS
 
-ApexMail automatically provisions and renews SSL certificates for custom tracking domains. No additional configuration needed.
+TLS for a custom tracking host is terminated by the platform edge: the
+deployment operator must provision a certificate (and the DNS/LB route) for
+the custom host. Automatic per-customer certificate issuance/renewal is an
+operator concern in this release, not a self-service step.
 
 ## Limitations
 
+- Custom tracking domains are available on **Pro and above**.
 - The tracking domain must be a subdomain of a verified domain in your account.
 - You can only have one custom tracking domain per verified domain.
-- The CNAME host must not conflict with existing records (don't use `www`, `mail`, etc.).
+- The CNAME host must not conflict with existing records — the first label
+  must not be a mail or web role (`www`, `mail`, `smtp`, `mta`, `mx`,
+  `bounce`, `api`, `app`, `cpanel`, `webmail`).
 
 ## Disable Tracking
 

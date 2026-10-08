@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Template sends.** `SendEmailRequest.TemplateID`/`TemplateData` are
+  serialized (`template_id`/`template_data`) and a template-only request may
+  omit `Subject`/`HTML`/`Text` — the server renders the stored template with
+  the supplied variables. An explicit `Subject`/`HTML`/`Text` overrides the
+  rendered field. `template_data` without `template_id` and non-object
+  `template_data` are still refused client-side, naming the contract.
+
 ### Fixed
 
 - **Critical (GO-1):** mutating POSTs now send `Idempotency-Key`. The SDK sent

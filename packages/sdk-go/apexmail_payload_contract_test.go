@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// ── F48/GO-6: send wire shape — every accepted option is serialized ─────────
+// ── F48: send wire shape — every accepted option is serialized ──────────────
 
 func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 	t.Parallel()
@@ -29,13 +29,15 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 		Subject: "Hello!",
 		HTML:    "<h1>Hello World</h1>",
 		// F48: every accepted option must reach the wire.
-		ReplyTo:     &EmailAddress{Email: "reply@example.com", Name: "Replies"},
-		Priority:    PriorityHigh,
-		Attachments: []Attachment{{Filename: "a.txt", Content: "eHg="}},
-		Headers:     map[string]string{"X-Custom": "yes"},
-		Tags:        []string{"welcome"},
-		Metadata:    map[string]interface{}{"source": "go-sdk-test"},
-		ScheduledAt: "2026-09-01T09:00:00Z",
+		ReplyTo:      &EmailAddress{Email: "reply@example.com", Name: "Replies"},
+		Priority:     PriorityHigh,
+		Attachments:  []Attachment{{Filename: "a.txt", Content: "eHg="}},
+		Headers:      map[string]string{"X-Custom": "yes"},
+		Tags:         []string{"welcome"},
+		Metadata:     map[string]interface{}{"source": "go-sdk-test"},
+		ScheduledAt:  "2026-09-01T09:00:00Z",
+		TemplateID:   "tpl_1",
+		TemplateData: map[string]interface{}{"name": "Ada"},
 	}
 
 	body, err := json.Marshal(req)
@@ -61,11 +63,18 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 	}
 
 	// Every accepted option reaches the wire under its documented
-	// snake_case field name (F48).
-	for _, required := range []string{"reply_to", "attachments", "priority", "headers", "metadata", "tags"} {
+	// snake_case field name (F48), template sends included.
+	for _, required := range []string{"reply_to", "attachments", "priority", "headers", "metadata", "tags", "template_id", "template_data"} {
 		if _, present := payload[required]; !present {
 			t.Fatalf("field %q must be serialized (F48: no silently dropped options)", required)
 		}
+	}
+	if payload["template_id"] != "tpl_1" {
+		t.Fatalf("template_id must be serialized, got %#v", payload["template_id"])
+	}
+	templateData, _ := payload["template_data"].(map[string]any)
+	if templateData["name"] != "Ada" {
+		t.Fatalf("template_data must be serialized as a JSON object, got %#v", payload["template_data"])
 	}
 	if payload["reply_to"] != "Replies <reply@example.com>" {
 		t.Fatalf("reply_to must keep the display name, got %#v", payload["reply_to"])
@@ -82,22 +91,27 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 		t.Fatalf("attachment shape mismatch: %#v", attachment)
 	}
 
-	// camelCase spellings must never appear; GO-6: template fields must never
-	// be serialized at all (the server's deny_unknown_fields
-	// SendMessageRequest answers 422 for them, so Send refuses client-side).
-	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "name", "template_id", "template_data"} {
+	// camelCase spellings must never appear (snake_case is the wire contract).
+	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "name", "text_body", "html_body"} {
 		if _, present := payload[forbidden]; present {
 			t.Fatalf("field %q must not be serialized", forbidden)
 		}
 	}
 }
 
-func TestSendRejectsTemplateFieldsClientSideWithoutRequest(t *testing.T) {
+// Template sends are a supported contract: a template-only request (no
+// subject/html/text) validates, reaches the wire with template_id/
+// template_data, and the payload carries no empty subject/html keys. The
+// still-invalid shapes are refused client-side, before any request.
+func TestSendTransmitsTemplateFieldsAndAllowsTemplateOnlyRequest(t *testing.T) {
 	t.Parallel()
 
-	var requests int
+	var bodies []map[string]any
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		body, _ := io.ReadAll(r.Body)
+		var decoded map[string]any
+		_ = json.Unmarshal(body, &decoded)
+		bodies = append(bodies, decoded)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"id":"m","status":"queued","created_at":"now"}}`))
 	}))
@@ -108,36 +122,69 @@ func TestSendRejectsTemplateFieldsClientSideWithoutRequest(t *testing.T) {
 		t.Fatalf("create client: %v", err)
 	}
 
-	// The server's SendMessageRequest carries template_id/template_data only
-	// to reject them with an explicit 422 — a body with either field can
-	// never succeed, so the SDK must fail client-side and never put it on the
-	// wire (GO-6).
-	_, err = client.Emails.Send(context.Background(), &SendEmailRequest{
-		From:       EmailAddress{Email: "hello@example.com"},
-		To:         []EmailAddress{{Email: "user@example.com"}},
-		Subject:    "Hi",
-		HTML:       "<p>Hi</p>",
-		TemplateID: "tpl_1",
-	})
-	if err == nil {
-		t.Fatal("expected template_id to be rejected client-side")
+	// A template-only send is valid: no Subject/HTML/Text required.
+	if _, err := client.Emails.Send(context.Background(), &SendEmailRequest{
+		From:         EmailAddress{Email: "hello@example.com"},
+		To:           []EmailAddress{{Email: "user@example.com"}},
+		TemplateID:   "tpl_1",
+		TemplateData: map[string]interface{}{"name": "Ada"},
+	}); err != nil {
+		t.Fatalf("template-only send must be accepted client-side: %v", err)
 	}
-	if requests != 0 {
-		t.Fatalf("a template request must never reach the server, got %d request(s)", requests)
+	if len(bodies) != 1 {
+		t.Fatalf("template send must reach the server, got %d request(s)", len(bodies))
+	}
+	first := bodies[0]
+	if first["template_id"] != "tpl_1" {
+		t.Fatalf("template_id must reach the wire, got %#v", first["template_id"])
+	}
+	data, _ := first["template_data"].(map[string]any)
+	if data["name"] != "Ada" {
+		t.Fatalf("template_data must reach the wire, got %#v", first["template_data"])
+	}
+	if _, present := first["subject"]; present {
+		t.Fatalf("a template-only send must not send an empty subject key: %#v", first)
+	}
+	if _, present := first["html"]; present {
+		t.Fatalf("a template-only send must not send an empty html key: %#v", first)
 	}
 
-	_, err = client.Emails.Batch(context.Background(), &BatchSendRequest{Messages: []*SendEmailRequest{{
+	// The batch path forwards the same fields for a template-only item.
+	if _, err := client.Emails.Batch(context.Background(), &BatchSendRequest{Messages: []*SendEmailRequest{{
+		From:         EmailAddress{Email: "hello@example.com"},
+		To:           []EmailAddress{{Email: "user@example.com"}},
+		TemplateID:   "tpl_2",
+		TemplateData: map[string]string{"name": "Grace"},
+	}}}); err != nil {
+		t.Fatalf("template batch must be accepted client-side: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("template batch must reach the server, got %d request(s)", len(bodies))
+	}
+
+	// template_data without a template_id is meaningless — refused before
+	// any request, naming the contract.
+	requestsBefore := len(bodies)
+	if _, err := client.Emails.Send(context.Background(), &SendEmailRequest{
 		From:         EmailAddress{Email: "hello@example.com"},
 		To:           []EmailAddress{{Email: "user@example.com"}},
 		Subject:      "Hi",
 		HTML:         "<p>Hi</p>",
 		TemplateData: map[string]string{"name": "Ada"},
-	}}})
-	if err == nil {
-		t.Fatal("expected template_data to be rejected client-side")
+	}); err == nil || !strings.Contains(err.Error(), "template_data requires template_id") {
+		t.Fatalf("template_data without template_id must be rejected client-side, got: %v", err)
 	}
-	if requests != 0 {
-		t.Fatalf("a template batch must never reach the server, got %d request(s)", requests)
+	// A scalar/array template_data is refused client-side too.
+	if _, err := client.Emails.Send(context.Background(), &SendEmailRequest{
+		From:         EmailAddress{Email: "hello@example.com"},
+		To:           []EmailAddress{{Email: "user@example.com"}},
+		TemplateID:   "tpl_1",
+		TemplateData: []string{"not", "an", "object"},
+	}); err == nil || !strings.Contains(err.Error(), "JSON object") {
+		t.Fatalf("non-object template_data must be rejected client-side, got: %v", err)
+	}
+	if len(bodies) != requestsBefore {
+		t.Fatalf("refused template shapes must never reach the server, got %d request(s)", len(bodies))
 	}
 }
 
@@ -177,7 +224,7 @@ func TestSendOverTheWireUsesExactPayload(t *testing.T) {
 	if gotBody["from"] != "hello@example.com" {
 		t.Fatalf("from must be an address string, got %#v", gotBody["from"])
 	}
-	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "template_id", "template_data", "text_body", "html_body"} {
+	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "text_body", "html_body"} {
 		if _, present := gotBody[forbidden]; present {
 			t.Fatalf("field %q reached the wire", forbidden)
 		}

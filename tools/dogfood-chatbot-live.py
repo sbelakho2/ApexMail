@@ -53,6 +53,8 @@ PASSWORD = "Dogfood!2026-Correct-Horse-9"
 SUFFIX = os.environ.get("DOGFOOD_SUFFIX", "cb" + uuid.uuid4().hex[:6])
 
 RESULTS: list[dict] = []
+_MIN_CALL_INTERVAL = 0.4
+_LAST_CALL_AT = 0.0
 _LOCK = threading.Lock()
 
 
@@ -114,13 +116,28 @@ def call(
     if extra_headers:
         headers.update(extra_headers)
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
-            return response.status, response.read().decode(errors="replace"), dict(response.headers)
-    except urllib.error.HTTPError as error:
-        return error.code, error.read().decode(errors="replace"), dict(error.headers)
-    except Exception as error:  # transport-level failure
-        return 0, f"transport: {error}", {}
+    # The stack's ddos protector brakes a bursty single IP; keep the probe
+    # stream paced and give one explicit backoff when it still engages.
+    global _LAST_CALL_AT
+    now = time.time()
+    wait = _MIN_CALL_INTERVAL - (now - _LAST_CALL_AT)
+    if wait > 0:
+        time.sleep(wait)
+    _LAST_CALL_AT = time.time()
+    for attempt in range(3):
+        try:
+            with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+                return response.status, response.read().decode(errors="replace"), dict(response.headers)
+        except urllib.error.HTTPError as error:
+            body = error.read().decode(errors="replace")
+            if attempt == 0 and error.code == 429 and "DDOS_RATE_LIMITED" in body:
+                time.sleep(30)
+                _LAST_CALL_AT = time.time()
+                continue
+            return error.code, body, dict(error.headers)
+        except Exception as error:  # transport-level failure
+            return 0, f"transport: {error}", {}
+    return 0, "transport: retries exhausted", {}
 
 
 def cookies_of(headers: dict) -> list[str]:
@@ -468,6 +485,22 @@ def relogin(user: dict) -> dict:
     return user
 
 
+def refresh_sessions(state: dict) -> None:
+    """Re-login every provisioned identity (session JWTs are short-lived) and
+    rewrite state.json, keeping the minted API keys intact."""
+    refreshed = 0
+    for name, user in state.get("users", {}).items():
+        relogin(user)
+        refreshed += 1
+        print(f"  refreshed {name}", flush=True)
+    member = state["tenants"].get("M")
+    if member and member.get("totp"):
+        relogin(member)
+        refreshed += 1
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+    print(f"refreshed {refreshed} sessions")
+
+
 def load_state() -> dict:
     if not STATE_FILE.exists():
         raise SystemExit("no state; run `provision` first")
@@ -690,6 +723,27 @@ def matrix(state: dict) -> None:
         status == 200 and marker in a_text,
         f"status={status}",
         history_a=history_a,
+    )
+
+    # P2-SECURITY (filed by the perf agent, fixed in tree): the history
+    # route must be per-CALLER. A tenant-level ai:read key (no user identity)
+    # must not read a console user's conversation through it.
+    nonce = f"history-leak-nonce-{uuid.uuid4().hex[:10]}"
+    console_user = state["users"]["A0"]
+    status, created = new_session_cookie(console_user)
+    console_sid = created.get("id")
+    status, turn = console_turn(console_user, console_sid, nonce)
+    history_key_status, history_key_body, _ = call(
+        "GET", "/v1/ai/chat/history", token=keys["A"]
+    )
+    key_text = json.dumps(history_key_body)
+    leaks = nonce in key_text
+    record(
+        "history: a tenant-level key never reads a user's conversation",
+        not leaks and history_key_status in (403, 200),
+        f"status={history_key_status} nonce_present={leaks} "
+        f"body={key_text[:120]}",
+        severity="P2" if leaks else None,
     )
 
     # x-tenant-id override attempt.
@@ -1185,6 +1239,7 @@ def perf(state: dict) -> None:
     server_errors: list[str] = []
     rate_limited = 0
     contaminated: list[str] = []
+    rate_limited_bodies: list[str] = []
     turns_ok = 0
     stop_at = time.time() + BUDGETS["duration_secs"]
     counter = {"n": 0}
@@ -1218,6 +1273,10 @@ def perf(state: dict) -> None:
                         contaminated.append(f"{name}:{index}")
                 elif status == 429:
                     rate_limited += 1
+                    if len(rate_limited_bodies) < 3:
+                        rate_limited_bodies.append(
+                            f"{name}:{json.dumps(body)[:140]}"
+                        )
                 else:
                     server_errors.append(f"{name}:{status}:{json.dumps(body)[:60]}")
             sleep_for = pace_secs - (time.time() - started)
@@ -1276,7 +1335,8 @@ def perf(state: dict) -> None:
     record(
         "perf: paced load stayed under the documented per-user bucket",
         rate_limited == 0,
-        f"429s={rate_limited} (pacing 8s/turn/worker ~15/min/user below the 20/min cap)",
+        f"429s={rate_limited} (pacing 8s/turn/worker ~15/min/user below the 20/min cap) "
+        f"sample={json.dumps(rate_limited_bodies)[:300]}",
     )
 
 
@@ -1374,7 +1434,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "stage",
-        choices=["provision", "matrix", "adversarial", "ui", "content", "perf", "disclosure", "all"],
+        choices=[
+            "provision",
+            "refresh",
+            "matrix",
+            "adversarial",
+            "ui",
+            "content",
+            "perf",
+            "disclosure",
+            "all",
+        ],
     )
     args = parser.parse_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1382,6 +1452,9 @@ def main() -> int:
         provision()
         return 0
     state = load_state()
+    if args.stage == "refresh":
+        refresh_sessions(state)
+        return 0
     if args.stage in ("matrix", "all"):
         matrix(state)
     if args.stage in ("adversarial", "all"):

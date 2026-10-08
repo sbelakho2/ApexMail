@@ -15,6 +15,7 @@
 pub mod ai;
 mod classifier;
 pub mod deterministic;
+pub mod dsr;
 pub mod policy;
 mod processor;
 mod types;

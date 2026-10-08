@@ -300,14 +300,15 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::Sso),
         rationale: "Enterprise SSO is consumed at login; a tenant that enforces SSO without the entitlement is refused instead of silently receiving it.",
     },
-    // NotYetImplemented — audit rows are written in api-server, but no
-    // customer-facing audit read/export handler exists (the `/audit`
-    // surface is operator-only). Removed from the paid plan seeds.
+    // RuntimeEnforced — the tenant routes `GET /v1/audit` and
+    // `GET /v1/audit/export` (api-server `routes/audit.rs`) require
+    // `FeatureKey::AuditLogs` and scope `audit:read` before reading a row.
+    // Seeded on Growth and above, exactly as docs/pricing.md sells it.
     FieldClassification {
         field: "audit_logs",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::AuditLogs),
-        rationale: "No customer audit-log read surface exists in api-server; selling the flag would be pricing metadata only.",
+        rationale: "The customer audit read/export surface exists and gates on the entitlement; rows and the hash chain already shipped, so the gate is the whole feature.",
     },
 
     // ── API & Integrations ─────────────────────────────────────────
@@ -353,21 +354,27 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::SendTimeOptimization),
         rationale: "The recommendation endpoint is the feature and now requires the entitlement.",
     },
-    // NotYetImplemented — no experiment-creation handler exists; the flag
-    // was removed from the paid seeds.
+    // RuntimeEnforced — the campaign send pipeline assigns per-recipient
+    // arms (apexmail_lib::ab_testing::AB_SPLIT_SQL), the worker evaluates
+    // the guarded two-proportion z-test (min 30 trials/arm, z >= 1.96) and
+    // routes/campaign_experiments.rs gates the results/declaration surface
+    // on this key. Seeded on Growth and above.
     FieldClassification {
         field: "ab_testing",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::AbTesting),
-        rationale: "No experiment creation surface exists in api-server, so there is nothing to gate; not sold until implemented.",
+        rationale: "Experiment execution (deterministic arm assignment, holdout, guarded winner selection) ships in the campaign send pipeline and the experiment results API; the entitlement is the runtime gate.",
     },
-    // NotYetImplemented — no historical state replay implementation; the
-    // field is removed from the paid seeds rather than sold as metadata.
+    // RuntimeEnforced — the historical message-state replay API
+    // (`GET /v1/messages/:id/timeline?at=`) and the console timeline page
+    // both call the gate; reconstruction reads the append-only delivery
+    // sources and answers insufficient history honestly. Seeded on Growth
+    // and above.
     FieldClassification {
         field: "time_travel_debugging",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::TimeTravelDebugging),
-        rationale: "The audit found this advertised without any runtime implementation; it is no longer priced.",
+        rationale: "The historical message-state replay API and console page are real handlers; the entitlement is the runtime gate.",
     },
     // RuntimeEnforced — `analytics::export`, `export_pdf`,
     // `download_export` and the contacts CSV form require
@@ -396,13 +403,16 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Feature(FeatureKey::CustomTemplates),
         rationale: "Template write handlers are the customization surface and now require the entitlement.",
     },
-    // NotYetImplemented — no approval-workflow state exists on templates;
-    // removed from the paid seeds.
+    // RuntimeEnforced — the enterprise service's maker/checker surface
+    // (`/templates/submit|approve|reject|request-changes|stats`, enterprise
+    // `routes.rs`) is gated on `FeatureKey::TemplateApprovalWorkflow`, so a
+    // Business tenant passes on the entitlement rather than a tenant type.
+    // Seeded on Business and Enterprise Cloud.
     FieldClassification {
         field: "template_approval_workflow",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::TemplateApprovalWorkflow),
-        rationale: "No maker/checker publishing path exists; not sold until implemented.",
+        rationale: "The submit/approve/reject workflow is implemented and now requires the entitlement on every route in the family; the gate, not the tenant type, decides access.",
     },
     // ContractualOnly — branding is applied by the central renderer and
     // enterprise agreement, never a per-request API gate.
@@ -449,21 +459,25 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         gate: Gate::Capacity(CapacityKey::TeamMembers),
         rationale: "Seats are consumed by a real invitation handler; the check runs transactionally with the insert.",
     },
-    // NotYetImplemented — no subaccount resource exists in the runtime;
-    // removed from the paid seeds.
+    // RuntimeEnforced — the enterprise sub-account CRUD family
+    // (`/sub-accounts...`, enterprise `routes.rs`) requires
+    // `FeatureKey::Subaccounts` on every route. Seeded on Business and
+    // Enterprise Cloud.
     FieldClassification {
         field: "subaccounts",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::Subaccounts),
-        rationale: "No subaccount creation surface exists; not sold until implemented.",
+        rationale: "The sub-account CRUD surface is implemented and now gated on the entitlement; the gate, not the tenant type, decides access.",
     },
-    // NotYetImplemented — no subaccount creation surface to enforce the
-    // limit on; removed from the paid seeds.
+    // RuntimeEnforced — `SubAccountService::create` enforces the plan cap
+    // inside its per-parent advisory-lock transaction (the same lock the
+    // seeded global cap used), refusing the cap+1'th create with a message
+    // naming `max_subaccounts`. Business 10, Enterprise unlimited.
     FieldClassification {
         field: "max_subaccounts",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Capacity(CapacityKey::Subaccounts),
-        rationale: "Capacity for a resource that cannot yet be created; not sold until implemented.",
+        rationale: "Sub-account creation enforces the plan ceiling transactionally (Business 10, Enterprise -1) so the seeded number is the number that refuses.",
     },
 
     // ── Support ────────────────────────────────────────────────────

@@ -155,6 +155,7 @@ Routes mounted under /v1/auth are public at the router boundary for login, regis
 | /v1/admin/support/reply | routes::admin::support |
 | /v1/admin/support/analytics | routes::admin::support_analytics |
 | /v1/admin/system/health | routes::admin::system_health |
+| /v1/admin/alerts/rules | routes::admin::alert_rules |
 
 ## Rust UI Surface Inventory
 

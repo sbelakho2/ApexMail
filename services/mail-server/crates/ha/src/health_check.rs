@@ -11,12 +11,27 @@ use crate::config::Config;
 use crate::types::{ClusterHealth, ComponentHealth, HealthStatus};
 
 /// Checks a single component and returns its health.
+///
+/// `timeout_ms` is the deployment's `HEALTH_CHECK_TIMEOUT` (config
+/// `health.timeout_ms`). Before this was honored, a probe against a hung
+/// dependency blocked the health endpoint indefinitely — the endpoint's
+/// whole purpose is to answer promptly and report the dependency unhealthy.
+/// A zero value disables the wrapper (tests that drive probes directly).
 async fn check_component(
     name: &str,
+    timeout_ms: u64,
     f: impl std::future::Future<Output = Result<(HealthStatus, Option<String>), String>>,
 ) -> ComponentHealth {
     let start = Instant::now();
-    match f.await {
+    let outcome = if timeout_ms > 0 {
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), f).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("probe timed out after {timeout_ms}ms")),
+        }
+    } else {
+        f.await
+    };
+    match outcome {
         Ok((status, msg)) => ComponentHealth {
             name: name.into(),
             status,
@@ -172,7 +187,7 @@ impl HealthCheckService {
     }
 
     async fn check_persistence_schema(&self) -> ComponentHealth {
-        check_component("persistence", async {
+        check_component("persistence", self.config.health.timeout_ms, async {
             if self.persistence_ready().await {
                 Ok((HealthStatus::Healthy, None))
             } else {
@@ -199,7 +214,7 @@ impl HealthCheckService {
 
     async fn check_database(&self) -> ComponentHealth {
         let pool = self.pool.clone();
-        check_component("database", async move {
+        check_component("database", self.config.health.timeout_ms, async move {
             sqlx::query_scalar::<_, i32>("SELECT 1")
                 .fetch_one(&pool)
                 .await
@@ -211,7 +226,7 @@ impl HealthCheckService {
 
     async fn check_redis(&self) -> ComponentHealth {
         let client = self.redis_client.clone();
-        check_component("redis", async move {
+        check_component("redis", self.config.health.timeout_ms, async move {
             let client = client.ok_or_else(|| "Redis client not configured".to_string())?;
             let mut conn = client
                 .get_multiplexed_async_connection()
@@ -241,7 +256,7 @@ impl HealthCheckService {
         // replicas — the "no replication timestamp at all" outcome is only
         // healthy for a genuine standalone.
         let expects_replicas = !self.config.database.replica_hosts.is_empty();
-        check_component("replication", async move {
+        check_component("replication", self.config.health.timeout_ms, async move {
             // pg_last_xact_replay_timestamp() only means something on a
             // standby. On a primary it returns the last local commit time,
             // so "lag" grows with write traffic and the check flapped
@@ -269,7 +284,7 @@ impl HealthCheckService {
 
     async fn check_disk_space(&self) -> ComponentHealth {
         let pool = self.pool.clone();
-        check_component("disk", async move {
+        check_component("disk", self.config.health.timeout_ms, async move {
             let row: Option<(i64,)> = sqlx::query_as("SELECT pg_database_size(current_database())")
                 .fetch_optional(&pool)
                 .await
@@ -290,7 +305,7 @@ impl HealthCheckService {
     }
 
     async fn check_memory(&self) -> ComponentHealth {
-        check_component("memory", async {
+        check_component("memory", self.config.health.timeout_ms, async {
             let pid = sysinfo::Pid::from_u32(std::process::id());
             let mut sys = System::new();
             sys.refresh_processes(ProcessesToUpdate::All, false);
@@ -536,5 +551,30 @@ mod tests {
         assert_eq!(status, HealthStatus::Unhealthy);
         let message = msg.unwrap();
         assert!(message.contains("DB_REPLICA_HOSTS"), "{message}");
+    }
+
+    /// HEALTH_CHECK_TIMEOUT (config `health.timeout_ms`) bounds every probe:
+    /// a hung dependency must report Unhealthy promptly instead of blocking
+    /// the health endpoint forever.
+    #[tokio::test]
+    async fn hung_probe_is_cut_off_by_the_configured_timeout() {
+        let report = check_component("hung", 20, std::future::pending::<
+            Result<(HealthStatus, Option<String>), String>,
+        >())
+        .await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        let message = report.message.expect("timeout message");
+        assert!(message.contains("timed out after 20ms"), "{message}");
+    }
+
+    /// A zero timeout keeps the direct (unbounded) behavior test fixtures
+    /// rely on.
+    #[tokio::test]
+    async fn zero_timeout_keeps_direct_probe_behavior() {
+        let report = check_component("fast", 0, async {
+            Ok((HealthStatus::Healthy, None))
+        })
+        .await;
+        assert_eq!(report.status, HealthStatus::Healthy);
     }
 }

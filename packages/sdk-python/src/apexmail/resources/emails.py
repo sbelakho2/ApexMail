@@ -212,7 +212,7 @@ def build_send_payload(
     *,
     from_: Any,
     to: Any,
-    subject: str,
+    subject: Optional[str] = None,
     html: Optional[str] = None,
     text: Optional[str] = None,
     cc: Any = None,
@@ -224,23 +224,30 @@ def build_send_payload(
     scheduled_at: Optional[Union[str, datetime]] = None,
     metadata: Optional[dict[str, Any]] = None,
     priority: Optional[Union[int, str]] = None,
+    template_id: Optional[str] = None,
+    template_data: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Serialize a send body for the messages send API.
 
     Every option the SDK accepts is serialized — nothing is dropped
     silently (F48): from/to/cc/bcc/reply_to go out as address strings with
     display names preserved as ``"Name <addr>"`` forms, tags as a string
-    list, attachments/headers/priority/template fields under their
-    documented snake_case names. Priority follows the shared contract — an
-    integer 1-10 or a named level "high"/"normal"/"low" (API queue integers
-    7/5/3); anything else raises before a request is sent.
+    list, attachments/headers/priority under their documented snake_case
+    names, and template_id/template_data for template sends (a template
+    supplies the subject/html/text; the server renders it with
+    template_data). Priority follows the shared contract — an integer 1-10
+    or a named level "high"/"normal"/"low" (API queue integers 7/5/3);
+    anything else raises before a request is sent.
     """
     payload: dict[str, Any] = {
         "from": _serialize_address(from_) or (from_ if isinstance(from_, str) else str(from_)),
         "to": _serialize_recipient_list(to) or [],
-        "subject": subject,
     }
 
+    # A template-only send omits subject/html/text entirely — the stored
+    # template supplies them (docs/api/endpoints/messages.md).
+    if subject:
+        payload["subject"] = subject
     if html:
         payload["html"] = html
     if text:
@@ -270,8 +277,39 @@ def build_send_payload(
         payload["metadata"] = metadata
     if priority is not None:
         payload["priority"] = _validate_priority(priority)
+    if template_id:
+        payload["template_id"] = template_id
+    if template_data:
+        payload["template_data"] = template_data
 
     return payload
+
+
+def _validate_template_fields(
+    template_id: Any,
+    template_data: Any,
+    *,
+    label: str = "",
+) -> Optional[str]:
+    """Validate the template-send pair (docs/api/endpoints/messages.md).
+
+    ``template_id`` names a stored, tenant-scoped template that supplies the
+    subject/html/text (rendered with ``template_data``); a template-only
+    send is valid. Returns the normalized template id (or ``None``) and
+    raises ``ValidationError`` for shapes the server would refuse: variables
+    without a template, or a non-object template_data.
+    """
+    prefix = f"{label}: " if label else ""
+    normalized_id = template_id.strip() if isinstance(template_id, str) else template_id
+    if not normalized_id:
+        if template_data is not None:
+            raise ValidationError(f'{prefix}"template_data" requires "template_id"')
+        return None
+    if template_data is not None and not isinstance(template_data, dict):
+        raise ValidationError(
+            f'{prefix}"template_data" must be a JSON object of template variables'
+        )
+    return str(normalized_id)
 
 
 def _validate_batch_email(email: dict[str, Any], index: int) -> None:
@@ -295,16 +333,27 @@ def _validate_batch_email(email: dict[str, Any], index: int) -> None:
     if email.get("priority") is not None:
         _validate_priority(email.get("priority"))
 
+    # A template supplies subject/html/text, so a template-only item is
+    # valid; everything else still needs them.
+    template_id = _validate_template_fields(
+        email.get("template_id"),
+        email.get("template_data"),
+        label=f"Email at index {index}",
+    )
+
     subject = email.get("subject")
-    if not subject:
-        raise ValidationError(f'Email at index {index}: "subject" is required')
-    if not isinstance(subject, str):
+    if not subject and not template_id:
+        raise ValidationError(f'Email at index {index}: "subject" is required (or provide template_id)')
+    if subject and not isinstance(subject, str):
         raise ValidationError(f'Email at index {index}: "subject" must be a string')
 
     html = email.get("html")
     text = email.get("text")
-    if not html and not text:
-        raise ValidationError(f'Email at index {index}: Either "html" or "text" body is required')
+    if not html and not text and not template_id:
+        raise ValidationError(
+            f'Email at index {index}: Either "html" or "text" body is required '
+            "(or provide template_id)"
+        )
     if html and isinstance(html, str) and not html.strip():
         raise ValidationError(f'Email at index {index}: "html" body must not be empty or whitespace-only')
     if text and isinstance(text, str) and not text.strip():
@@ -315,11 +364,12 @@ def _normalize_batch_message(email: dict[str, Any]) -> dict[str, Any]:
     """Build the wire body for one batch message with the same serialization
     as send() — display names preserved as "Name <addr>", snake_case
     scheduled_at, tags as a string list, and every accepted option
-    (reply_to, attachments, headers, priority) forwarded (F48)."""
+    (reply_to, attachments, headers, priority, template fields) forwarded
+    (F48)."""
     payload = build_send_payload(
         from_=email.get("from") or email.get("from_"),
         to=email.get("to"),
-        subject=email["subject"],
+        subject=email.get("subject"),
         html=email.get("html"),
         text=email.get("text"),
         cc=email.get("cc"),
@@ -331,6 +381,8 @@ def _normalize_batch_message(email: dict[str, Any]) -> dict[str, Any]:
         scheduled_at=email.get("scheduled_at") or email.get("scheduledAt"),
         metadata=email.get("metadata"),
         priority=email.get("priority"),
+        template_id=email.get("template_id") or email.get("templateId"),
+        template_data=email.get("template_data") or email.get("templateData"),
     )
     return payload
 
@@ -372,7 +424,7 @@ class EmailsResource:
         *,
         from_: str,
         to: Union[str, list[str]],
-        subject: str,
+        subject: Optional[str] = None,
         html: Optional[str] = None,
         text: Optional[str] = None,
         cc: Optional[list[str]] = None,
@@ -384,6 +436,8 @@ class EmailsResource:
         scheduled_at: Optional[Union[str, datetime]] = None,
         metadata: Optional[dict[str, Any]] = None,
         priority: Optional[Union[int, str]] = None,
+        template_id: Optional[str] = None,
+        template_data: Optional[dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendEmailResponse:
         """
@@ -396,13 +450,18 @@ class EmailsResource:
         names. Priority follows the shared contract — an integer 1-10 or a
         named level "high"/"normal"/"low" (API queue integers 7/5/3).
 
+        Template sends are supported: ``template_id`` names a stored
+        tenant-scoped template that supplies the subject/html/text, rendered
+        with ``template_data``; a template-only send may omit ``subject``,
+        ``html`` and ``text`` (docs/api/endpoints/messages.md).
+
         Args:
             from_: Sender email address, ``{"email": ..., "name": ...}`` or
                 a "Name <addr>" display string
             to: Recipient email address(es)
-            subject: Email subject
-            html: HTML body content
-            text: Plain text body content
+            subject: Email subject (optional when template_id is given)
+            html: HTML body content (optional when template_id is given)
+            text: Plain text body content (optional when template_id is given)
             cc: CC recipients
             bcc: BCC recipients
             reply_to: Reply-To address (string or {"email": ..., "name": ...})
@@ -413,6 +472,8 @@ class EmailsResource:
             scheduled_at: ISO 8601 datetime or datetime object for scheduled sending
             metadata: Custom metadata
             priority: Queue priority — integer 1-10 or "high"/"normal"/"low"
+            template_id: Stored template UUID to render the message from
+            template_data: Variables for template rendering
             idempotency_key: Idempotency key for safe retries
 
         Returns:
@@ -446,9 +507,15 @@ class EmailsResource:
         if priority is not None:
             _validate_priority(priority)
 
+        # A template supplies the subject/body, so only non-template sends
+        # must carry them explicitly.
+        template_id = _validate_template_fields(template_id, template_data)
+        if not subject and not template_id:
+            raise ValidationError('"subject" is required (or provide template_id)')
+
         # FIX-500-288: Body presence check
-        if not html and not text:
-            raise ValidationError('Either "html" or "text" body is required')
+        if not html and not text and not template_id:
+            raise ValidationError('Either "html" or "text" body is required (or provide template_id)')
         if html and not html.strip():
             raise ValidationError('"html" body must not be empty or whitespace-only')
         if text and not text.strip():
@@ -469,6 +536,8 @@ class EmailsResource:
             scheduled_at=scheduled_at,
             metadata=metadata,
             priority=priority,
+            template_id=template_id,
+            template_data=template_data,
         )
 
         # FIX-500-CRITICAL + SDK-B: thread idempotency_key to the HTTP client
@@ -606,7 +675,7 @@ class AsyncEmailsResource:
         *,
         from_: str,
         to: Union[str, list[str]],
-        subject: str,
+        subject: Optional[str] = None,
         html: Optional[str] = None,
         text: Optional[str] = None,
         cc: Optional[list[str]] = None,
@@ -618,6 +687,8 @@ class AsyncEmailsResource:
         scheduled_at: Optional[Union[str, datetime]] = None,
         metadata: Optional[dict[str, Any]] = None,
         priority: Optional[Union[int, str]] = None,
+        template_id: Optional[str] = None,
+        template_data: Optional[dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendEmailResponse:
         """Send an email asynchronously.
@@ -626,7 +697,9 @@ class AsyncEmailsResource:
         serialized — reply_to/attachments/headers/priority reach the wire
         and display names survive as "Name <addr>" forms (F48). Validation
         targets the extracted bare addr-spec from dict/string display
-        forms.
+        forms. A template-only send (template_id + template_data, no
+        subject/html/text) is valid: the stored template supplies the
+        content.
         """
         from_bare = _bare_address(from_)
         if not from_bare:
@@ -653,8 +726,11 @@ class AsyncEmailsResource:
         if priority is not None:
             _validate_priority(priority)
 
-        if not html and not text:
-            raise ValidationError('Either "html" or "text" body is required')
+        template_id = _validate_template_fields(template_id, template_data)
+        if not subject and not template_id:
+            raise ValidationError('"subject" is required (or provide template_id)')
+        if not html and not text and not template_id:
+            raise ValidationError('Either "html" or "text" body is required (or provide template_id)')
         if html and not html.strip():
             raise ValidationError('"html" body must not be empty or whitespace-only')
         if text and not text.strip():
@@ -675,6 +751,8 @@ class AsyncEmailsResource:
             scheduled_at=scheduled_at,
             metadata=metadata,
             priority=priority,
+            template_id=template_id,
+            template_data=template_data,
         )
 
         data = await self._client._request(

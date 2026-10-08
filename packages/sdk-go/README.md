@@ -70,12 +70,20 @@ res, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
 // NOTE: EmailAddress display names are serialized as RFC 5322
 // "Name <addr>" forms, and every accepted option (ReplyTo, Priority,
 // Attachments, Headers, Metadata, ScheduledAt) is transmitted under its
-// documented snake_case field name. Template sends are NOT supported by the
-// send API (the server answers 422 for template_id/template_data), so the
-// SDK refuses them client-side — render the template with
-// client.Templates.Render first and send HTML/Text.
+// documented snake_case field name.
 
-// Batch send (up to 1000 emails)
+// Template send: TemplateID names a stored template that supplies
+// subject/html/text, rendered with TemplateData. A template-only request
+// (no Subject/HTML/Text) is valid; an explicit Subject/HTML/Text overrides
+// the rendered field.
+res, err = client.Emails.Send(ctx, &apexmail.SendEmailRequest{
+	From:         apexmail.EmailAddress{Email: "hello@example.com"},
+	To:           []apexmail.EmailAddress{{Email: "user@example.com"}},
+	TemplateID:   "tpl_welcome000000000001",
+	TemplateData: map[string]interface{}{"firstName": "Ada"},
+})
+
+// Batch send (up to the server's batch limit — 100 by default)
 res, err := client.Emails.Batch(ctx, &apexmail.BatchSendRequest{
 	Messages: []*apexmail.SendEmailRequest{
 		{From: apexmail.EmailAddress{Email: "hello@example.com"}, To: []apexmail.EmailAddress{{Email: "user1@example.com"}}, Subject: "Hi", HTML: "<p>Hello</p>"},

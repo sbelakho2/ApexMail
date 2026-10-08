@@ -3332,6 +3332,19 @@ impl EmailProcessor {
             .filter(|p| !p.is_empty() && p.len() <= 128)
             .map(str::to_string);
 
+        // Gmail Annotations (Promotions tab, `docs/security/advanced-analytics.md`):
+        // when the queue row's SERVER-WRITTEN metadata carries a
+        // `gmail_annotations` object (the documented campaign payload — see
+        // `mta::gmail_annotations::GmailAnnotationConfig`), generate the
+        // schema.org JSON-LD and inject it into the message HTML `<head>`.
+        // This is the live injection point the MTA-side generator exists
+        // for; before this wiring existed the whole module was unreachable
+        // and the documented "injects it into the email <head>" behavior had
+        // no effect. Fail-open per message: a malformed or invalid
+        // configuration is logged and the send proceeds WITHOUT annotations
+        // (annotations are a presentation surface, never a delivery gate).
+        let html = maybe_annotate_html(html, job);
+
         Ok(PreparedEmail {
             // The stable logical send identity: the same value the acceptance
             // reservation (`claim_acceptance`) and the outbound MTA's
@@ -4277,6 +4290,110 @@ impl EmailProcessor {
                     "Error rate circuit breaker activated"
                 );
             }
+        }
+    }
+}
+
+/// Gmail Annotations injection (Promotions tab).
+///
+/// When `job.metadata.gmail_annotations` is present, generate the schema.org
+/// JSON-LD with the MTA's generator and insert the (script-safe escaped)
+/// `<script type="application/ld+json">` block into the message HTML:
+///
+/// * into `<head>` when the document has one (case-insensitive), so the
+///   markup sits where Gmail's parser looks for it;
+/// * otherwise prepended to the HTML, which every HTML parser treats as
+///   head content before the first element.
+///
+/// Fail-open per message: malformed JSON, an invalid annotation config, or a
+/// non-string HTML payload is logged and returns the input unchanged.
+/// Annotations are a presentation surface — they must never block or alter
+/// delivery, and they are never applied to the plain-text part.
+fn maybe_annotate_html(html: Option<String>, job: &EmailJob) -> Option<String> {
+    let Some(annotations) = job
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("gmail_annotations"))
+    else {
+        return html;
+    };
+    // `null` is the "explicitly no annotations" shape.
+    if annotations.is_null() {
+        return html;
+    }
+
+    let config =
+        match serde_json::from_value::<mta::gmail_annotations::GmailAnnotationConfig>(
+            annotations.clone(),
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(
+                    job_id = %job.id,
+                    error = %error,
+                    "gmail_annotations metadata is not a valid annotation config — sending without annotations"
+                );
+                return html;
+            }
+        };
+
+    let result =
+        mta::gmail_annotations::GmailAnnotationsService::new().generate_annotations(&config);
+    if !result.validation.valid {
+        warn!(
+            job_id = %job.id,
+            errors = ?result.validation.errors,
+            "gmail_annotations config failed validation — sending without annotations"
+        );
+        return html;
+    }
+    if !result.validation.warnings.is_empty() {
+        warn!(
+            job_id = %job.id,
+            warnings = ?result.validation.warnings,
+            "gmail_annotations config has warnings"
+        );
+    }
+
+    let Some(body) = html else {
+        warn!(
+            job_id = %job.id,
+            "gmail_annotations configured but the message has no HTML part — annotations skipped"
+        );
+        return html;
+    };
+    Some(inject_json_ld_into_head(&body, &result.html))
+}
+
+/// Insert the annotation `<script>` block into the document's `<head>`.
+/// Case-insensitive head detection; no head → prepend (still valid HTML
+/// document parsing: the parser moves leading script elements into head).
+fn inject_json_ld_into_head(html: &str, script_block: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    match lower.find("<head>") {
+        Some(idx) => {
+            let insert_at = idx + "<head>".len();
+            let mut out = String::with_capacity(html.len() + script_block.len() + 1);
+            out.push_str(&html[..insert_at]);
+            out.push('\n');
+            out.push_str(script_block);
+            out.push_str(&html[insert_at..]);
+            out
+        }
+        None => {
+            // `<head ...>` with attributes, or no head at all.
+            if let Some(idx) = lower.find("<head") {
+                if let Some(close) = html[idx..].find('>') {
+                    let insert_at = idx + close + 1;
+                    let mut out = String::with_capacity(html.len() + script_block.len() + 1);
+                    out.push_str(&html[..insert_at]);
+                    out.push('\n');
+                    out.push_str(script_block);
+                    out.push_str(&html[insert_at..]);
+                    return out;
+                }
+            }
+            format!("{script_block}\n{html}")
         }
     }
 }
@@ -17165,5 +17282,116 @@ mod residual_arms_db_tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Gmail Annotations injection (`metadata.gmail_annotations`)
+    // ---------------------------------------------------------------------------
+
+    fn annotation_job(metadata: serde_json::Value) -> EmailJob {
+        EmailJob {
+            id: "job-annotations".into(),
+            message_id: "msg-annotations".into(),
+            tenant_id: "tenant-1".into(),
+            domain_id: "domain-1".into(),
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            subject: "sale".into(),
+            html: Some("<html><head><title>sale</title></head><body>hi</body></html>".into()),
+            text: Some("hi".into()),
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: Some(metadata),
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// The documented payload (camelCase, organization object) must produce
+    /// the JSON-LD block inside `<head>` — the effect the doc page promises
+    /// ("generates the required JSON-LD markup and injects it into the email
+    /// <head>"). Before this wiring the generator was unreachable.
+    #[test]
+    fn gmail_annotations_metadata_injects_json_ld_into_head() {
+        let job = annotation_job(serde_json::json!({
+            "gmail_annotations": {
+                "organization": { "name": "Acme Store", "url": "https://acme.com" },
+                "featuredImageUrl": "https://acme.com/banner.png",
+                "deal": {
+                    "discountDescription": "25% off everything",
+                    "discountCode": "SAVE25"
+                }
+            }
+        }));
+
+        let out = maybe_annotate_html(job.html.clone(), &job).expect("html survives");
+
+        assert!(
+            out.contains("application/ld+json"),
+            "annotation script block must be present: {out}"
+        );
+        assert!(out.contains("SAVE25"), "deal code must be in the JSON-LD");
+        assert!(out.contains("\"@type\": \"PromotionCard\"") || out.contains("\"@type\":\"PromotionCard\""));
+        let head_end = out.find("</head>").expect("head preserved");
+        let script_at = out.find("application/ld+json").expect("script present");
+        assert!(
+            script_at < head_end,
+            "the script block must land inside <head>, not after it"
+        );
+        // The body content is untouched.
+        assert!(out.contains("<body>hi</body>"));
+    }
+
+    /// A malformed or invalid annotation config must never block or mutate
+    /// the send (annotations are presentation, not a delivery gate).
+    #[test]
+    fn gmail_annotations_invalid_config_is_fail_open() {
+        let job = annotation_job(serde_json::json!({
+            "gmail_annotations": { "deal": { "discountDescription": "" } }
+        }));
+        let out = maybe_annotate_html(job.html.clone(), &job);
+        assert_eq!(out, job.html, "invalid config leaves the HTML untouched");
+
+        let garbage = annotation_job(serde_json::json!({
+            "gmail_annotations": "not-an-object"
+        }));
+        assert_eq!(
+            maybe_annotate_html(garbage.html.clone(), &garbage),
+            garbage.html,
+            "non-object metadata leaves the HTML untouched"
+        );
+    }
+
+    /// Without the metadata key nothing is injected (no behavior change for
+    /// every other producer), and a message with no HTML part is skipped.
+    #[test]
+    fn gmail_annotations_absent_or_htmlless_is_untouched() {
+        let plain = annotation_job(serde_json::json!({ "track_opens": true }));
+        assert_eq!(maybe_annotate_html(plain.html.clone(), &plain), plain.html);
+
+        let mut html_less = annotation_job(serde_json::json!({
+            "gmail_annotations": { "goToAction": { "name": "Buy", "url": "https://x.test" } }
+        }));
+        html_less.html = None;
+        assert_eq!(maybe_annotate_html(None, &html_less), None);
+    }
+
+    /// HTML without a `<head>` still gets the block (prepended), and a
+    /// `<head attr>` element is honored.
+    #[test]
+    fn gmail_annotations_head_detection_variants() {
+        let script = "<script type=\"application/ld+json\">{\"a\":1}</script>";
+        let with_attrs = inject_json_ld_into_head("<html><head data-x=\"1\"><body>b</body></head></html>", script);
+        assert!(with_attrs.contains("application/ld+json"));
+        assert!(with_attrs.find("application/ld+json").unwrap() < with_attrs.find("<body>").unwrap());
+
+        let headless = inject_json_ld_into_head("<p>fragment</p>", script);
+        assert!(headless.starts_with(script));
+        assert!(headless.ends_with("<p>fragment</p>"));
     }
 }

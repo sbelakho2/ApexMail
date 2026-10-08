@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::backup::BackupService;
@@ -288,6 +289,26 @@ async fn health_check() -> impl IntoResponse {
 async fn health_detailed(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // Fail fast when a guarded dependency's circuit is OPEN. Consulting the
+    // breaker here is also what makes the circuit decision API live: the
+    // background health cron reports each probe's outcome
+    // (bin/server.rs) and this handler refuses to re-probe a dependency the
+    // breaker has declared unhealthy, instead of queuing behind connection
+    // timeouts (the cascading-failure behaviour the breaker exists to stop).
+    for circuit in ["database", "redis"] {
+        match state.circuit_breaker.allow_request(circuit).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(circuit, "health probe refused: circuit is open");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Err(error) => {
+                // An unknown circuit name is a wiring error, not an outage:
+                // surface it instead of silently skipping the gate.
+                warn!(circuit, error = %error, "circuit lookup failed");
+            }
+        }
+    }
     let health = state.health.check_all().await;
     Ok(Json(health))
 }

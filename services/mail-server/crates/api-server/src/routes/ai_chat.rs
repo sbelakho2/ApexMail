@@ -176,7 +176,13 @@ pub(crate) async fn ask_assistant(
             })?;
             Ok(AssistantOutcome {
                 answer: out["answer"].as_str().unwrap_or_default().to_string(),
-                citations: out.get("citations").cloned().unwrap_or_default(),
+                // Public projection ONLY: the ai-service payload also carries
+                // internal retrieval metadata (docs-relative `path`,
+                // `snippet`, `score`) which must never reach a caller
+                // surface. Projecting here (the single choke point) covers
+                // the JSON route, the persisted session turns and the
+                // console PRG handler alike.
+                citations: public_citations(out.get("citations").unwrap_or(&serde_json::Value::Null)),
                 escalated: out["escalated"].as_bool().unwrap_or(false),
                 disclosure: out["disclosure"]
                     .as_str()
@@ -195,6 +201,39 @@ pub(crate) async fn ask_assistant(
             ))
         }
     }
+}
+
+/// The PUBLIC citation projection: the only citation fields a caller may see
+/// are `title` and `url` (the console renders exactly those —
+/// `assistant_turn_html`). Everything else an upstream payload carries is
+/// dropped, so internal retrieval metadata (docs-relative `path`, `snippet`,
+/// retrieval `score`, or any future addition) can never leak through the
+/// assistant surfaces. Items with neither a title nor a url carry nothing
+/// public and are dropped.
+pub(crate) fn public_citations(raw: &serde_json::Value) -> serde_json::Value {
+    let Some(items) = raw.as_array() else {
+        return serde_json::Value::Array(Vec::new());
+    };
+    let projected: Vec<serde_json::Value> = items
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let title = object.get("title").and_then(|value| value.as_str());
+            let url = object.get("url").and_then(|value| value.as_str());
+            if title.is_none() && url.is_none() {
+                return None;
+            }
+            let mut out = serde_json::Map::new();
+            if let Some(title) = title {
+                out.insert("title".into(), serde_json::Value::String(title.to_string()));
+            }
+            if let Some(url) = url {
+                out.insert("url".into(), serde_json::Value::String(url.to_string()));
+            }
+            Some(serde_json::Value::Object(out))
+        })
+        .collect();
+    serde_json::Value::Array(projected)
 }
 
 pub(crate) async fn chat(
@@ -225,12 +264,31 @@ pub(crate) async fn chat(
     }))
 }
 
+/// The caller's own assistant history (newest first).
+///
+/// P2-SECURITY (dogfood 2026-10-06, live-confirmed): this route used to
+/// forward only the tenant header, so a tenant-level `ai:read` key read
+/// every teammate's conversation. The console session surface is per-user
+/// and `docs/user-guide/assistant.md` documents conversations as "visible
+/// only to the user they belong to" — so the deliberate contract here is the
+/// CALLER's own history: a user-bound credential (session, impersonation, a
+/// user-owned API key) gets its own turns, and a credential with NO user
+/// identity (a tenant-level key) gets a named 403 — there is no caller whose
+/// history could be returned, and the tenant-wide view is exactly the leak.
 pub(crate) async fn chat_history(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
     require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+
+    let Some(user_key) = auth.user_id.clone() else {
+        return Err(ApiError::Forbidden(
+            "chat history is per user and this credential has no user identity; \
+             use the console sessions API (POST/GET /v1/ai/chat/sessions)"
+                .into(),
+        ));
+    };
 
     let ai_url = state.config.ai_service_base_url.trim().to_string();
     if ai_url.is_empty() {
@@ -240,15 +298,17 @@ pub(crate) async fn chat_history(
         .http_client
         .post(format!("{ai_url}/admin/chat/history"))
         // P1-SECURITY: ai-service now scopes this read to the REQUIRED
-        // forwarded tenant header and rejects any body-carried tenant_id, so
-        // the target tenant travels only in the header here.
+        // forwarded tenant/user headers and rejects any body-carried
+        // tenant_id, so the read scope travels only in the headers here.
         .json(&serde_json::json!({ "limit": 50 }))
         .timeout(std::time::Duration::from_secs(10));
     if let Some(token) = state.config.internal_service_token.as_deref() {
         request = request.header("x-api-key", token);
     }
-    // The authenticated tenant is the only read scope for the history route.
+    // Tenant + the caller's own user identity: the only read scope.
     request = request.header("x-apexmail-tenant-id", &auth.tenant_id);
+    request = request.header("x-apexmail-user-id", &user_key);
+
     let response = request.send().await.map_err(|e| {
         tracing::warn!(error = %e, "ai chat history: service unreachable");
         ApiError::Internal("assistant unavailable".into())
@@ -505,7 +565,10 @@ pub(crate) async fn read_session_turns(
                     "role": role,
                     "content": content,
                     "escalated": escalated,
-                    "citations": citations,
+                    // Defense in depth for turns persisted before the write
+                    // projection existed: internal retrieval metadata must
+                    // never be re-served from the session window.
+                    "citations": public_citations(&citations),
                     "disclosure": disclosure,
                     "docs_version": docs_version,
                     "created_at": created_at.to_rfc3339(),
@@ -852,7 +915,16 @@ mod adversarial_tests {
                     state.lock().unwrap().push(body);
                     axum::Json(serde_json::json!({
                         "answer": "Ship the adversarial test.",
-                        "citations": [{"title": "ApexMail docs", "url": "https://apexmail.ee/docs"}],
+                        // The upstream payload ALSO carries internal retrieval
+                        // metadata (path/snippet/score); the route must project
+                        // it away before any caller sees it.
+                        "citations": [{
+                            "path": "marketing/pricing.md",
+                            "title": "ApexMail docs",
+                            "url": "https://apexmail.ee/docs",
+                            "snippet": "internal passage text",
+                            "score": 1.027,
+                        }],
                         "escalated": false,
                         "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
                         "docs_version": "v42",
@@ -885,6 +957,59 @@ mod adversarial_tests {
         let mut config = crate::app::test_support::test_config();
         config.ai_service_base_url = ai_url.into();
         config
+    }
+
+    /// Every citation a caller receives may carry ONLY the public fields.
+    pub(crate) fn assert_public_citations(citations: &serde_json::Value) {
+        let items = citations.as_array().expect("citations array");
+        assert!(!items.is_empty(), "expected at least one citation");
+        for item in items {
+            let object = item.as_object().expect("citation object");
+            for field in object.keys() {
+                assert!(
+                    field == "title" || field == "url",
+                    "internal citation field leaked: {field} in {item}"
+                );
+            }
+        }
+    }
+
+    /// The projection itself: title/url survive; internal retrieval metadata
+    /// (path, snippet, score) and unknown future fields are dropped; items
+    /// with nothing public are removed entirely.
+    #[test]
+    fn citations_projection_strips_internal_retrieval_metadata() {
+        let raw = serde_json::json!([
+            {
+                "path": "marketing/pricing.md",
+                "title": "Pricing",
+                "url": "https://apexmail.ee/pricing/",
+                "snippet": "| Free | €0 |",
+                "score": 1.027,
+                "internal_note": "future field",
+            },
+            {"path": "docs/billing.md", "snippet": "url-less internal item", "score": 0.9},
+            {"title": "Billing"},
+        ]);
+        let public = super::public_citations(&raw);
+        assert_eq!(
+            public,
+            serde_json::json!([
+                {"title": "Pricing", "url": "https://apexmail.ee/pricing/"},
+                {"title": "Billing"},
+            ]),
+            "only title/url may survive the projection"
+        );
+        // A non-array or absent payload projects to an empty list, never to
+        // the raw upstream value.
+        assert_eq!(
+            super::public_citations(&serde_json::Value::Null),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            super::public_citations(&serde_json::json!({"path": "x"})),
+            serde_json::json!([])
+        );
     }
 
     #[tokio::test]
@@ -995,6 +1120,13 @@ mod adversarial_tests {
         assert_eq!(body["docs_version"], "v42");
         assert_eq!(body["escalated"], false);
         assert_eq!(body["citations"][0]["title"], "ApexMail docs");
+        // The upstream mock also sent path/snippet/score: the caller-facing
+        // payload must carry title/url only.
+        assert_public_citations(&body["citations"]);
+        assert_eq!(body["citations"][0]["url"], "https://apexmail.ee/docs");
+        assert!(body["citations"][0].get("path").is_none(), "{body}");
+        assert!(body["citations"][0].get("score").is_none(), "{body}");
+        assert!(body["citations"][0].get("snippet").is_none(), "{body}");
 
         // The forwarded payload is tenant-scoped and filters history.
         let forwarded = seen.lock().unwrap()[0].clone();
@@ -1053,33 +1185,68 @@ mod adversarial_tests {
             return;
         };
         let (ai_url, _seen, history_headers) = start_mock_ai().await;
-        let (env, tenant) =
-            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config(&ai_url)).await;
-        let (status, body) = env.get("/v1/ai/chat/history").await;
+
+        // P2-SECURITY (dogfood 2026-10-06): a USER-BOUND credential gets its
+        // own history and the proxy forwards the user identity alongside the
+        // tenant; a tenant-level key has no user whose history could be
+        // returned and is refused instead of reading teammates' turns.
+        let Some((session_env, tenant, user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (status, body) = session_env.get("/v1/ai/chat/history").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["conversations"].is_array());
-
-        // P1-SECURITY: the target tenant travels in the REQUIRED
-        // x-apexmail-tenant-id header (ai-service no longer accepts a body
-        // tenant), scoped to the AUTHENTICATED tenant.
         {
             let headers = history_headers.lock().unwrap();
             assert_eq!(headers.len(), 1, "exactly one history call");
+            let rendered = headers[0].to_lowercase();
             assert!(
-                headers[0].to_lowercase().contains("x-apexmail-tenant-id:")
-                    && headers[0].contains(tenant.as_str()),
+                rendered.contains("x-apexmail-tenant-id:") && headers[0].contains(tenant.as_str()),
                 "history proxy must forward the authenticated tenant header: {}",
+                headers[0]
+            );
+            assert!(
+                rendered.contains("x-apexmail-user-id:")
+                    && headers[0].contains(user.as_str()),
+                "history proxy must forward the caller's own user identity: {}",
                 headers[0]
             );
         }
 
-        // Unconfigured / unreachable service arms.
-        let (unconfigured, _t) =
-            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config("")).await;
+        // A tenant-level API key: 403 with the named reason, and NO call to
+        // the service (the tenant-wide read is exactly the leak).
+        let (key_env, _tenant) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config(&ai_url)).await;
+        let (status, body) = key_env.get("/v1/ai/chat/history").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no user identity"),
+            "{body}"
+        );
+        assert_eq!(
+            history_headers.lock().unwrap().len(),
+            1,
+            "a refused caller never reaches the history service"
+        );
+
+        // Unconfigured / unreachable service arms (session-bound caller).
+        let Some((unconfigured, _t, _u)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config("")).await
+        else {
+            return;
+        };
         let (status, _body) = unconfigured.get("/v1/ai/chat/history").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        let (dead, _t2) =
-            AdvEnv::tenant_with_config(pool, &["ai:read"], ai_config("http://127.0.0.1:1")).await;
+        let Some((dead, _t2, _u2)) =
+            AdvEnv::session_with_config(pool, "owner", ai_config("http://127.0.0.1:1")).await
+        else {
+            return;
+        };
         let (status, _body) = dead.get("/v1/ai/chat/history").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -1109,7 +1276,14 @@ mod session_tests {
                     state.lock().unwrap().push(body);
                     axum::Json(serde_json::json!({
                         "answer": format!("answer #{history_len}"),
-                        "citations": [{"title": "ApexMail docs"}],
+                        // Upstream retrieval metadata that must never reach a
+                        // caller surface (write or read).
+                        "citations": [{
+                            "path": "marketing/pricing.md",
+                            "title": "ApexMail docs",
+                            "snippet": "internal passage",
+                            "score": 0.91,
+                        }],
                         "escalated": false,
                         "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
                         "docs_version": "v42",
@@ -1216,6 +1390,81 @@ mod session_tests {
         .await
         .expect("owner check");
         assert_eq!(owners, 1, "the session belongs to its creator");
+    }
+
+    /// Secret-compliance regression (dogfood 2026-10-06, scope extension):
+    /// the upstream chat payload carries internal retrieval metadata
+    /// (`path`, `snippet`, `score`). The api-server must project citations to
+    /// the public `{title, url}` shape on the WRITE path (so stored turns are
+    /// clean) and on the READ path (so pre-existing rows cannot re-serve
+    /// internals). This test drives the whole flow and inspects the HTTP
+    /// response, the persisted row and the session window.
+    #[tokio::test]
+    async fn session_turn_citations_never_expose_internal_retrieval_metadata() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_citation_projection").await
+        else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let Some((env, _tenant, _user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (_, created) = env.post("/v1/ai/chat/sessions", "{}").await;
+        let id = session_id(&created);
+        let (status, out) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                r#"{"message":"How do I verify a domain?"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+
+        // 1. The response projects the assistant turn's citations.
+        super::adversarial_tests::assert_public_citations(&out["assistant_turn"]["citations"]);
+        assert_eq!(out["assistant_turn"]["citations"][0]["title"], "ApexMail docs");
+
+        // 2. The PERSISTED row is clean: the write choke point projected
+        // before the insert, so the DB never holds the internal fields.
+        let stored: serde_json::Value = sqlx::query_scalar(
+            "SELECT citations FROM ai_chat_session_turns \
+             WHERE session_id = $1 AND role = 'assistant' LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("stored citations");
+        super::adversarial_tests::assert_public_citations(&stored);
+
+        // 3. Even a legacy row that predates the projection is re-projected
+        // on read (defense in depth): plant one and read the window.
+        let legacy_id = apexmail_lib::id::generate_id("turn", 21);
+        sqlx::query(
+            "INSERT INTO ai_chat_session_turns \
+                 (id, session_id, tenant_id, role, content, escalated, citations, docs_version, disclosure) \
+             VALUES ($1, $2, $3, 'assistant', 'legacy answer', false, \
+                     '[{\"path\": \"marketing/pricing.md\", \"title\": \"Legacy\", \"score\": 1.0}]'::jsonb, 'v0', 'x')",
+        )
+        .bind(&legacy_id)
+        .bind(&id)
+        .bind(&_tenant)
+        .execute(&pool)
+        .await
+        .expect("plant legacy row");
+        let (status, window) = env.get(&format!("/v1/ai/chat/sessions/{id}/turns?limit=50")).await;
+        assert_eq!(status, StatusCode::OK, "{window}");
+        let legacy = window["turns"]
+            .as_array()
+            .expect("turns")
+            .iter()
+            .find(|turn| turn["content"] == "legacy answer")
+            .expect("legacy turn in the window");
+        assert_eq!(
+            legacy["citations"],
+            serde_json::json!([{"title": "Legacy"}]),
+            "a stored legacy citation must be re-projected on read"
+        );
     }
 
     /// Regression (dogfood P1, live concurrency probe): the session window

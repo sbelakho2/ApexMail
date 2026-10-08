@@ -16,7 +16,14 @@ use billing_service::send_admission::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
+use template_renderer::config::{
+    CacheConfig as RendererCacheConfig, DatabaseConfig as RendererDatabaseConfig, RendererConfig,
+    SandboxConfig as RendererSandboxConfig, ServerConfig as RendererServerConfig,
+};
+use template_renderer::renderer::TemplateRenderer;
+use template_renderer::types::{RenderOptions, TemplateError};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -155,7 +162,7 @@ const MAX_DISPLAY_NAME_CHARS: usize = 320;
 
 // ─── Types ─────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     /// Sender mailbox — a bare addr-spec (`sender@example.com`) or an
@@ -169,6 +176,9 @@ pub struct SendMessageRequest {
     pub cc: Option<Vec<String>>,
     #[serde(default)]
     pub bcc: Option<Vec<String>>,
+    /// Subject line. Optional on the wire because a `template_id` template
+    /// may supply it (docs/api/endpoints/messages.md); empty when absent.
+    #[serde(default)]
     pub subject: String,
     #[serde(default)]
     pub html: Option<String>,
@@ -207,10 +217,11 @@ pub struct SendMessageRequest {
     /// global suppression. Default: `marketing`.
     #[serde(default)]
     pub category: Option<String>,
-    // ── F48: advertised by the SDK but NOT implemented anywhere in the
-    // persistence/queue/transport stack. Accepted here ONLY so they can be
-    // rejected with an explicit 422 naming the field — never silently
-    // discarded.
+    // ── Template sends (docs/api/endpoints/messages.md): `template_id`
+    // names a tenant-scoped stored template that supplies subject/html/text,
+    // rendered with the `template_data` variables through the shared
+    // template-renderer pipeline. An explicit request subject/html/text
+    // overrides the corresponding rendered field.
     #[serde(default)]
     pub template_id: Option<String>,
     #[serde(default)]
@@ -824,26 +835,33 @@ fn type_name_of(value: &serde_json::Value) -> &'static str {
 }
 
 /// F48: validate the F48 send options (`reply_to`, `headers`,
-/// `attachments`, `priority`) and explicitly reject the advertised-but-
-/// unsupported `template_id` / `template_data` fields. Returns per-field
-/// error strings for the 422 body.
+/// `attachments`, `priority`) and the template-send pair
+/// (`template_id` + `template_data`). Returns per-field error strings for
+/// the 422 body.
 fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
     let mut errors = Vec::new();
 
-    if let Some(template_id) = body.template_id.as_deref() {
-        if !template_id.trim().is_empty() {
-            errors.push(
-                "field 'template_id' is not supported by this endpoint: template-based sending is not implemented; render the template and send the result explicitly"
-                    .to_string(),
-            );
-        }
-    }
+    // Template sends are a supported contract: `template_id` names the
+    // stored template, `template_data` its JSON-object variables. A blank
+    // id is treated as absent (like a blank reply_to); variables without a
+    // template are a silent no-op and rejected naming both fields.
+    let template_supplied = body
+        .template_id
+        .as_deref()
+        .is_some_and(|template_id| !template_id.trim().is_empty());
     if let Some(template_data) = body.template_data.as_ref() {
         if !template_data.is_null() {
-            errors.push(
-                "field 'template_data' is not supported by this endpoint: template-based sending is not implemented; render the template and send the result explicitly"
-                    .to_string(),
-            );
+            if !template_data.is_object() {
+                errors.push(
+                    "field 'template_data' must be a JSON object of template variables".to_string(),
+                );
+            }
+            if !template_supplied {
+                errors.push(
+                    "field 'template_data' requires 'template_id' (variables without a template render nothing)"
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -977,6 +995,241 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
         }
     }
 
+    errors
+}
+
+/// Extract the variable names from the renderer's missing-merge-field
+/// warnings (`"Missing merge field 'name' replaced with fallback"`),
+/// deduplicated across the subject/body/text phases: the send path turns
+/// each one into a named `template_data` refusal instead of shipping the
+/// fallback (docs/api/endpoints/messages.md).
+fn missing_template_variables(warnings: &[String]) -> Vec<String> {
+    let mut variables: Vec<String> = Vec::new();
+    for warning in warnings {
+        let Some(start) = warning.find('\'') else {
+            continue;
+        };
+        let Some(end) = warning[start + 1..].find('\'') else {
+            continue;
+        };
+        let variable = &warning[start + 1..start + 1 + end];
+        if !variable.is_empty() && !variables.iter().any(|existing| existing == variable) {
+            variables.push(variable.to_string());
+        }
+    }
+    variables
+}
+
+/// 422 response for template-send contract violations (missing variables,
+/// an unusable template, a rendered value violating a send invariant). Same
+/// JSON error shape as [`unprocessable_send_options`] with a
+/// template-specific message, answered before anything is queued.
+fn unprocessable_template_send(details: Vec<String>) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrorBody {
+            data: None,
+            error: Some(ErrorDetail {
+                code: "VALIDATION_ERROR".to_string(),
+                message: "the request could not be rendered from its template".to_string(),
+                details: Some(details),
+            }),
+            meta: None,
+        }),
+    )
+        .into_response()
+}
+
+/// Renderer configuration for the send path. The sandbox/cache bounds mirror
+/// the template-renderer service defaults (`template-renderer::config`);
+/// `db.url` is unused — the renderer is handed the api-server's own pool.
+fn send_template_renderer_config() -> RendererConfig {
+    RendererConfig {
+        db: RendererDatabaseConfig {
+            url: "api-server-pool://in-process".to_string(),
+            max_connections: 1,
+        },
+        server: RendererServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 9080,
+            request_timeout_secs: 30,
+        },
+        sandbox: RendererSandboxConfig {
+            timeout_ms: 5_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_source_length: 512 * 1024,
+            max_output_length: 2 * 1024 * 1024,
+            trusted_html_props: Vec::new(),
+        },
+        cache: RendererCacheConfig {
+            max_entries: 256,
+            ttl_secs: 300,
+        },
+    }
+}
+
+/// Fields a stored template contributes to a send, after rendering
+/// `template_data` through the canonical renderer.
+struct RenderedTemplateFields {
+    subject: String,
+    html: String,
+    text: Option<String>,
+}
+
+/// Why a template send could not be resolved. Kept separate from
+/// [`ApiError`] because the single-send path answers 404 for a missing
+/// template while template/validation refusals are 422, and the batch path
+/// reports every refusal as a per-item error string.
+enum TemplateSendRefusal {
+    /// Unknown or another tenant's template id → 404 NOT_FOUND.
+    NotFound(String),
+    /// A named contract refusal (missing variables, unusable template) → 422.
+    Refused(Vec<String>),
+    /// Rendering infrastructure failure → 500.
+    Internal(String),
+}
+
+/// Resolve a send's stored template: load the tenant-scoped template from
+/// the canonical `templates` table, render subject/html/text through the
+/// shared [`TemplateRenderer`], and return the fields the template supplies.
+///
+/// * `Ok(None)` — the request carries no template (the transactional path is
+///   untouched).
+/// * `Err(NotFound)` — unknown OR cross-tenant template id: both are
+///   indistinguishable by construction (the load is scoped by tenant) and
+///   answer 404, exactly like `GET /v1/templates/:id`.
+/// * `Err(Refused)` — every merge variable the template references MUST be
+///   supplied: the renderer reports each missing field, and the send path
+///   refuses the whole request naming every missing variable instead of
+///   shipping a partial render. Renderer failures name their cause too.
+///
+/// A request `subject` is passed to the renderer as the subject override, so
+/// it is merge-resolved and header-hardened by the same pipeline; request
+/// `html`/`text` overrides are applied verbatim afterwards by
+/// [`effective_template_body`].
+async fn resolve_template_send(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    body: &SendMessageRequest,
+) -> Result<Option<RenderedTemplateFields>, TemplateSendRefusal> {
+    let Some(template_id) = body
+        .template_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let props = match body.template_data.as_ref() {
+        None | Some(serde_json::Value::Null) => serde_json::json!({}),
+        Some(value) if value.is_object() => value.clone(),
+        Some(_) => {
+            return Err(TemplateSendRefusal::Refused(vec![
+                "field 'template_data' must be a JSON object of template variables".to_string(),
+            ]))
+        }
+    };
+
+    let renderer = TemplateRenderer::new(db.clone(), send_template_renderer_config());
+    let options = RenderOptions {
+        props,
+        generate_plaintext: true,
+        minify: false,
+        subject: (!body.subject.is_empty()).then(|| body.subject.clone()),
+        missing_field_fallback: None,
+    };
+
+    let rendered = renderer
+        .render_template(tenant_id, template_id, None, &options)
+        .await
+        .map_err(|error| match error {
+            TemplateError::NotFound { .. } => {
+                TemplateSendRefusal::NotFound(template_id.to_string())
+            }
+            TemplateError::Database(error) => {
+                TemplateSendRefusal::Internal(format!("template store error: {error}"))
+            }
+            other => TemplateSendRefusal::Refused(vec![format!(
+                "template '{template_id}' could not be rendered: {other}"
+            )]),
+        })?;
+
+    let missing = missing_template_variables(&rendered.warnings);
+    if !missing.is_empty() {
+        return Err(TemplateSendRefusal::Refused(
+            missing
+                .into_iter()
+                .map(|variable| {
+                    format!("template variable '{variable}' is missing from template_data")
+                })
+                .collect(),
+        ));
+    }
+
+    Ok(Some(RenderedTemplateFields {
+        // The renderer returns the stored subject unless the request
+        // overrode it; a missing subject would be a renderer contract break.
+        subject: rendered.subject.unwrap_or_default(),
+        html: rendered.html,
+        // The stored text_body (merge-resolved) or the plaintext generated
+        // from the rendered HTML.
+        text: rendered.plaintext,
+    }))
+}
+
+/// Apply the documented override rule and validate the final content before
+/// anything is queued: an explicit request `html`/`text` wins over the
+/// rendered template value (an explicit `subject` was already resolved as
+/// the renderer's subject override), and the final subject/body must satisfy
+/// the same invariants the non-template path enforces.
+fn effective_template_body(
+    body: &SendMessageRequest,
+    rendered: RenderedTemplateFields,
+) -> Result<SendMessageRequest, Vec<String>> {
+    let mut effective = body.clone();
+    effective.subject = rendered.subject;
+    effective.html = Some(rendered.html);
+    effective.text = rendered.text;
+    if body.html.as_deref().is_some_and(|html| !html.is_empty()) {
+        effective.html = body.html.clone();
+    }
+    if body.text.as_deref().is_some_and(|text| !text.is_empty()) {
+        effective.text = body.text.clone();
+    }
+
+    let errors = validate_rendered_send_content(&effective);
+    if errors.is_empty() {
+        Ok(effective)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Invariants the FINAL (template- or override-supplied) subject/body must
+/// satisfy — the same ones [`validate_send_with_domain_cache`] enforces for
+/// explicitly sent content.
+fn validate_rendered_send_content(body: &SendMessageRequest) -> Vec<String> {
+    let mut errors = Vec::new();
+    if body.subject.is_empty() {
+        errors.push("template rendered an empty subject; provide a subject override".to_string());
+    } else {
+        if body.subject.contains('\r') || body.subject.contains('\n') {
+            errors.push("subject must not contain line breaks".to_string());
+        }
+        if body.subject.chars().count() > MAX_SUBJECT_CHARS {
+            errors.push(format!(
+                "subject must be {MAX_SUBJECT_CHARS} characters or fewer"
+            ));
+        }
+    }
+    let html_present = body.html.as_deref().is_some_and(|html| !html.is_empty());
+    let text_present = body.text.as_deref().is_some_and(|text| !text.is_empty());
+    if !html_present && !text_present {
+        errors.push(
+            "template rendered an empty html/text body; provide a body override".to_string(),
+        );
+    }
     errors
 }
 
@@ -1686,9 +1939,10 @@ async fn send_message(
     require_scopes(&auth, &["messages:send"])?;
 
     // F44/F45/F48: contract validation BEFORE any quota reservation or
-    // persistence — metadata shape, reserved operational keys, and the
-    // explicitly-unsupported SDK options (template sending) are rejected
-    // with 422 here, never silently discarded.
+    // persistence — metadata shape, reserved operational keys, and malformed
+    // `template_data` shapes are rejected with 422 here, never silently
+    // discarded. Template sends are a supported contract (see
+    // `resolve_template_send` below).
     let option_errors = validate_send_options(&body);
     if !option_errors.is_empty() {
         return Ok(unprocessable_send_options(option_errors));
@@ -1756,6 +2010,34 @@ async fn send_message(
     }
 
     ensure_tenant_message_circuit_closed(&state, &auth.tenant_id).await?;
+
+    // Template sends: resolve AFTER the idempotency replay checks (a retry
+    // of a stored send must replay even if the template was changed or
+    // removed since) and BEFORE the transaction/quota (a refusal queues
+    // nothing and consumes no quota). Requests without a template borrow
+    // their body unchanged — the transactional path stays byte-identical.
+    let rendered = match resolve_template_send(&state.db, &auth.tenant_id, &body).await {
+        Ok(rendered) => rendered,
+        Err(TemplateSendRefusal::NotFound(template_id)) => {
+            return Err(ApiError::NotFound(format!(
+                "template not found: {template_id}"
+            )));
+        }
+        Err(TemplateSendRefusal::Refused(details)) => {
+            return Ok(unprocessable_template_send(details));
+        }
+        Err(TemplateSendRefusal::Internal(message)) => {
+            tracing::error!(error = %message, tenant_id = %auth.tenant_id, "template render failed");
+            return Err(ApiError::Internal("template rendering failed".into()));
+        }
+    };
+    let effective: Cow<'_, SendMessageRequest> = match rendered {
+        Some(rendered) => match effective_template_body(&body, rendered) {
+            Ok(effective) => Cow::Owned(effective),
+            Err(details) => return Ok(unprocessable_template_send(details)),
+        },
+        None => Cow::Borrowed(&body),
+    };
 
     let mut tx = state.db.begin().await.map_err(|error| {
         tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to begin message transaction");
@@ -1865,10 +2147,13 @@ async fn send_message(
     // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
     // (the ledger pre-check above is only a fast path; it cannot close the
     // concurrent-duplicate race window on its own).
+    //
+    // `effective` carries the RENDERED template content for a template send
+    // and borrows the request unchanged otherwise.
     let persisted = match insert_message_and_queue(
         &mut tx,
         &auth.tenant_id,
-        &body,
+        effective.as_ref(),
         &parsed,
         &metadata,
         idempotency_key.as_deref(),
@@ -2257,6 +2542,37 @@ async fn send_batch(
             }
         };
 
+        // Template sends: resolve per item BEFORE this item's quota
+        // reservation — a refused template rejects just this item and never
+        // touches quota. Items without a template borrow their request body
+        // unchanged, so their path (and stored bytes) is identical.
+        let rendered = match resolve_template_send(&state.db, &auth.tenant_id, msg).await {
+            Ok(rendered) => rendered,
+            Err(TemplateSendRefusal::NotFound(template_id)) => {
+                reject_item!(format!("template not found: {template_id}"));
+                continue;
+            }
+            Err(TemplateSendRefusal::Refused(details)) => {
+                reject_item!(details.join("; "));
+                continue;
+            }
+            Err(TemplateSendRefusal::Internal(message)) => {
+                tracing::error!(error = %message, batch_index = i, "template render failed");
+                reject_item!("template rendering failed".to_string());
+                continue;
+            }
+        };
+        let effective: Cow<'_, SendMessageRequest> = match rendered {
+            Some(rendered) => match effective_template_body(msg, rendered) {
+                Ok(effective) => Cow::Owned(effective),
+                Err(details) => {
+                    reject_item!(details.join("; "));
+                    continue;
+                }
+            },
+            None => Cow::Borrowed(msg),
+        };
+
         // Per-recipient metering, same as single sends: the reservation covers
         // every delivery recipient of this batch item in one atomic quantity
         // (F1). Insufficient quota rejects just this item — the reservation is
@@ -2315,10 +2631,12 @@ async fn send_batch(
 
         // Batch items carry no per-message idempotency key (and a NULL key
         // can never conflict); the batch-level ledger above owns replay.
+        // `effective` carries the RENDERED template content for a template
+        // item and borrows the request unchanged otherwise.
         match insert_message_and_queue(
             &mut tx,
             &auth.tenant_id,
-            msg,
+            effective.as_ref(),
             &parsed,
             &item_metadata,
             None,
@@ -2755,7 +3073,14 @@ async fn validate_send_with_domain_cache(
         ));
     }
 
-    if body.subject.is_empty() {
+    // A template supplies subject/html/text: a template send without them is
+    // validated on the RENDERED content instead (resolve + effective body in
+    // the handlers), so only non-template sends require them here.
+    let template_supplies_content = body
+        .template_id
+        .as_deref()
+        .is_some_and(|template_id| !template_id.trim().is_empty());
+    if body.subject.is_empty() && !template_supplies_content {
         errors.push("subject is required".into());
     }
     // CRLF in a subject breaks header folding and enables header injection.
@@ -2769,7 +3094,7 @@ async fn validate_send_with_domain_cache(
             "subject must be {MAX_SUBJECT_CHARS} characters or fewer"
         ));
     }
-    if body.html.is_none() && body.text.is_none() {
+    if body.html.is_none() && body.text.is_none() && !template_supplies_content {
         errors.push("html or text body is required".into());
     }
 
@@ -3876,36 +4201,77 @@ Bcc: victim@example.com"@example.com"#
         assert_eq!(queue_priority_of(&body), 3);
     }
 
-    /// Advertised-but-unsupported options must be REJECTED with an explicit
-    /// error naming the field — never silently discarded.
+    /// Template sends are a SUPPORTED contract now (the old
+    /// "template-based sending is not implemented" refusal is gone): a
+    /// non-empty `template_id` passes option validation, while malformed
+    /// `template_data` shapes are still rejected naming the field.
     #[test]
-    fn template_id_is_rejected_naming_the_field() {
+    fn template_send_options_are_accepted_and_shape_violations_named() {
         let mut body = options_request();
         body.template_id = Some("tmpl_123".into());
+        assert!(
+            validate_send_options(&body).is_empty(),
+            "a template send must pass option validation"
+        );
+
+        // template_data must be an object of variables…
+        let mut body = options_request();
+        body.template_id = Some("tmpl_123".into());
+        body.template_data = Some(serde_json::json!(["not", "an", "object"]));
         let errors = validate_send_options(&body);
         assert!(
-            errors.len() == 1 && errors[0].contains("'template_id'"),
-            "template_id must be rejected naming the field: {errors:?}"
+            errors
+                .iter()
+                .any(|e| e.contains("'template_data'") && e.contains("JSON object")),
+            "a non-object template_data must be rejected naming the field: {errors:?}"
         );
-    }
 
-    #[test]
-    fn template_data_is_rejected_naming_the_field() {
+        // …and requires a template_id (variables without a template are a
+        // silent no-op otherwise).
         let mut body = options_request();
         body.template_data = Some(serde_json::json!({"x": 1}));
         let errors = validate_send_options(&body);
         assert!(
-            errors.len() == 1 && errors[0].contains("'template_data'"),
-            "template_data must be rejected naming the field: {errors:?}"
+            errors
+                .iter()
+                .any(|e| e.contains("'template_data'") && e.contains("requires 'template_id'")),
+            "template_data without template_id must be named: {errors:?}"
         );
+
+        // JSON null stays absence, exactly like before.
+        let mut body = options_request();
+        body.template_data = Some(serde_json::Value::Null);
+        assert!(validate_send_options(&body).is_empty());
+    }
+
+    /// The renderer reports missing merge fields as
+    /// "Missing merge field '{name}' replaced with fallback" warnings; the
+    /// send path turns those into a NAMED refusal of every missing variable,
+    /// deduplicated across subject/body/text (the same variable can appear
+    /// in more than one of them).
+    #[test]
+    fn missing_template_variables_are_extracted_from_renderer_warnings() {
+        let warnings = vec![
+            "Missing merge field 'name' replaced with fallback".to_string(),
+            "Missing merge field 'user.email' replaced with fallback".to_string(),
+            "Missing merge field 'name' replaced with fallback".to_string(),
+        ];
+        assert_eq!(
+            missing_template_variables(&warnings),
+            vec!["name", "user.email"]
+        );
+        assert!(missing_template_variables(&[]).is_empty());
+        // A warning without a quoted field name contributes nothing rather
+        // than panicking or inventing a variable.
+        assert!(missing_template_variables(&["some other warning".to_string()]).is_empty());
     }
 
     #[test]
     fn unsupported_fields_never_pass_validation_silently() {
         // Sanity for the deny_unknown_fields contract: any field outside the
-        // struct (e.g. a future SDK option) is a deserialization error, and
-        // the two template fields deserialize only to be explicitly
-        // rejected — both paths produce a client-visible failure.
+        // struct (e.g. a future SDK option) is a deserialization error, never
+        // silently ignored. The template fields are now a supported contract
+        // (see `template_send_options_are_accepted_and_shape_violations_named`).
         let json = r#"{"from":"a@b.com","to":["c@d.com"],"subject":"X","html":"y",
                       "send_at":"2030-01-01T00:00:00Z"}"#;
         assert!(serde_json::from_str::<SendMessageRequest>(json).is_err());
@@ -5063,23 +5429,26 @@ Bcc: victim@example.com"@example.com"#
 
     #[test]
     fn validate_send_options_errors_name_every_offending_field() {
-        // template_id non-empty is rejected; whitespace-only is tolerated.
+        // template_id: a non-empty id is a supported template send; blank is
+        // treated as absent (like reply_to). template_data must be an object
+        // AND must come with a template_id; null stays absence.
         let mut body = options_request();
         body.template_id = Some("tpl_1".into());
-        assert!(validate_send_options(&body)
-            .iter()
-            .any(|e| e.contains("template_id")));
+        assert!(validate_send_options(&body).is_empty());
         body.template_id = Some("   ".into());
         assert!(validate_send_options(&body).is_empty());
-
-        // template_data null is tolerated; a real value is rejected.
+        body.template_id = Some("tpl_1".into());
+        body.template_data = Some(serde_json::json!("scalar"));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("'template_data' must be a JSON object")));
         body.template_id = None;
-        body.template_data = Some(serde_json::Value::Null);
-        assert!(validate_send_options(&body).is_empty());
         body.template_data = Some(serde_json::json!({"k": "v"}));
         assert!(validate_send_options(&body)
             .iter()
-            .any(|e| e.contains("template_data")));
+            .any(|e| e.contains("requires 'template_id'")));
+        body.template_data = Some(serde_json::Value::Null);
+        assert!(validate_send_options(&body).is_empty());
         body.template_data = None;
 
         // reply_to: malformed is rejected naming the field; empty is fine.
@@ -5693,6 +6062,48 @@ Bcc: victim@example.com"@example.com"#
         })
     }
 
+    /// Seed a canonical `templates` row — the SAME table (and tenant scope)
+    /// the template renderer and the templates routes read. ids are
+    /// VARCHAR(26), exactly like the production writer mints them.
+    async fn seed_send_template(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        subject: &str,
+        html_body: &str,
+        text_body: Option<&str>,
+    ) -> String {
+        let id = apexmail_lib::id::generate_id("tpl", 22);
+        sqlx::query(
+            "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
+             VALUES ($1, $2, 'send-template', $3, $4, $5, 1, 'active', NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(subject)
+        .bind(html_body)
+        .bind(text_body)
+        .execute(pool)
+        .await
+        .expect("seed send template");
+        id
+    }
+
+    /// Every message + queue row the tenant owns (a refused send must leave
+    /// both at zero; an accepted one queues exactly its recipients).
+    async fn tenant_message_counts(pool: &sqlx::PgPool, tenant: &str) -> (i64, i64) {
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("count messages");
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("count queue rows");
+        (messages, queued)
+    }
+
     async fn seed_message_row(
         pool: &sqlx::PgPool,
         tenant: &str,
@@ -5854,9 +6265,22 @@ Bcc: victim@example.com"@example.com"#
             value
         };
         cases.push((
-            with(|v| v["template_id"] = serde_json::json!("tpl")),
+            // Template sends are implemented: an unknown template id is a
+            // 404 NOT_FOUND (docs/api/endpoints/messages.md), not the old
+            // "template-based sending is not implemented" 422.
+            with(|v| v["template_id"] = serde_json::json!("tpl_does_not_exist_0000001")),
+            StatusCode::NOT_FOUND,
+            "template not found",
+        ));
+        cases.push((
+            with(|v| v["template_data"] = serde_json::json!({"name": "Ada"})),
             StatusCode::UNPROCESSABLE_ENTITY,
-            "template_id",
+            "requires 'template_id'",
+        ));
+        cases.push((
+            with(|v| v["template_data"] = serde_json::json!(["not", "an", "object"])),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "must be a JSON object",
         ));
         cases.push((
             with(|v| v["metadata"] = serde_json::json!("scalar")),
@@ -5960,6 +6384,338 @@ Bcc: victim@example.com"@example.com"#
         let (status, _, body) =
             msg_call(&app, &fixture.key_read, Method::POST, "/", Some(good), &[]).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+        fixture.cleanup().await;
+    }
+
+    // ── Template sends (docs/api/endpoints/messages.md) ───────────────
+    //
+    // The documented `template_id`/`template_data` send fields must be TRUE
+    // end to end: the tenant-scoped template is loaded from the canonical
+    // `templates` table, rendered through the shared template-renderer
+    // pipeline, and the RENDERED content flows through the existing send
+    // path (consent, quota, idempotency, queue).
+
+    /// Render + send persists the rendered subject/html/text — never the raw
+    /// template bytes — on both the message row and every queue row; an
+    /// idempotent retry replays the same response; explicit request fields
+    /// override the rendered values (the docs' precedence rule).
+    #[tokio::test]
+    async fn template_send_renders_persists_and_replays_idempotently() {
+        let Some(fixture) = msg_fixture("adv_send_template_render").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_both;
+        let template_id = seed_send_template(
+            &fixture.pool,
+            &fixture.tenant,
+            "Welcome {{ name }}",
+            "<h1>Hello {{ name }}</h1>",
+            Some("Hello {{ name }}"),
+        )
+        .await;
+
+        let payload = serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "template_id": template_id,
+            "template_data": {"name": "Ada"},
+        });
+        let (status, _, first) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(payload.clone()),
+            &[("idempotency-key", "adv-tpl-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {first}");
+        let message_id = first["data"]["id"].as_str().expect("id").to_string();
+
+        // The message row carries the RENDERED content, not `{{ name }}`.
+        let (subject, html, text): (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT subject, html_body, text_body FROM messages
+             WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&message_id)
+        .bind(&fixture.tenant)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("fetch persisted message");
+        assert_eq!(subject, "Welcome Ada");
+        assert_eq!(html.as_deref(), Some("<h1>Hello Ada</h1>"));
+        assert_eq!(text.as_deref(), Some("Hello Ada"));
+        assert!(
+            !subject.contains("{{") && !html.as_deref().unwrap_or_default().contains("{{"),
+            "the raw template must never be persisted"
+        );
+
+        // Every queue row carries the rendered content the worker dispatches.
+        let queue: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT subject, html, text FROM email_queue WHERE message_id = $1::uuid",
+        )
+        .bind(&message_id)
+        .fetch_all(&fixture.pool)
+        .await
+        .expect("fetch queue rows");
+        assert_eq!(queue.len(), 1, "one queue row for the single recipient");
+        assert!(
+            queue.iter().all(|(s, h, t)| s == "Welcome Ada"
+                && h.as_deref() == Some("<h1>Hello Ada</h1>")
+                && t.as_deref() == Some("Hello Ada")),
+            "queue rows must carry rendered content: {queue:?}"
+        );
+
+        // Idempotent replay: same key + payload → the stored response,
+        // byte-identical, with no second message.
+        let (status, _, replay) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(payload),
+            &[("idempotency-key", "adv-tpl-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {replay}");
+        assert_eq!(replay, first, "template-send replay must be byte-identical");
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (1, 1),
+            "a replay must never enqueue a second message"
+        );
+
+        // Explicit request fields override the rendered template values; the
+        // overriding subject still merge-resolves against template_data.
+        let (status, _, second) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(serde_json::json!({
+                "from": format!("sender@{}", fixture.domain),
+                "to": ["to@example.com"],
+                "subject": "Override {{ name }}",
+                "html": "<p>override body</p>",
+                "template_id": template_id,
+                "template_data": {"name": "Grace"},
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {second}");
+        let (subject, html): (String, Option<String>) = sqlx::query_as(
+            "SELECT subject, html_body FROM messages
+             WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(second["data"]["id"].as_str().expect("id"))
+        .bind(&fixture.tenant)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("fetch override message");
+        assert_eq!(
+            subject, "Override Grace",
+            "an explicit subject overrides the template and still merge-resolves"
+        );
+        assert_eq!(
+            html.as_deref(),
+            Some("<p>override body</p>"),
+            "an explicit html body overrides the template body"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    /// Unknown AND cross-tenant templates are refused with 404 and nothing
+    /// queued; a missing merge variable is a named 422 refusal with no
+    /// partial render; malformed `template_data` shapes are named refusals.
+    #[tokio::test]
+    async fn template_send_refusals_leave_nothing_queued() {
+        let Some(fixture) = msg_fixture("adv_send_template_refusals").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_send;
+        let from = format!("sender@{}", fixture.domain);
+
+        // A template owned by ANOTHER tenant is indistinguishable from a
+        // missing one (tenant-scoped load) — both 404, nothing queued.
+        let foreign = seed_send_template(
+            &fixture.pool,
+            &fixture.other_tenant,
+            "Foreign {{ x }}",
+            "<p>{{ x }}</p>",
+            None,
+        )
+        .await;
+        for template_id in ["tpl_missing0000000000000000".to_string(), foreign] {
+            let (status, _, body) = msg_call(
+                &app,
+                key,
+                Method::POST,
+                "/",
+                Some(serde_json::json!({
+                    "from": from.clone(),
+                    "to": ["to@example.com"],
+                    "template_id": template_id,
+                    "template_data": {"x": "1"},
+                })),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+            assert!(
+                body.to_string().contains("template not found"),
+                "the refusal must name the template contract: {body}"
+            );
+        }
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (0, 0),
+            "a 404 template send must queue nothing"
+        );
+
+        // A template with a merge variable the caller did not supply is a
+        // NAMED 422 refusal — every missing variable is listed, nothing is
+        // rendered partially and nothing is queued.
+        let template_id = seed_send_template(
+            &fixture.pool,
+            &fixture.tenant,
+            "Welcome {{ name }}",
+            "<p>Hi {{ name }} — see {{ link }}</p>",
+            None,
+        )
+        .await;
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(serde_json::json!({
+                "from": from.clone(),
+                "to": ["to@example.com"],
+                "template_id": template_id,
+                "template_data": {"name": "Ada"},
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
+        assert!(
+            body.to_string()
+                .contains("template variable 'link' is missing from template_data"),
+            "the refusal must name the missing variable: {body}"
+        );
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (0, 0),
+            "a missing-variable refusal must queue nothing"
+        );
+
+        // Shape refusals, left of the template load.
+        for (patch, expected) in [
+            (
+                serde_json::json!({"name": "Ada"}),
+                "requires 'template_id'",
+            ),
+            (serde_json::json!([]), "must be a JSON object"),
+        ] {
+            let mut payload = serde_json::json!({
+                "from": from.clone(),
+                "to": ["to@example.com"],
+            });
+            payload["template_data"] = patch;
+            let (status, _, body) =
+                msg_call(&app, key, Method::POST, "/", Some(payload), &[]).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
+            assert!(
+                body.to_string().contains(expected),
+                "want {expected:?} in {body}"
+            );
+        }
+        assert_eq!(
+            tenant_message_counts(&fixture.pool, &fixture.tenant).await,
+            (0, 0),
+            "a malformed template_data refusal must queue nothing"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    /// Batch partial semantics hold for template sends: the renderable item
+    /// is accepted and queued with rendered content, the unusable one is
+    /// rejected per-item with a named error.
+    #[tokio::test]
+    async fn batch_template_send_keeps_partial_semantics() {
+        let Some(fixture) = msg_fixture("adv_send_template_batch").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_send;
+        let template_id = seed_send_template(
+            &fixture.pool,
+            &fixture.tenant,
+            "Hi {{ name }}",
+            "<p>{{ name }}</p>",
+            None,
+        )
+        .await;
+        let from = format!("sender@{}", fixture.domain);
+
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/batch",
+            Some(serde_json::json!({
+                "messages": [
+                    {
+                        "from": from.clone(),
+                        "to": ["to@example.com"],
+                        "template_id": template_id,
+                        "template_data": {"name": "Ada"},
+                    },
+                    {
+                        "from": from.clone(),
+                        "to": ["first@example.com"],
+                        "template_id": "tpl_missing0000000000000000",
+                        "template_data": {},
+                    },
+                ],
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["data"]["accepted"], 1, "body: {body}");
+        assert_eq!(body["data"]["rejected"], 1, "body: {body}");
+        assert_eq!(body["data"]["results"][0]["status"], "queued", "body: {body}");
+        assert_eq!(
+            body["data"]["results"][1]["status"], "rejected",
+            "body: {body}"
+        );
+        assert!(
+            body["data"]["results"][1]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("template not found"),
+            "the rejected item must name the template contract: {body}"
+        );
+
+        // Exactly the accepted item is queued — with rendered content.
+        let (messages, queued) = tenant_message_counts(&fixture.pool, &fixture.tenant).await;
+        assert_eq!((messages, queued), (1, 1), "body: {body}");
+        let (subject, html): (String, Option<String>) = sqlx::query_as(
+            "SELECT subject, html_body FROM messages WHERE tenant_id = $1",
+        )
+        .bind(&fixture.tenant)
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("fetch batched template message");
+        assert_eq!(subject, "Hi Ada");
+        assert_eq!(html.as_deref(), Some("<p>Ada</p>"));
 
         fixture.cleanup().await;
     }

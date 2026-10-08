@@ -663,7 +663,7 @@ async fn send_time_windows_respect_tenant_offset_and_cold_start() {
     let cold = format!("cold-{tag}@example.com");
     insert_churn_event(&pool, &tenant, &cold, "opened", 3).await;
     let cold_start = optimizer
-        .get_optimal_window(&cold)
+        .get_optimal_window_for_tenant(&tenant, &cold)
         .await
         .expect("cold window");
     assert_eq!(cold_start.windows.len(), 1);
@@ -677,30 +677,55 @@ async fn send_time_windows_respect_tenant_offset_and_cold_start() {
     // Warm profile: all engagement at 14:00 UTC → 14:00 is the top window
     // for an offset-0 tenant.
     let warm = format!("warm-{tag}@example.com");
-    for _ in 0..8 {
-        sqlx::query(
-            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp) \
-             VALUES ($1, $2, $3, 'opened', $4, TIMESTAMPTZ '2026-06-16 14:00:00+00')",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(&tenant)
-        .bind(Uuid::new_v4().to_string())
-        .bind(&warm)
-        .execute(&pool)
-        .await
-        .expect("warm event");
-    }
+    let insert_warm = |email: String, tenant_id: String| {
+        let pool = pool.clone();
+        async move {
+            for _ in 0..8 {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp) \
+                     VALUES ($1, $2, $3, 'opened', $4, TIMESTAMPTZ '2026-06-16 14:00:00+00')",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(&tenant_id)
+                .bind(Uuid::new_v4().to_string())
+                .bind(&email)
+                .execute(&pool)
+                .await
+                .expect("warm event");
+            }
+        }
+    };
+    insert_warm(warm.clone(), tenant.clone()).await;
     let warm_utc = optimizer
-        .get_optimal_window(&warm)
+        .get_optimal_window_for_tenant(&tenant, &warm)
         .await
         .expect("warm window");
     assert_eq!(warm_utc.windows[0].hour, 14);
     assert!(warm_utc.windows[0].confidence > 0.0);
 
-    // The same recipient under a +120-minute tenant is bucketed at 16:00
-    // local, and the offset is labelled on the result.
-    let warm_local = optimizer
+    // TENANT SCOPE (wave G): the SAME address in another tenant has no events
+    // there — it must resolve the cold-start window for that tenant's offset,
+    // never the first tenant's 14:00 histogram.
+    let leak_check = optimizer
         .get_optimal_window_for_tenant(&with_offset, &warm)
+        .await
+        .expect("scoped window");
+    assert_eq!(leak_check.utc_offset_minutes, 120);
+    assert_eq!(
+        leak_check.windows[0].confidence, 0.0,
+        "another tenant's events must not leak into this profile"
+    );
+    assert_eq!(
+        leak_check.windows[0].hour, 12,
+        "cold start at +02:00 is 12:00 local (10:00 UTC)"
+    );
+
+    // The +120-minute tenant's OWN recipient is bucketed at 16:00 local, and
+    // the offset is labelled on the result.
+    let warm_local_address = format!("warm-local-{tag}@example.com");
+    insert_warm(warm_local_address.clone(), with_offset.clone()).await;
+    let warm_local = optimizer
+        .get_optimal_window_for_tenant(&with_offset, &warm_local_address)
         .await
         .expect("offset window");
     assert_eq!(warm_local.utc_offset_minutes, 120);
@@ -708,6 +733,15 @@ async fn send_time_windows_respect_tenant_offset_and_cold_start() {
         warm_local.windows[0].hour, 16,
         "14:00 UTC is 16:00 at +02:00"
     );
+
+    // An explicit offset override (campaign `settings.timezone`) shifts the
+    // same profile without touching the tenant record.
+    let overridden = optimizer
+        .get_optimal_window_for_tenant_with_offset(&tenant, &warm, Some(180))
+        .await
+        .expect("override window");
+    assert_eq!(overridden.utc_offset_minutes, 180);
+    assert_eq!(overridden.windows[0].hour, 17, "14:00 UTC is 17:00 at +03:00");
 
     // The offset-0 tenant keeps its 14:00 bucket (tenant caches are scoped).
     let warm_uk = optimizer
@@ -717,22 +751,25 @@ async fn send_time_windows_respect_tenant_offset_and_cold_start() {
     assert_eq!(warm_uk.utc_offset_minutes, 0);
     assert_eq!(warm_uk.windows[0].hour, 14);
 
-    // Unknown tenant: offset defaults to 0, never an error.
+    // Unknown tenant: offset defaults to 0 and the profile is cold (no events
+    // exist under that tenant id at all), never an error and never another
+    // tenant's histogram.
     let unknown = optimizer
         .get_optimal_window_for_tenant(&format!("missing-tenant-{tag}"), &warm)
         .await
         .expect("unknown tenant");
     assert_eq!(unknown.utc_offset_minutes, 0);
-    assert_eq!(unknown.windows[0].hour, 14);
+    assert_eq!(unknown.windows[0].hour, 10);
+    assert_eq!(unknown.windows[0].confidence, 0.0);
 
-    // Replays are cache hits (same windows).
+    // Replays are cache hits (same windows for the same tenant+offset+email).
     let replay = optimizer
         .get_optimal_window_for_tenant(&with_offset, &warm)
         .await
         .expect("cached");
-    assert_eq!(replay.email_hash, warm_local.email_hash);
-    assert_eq!(replay.windows.len(), warm_local.windows.len());
-    assert_eq!(replay.windows[0].hour, warm_local.windows[0].hour);
-    assert_eq!(replay.windows[0].day, warm_local.windows[0].day);
-    assert!((replay.windows[0].score - warm_local.windows[0].score).abs() < 1e-12);
+    assert_eq!(replay.email_hash, leak_check.email_hash);
+    assert_eq!(replay.windows.len(), leak_check.windows.len());
+    assert_eq!(replay.windows[0].hour, leak_check.windows[0].hour);
+    assert_eq!(replay.windows[0].day, leak_check.windows[0].day);
+    assert!((replay.windows[0].score - leak_check.windows[0].score).abs() < 1e-12);
 }

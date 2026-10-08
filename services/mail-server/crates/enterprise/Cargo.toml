@@ -43,6 +43,12 @@ hex        = { workspace = true }
 quick-xml  = "0.41"
 mail-common = { path = "../mail-common" }
 apexmail-dns-resolver = { path = "../dns-resolver" }
+# Plan entitlements: the template-approval and sub-account surfaces are gated
+# on the SAME override-aware snapshot api-server handlers use, so the gate is
+# the plan flag, never the tenant type. billing-service depends on no
+# enterprise crate — no cycle.
+billing-service = { path = "../billing-service" }
+billing-entitlements = { path = "../billing-entitlements" }
 urlencoding = { workspace = true }
 flate2 = "1.1"
 jsonwebtoken = "9.3"

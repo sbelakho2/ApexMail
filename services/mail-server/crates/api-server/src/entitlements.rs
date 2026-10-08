@@ -172,6 +172,11 @@ mod tests {
             FeatureKey::SendTimeOptimization,
             FeatureKey::DataExport,
             FeatureKey::CustomTemplates,
+            FeatureKey::AuditLogs,
+            FeatureKey::AbTesting,
+            FeatureKey::TimeTravelDebugging,
+            FeatureKey::TemplateApprovalWorkflow,
+            FeatureKey::Subaccounts,
         ];
         for key in gated {
             let error =
@@ -195,7 +200,12 @@ mod tests {
             "advanced_analytics": true,
             "send_time_optimization": true,
             "data_export": true,
-            "custom_templates": true
+            "custom_templates": true,
+            "audit_logs": true,
+            "ab_testing": true,
+            "time_travel_debugging": true,
+            "template_approval_workflow": true,
+            "subaccounts": true
         }));
         for key in [
             FeatureKey::DedicatedIp,
@@ -207,6 +217,11 @@ mod tests {
             FeatureKey::SendTimeOptimization,
             FeatureKey::DataExport,
             FeatureKey::CustomTemplates,
+            FeatureKey::AuditLogs,
+            FeatureKey::AbTesting,
+            FeatureKey::TimeTravelDebugging,
+            FeatureKey::TemplateApprovalWorkflow,
+            FeatureKey::Subaccounts,
         ] {
             assert!(
                 gate_feature(&granted, key).is_ok(),
@@ -223,15 +238,15 @@ mod tests {
         let snap = snapshot(serde_json::json!({
             "sla_guarantee": true,
             "hipaa_compliance": true,
-            "time_travel_debugging": true,
-            "ab_testing": true,
+            "custom_retention": true,
+            "custom_tracking_domain": true,
             "white_label": true
         }));
         for key in [
             FeatureKey::SlaGuarantee,
             FeatureKey::HipaaCompliance,
-            FeatureKey::TimeTravelDebugging,
-            FeatureKey::AbTesting,
+            FeatureKey::CustomRetention,
+            FeatureKey::CustomTrackingDomain,
             FeatureKey::WhiteLabel,
         ] {
             let error = gate_feature(&snap, key)
@@ -279,9 +294,12 @@ mod tests {
     }
 
     /// Release-gate parity in Rust: every field classified `RuntimeEnforced`
-    /// must have its gate key referenced by a real api-server handler. A
-    /// classification that claims enforcement without wiring fails here
-    /// (the Python gate checks the same invariant at release time).
+    /// must have its gate key referenced by a real handler. The customer
+    /// surface is spread across two services — api-server (`/v1/*`) and the
+    /// enterprise service (`/templates/*`, `/sub-accounts/*`) — so both
+    /// source trees are scanned. A classification that claims enforcement
+    /// without wiring fails here (the Python gate checks the same invariant
+    /// at release time).
     #[test]
     fn every_runtime_enforced_field_is_wired_to_a_handler() {
         use billing_entitlements::{FeatureClass, Gate, PLAN_FEATURE_CLASSIFICATION};
@@ -307,12 +325,14 @@ mod tests {
         }
 
         let mut sources = Vec::new();
-        collect_rust_sources(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src")
-                .as_path(),
-            &mut sources,
-        );
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        collect_rust_sources(&manifest.join("src"), &mut sources);
+        // The enterprise service owns the template-approval and sub-account
+        // surface; its handlers are equally real wiring.
+        let enterprise_src = manifest.join("../enterprise/src");
+        if enterprise_src.is_dir() {
+            collect_rust_sources(&enterprise_src, &mut sources);
+        }
         let wiring = sources.join("\n");
 
         for entry in PLAN_FEATURE_CLASSIFICATION {

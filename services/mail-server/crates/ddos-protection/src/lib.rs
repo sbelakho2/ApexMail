@@ -160,6 +160,20 @@ pub struct AttackState {
     pub mitigation_level: u8,
 }
 
+/// The decision outcome recorded against a client's reputation entry (see
+/// [`DdosProtector::note_reputation_outcome`]).
+#[derive(Debug, Clone, Copy)]
+enum ReputationOutcome {
+    /// The request was refused outright.
+    Blocked,
+    /// The request was throttled (cost budget or adaptive rate).
+    RateLimited,
+    /// An issued challenge was answered incorrectly. Only reachable when
+    /// the `challenges` feature compiles `verify_pow` in.
+    #[cfg(feature = "challenges")]
+    ChallengeFailed,
+}
+
 /// Context for evaluating a request
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -309,11 +323,16 @@ impl DdosProtector {
             &canonical_ctx_storage
         };
 
+        // Count the request on the client's reputation entry (denominator of
+        // block_rate); every decision path below records its own outcome.
+        self.note_reputation_request(&ctx.ip);
+
         // Layer 0:Check blocklist
         if self.is_blocked(&ctx.ip) {
             if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
                 metric.with_label_values(&["blocked", "blocklist"]).inc();
             }
+            self.note_reputation_outcome(&ctx.ip, ReputationOutcome::Blocked);
             return ProtectionDecision::Block;
         }
 
@@ -355,12 +374,14 @@ impl DdosProtector {
                 if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
                     metric.with_label_values(&["limited", "system"]).inc();
                 }
+                self.note_reputation_outcome(&ctx.ip, ReputationOutcome::RateLimited);
                 return ProtectionDecision::RateLimit { retry_after };
             }
             cost_based::CostDecision::QuotaExceeded { retry_after, .. } => {
                 if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
                     metric.with_label_values(&["limited", "tenant"]).inc();
                 }
+                self.note_reputation_outcome(&ctx.ip, ReputationOutcome::RateLimited);
                 return ProtectionDecision::RateLimit { retry_after };
             }
             cost_based::CostDecision::Allowed { .. } => {}
@@ -394,6 +415,7 @@ impl DdosProtector {
                 if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
                     metric.with_label_values(&["limited", "adaptive"]).inc();
                 }
+                self.note_reputation_outcome(&ctx.ip, ReputationOutcome::RateLimited);
                 return ProtectionDecision::RateLimit {
                     retry_after: Duration::from_secs(1),
                 };
@@ -498,6 +520,7 @@ impl DdosProtector {
             if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
                 metric.with_label_values(&["blocked", "reputation"]).inc();
             }
+            self.note_reputation_outcome(&ctx.ip, ReputationOutcome::Blocked);
             return ProtectionDecision::Block;
         }
 
@@ -658,6 +681,57 @@ impl DdosProtector {
         debug!(%ip, new_score = entry.score, "Reputation decreased");
     }
 
+    /// Count one evaluated request on the client's reputation entry.
+    ///
+    /// `ReputationScore::record_request` feeds `total_requests`, the
+    /// denominator of [`ReputationScore::block_rate`]. Nothing called it in
+    /// production, so every IP reported a 0.0 block rate no matter how many
+    /// of its requests were refused.
+    fn note_reputation_request(&self, ip: &IpAddr) {
+        if !self.reputation_db.contains_key(ip) {
+            self.enforce_reputation_capacity();
+        }
+        let mut entry = self.reputation_db.entry(*ip).or_insert_with(|| {
+            ReputationScore::with_initial_reputation(self.config.initial_reputation)
+        });
+        entry.last_seen = std::time::Instant::now();
+        entry.record_request();
+    }
+
+    /// Record the OUTCOME of a decision on the client's reputation entry.
+    ///
+    /// `ReputationScore::record_blocked` / `record_rate_limit` /
+    /// `record_challenge_failed` maintain the counters behind
+    /// [`ReputationScore::block_rate`] and
+    /// [`ReputationScore::challenge_pass_rate`] and apply the documented
+    /// score penalties. Before this was wired they were exercised only by
+    /// unit tests: the protector could block or rate-limit a client for
+    /// hours while the reputation entry reported zero blocked requests, and
+    /// a failed proof-of-work left no trace in the score.
+    fn note_reputation_outcome(&self, ip: &IpAddr, outcome: ReputationOutcome) {
+        let canonical = canonical_client_key(ip);
+        if !self.reputation_db.contains_key(&canonical) {
+            self.enforce_reputation_capacity();
+        }
+        let mut entry = self.reputation_db.entry(canonical).or_insert_with(|| {
+            ReputationScore::with_initial_reputation(self.config.initial_reputation)
+        });
+        entry.last_seen = std::time::Instant::now();
+        match outcome {
+            ReputationOutcome::Blocked => entry.record_blocked(),
+            ReputationOutcome::RateLimited => entry.record_rate_limit(),
+            #[cfg(feature = "challenges")]
+            ReputationOutcome::ChallengeFailed => entry.record_challenge_failed(),
+        }
+        debug!(
+            ip = %ip,
+            ?outcome,
+            new_score = entry.score,
+            block_rate = entry.block_rate(),
+            "Reputation outcome recorded"
+        );
+    }
+
     /// Number of tracked reputation entries (observability / tests).
     pub fn reputation_entry_count(&self) -> usize {
         self.reputation_db.len()
@@ -800,6 +874,12 @@ impl DdosProtector {
         };
         if result.valid {
             self.record_challenge_passed(&canonical_client_key(ip));
+        } else {
+            // A wrong/expired/replayed answer is a failed challenge: record
+            // the counter and penalty so `challenge_pass_rate()` and the
+            // score reflect what actually happened (previously the failure
+            // path left no trace anywhere).
+            self.note_reputation_outcome(ip, ReputationOutcome::ChallengeFailed);
         }
         result
     }
@@ -1901,6 +1981,88 @@ mod tests {
         assert!(
             protector.anomaly_detector.is_some(),
             "anomaly detector must be constructed in new()"
+        );
+    }
+
+    /// A blocked request must be recorded on the client's reputation entry:
+    /// before `record_blocked` was wired, an IP could be refused for hours
+    /// while `block_rate()` reported 0.0.
+    #[tokio::test]
+    async fn blocked_decision_is_recorded_on_reputation() {
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+        let ip: IpAddr = "198.51.100.77".parse().unwrap();
+        protector.block_ip(ip, Duration::from_secs(300), "test".to_string());
+        let ctx = RequestContext {
+            ip,
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+        assert!(matches!(
+            protector.evaluate(&ctx).await,
+            ProtectionDecision::Block
+        ));
+        {
+            let entry = protector
+                .reputation_db
+                .get(&ip)
+                .expect("a blocked client must have a reputation entry");
+            assert_eq!(entry.blocked_requests, 1, "the block must be counted");
+            assert!(entry.block_rate() > 0.0, "block_rate must reflect it");
+            assert!(
+                entry.score < protector.config.initial_reputation,
+                "the blocked outcome must apply its documented penalty"
+            );
+        }
+    }
+
+    /// A throttled request records `rate_limit_hits` (and the score penalty)
+    /// so the reputation signal tracks the protector's own decisions.
+    #[tokio::test]
+    async fn rate_limited_decision_is_recorded_on_reputation() {
+        // A zero-cost budget forces the quota path on the first request.
+        let config = ProtectorConfig {
+            default_cost_budget: 0,
+            system_cost_capacity: 0,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+        let ip: IpAddr = "198.51.100.78".parse().unwrap();
+        let ctx = RequestContext {
+            ip,
+            path: "/v1/expensive".to_string(),
+            method: "POST".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: Some("tenant-a".to_string()),
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+        assert!(matches!(
+            protector.evaluate(&ctx).await,
+            ProtectionDecision::RateLimit { .. }
+        ));
+        let entry = protector
+            .reputation_db
+            .get(&ip)
+            .expect("a rate-limited client must have a reputation entry");
+        assert_eq!(
+            entry.rate_limit_hits, 1,
+            "the throttle must be counted on the reputation entry"
         );
     }
 }

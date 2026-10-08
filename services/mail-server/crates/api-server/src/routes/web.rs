@@ -322,6 +322,20 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         .route("/web/lists/delete-bulk", post(form_lists_delete_bulk))
         .route("/web/domains", post(form_domain_create))
         .route("/web/domains/:id/verify", post(form_domain_verify))
+        // Capability wave 2: custom tracking domain forms (create / verify /
+        // delete), reusing the JSON route's gated lifecycle for one truth.
+        .route(
+            "/web/domains/:id/tracking-domain",
+            post(form_tracking_domain_create),
+        )
+        .route(
+            "/web/domains/:id/tracking-domain/verify",
+            post(form_tracking_domain_verify),
+        )
+        .route(
+            "/web/domains/:id/tracking-domain/delete",
+            post(form_tracking_domain_delete),
+        )
         .route("/web/templates", post(form_template_create))
         .route("/web/templates/update", post(form_template_update))
         .route("/web/templates/preview", post(form_template_preview))
@@ -366,6 +380,12 @@ pub fn detail_router() -> Router<AppState> {
         // Deferred-feature 3: /contacts/{id}/edit renders the real contact
         // (name/status editor posting to /web/contacts/update).
         .route("/contacts/:id/edit", get(web_contact_edit))
+        // Time-travel debugging: the message timeline page (state as of
+        // `?at=`), linked from the delivery events surface.
+        .route("/messages/:id/timeline", get(web_message_timeline))
+        // Capability wave 2: the custom tracking domain surface from
+        // docs/domains/tracking-domain.md (Domains → [domain] → Tracking).
+        .route("/domains/:id/tracking", get(web_domain_tracking))
     // Deferred-feature 8: the favicon ships as the inline data: URL every
     // root layout embeds (`<link rel="icon">`) — no route is needed for
     // it, and /favicon.ico is already served by the marketing asset
@@ -426,6 +446,24 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         .route(
             "/web/admin/alerts/ack-bulk",
             post(form_admin_alert_ack_bulk),
+        )
+        // The /alerts/rules management surface: CRUD over the evaluated
+        // usage-alert store, PRG + CSRF like every sibling CP form.
+        .route(
+            "/web/admin/alert-rules",
+            post(form_admin_alert_rule_create),
+        )
+        .route(
+            "/web/admin/alert-rules/:id/update",
+            post(form_admin_alert_rule_update),
+        )
+        .route(
+            "/web/admin/alert-rules/:id/toggle",
+            post(form_admin_alert_rule_toggle),
+        )
+        .route(
+            "/web/admin/alert-rules/:id/delete",
+            post(form_admin_alert_rule_delete),
         )
         .route(
             "/web/admin/tenants/:id/suspend",
@@ -6123,7 +6161,15 @@ async fn web_domain_detail(
     )
     .await
     {
-        Ok(Some(list)) => {
+        Ok(Some(mut list)) => {
+            // Capability wave 2: the documented path
+            // "Domains → [your domain] → Tracking" (docs/domains/tracking-domain.md)
+            // is this primary action on the domain detail page. The page
+            // itself renders honestly when no tracking domain is configured.
+            list.primary_action = Some((
+                "Custom tracking domain".to_string(),
+                format!("/domains/{id}/tracking"),
+            ));
             let form_csrf = form_csrf_for_render(&headers, &state.config);
             let html = web_data_page(
                 &format!("/domains/{id}"),
@@ -6146,6 +6192,602 @@ async fn web_domain_detail(
             temporary_storage_failure(&WebActionError::Database(error), "/domains", &state.config)
         }
     }
+}
+
+// ─── Custom tracking domain console surface (capability wave 2) ──────────────
+
+/// The render inputs for the tracking-domain page/panel. Pure data so the
+/// panel is directly testable without a database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrackingDomainPanel {
+    /// The sending domain id (the page path segment; POST targets).
+    pub domain_id: String,
+    /// The sending domain this page is about (`customer.test`).
+    pub domain_name: String,
+    /// The sending domain is verified — a prerequisite per the docs.
+    pub domain_verified: bool,
+    /// Whether the plan grants `custom_tracking_domain` (Pro and above).
+    pub entitled: bool,
+    /// The configured tracking domain for this parent, when one exists.
+    pub configured: Option<TrackingDomainPanelRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrackingDomainPanelRow {
+    pub domain: String,
+    pub status: String,
+    pub status_reason: Option<String>,
+    pub cname_target: String,
+    pub verified_at: Option<String>,
+}
+
+/// Render the honest custom-tracking-domain panel:
+/// * parent not verified → say so (the API refuses with the same rule);
+/// * not entitled → say the capability is Pro and above (no dead form);
+/// * entitled + empty → the ONE documented configure form;
+/// * configured → status + named reason + the exact CNAME record and the
+///   verify/remove actions for the current state.
+pub(crate) fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str) -> String {
+    let escape = ui_foundation::shell::html_escape;
+    let domain_name = escape(&panel.domain_name);
+    let csrf = escape(csrf_token);
+    let card = |inner: String| {
+        format!(
+            "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{inner}</div></section>"
+        )
+    };
+    const BTN: &str = "inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+    const H2: &str = "text-xs font-bold uppercase tracking-widest text-surface-500";
+
+    if !panel.domain_verified {
+        return card(format!(
+            "<h2 class=\"{H2}\">Custom tracking domain</h2><p class=\"mt-2 text-sm text-muted-foreground\">Verify <span class=\"font-mono\">{domain_name}</span> first. A tracking domain must be a subdomain of a verified domain in your workspace, so it can only be configured after this domain passes verification.</p>"
+        ));
+    }
+
+    if !panel.entitled {
+        return card(format!(
+            "<h2 class=\"{H2}\">Custom tracking domain</h2><p class=\"mt-2 text-sm text-muted-foreground\">Custom tracking domains are available on Pro and above. Your current plan does not include this capability, so no setup form is shown here.</p>"
+        ));
+    }
+
+    match &panel.configured {
+        None => card(format!(
+            "<h2 class=\"{H2}\">Custom tracking domain</h2>\
+             <p class=\"mt-2 text-sm text-muted-foreground\">Use your own subdomain (for example <span class=\"font-mono\">email.{domain_name}</span>) for open and click tracking links. It must be a subdomain of <span class=\"font-mono\">{domain_name}</span>, one per verified domain, and must not use a mail or web label such as <span class=\"font-mono\">www</span> or <span class=\"font-mono\">mail</span>.</p>\
+             <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain\" class=\"mt-4 flex flex-col gap-3 sm:flex-row\" data-form-id=\"tracking-domain-create\">\
+               <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
+               <label class=\"sr-only\" for=\"tracking-domain-input\">Tracking domain</label>\
+               <input id=\"tracking-domain-input\" name=\"domain\" required placeholder=\"email.{domain_name}\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">\
+               <button type=\"submit\" class=\"{BTN}\">Use custom tracking domain</button>\
+             </form>\
+             <p class=\"mt-2 text-xs text-muted-foreground\">The CNAME record to publish is shown here immediately after setup, and verification checks it live.</p>",
+            domain_id = escape(&panel.domain_id)
+        )),
+        Some(row) => {
+            let status = escape(&row.status);
+            let reason = row
+                .status_reason
+                .as_deref()
+                .map(|reason| format!("<p class=\"mt-2 text-sm text-muted-foreground\">{}</p>", escape(reason)))
+                .unwrap_or_default();
+            let record = if row.status == "verified" {
+                String::new()
+            } else {
+                format!(
+                    "<div class=\"mt-4 rounded-sm border border-primary/30 bg-primary/5 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS record to publish</p><p class=\"mt-2 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Type · Host · Value</p><p class=\"mt-1 font-mono text-xs break-all select-text text-surface-800\">CNAME · {host} · {value}</p></div>",
+                    host = escape(&row.domain),
+                    value = escape(&row.cname_target),
+                )
+            };
+            let verified_note = match row.verified_at.as_deref() {
+                Some(at) => format!(
+                    "<p class=\"mt-2 text-xs text-muted-foreground\">Verified at {}. Tracked links on this host are served for this workspace.</p>",
+                    escape(at)
+                ),
+                None => String::new(),
+            };
+            card(format!(
+                "<h2 class=\"{H2}\">Custom tracking domain</h2>\
+                 <div class=\"mt-2 flex flex-wrap items-center gap-3\"><span class=\"font-mono text-sm\">{domain}</span><span class=\"inline-flex items-center rounded-full border border-surface-200 px-2 py-0.5 text-[11px] font-bold uppercase tracking-widest text-surface-500\">{status}</span></div>\
+                 {reason}{verified_note}{record}\
+                 <div class=\"mt-4 flex flex-wrap gap-3\">\
+                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/verify\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"{BTN}\">Verify DNS now</button></form>\
+                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Remove</button></form>\
+                 </div>",
+                domain = escape(&row.domain),
+                domain_id = escape(&panel.domain_id),
+            ))
+        }
+    }
+}
+
+/// GET /domains/{id}/tracking — the documented console surface for custom
+/// tracking domains. Honest in every state: no row is an empty state with
+/// the configure form, a failed check names its reason, and a capability the
+/// plan lacks shows why instead of a dead form.
+async fn web_domain_tracking(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    let back = format!("/domains/{id}/tracking");
+    if Uuid::parse_str(&id).is_err() {
+        return state_ssr_fallback(&state, "web", &uri, &headers).await;
+    }
+    let flash = flash_from_headers(&headers, &state.config);
+
+    let domain: Result<Option<(String, bool)>, sqlx::Error> = sqlx::query_as(
+        "SELECT name, (verified = true OR status = 'verified') FROM domains \
+         WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&id)
+    .bind(&user.tenant_id)
+    .fetch_optional(&state.db)
+    .await;
+    let (domain_name, domain_verified) = match domain {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return redirect_error(
+                "That domain could not be found in this workspace.",
+                "/domains",
+                &state.config,
+            )
+        }
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/domains",
+                &state.config,
+            )
+        }
+    };
+
+    let row: Result<
+        Option<(
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        "SELECT domain, status, status_reason, cname_target, verified_at \
+         FROM tracking_domains WHERE tenant_id = $1 AND parent_domain = $2",
+    )
+    .bind(&user.tenant_id)
+    .bind(&domain_name)
+    .fetch_optional(&state.db)
+    .await;
+    let configured = match row {
+        Ok(Some((domain, status, status_reason, cname_target, verified_at))) => {
+            Some(TrackingDomainPanelRow {
+                domain,
+                status,
+                status_reason,
+                cname_target,
+                verified_at: verified_at.map(|at| at.to_rfc3339()),
+            })
+        }
+        Ok(None) => None,
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                &back,
+                &state.config,
+            )
+        }
+    };
+
+    // Presentation only: the POST path re-runs the authoritative gate.
+    let entitled = crate::entitlements::snapshot(&state, &user.tenant_id)
+        .await
+        .map(|snapshot| snapshot.has_feature(billing_entitlements::FeatureKey::CustomTrackingDomain))
+        .unwrap_or(false);
+
+    let panel = TrackingDomainPanel {
+        domain_id: id.clone(),
+        domain_name,
+        domain_verified,
+        entitled,
+        configured,
+    };
+    let form_csrf = form_csrf_for_render(&headers, &state.config);
+    let mut inner = stub_flash_banner(&flash);
+    inner.push_str(&tracking_domain_panel_html(&panel, &form_csrf.token));
+    let layout = ui_foundation::leptos_views::web_dashboard_layout_with_csrf(
+        &inner,
+        &back,
+        &form_csrf.token,
+    );
+    let title = ui_foundation::axum_router::route_document_title("web", &back);
+    let html = ui_foundation::leptos_views::web_root_layout(&layout, &title);
+    html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
+}
+
+/// One PostgreSQL row for the parent + its tracking configuration.
+async fn tn_parent_row(
+    state: &AppState,
+    tenant_id: &str,
+    domain_id: &str,
+) -> Result<Option<(String, bool)>, WebActionError> {
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "SELECT name, (verified = true OR status = 'verified') FROM domains \
+         WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(domain_id)
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(WebActionError::Database)?;
+    Ok(row)
+}
+
+async fn tn_tracking_row_id(
+    state: &AppState,
+    tenant_id: &str,
+    parent: &str,
+) -> Result<Option<String>, WebActionError> {
+    sqlx::query_scalar(
+        "SELECT id::text FROM tracking_domains WHERE tenant_id = $1 AND parent_domain = $2",
+    )
+    .bind(tenant_id)
+    .bind(parent)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(WebActionError::Database)
+}
+
+/// POST /web/domains/{id}/tracking-domain — the console create form.
+async fn form_tracking_domain_create(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/domains/{id}/tracking");
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let Some((_name, verified)) = (match tn_parent_row(&state, &user.tenant_id, &id).await {
+        Ok(row) => row,
+        Err(error) => return temporary_storage_failure(&error, &back, &state.config),
+    }) else {
+        return redirect_error("That domain could not be found in this workspace.", "/domains", &state.config);
+    };
+    if !verified {
+        return redirect_error(
+            "Verify the domain itself before configuring a tracking subdomain for it.",
+            &back,
+            &state.config,
+        );
+    }
+    let request = crate::routes::tracking_domains::CreateTrackingDomainRequest {
+        domain: field_truncated(&form, "domain", 253),
+    };
+    match crate::routes::tracking_domains::create_tracking_domain_gated(
+        &state,
+        &user.tenant_id,
+        &request,
+    )
+    .await
+    {
+        Ok((_, axum::Json(created))) => redirect_success(
+            &format!(
+                "Tracking domain {} added — publish the CNAME record, then verify.",
+                created.domain
+            ),
+            &back,
+            &state.config,
+        ),
+        Err(crate::error::ApiError::Validation(messages)) => redirect_error(
+            &messages.join("; "),
+            &back,
+            &state.config,
+        ),
+        Err(error) => redirect_error(&format!("Could not add the tracking domain: {error}"), &back, &state.config),
+    }
+}
+
+/// POST /web/domains/{id}/tracking-domain/verify — live DNS check.
+async fn form_tracking_domain_verify(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/domains/{id}/tracking");
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let Some((name, _verified)) = (match tn_parent_row(&state, &user.tenant_id, &id).await {
+        Ok(row) => row,
+        Err(error) => return temporary_storage_failure(&error, &back, &state.config),
+    }) else {
+        return redirect_error("That domain could not be found in this workspace.", "/domains", &state.config);
+    };
+    let row_id = match tn_tracking_row_id(&state, &user.tenant_id, &name).await {
+        Ok(Some(row_id)) => row_id,
+        Ok(None) => {
+            return redirect_error(
+                "No tracking domain is configured for this domain yet.",
+                &back,
+                &state.config,
+            )
+        }
+        Err(error) => return temporary_storage_failure(&error, &back, &state.config),
+    };
+    match crate::routes::tracking_domains::verify_tracking_domain_gated(
+        &state,
+        &user.tenant_id,
+        &row_id,
+    )
+    .await
+    {
+        Ok(axum::Json(verified)) => {
+            let flash = match (verified.status.as_str(), verified.status_reason.as_deref()) {
+                ("verified", _) => format!(
+                    "{} is verified — tracked links on this host now serve this workspace.",
+                    verified.domain
+                ),
+                (_, Some(reason)) => format!("Verification failed: {reason}"),
+                _ => format!("Verification result: {}", verified.status),
+            };
+            redirect_success(&flash, &back, &state.config)
+        }
+        Err(error) => redirect_error(&format!("Verification could not run: {error}"), &back, &state.config),
+    }
+}
+
+/// POST /web/domains/{id}/tracking-domain/delete — remove (never gated:
+/// cleanup must always work, even after a downgrade).
+async fn form_tracking_domain_delete(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/domains/{id}/tracking");
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let Some((name, _verified)) = (match tn_parent_row(&state, &user.tenant_id, &id).await {
+        Ok(row) => row,
+        Err(error) => return temporary_storage_failure(&error, &back, &state.config),
+    }) else {
+        return redirect_error("That domain could not be found in this workspace.", "/domains", &state.config);
+    };
+    let row_id = match tn_tracking_row_id(&state, &user.tenant_id, &name).await {
+        Ok(Some(row_id)) => row_id,
+        Ok(None) => {
+            return redirect_error(
+                "No tracking domain is configured for this domain.",
+                &back,
+                &state.config,
+            )
+        }
+        Err(error) => return temporary_storage_failure(&error, &back, &state.config),
+    };
+    match crate::routes::tracking_domains::delete_tracking_domain_for_tenant(
+        &state,
+        &user.tenant_id,
+        &row_id,
+    )
+    .await
+    {
+        Ok(()) => redirect_success(
+            &format!("Tracking domain for {name} removed — it stops serving immediately."),
+            &back,
+            &state.config,
+        ),
+        Err(error) => redirect_error(&format!("Could not remove the tracking domain: {error}"), &back, &state.config),
+    }
+}
+
+/// The full document body for the tracking page (flash banner + panel).
+/// GET /messages/{id}/timeline — the time-travel debugging console page.
+///
+/// Renders the SAME reconstruction contract as the JSON replay API
+/// (`crate::routes::message_timeline`): the message's state AS OF `?at=`
+/// (default: now) from the append-only sources, with the honest
+/// insufficient-history state when the sources cannot prove the state.
+/// Anonymous browser GETs redirect to login like every auth-required UI
+/// route; a foreign-tenant id renders the honest not-found, and the
+/// entitlement gate refuses non-entitled plans with the named reason.
+async fn web_message_timeline(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<crate::routes::message_timeline::TimelineQuery>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    let Ok(message_id) = Uuid::parse_str(&id) else {
+        return state_ssr_fallback(&state, "web", &uri, &headers).await;
+    };
+
+    // Tenant-scoped existence: another workspace's id is the honest
+    // not-found, never a confirmation that it exists elsewhere.
+    match crate::routes::message_timeline::load_message(&state, message_id).await {
+        Ok(message) if message.tenant_id == user.tenant_id.as_str() => {}
+        Ok(_) => {
+            return redirect_error(
+                "That message could not be found in this workspace.",
+                "/events",
+                &state.config,
+            )
+        }
+        Err(crate::error::ApiError::NotFound(_)) => {
+            return redirect_error(
+                "That message could not be found in this workspace.",
+                "/events",
+                &state.config,
+            )
+        }
+        Err(error) => {
+            tracing::error!(message_id = %message_id, error = %error, "message timeline load failed");
+            return redirect_error(
+                "The message timeline is temporarily unavailable. Please retry.",
+                "/events",
+                &state.config,
+            );
+        }
+    }
+
+    // The entitlement gate (same transitional fixture seam as the API).
+    if let Err(error) = crate::routes::capability_gate::require_feature_with_fixture(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::TimeTravelDebugging,
+    )
+    .await
+    {
+        let message = match error {
+            crate::error::ApiError::Forbidden(message) => format!(
+                "Time-travel debugging is not available on this plan: {message}. \
+                 It ships with Growth and above."
+            ),
+            _ => "The message timeline is temporarily unavailable. Please retry.".to_string(),
+        };
+        return redirect_error(&message, "/events", &state.config);
+    }
+
+    let at = match params.at.as_deref() {
+        None => Utc::now(),
+        Some(raw) => match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(parsed) => parsed.with_timezone(&Utc),
+            Err(_) => {
+                return redirect_error(
+                    "The `at` timestamp must be RFC 3339, e.g. 2026-10-07T12:00:00Z.",
+                    &format!("/messages/{id}/timeline"),
+                    &state.config,
+                )
+            }
+        },
+    };
+
+    let timeline = match crate::routes::message_timeline::reconstruct_timeline(
+        &state, message_id, at,
+    )
+    .await
+    {
+        Ok(timeline) => timeline,
+        Err(error) => {
+            tracing::error!(message_id = %message_id, error = %error, "timeline reconstruction failed");
+            return redirect_error(
+                "The message timeline is temporarily unavailable. Please retry.",
+                "/events",
+                &state.config,
+            );
+        }
+    };
+
+    let list = message_timeline_page_data(&id, &timeline);
+    let flash = flash_from_headers(&headers, &state.config);
+    let form_csrf = form_csrf_for_render(&headers, &state.config);
+    let html = web_data_page(
+        &format!("/messages/{id}/timeline"),
+        &list,
+        "entry",
+        &flash,
+        &form_csrf.token,
+    );
+    html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
+}
+
+/// The console rendering of one reconstruction: state + completeness KPIs,
+/// the transition table (shared `data_list_page` primitives), and the
+/// honest empty state when no entry exists at the timestamp.
+fn message_timeline_page_data(
+    id: &str,
+    timeline: &crate::routes::message_timeline::MessageTimelineResponse,
+) -> ui_foundation::view_data::ListPageData {
+    use ui_foundation::view_data::{DataCell, DataRowData, KpiCardData, ListPageData, TableData};
+
+    let mut data = ListPageData {
+        title: "Message timeline".into(),
+        description: format!(
+            "State as of {}: {}. {}",
+            timeline.at, timeline.state.status, timeline.state.description
+        ),
+        kpis: vec![
+            KpiCardData::new("State", &timeline.state.status),
+            KpiCardData::new("As of", &timeline.at),
+            KpiCardData::new(
+                "History",
+                if timeline.history_complete {
+                    "complete"
+                } else {
+                    "insufficient"
+                },
+            ),
+        ],
+        empty_title: "No state transitions at this timestamp".into(),
+        empty_description: if timeline.history_complete {
+            "No timeline entry exists at or before this timestamp — the message did not exist yet."
+                .into()
+        } else {
+            timeline
+                .insufficient_history
+                .as_ref()
+                .map(|gap| gap.reason.clone())
+                .unwrap_or_else(|| "The sources cannot prove the state at this timestamp.".into())
+        },
+        primary_action: Some(("Back to events".into(), "/events".into())),
+        base_path: format!("/messages/{id}/timeline"),
+        per_page: timeline.timeline.len().max(1),
+        total_count: timeline.timeline.len() as i64,
+        total_pages: 1,
+        page: 1,
+        ..ListPageData::default()
+    };
+    data.table = Some(TableData {
+        columns: vec![
+            "When".into(),
+            "Source".into(),
+            "Event".into(),
+            "Status".into(),
+            "Detail".into(),
+        ],
+        rows: timeline
+            .timeline
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| DataRowData {
+                id: format!("{index}"),
+                cells: vec![
+                    DataCell::time(entry.at.clone(), entry.at.clone()),
+                    DataCell::mono(entry.source),
+                    DataCell::mono(entry.kind.clone()),
+                    entry
+                        .status
+                        .as_deref()
+                        .map(DataCell::status)
+                        .unwrap_or_else(|| DataCell::text("—")),
+                    DataCell::text(entry.detail.clone().unwrap_or_default()),
+                ],
+            })
+            .collect(),
+    });
+    data
 }
 
 /// POST /web/domains/{id}/verify — runs the SAME locked verification path
@@ -8435,6 +9077,384 @@ async fn form_admin_alert_ack_bulk(
     }
 }
 
+// ─── CP alert-rule management (the /alerts/rules surface) ─────────
+//
+// These forms mutate the EXISTING evaluated store (`usage_alert_configs`,
+// migrations 024 + 246) — the same rows the billing-service maintenance
+// sweep reads — so a rule created here fires into `system_alerts` and shows
+// up on /alerts. Validation is shared with the JSON admin API
+// (`routes::admin::alert_rules`) so the two surfaces cannot drift.
+
+/// One shared "load the posted fields back into the field map" step for the
+/// create/edit forms, so a validation refusal renders the values the
+/// operator typed instead of an empty form.
+fn alert_rule_form_fields(form: &HashMap<String, String>, form_id: &str) -> FormFieldMap {
+    let mut fields = FormFieldMap::new(form_id);
+    fields.set("tenant", &field(form, "tenant"));
+    fields.set("name", &field(form, "name"));
+    fields.set("metric", &field(form, "metric"));
+    fields.set("channel", &field(form, "channel"));
+    fields.set("severity", &field(form, "severity"));
+    fields.set("threshold", &field(form, "threshold"));
+    fields.set("enabled", if field(form, "enabled") == "true" { "true" } else { "false" });
+    fields
+}
+
+/// POST /web/admin/alert-rules — create a rule on the evaluated store.
+async fn form_admin_alert_rule_create(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/alerts/rules", &state.config);
+    }
+    use crate::routes::admin::alert_rules as rules;
+
+    let tenant = field(&form, "tenant").trim().to_string();
+    let metric = field(&form, "metric").trim().to_string();
+    let channel = field(&form, "channel").trim().to_string();
+    let severity = field(&form, "severity").trim().to_string();
+    let threshold_raw = field(&form, "threshold");
+    let enabled = field(&form, "enabled") == "true";
+    let mut fields = alert_rule_form_fields(&form, "alert-rule-create");
+
+    let name = match rules::validate_name(&field(&form, "name")) {
+        Ok(name) => name,
+        Err(message) => {
+            fields.error("name", &message);
+            return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+        }
+    };
+    let threshold = match threshold_raw.trim().parse::<i32>() {
+        Ok(threshold) => threshold,
+        Err(_) => {
+            let message = "The threshold must be a whole number between 1 and 100.";
+            fields.error("threshold", message);
+            return redirect_with_field_map(&fields, message, "/alerts/rules", &state.config);
+        }
+    };
+    if let Err(message) = rules::validate_metric(&metric) {
+        fields.error("metric", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+    if let Err(message) = rules::validate_threshold(threshold) {
+        fields.error("threshold", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+    if let Err(message) = rules::validate_channel(&channel) {
+        fields.error("channel", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+    if let Err(message) = rules::validate_severity(&severity) {
+        fields.error("severity", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+    if tenant.is_empty() {
+        fields.error("tenant", "Select a tenant.");
+        return redirect_with_field_map(
+            &fields,
+            "Select a tenant for the rule.",
+            "/alerts/rules",
+            &state.config,
+        );
+    }
+    // A rule must belong to a real tenant: the sweep resolves usage per
+    // tenant, so a typo'd id would silently never fire.
+    match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)")
+        .bind(&tenant)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            fields.error("tenant", "Unknown tenant — pick one from the list.");
+            return redirect_with_field_map(&fields, "Unknown tenant.", "/alerts/rules", &state.config);
+        }
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/alerts/rules",
+                &state.config,
+            );
+        }
+    }
+
+    let inserted = sqlx::query_scalar::<_, String>(
+        "INSERT INTO usage_alert_configs
+             (tenant_id, name, metric_type, threshold_percent,
+              notification_channel, severity, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id::text",
+    )
+    .bind(&tenant)
+    .bind(&name)
+    .bind(&metric)
+    .bind(threshold)
+    .bind(&channel)
+    .bind(&severity)
+    .bind(enabled)
+    .fetch_one(&state.db)
+    .await;
+    match inserted {
+        Ok(rule_id) => {
+            rules::log_rule_audit(
+                &state,
+                &user,
+                "control_plane.alert_rule.created",
+                &rule_id,
+                json!({
+                    "tenantId": tenant,
+                    "name": name,
+                    "metricType": metric,
+                    "thresholdPercent": threshold,
+                    "notificationChannel": channel,
+                    "severity": severity,
+                    "enabled": enabled,
+                    "surface": "control_plane_page",
+                }),
+            )
+            .await;
+            redirect_success(
+                &format!("Alert rule \"{name}\" created."),
+                "/alerts/rules",
+                &state.config,
+            )
+        }
+        Err(error) if rules::is_unique_violation(&error) => redirect_error(
+            "A rule for that tenant, metric and threshold already exists.",
+            "/alerts/rules",
+            &state.config,
+        ),
+        Err(error) => {
+            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/alert-rules/{id}/update — edit the mutable fields of a
+/// rule. Tenant and metric are identity and stay fixed (the unique key
+/// `(tenant_id, metric_type, threshold_percent)` is the evaluator's).
+async fn form_admin_alert_rule_update(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/alerts/rules", &state.config);
+    }
+    use crate::routes::admin::alert_rules as rules;
+    let Ok(rule_id) = Uuid::parse_str(&id) else {
+        return redirect_error("Unknown alert rule.", "/alerts/rules", &state.config);
+    };
+
+    let channel = field(&form, "channel").trim().to_string();
+    let severity = field(&form, "severity").trim().to_string();
+    let threshold_raw = field(&form, "threshold");
+    let enabled = field(&form, "enabled") == "true";
+    let mut fields = alert_rule_form_fields(&form, "alert-rule-edit");
+
+    let name = match rules::validate_name(&field(&form, "name")) {
+        Ok(name) => name,
+        Err(message) => {
+            fields.error("name", &message);
+            return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+        }
+    };
+    let threshold = match threshold_raw.trim().parse::<i32>() {
+        Ok(threshold) => threshold,
+        Err(_) => {
+            let message = "The threshold must be a whole number between 1 and 100.";
+            fields.error("threshold", message);
+            return redirect_with_field_map(&fields, message, "/alerts/rules", &state.config);
+        }
+    };
+    if let Err(message) = rules::validate_threshold(threshold) {
+        fields.error("threshold", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+    if let Err(message) = rules::validate_channel(&channel) {
+        fields.error("channel", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+    if let Err(message) = rules::validate_severity(&severity) {
+        fields.error("severity", &message);
+        return redirect_with_field_map(&fields, &message, "/alerts/rules", &state.config);
+    }
+
+    let updated = sqlx::query(
+        "UPDATE usage_alert_configs
+         SET name = $2, threshold_percent = $3, notification_channel = $4,
+             severity = $5, enabled = $6, updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(rule_id)
+    .bind(&name)
+    .bind(threshold)
+    .bind(&channel)
+    .bind(&severity)
+    .bind(enabled)
+    .execute(&state.db)
+    .await;
+    match updated {
+        Ok(result) if result.rows_affected() == 1 => {
+            rules::log_rule_audit(
+                &state,
+                &user,
+                "control_plane.alert_rule.updated",
+                &id,
+                json!({
+                    "name": name,
+                    "thresholdPercent": threshold,
+                    "notificationChannel": channel,
+                    "severity": severity,
+                    "enabled": enabled,
+                    "surface": "control_plane_page",
+                }),
+            )
+            .await;
+            redirect_success("Alert rule updated.", "/alerts/rules", &state.config)
+        }
+        Ok(_) => redirect_error("That alert rule no longer exists.", "/alerts/rules", &state.config),
+        Err(error) if rules::is_unique_violation(&error) => redirect_error(
+            "Another rule for this tenant and metric already uses that threshold.",
+            "/alerts/rules",
+            &state.config,
+        ),
+        Err(error) => {
+            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/alert-rules/{id}/toggle — enable/disable a rule. The
+/// posted value is explicit (`true`/`false`), so the action is idempotent and
+/// never a blind flip.
+async fn form_admin_alert_rule_toggle(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/alerts/rules", &state.config);
+    }
+    use crate::routes::admin::alert_rules as rules;
+    let Ok(rule_id) = Uuid::parse_str(&id) else {
+        return redirect_error("Unknown alert rule.", "/alerts/rules", &state.config);
+    };
+    let enabled = match field(&form, "enabled").as_str() {
+        "true" => true,
+        "false" => false,
+        _ => {
+            return redirect_error(
+                "Invalid enable or disable request.",
+                "/alerts/rules",
+                &state.config,
+            );
+        }
+    };
+
+    let updated: Result<Option<(String, String)>, sqlx::Error> = sqlx::query_as(
+        "UPDATE usage_alert_configs
+         SET enabled = $2, updated_at = NOW()
+         WHERE id = $1
+         RETURNING tenant_id, COALESCE(name, '')",
+    )
+    .bind(rule_id)
+    .bind(enabled)
+    .fetch_optional(&state.db)
+    .await;
+    match updated {
+        Ok(Some((tenant_id, name))) => {
+            rules::log_rule_audit(
+                &state,
+                &user,
+                if enabled {
+                    "control_plane.alert_rule.enabled"
+                } else {
+                    "control_plane.alert_rule.disabled"
+                },
+                &id,
+                json!({
+                    "tenantId": tenant_id,
+                    "name": name,
+                    "enabled": enabled,
+                    "surface": "control_plane_page",
+                }),
+            )
+            .await;
+            redirect_success(
+                if enabled {
+                    "Alert rule enabled."
+                } else {
+                    "Alert rule disabled."
+                },
+                "/alerts/rules",
+                &state.config,
+            )
+        }
+        Ok(None) => redirect_error("That alert rule no longer exists.", "/alerts/rules", &state.config),
+        Err(error) => {
+            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/alert-rules/{id}/delete — remove a rule from the
+/// evaluated store. The row is the only copy; deletion stops future firing
+/// immediately (the sweep reads the table live).
+async fn form_admin_alert_rule_delete(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/alerts/rules", &state.config);
+    }
+    use crate::routes::admin::alert_rules as rules;
+    let Ok(rule_id) = Uuid::parse_str(&id) else {
+        return redirect_error("Unknown alert rule.", "/alerts/rules", &state.config);
+    };
+
+    let deleted: Result<Option<(String, String)>, sqlx::Error> = sqlx::query_as(
+        "DELETE FROM usage_alert_configs
+         WHERE id = $1
+         RETURNING tenant_id, COALESCE(name, '')",
+    )
+    .bind(rule_id)
+    .fetch_optional(&state.db)
+    .await;
+    match deleted {
+        Ok(Some((tenant_id, name))) => {
+            rules::log_rule_audit(
+                &state,
+                &user,
+                "control_plane.alert_rule.deleted",
+                &id,
+                json!({ "tenantId": tenant_id, "name": name, "surface": "control_plane_page" }),
+            )
+            .await;
+            let message = if name.trim().is_empty() {
+                "Alert rule deleted.".to_string()
+            } else {
+                format!("Alert rule \"{name}\" deleted.")
+            };
+            redirect_success(&message, "/alerts/rules", &state.config)
+        }
+        Ok(None) => redirect_error("That alert rule no longer exists.", "/alerts/rules", &state.config),
+        Err(error) => {
+            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
+        }
+    }
+}
+
 // ─── CP tenant lifecycle (item I) ─────────────────────────────────
 
 /// POST /web/admin/tenants/{id}/suspend — signs a `suspend-tenant`
@@ -10661,6 +11681,22 @@ mod tests {
             let reject_from = format!("reject-{}@corp.example", &suffix[..8]);
             mk(&approve_id, &approve_from).await;
             mk(&reject_id, &reject_from).await;
+            // F4: the approval path runs the shared send-admission consent
+            // gate, so the reviewed reply's recipient needs an active
+            // marketing consent record (the rejection path does not).
+            sqlx::query(
+                "INSERT INTO consent_records \
+                     (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source) \
+                 VALUES ($1, 'system', $2, $3, 'marketing', true, NOW(), 'dogfood-test') \
+                 ON CONFLICT (tenant_id, subscriber_id, consent_type) DO UPDATE SET \
+                     granted = true, granted_at = NOW(), revoked_at = NULL, email = EXCLUDED.email",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(format!("sub-{}", &suffix[..8]))
+            .bind(&approve_from)
+            .execute(&state.db)
+            .await
+            .expect("grant marketing consent");
 
             let user = session_user("system");
             let app = web_handlers(state.clone(), user);
@@ -10798,6 +11834,76 @@ mod tests {
 
             let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = ANY($1)")
                 .bind(vec![plain_id, fr_id])
+                .execute(&state.db)
+                .await;
+        }
+
+        /// F-6 (live mailbot dogfood 2026-10-06): the review page rendered the
+        /// raw tenant id as "Workspace <id>" — an internal identifier in
+        /// operator copy. The loader resolves the workspace NAME (slug as the
+        /// fallback) into `tenant_label`, the rendered page shows the label,
+        /// and the raw id never reaches the HTML.
+        #[tokio::test]
+        async fn ai_drafts_label_shows_the_workspace_name_never_the_raw_id() {
+            let Some(state) = web_test_state("ai_drafts_tenant_label").await else {
+                return;
+            };
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let tenant_id = format!("ten{}", &suffix[..23]);
+            let draft_id = format!("inb_{}", &suffix[..22]);
+            let from_email = format!("label-probe-{}@corp.example", &suffix[..8]);
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+                 VALUES ($1, 'Northwind SaaS', $2, 'free', 'active', NOW(), NOW())",
+            )
+            .bind(&tenant_id)
+            .bind(format!("northwind-{}", &suffix[..8]))
+            .execute(&state.db)
+            .await
+            .expect("seed tenant");
+            sqlx::query(
+                "INSERT INTO inbound_messages \
+                     (id, tenant_id, from_email, subject, ai_response, pending_approval, \
+                      is_verp_reply, received_at) \
+                 VALUES ($1, $2, $3, 'Re: invoice', 'the grounded reply', true, false, NOW())",
+            )
+            .bind(&draft_id)
+            .bind(&tenant_id)
+            .bind(&from_email)
+            .execute(&state.db)
+            .await
+            .expect("seed draft");
+
+            let data = crate::routes::web::data::load_ai_drafts_page(&state).await;
+            let draft = data
+                .drafts
+                .iter()
+                .find(|d| d.id == draft_id)
+                .expect("the seeded draft is listed");
+            assert_eq!(
+                draft.tenant_id, tenant_id,
+                "the raw id stays on the record (audit/routing)"
+            );
+            assert_eq!(
+                draft.tenant_label, "Northwind SaaS",
+                "operators see the workspace name"
+            );
+            let page = ui_foundation::leptos_views::web_ai_drafts_page(Some(&data));
+            assert!(
+                page.contains("Northwind SaaS"),
+                "the rendered page carries the workspace label"
+            );
+            assert!(
+                !page.contains(&tenant_id),
+                "the raw tenant id must never appear in operator copy"
+            );
+
+            let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = $1")
+                .bind(&draft_id)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(&tenant_id)
                 .execute(&state.db)
                 .await;
         }
@@ -26400,5 +27506,131 @@ mod deferred_feature_tests {
         );
         assert!(expected.starts_with("<svg"), "the asset is an inline SVG");
         assert!(expected.contains("viewBox=\"0 0 32 32\""));
+    }
+}
+
+/// Capability wave 2: the custom tracking domain panel renders honestly in
+/// every state (pure, no database).
+#[cfg(test)]
+mod tracking_domain_panel_tests {
+    use super::*;
+
+    fn panel(
+        verified: bool,
+        entitled: bool,
+        configured: Option<TrackingDomainPanelRow>,
+    ) -> TrackingDomainPanel {
+        TrackingDomainPanel {
+            domain_id: "11111111-1111-1111-1111-111111111111".into(),
+            domain_name: "customer.test".into(),
+            domain_verified: verified,
+            entitled,
+            configured,
+        }
+    }
+
+    /// An unverified parent names the prerequisite instead of offering a
+    /// form the API would refuse.
+    #[test]
+    fn unverified_parent_renders_the_prerequisite_not_a_form() {
+        let html = tracking_domain_panel_html(&panel(false, true, None), "csrf-token");
+        assert!(html.contains("Verify"), "{html}");
+        assert!(!html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+    }
+
+    /// A plan without the capability gets the honest reason and no dead form.
+    #[test]
+    fn unentitled_plan_renders_no_setup_form() {
+        let html = tracking_domain_panel_html(&panel(true, false, None), "csrf-token");
+        assert!(html.contains("Pro and above"), "{html}");
+        assert!(!html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+    }
+
+    /// The empty entitled state carries the one documented configure form
+    /// with a CSRF token and the honest constraints.
+    #[test]
+    fn empty_state_renders_the_configure_form() {
+        let html = tracking_domain_panel_html(&panel(true, true, None), "csrf-token");
+        assert!(html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+        assert!(html.contains("name=\"_csrf\" value=\"csrf-token\""), "{html}");
+        assert!(html.contains("one per verified domain"), "{html}");
+    }
+
+    /// A pending row renders the exact CNAME record plus verify/remove
+    /// actions; a failed row renders its NAMED reason.
+    #[test]
+    fn configured_row_renders_record_status_and_named_reason() {
+        let pending = panel(
+            true,
+            true,
+            Some(TrackingDomainPanelRow {
+                domain: "email.customer.test".into(),
+                status: "pending".into(),
+                status_reason: Some("publish the CNAME record, then verify".into()),
+                cname_target: "track.apexmail.ee".into(),
+                verified_at: None,
+            }),
+        );
+        let html = tracking_domain_panel_html(&pending, "csrf-token");
+        assert!(html.contains("email.customer.test"), "{html}");
+        assert!(html.contains("track.apexmail.ee"), "{html}");
+        assert!(html.contains("publish the CNAME record"), "{html}");
+        assert!(html.contains("/tracking-domain/verify"), "{html}");
+        assert!(html.contains("/tracking-domain/delete"), "{html}");
+        assert!(!html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+
+        let failed = panel(
+            true,
+            true,
+            Some(TrackingDomainPanelRow {
+                domain: "email.customer.test".into(),
+                status: "failed".into(),
+                status_reason: Some("`email.customer.test` resolves to [203.0.113.9]".into()),
+                cname_target: "track.apexmail.ee".into(),
+                verified_at: None,
+            }),
+        );
+        let html = tracking_domain_panel_html(&failed, "csrf-token");
+        assert!(html.contains("resolves to [203.0.113.9]"), "{html}");
+    }
+
+    /// A verified row says so, records the verification time, and still
+    /// offers removal.
+    #[test]
+    fn verified_row_is_honest_about_serving() {
+        let verified = panel(
+            true,
+            true,
+            Some(TrackingDomainPanelRow {
+                domain: "email.customer.test".into(),
+                status: "verified".into(),
+                status_reason: None,
+                cname_target: "track.apexmail.ee".into(),
+                verified_at: Some("2026-10-07T10:00:00+00:00".into()),
+            }),
+        );
+        let html = tracking_domain_panel_html(&verified, "csrf-token");
+        assert!(html.contains("Verified at 2026-10-07T10:00:00+00:00"), "{html}");
+        assert!(html.contains("served for this workspace"), "{html}");
+        assert!(html.contains("/tracking-domain/delete"), "{html}");
+    }
+
+    /// Hostile strings in stored values are HTML-escaped.
+    #[test]
+    fn stored_values_are_escaped() {
+        let hostile = panel(
+            true,
+            true,
+            Some(TrackingDomainPanelRow {
+                domain: "email.customer.test".into(),
+                status: "failed".into(),
+                status_reason: Some("<script>alert(1)</script>".into()),
+                cname_target: "track.apexmail.ee".into(),
+                verified_at: None,
+            }),
+        );
+        let html = tracking_domain_panel_html(&hostile, "csrf-token");
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 }

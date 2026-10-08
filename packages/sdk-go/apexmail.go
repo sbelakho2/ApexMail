@@ -237,21 +237,38 @@ func validateSendEmailRequest(req *SendEmailRequest) error {
 			return fmt.Errorf("apexmail: invalid bcc address")
 		}
 	}
-	if req.Subject == "" {
-		return fmt.Errorf("apexmail: subject is required")
+	if req.Subject == "" && strings.TrimSpace(req.TemplateID) == "" {
+		return fmt.Errorf("apexmail: subject is required (or provide template_id)")
 	}
-	// GO-6: the server's SendMessageRequest (deny_unknown_fields) carries
-	// template_id/template_data ONLY so validation can reject them with an
-	// explicit 422 ("field 'template_id' is not supported by this endpoint").
-	// A body containing either field is a guaranteed 422, so refuse it
-	// client-side instead of serializing a payload no route accepts.
-	if req.TemplateID != "" || req.TemplateData != nil {
-		return fmt.Errorf("apexmail: template_id/template_data are not supported by the send API (the server rejects them with 422); render the template with Templates.Render and send html/text")
+	// Template sends are supported by the send API: template_id names a
+	// tenant-scoped stored template that supplies the subject/html/text,
+	// rendered with template_data. A template-only request is valid.
+	hasTemplate := strings.TrimSpace(req.TemplateID) != ""
+	if req.HTML == "" && req.Text == "" && !hasTemplate {
+		return fmt.Errorf("apexmail: html or text is required (or provide template_id)")
 	}
-	if req.HTML == "" && req.Text == "" {
-		return fmt.Errorf("apexmail: html or text is required")
+	if req.TemplateData != nil && !hasTemplate {
+		return fmt.Errorf("apexmail: template_data requires template_id")
+	}
+	if req.TemplateData != nil && !isJSONObject(req.TemplateData) {
+		return fmt.Errorf("apexmail: template_data must be a JSON object of template variables")
 	}
 	return nil
+}
+
+// isJSONObject reports whether a template_data value serializes to a JSON
+// object — the server rejects scalar/array template_data, so the SDK refuses
+// it before putting it on the wire.
+func isJSONObject(value interface{}) bool {
+	if value == nil {
+		return false
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	trimmed := bytes.TrimSpace(encoded)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 func isValidEmailAddress(value string) bool {
@@ -1000,22 +1017,22 @@ type EmailsAPI struct{ client *Client }
 // string list, and attachments/priority/headers/metadata/scheduled_at
 // under their documented snake_case field names.
 //
-// TemplateID and TemplateData are retained as inputs for source
-// compatibility only: the send API does not support template sends (the
-// server answers 422), so setting either makes Send/Batch fail client-side
-// with an error naming the contract. Render the template first
-// (Templates.Render) and send html/text.
+// TemplateID and TemplateData drive a template send: the tenant-scoped
+// stored template supplies the subject/html/text, rendered with
+// TemplateData, and an explicit Subject/HTML/Text overrides the rendered
+// field (docs/api/endpoints/messages.md). A template-only request may omit
+// Subject, HTML and Text.
 type SendEmailRequest struct {
 	From         EmailAddress      `json:"from"`
 	To           []EmailAddress    `json:"to"`
 	CC           []EmailAddress    `json:"cc,omitempty"`
 	BCC          []EmailAddress    `json:"bcc,omitempty"`
 	ReplyTo      *EmailAddress     `json:"reply_to,omitempty"` // wire: display-name aware
-	Subject      string            `json:"subject"`
+	Subject      string            `json:"subject,omitempty"`
 	HTML         string            `json:"html,omitempty"`
 	Text         string            `json:"text,omitempty"`
-	TemplateID   string            `json:"template_id,omitempty"`   // unsupported: rejected client-side (GO-6)
-	TemplateData interface{}       `json:"template_data,omitempty"` // unsupported: rejected client-side (GO-6)
+	TemplateID   string            `json:"template_id,omitempty"`   // wire: template send (snake_case)
+	TemplateData interface{}       `json:"template_data,omitempty"` // wire: template variables (JSON object)
 	Attachments  []Attachment      `json:"attachments,omitempty"`
 	Tags         []string          `json:"tags,omitempty"`
 	Priority     SendPriority      `json:"priority,omitempty"` // wire: int 1-10 or named level (F48 contract)
@@ -1027,44 +1044,47 @@ type SendEmailRequest struct {
 // sendMessagePayload is the wire body for the messages send API. Every
 // accepted option is serialized (F48) — display names survive as
 // "Name <addr>" forms and extended options use their documented
-// snake_case field names. template_id/template_data are deliberately ABSENT:
-// the server's deny_unknown_fields SendMessageRequest always answers 422 for
-// them, and validateSendEmailRequest refuses such requests before marshal.
+// snake_case field names, including template_id/template_data for
+// template sends.
 type sendMessagePayload struct {
-	From        string            `json:"from"`
-	To          []string          `json:"to"`
-	CC          []string          `json:"cc,omitempty"`
-	BCC         []string          `json:"bcc,omitempty"`
-	ReplyTo     string            `json:"reply_to,omitempty"`
-	Subject     string            `json:"subject"`
-	HTML        string            `json:"html,omitempty"`
-	Text        string            `json:"text,omitempty"`
-	Attachments []Attachment      `json:"attachments,omitempty"`
-	Tags        []string          `json:"tags,omitempty"`
-	Priority    *SendPriority     `json:"priority,omitempty"` // int 1-10 or named level, exactly as the API accepts (F48)
-	Headers     map[string]string `json:"headers,omitempty"`
-	Metadata    interface{}       `json:"metadata,omitempty"`
-	ScheduledAt string            `json:"scheduled_at,omitempty"`
+	From         string            `json:"from"`
+	To           []string          `json:"to"`
+	CC           []string          `json:"cc,omitempty"`
+	BCC          []string          `json:"bcc,omitempty"`
+	ReplyTo      string            `json:"reply_to,omitempty"`
+	Subject      string            `json:"subject,omitempty"`
+	HTML         string            `json:"html,omitempty"`
+	Text         string            `json:"text,omitempty"`
+	TemplateID   string            `json:"template_id,omitempty"`
+	TemplateData interface{}       `json:"template_data,omitempty"`
+	Attachments  []Attachment      `json:"attachments,omitempty"`
+	Tags         []string          `json:"tags,omitempty"`
+	Priority     *SendPriority     `json:"priority,omitempty"` // int 1-10 or named level, exactly as the API accepts (F48)
+	Headers      map[string]string `json:"headers,omitempty"`
+	Metadata     interface{}       `json:"metadata,omitempty"`
+	ScheduledAt  string            `json:"scheduled_at,omitempty"`
 }
 
 // MarshalJSON serializes the send payload with every accepted option on
-// the wire (F48). Template fields are never serialized (GO-6).
+// the wire (F48) — including the template send fields.
 func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
 	payload := sendMessagePayload{
-		From:        formatEmailAddress(r.From),
-		To:          addressListToStrings(r.To),
-		CC:          addressListToStrings(r.CC),
-		BCC:         addressListToStrings(r.BCC),
-		ReplyTo:     formatEmailAddressPtr(r.ReplyTo),
-		Subject:     r.Subject,
-		HTML:        r.HTML,
-		Text:        r.Text,
-		Attachments: r.Attachments,
-		Tags:        r.Tags,
-		Priority:    sendPriorityPtr(r.Priority),
-		Headers:     r.Headers,
-		Metadata:    r.Metadata,
-		ScheduledAt: r.ScheduledAt,
+		From:         formatEmailAddress(r.From),
+		To:           addressListToStrings(r.To),
+		CC:           addressListToStrings(r.CC),
+		BCC:          addressListToStrings(r.BCC),
+		ReplyTo:      formatEmailAddressPtr(r.ReplyTo),
+		Subject:      r.Subject,
+		HTML:         r.HTML,
+		Text:         r.Text,
+		TemplateID:   r.TemplateID,
+		TemplateData: r.TemplateData,
+		Attachments:  r.Attachments,
+		Tags:         r.Tags,
+		Priority:     sendPriorityPtr(r.Priority),
+		Headers:      r.Headers,
+		Metadata:     r.Metadata,
+		ScheduledAt:  r.ScheduledAt,
 	}
 	if payload.To == nil {
 		payload.To = []string{}

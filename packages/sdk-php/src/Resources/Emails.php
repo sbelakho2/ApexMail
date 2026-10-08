@@ -24,12 +24,17 @@ class Emails
      * headers, priority, template_id/template_data under their documented
      * snake_case field names.
      *
+     * Template sends are supported: template_id names a stored
+     * tenant-scoped template that supplies subject/html/text, rendered with
+     * template_data — a template-only send may omit subject/html/text
+     * (docs/api/endpoints/messages.md).
+     *
      * @param array $params {
      *   @type string|array  $from            Sender ("addr" or ["email" => ..., "name" => ...])
      *   @type string|array  $to              Recipient(s)
-     *   @type string        $subject
-     *   @type string        $html            HTML body
-     *   @type string        $text            Plain-text body
+     *   @type string        $subject         Optional when template_id is given
+     *   @type string        $html            HTML body (optional with template_id)
+     *   @type string        $text            Plain-text body (optional with template_id)
      *   @type string|array  $reply_to        Reply-To address (display-name aware)
      *   @type array         $attachments     [{filename, content, contentType}, ...]
      *   @type array         $headers         Custom email headers
@@ -65,13 +70,33 @@ class Emails
         if (!$toSet) {
             throw new \InvalidArgumentException('"to" is required');
         }
-        if (!isset($params['subject']) || trim((string) $params['subject']) === '') {
-            throw new \InvalidArgumentException('"subject" is required');
+        // Template sends (docs/api/endpoints/messages.md): template_id names
+        // a stored tenant-scoped template that supplies subject/html/text,
+        // rendered with template_data. A template-only send is valid.
+        $templateId = $params['template_id'] ?? $params['templateId'] ?? null;
+        if (is_string($templateId) && trim($templateId) === '') {
+            $templateId = null;
+        }
+        $templateData = $params['template_data'] ?? $params['templateData'] ?? null;
+        if ($templateData !== null) {
+            if ($templateId === null) {
+                throw new \InvalidArgumentException('"template_data" requires "template_id"');
+            }
+            if (!is_array($templateData)) {
+                throw new \InvalidArgumentException('"template_data" must be an array of template variables');
+            }
+            if (array_is_list($templateData) && $templateData !== []) {
+                throw new \InvalidArgumentException('"template_data" must be a JSON object (string keys), not a list');
+            }
+        }
+        if ($templateId === null
+            && (!isset($params['subject']) || trim((string) $params['subject']) === '')) {
+            throw new \InvalidArgumentException('"subject" is required (or provide template_id)');
         }
         $htmlSet = isset($params['html']) && trim((string) $params['html']) !== '';
         $textSet = isset($params['text']) && trim((string) $params['text']) !== '';
-        if (!$htmlSet && !$textSet) {
-            throw new \InvalidArgumentException('Either "html" or "text" body is required');
+        if (!$htmlSet && !$textSet && $templateId === null) {
+            throw new \InvalidArgumentException('Either "html" or "text" body is required (or provide template_id)');
         }
 
         $this->validateRecipients($params['from'], 'from');

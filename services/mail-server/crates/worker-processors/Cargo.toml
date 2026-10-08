@@ -70,6 +70,9 @@ metrics-exporter-prometheus.workspace = true
 
 # Utils
 chrono.workspace = true
+# IANA timezone parsing for campaign `settings.timezone` (send-time
+# optimization windows); the same chrono-tz the API validator uses.
+chrono-tz.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
@@ -107,6 +110,12 @@ outbound-mta = { path = "../outbound-mta" }
 # outbound copy (subject, text, stripped HTML, decoded attachments) before
 # the acceptance reservation — see email/dlp.rs.
 dlp-engine = { path = "../dlp-engine" }
+# Gmail Annotations (Promotions-tab JSON-LD): the MTA crate owns the
+# generator; `prepare_email` injects the generated block into the message
+# HTML when a queue row carries `metadata.gmail_annotations` (the payload
+# documented for the campaign annotations API). Path dependency, no new
+# vendor-graph entries.
+mta = { path = "../mta" }
 
 [dev-dependencies]
 # `start_paused` for the supervisor backoff test (a real 5s+10s wait would

@@ -18,6 +18,7 @@ This index lists all documented API endpoints for the ApexMail platform. Each re
 | Automations | `/v1/automations` | [`automations.md`](automations.md) | Automation workflow management |
 | Events | `/v1/events` | [`events.md`](events.md) | Event history and delivery tracking |
 | Analytics | `/v1/analytics` | [`analytics.md`](analytics.md) | Dashboard, volume, engagement, deliverability |
+| Audit Logs | `/v1/audit` | [`audit.md`](audit.md) | Tenant audit trail read and export |
 | Webhooks | `/v1/webhooks` | [`webhooks.md`](webhooks.md) | Webhook endpoint configuration |
 | Billing | `/v1/billing` | [`billing.md`](billing.md) | Plans, usage, invoices, subscriptions |
 | Dedicated IPs | `/v1/dedicated-ips` | [`dedicated-ips.md`](dedicated-ips.md) | Dedicated sending IP lifecycle |

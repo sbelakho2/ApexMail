@@ -280,16 +280,34 @@ def numbers_in(text: str) -> list[str]:
     return [n.replace(",", "") for n in NUMBER_RE.findall(text)]
 
 
+def _as_number(token: str) -> float | None:
+    """Numeric value of a token, honouring k/m suffixes ("100K" = 100000)."""
+    token = token.replace(",", "").strip().lower()
+    mult = 1.0
+    if token.endswith("k"):
+        mult, token = 1_000.0, token[:-1]
+    elif token.endswith("m"):
+        mult, token = 1_000_000.0, token[:-1]
+    try:
+        return float(token) * mult
+    except ValueError:
+        return None
+
+
 def number_matches(required: str, answer: str) -> bool:
-    wanted = required.replace(",", "")
+    wanted = _as_number(required)
+    if wanted is None:
+        return False
     for found in numbers_in(answer):
-        if found == wanted:
+        value = _as_number(found)
+        if value is not None and abs(value - wanted) < 1e-9:
             return True
-        try:
-            if abs(float(found) - float(wanted)) < 1e-9:
-                return True
-        except ValueError:
-            continue
+    # Also catch suffixed forms the token regex splits from their suffix
+    # ("100K" tokenises as "100").
+    for raw in re.findall(r"(\d[\d,]*(?:\.\d+)?)\s*([kKmM])\b", answer):
+        value = _as_number(raw[0] + raw[1])
+        if value is not None and abs(value - wanted) < 1e-9:
+            return True
     return False
 
 
@@ -412,9 +430,11 @@ def run_chat(args, users: list[dict]) -> None:
                 record("chat", label, "FAIL", "no refusal for a refusal-class case: "
                        + answer[:160].replace("\n", " "), evidence)
         elif missing or missed_any:
-            if escalated and live.get("allow_escalation"):
+            no_answer = "does not cover" in answer.lower()
+            if (escalated or no_answer) and live.get("allow_escalation"):
+                kind = "honest not-covered" if no_answer else "honest escalation"
                 record("chat", label, "DEGRADED",
-                       f"honest escalation without required facts {missing or any_of}", evidence)
+                       f"{kind} without required facts {missing or any_of}", evidence)
             else:
                 record("chat", label, "FAIL",
                        f"missing facts {missing or any_of}; answer={answer[:160]!r}", evidence)

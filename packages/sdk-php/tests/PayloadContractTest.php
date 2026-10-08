@@ -83,6 +83,65 @@ final class PayloadContractTest extends TestCase
         }
     }
 
+    /**
+     * Template sends (docs/api/endpoints/messages.md): template_id names a
+     * stored template that supplies subject/html/text, rendered with
+     * template_data. A template-only send serializes both fields and omits
+     * the empty content keys.
+     */
+    public function testTemplateOnlySendSerializesTemplateFields(): void
+    {
+        $client = $this->recordingClient();
+        $client->emails->send([
+            'from'          => 'hello@example.com',
+            'to'            => ['user@example.com'],
+            'template_id'   => 'tpl_1',
+            'template_data' => ['name' => 'Ada'],
+        ]);
+
+        $body = $client->requests[0]['body'];
+        $this->assertSame('tpl_1', $body['template_id']);
+        $this->assertSame(['name' => 'Ada'], $body['template_data']);
+        foreach (['subject', 'html', 'text'] as $omitted) {
+            $this->assertArrayNotHasKey($omitted, $body, "{$omitted} must be omitted for a template-only send");
+        }
+    }
+
+    public function testTemplateShapeViolationsAreRefusedClientSide(): void
+    {
+        $client = $this->recordingClient();
+
+        // template_data without a template_id.
+        try {
+            $client->emails->send([
+                'from'          => 'hello@example.com',
+                'to'            => ['user@example.com'],
+                'subject'       => 'Hi',
+                'text'          => 'body',
+                'template_data' => ['name' => 'Ada'],
+            ]);
+            $this->fail('template_data without template_id must be refused');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('template_data', $exception->getMessage());
+        }
+
+        // A list-shaped template_data serializes as a JSON array, which the
+        // server refuses — refuse it before the request.
+        try {
+            $client->emails->send([
+                'from'          => 'hello@example.com',
+                'to'            => ['user@example.com'],
+                'template_id'   => 'tpl_1',
+                'template_data' => ['not', 'an', 'object'],
+            ]);
+            $this->fail('list template_data must be refused');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('JSON object', $exception->getMessage());
+        }
+
+        $this->assertSame([], $client->requests, 'refused shapes must not reach the wire');
+    }
+
     public function testSendFromNameObjectKeepsDisplayName(): void
     {
         $client = $this->recordingClient();

@@ -36,6 +36,7 @@ use crate::types::{
     SubAccount,
 };
 use crate::whitelabel::WhiteLabelService;
+use billing_entitlements::{CapacityKey, EntitlementSnapshot, FeatureKey};
 
 // ── Shared state ───────────────────────────────────────────────────────
 
@@ -89,11 +90,10 @@ impl AppState {
                 config.sub_account.volume_allocation_mode.clone(),
             ),
             support: SupportService::new(db.clone()),
-            templates: TemplateApprovalService::new(
-                db.clone(),
-                config.template.auto_approve_threshold,
-                config.template.max_spam_score,
-            ),
+            // The only threshold is the auto-REJECT spam score (M-01: no
+            // auto-approval exists, so the old auto-approve argument and the
+            // TEMPLATE_AUTO_APPROVE_THRESHOLD env knob were removed).
+            templates: TemplateApprovalService::new(db.clone(), config.template.max_spam_score),
             whitelabel: WhiteLabelService::new(db.clone()),
             qbr: QBRService::new(db.clone()),
             db,
@@ -1130,6 +1130,87 @@ impl_tenant_owned!(
     crate::types::WhiteLabelDomain,
     crate::types::QuarterlyBusinessReview,
 );
+
+/// A sub-account is owned by its PARENT tenant (the field is `parent_id`,
+/// not `tenant_id`), so the entitlement gate resolves the parent's plan.
+impl TenantOwned for crate::types::SubAccount {
+    fn owner_tenant_id(&self) -> &str {
+        &self.parent_id
+    }
+}
+
+// ── Plan entitlements (capability wave 1) ──────────────────────────────
+//
+// `template_approval_workflow` and `subaccounts` are plan capabilities sold
+// on Business and Enterprise Cloud (docs/pricing.md). These helpers resolve
+// the OWNING tenant's entitlement snapshot through the same override-aware
+// billing-service path api-server handlers use, so the gate is the PLAN FLAG
+// — a Business (`scale`) tenant passes exactly like an Enterprise tenant,
+// and a plan that does not sell the capability is refused 403 naming the
+// plan and the field.
+
+/// Resolve a tenant's entitlement snapshot, mapping failures to HTTP.
+/// Database failures are 500 (never a silent grant); a missing tenant is 404.
+async fn resolve_entitlement(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<EntitlementSnapshot, (StatusCode, Json<serde_json::Value>)> {
+    match billing_service::plans::get_entitlement_snapshot(&state.db, tenant_id).await {
+        Ok(Some(snapshot)) => Ok(snapshot),
+        Ok(None) => Err(err_json(StatusCode::NOT_FOUND, "Tenant not found")),
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "entitlement resolution failed"
+            );
+            Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Entitlement resolution failed",
+            ))
+        }
+    }
+}
+
+/// Gate a route on a plan capability for the owning tenant. Returns the
+/// resolved snapshot so callers can also read the plan's capacity.
+async fn require_plan_feature(
+    state: &AppState,
+    tenant_id: &str,
+    key: FeatureKey,
+) -> Result<EntitlementSnapshot, (StatusCode, Json<serde_json::Value>)> {
+    let snapshot = resolve_entitlement(state, tenant_id).await?;
+    if let Err(error) = snapshot.require_feature(key) {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            plan = %snapshot.plan(),
+            feature = key.as_str(),
+            error = %error,
+            "entitlement denied"
+        );
+        let message = error.to_string();
+        return Err(err_json(StatusCode::FORBIDDEN, &message));
+    }
+    Ok(snapshot)
+}
+
+/// Gate a fetched resource on its owning tenant's plan capability, mirroring
+/// [`guard_resource_tenant`]'s lookup shape (`None` = admit).
+async fn guard_plan_feature<T: TenantOwned + serde::Serialize>(
+    state: &AppState,
+    result: &Result<crate::types::ApiResult<T>, String>,
+    key: FeatureKey,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    match result {
+        Ok(api_result) => match api_result.data.as_ref() {
+            Some(resource) => require_plan_feature(state, resource.owner_tenant_id(), key)
+                .await
+                .err(),
+            None => None,
+        },
+        Err(_) => None,
+    }
+}
 
 fn unwrap_contract_result<T>(
     result: ApiResult<T>,
@@ -3262,10 +3343,20 @@ async fn sub_account_create(
     if let Err(e) = verify_tenant_access(&auth, &body.parent_id) {
         return e;
     }
+    // Entitlement gate: the PARENT tenant's plan must sell subaccounts, and
+    // its `max_subaccounts` ceiling is passed into the service's advisory-lock
+    // transaction so the cap is enforced where the count is exact.
+    let snapshot =
+        match require_plan_feature(&state, &body.parent_id, FeatureKey::Subaccounts).await {
+            Ok(snapshot) => snapshot,
+            Err(e) => return e,
+        };
+    let plan_max = snapshot.capacity(CapacityKey::Subaccounts);
+    let plan_max = i32::try_from(plan_max).unwrap_or(if plan_max < 0 { -1 } else { i32::MAX });
     service_result(
         state
             .sub_accounts
-            .create(
+            .create_with_plan_limit(
                 body.parent_id,
                 &body.name,
                 body.email.as_deref(),
@@ -3273,6 +3364,7 @@ async fn sub_account_create(
                 body.plan.as_deref(),
                 body.volume_limit,
                 body.inherit_parent_settings.unwrap_or(true),
+                Some(plan_max),
             )
             .await,
     )
@@ -3288,6 +3380,11 @@ async fn sub_account_get(
     if let Ok(ref api_result) = result {
         if let Some(ref sub) = api_result.data {
             if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
+                return e;
+            }
+            if let Err(e) =
+                require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+            {
                 return e;
             }
         }
@@ -3306,6 +3403,11 @@ async fn sub_account_update(
         Ok(api_result) => {
             if let Some(ref sub) = api_result.data {
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
+                    return e;
+                }
+                if let Err(e) =
+                    require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+                {
                     return e;
                 }
             } else {
@@ -3340,6 +3442,11 @@ async fn sub_account_delete(
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
+                if let Err(e) =
+                    require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+                {
+                    return e;
+                }
             } else {
                 return service_result::<SubAccount>(Ok(api_result));
             }
@@ -3356,6 +3463,9 @@ async fn sub_account_list(
     Query(q): Query<StatusFilterParams>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &parent_id) {
+        return e;
+    }
+    if let Err(e) = require_plan_feature(&state, &parent_id, FeatureKey::Subaccounts).await {
         return e;
     }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
@@ -3381,6 +3491,11 @@ async fn sub_account_suspend(
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
+                if let Err(e) =
+                    require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+                {
+                    return e;
+                }
             } else {
                 return service_result::<SubAccount>(Ok(api_result));
             }
@@ -3402,6 +3517,11 @@ async fn sub_account_resume(
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
+                if let Err(e) =
+                    require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+                {
+                    return e;
+                }
             } else {
                 return service_result::<SubAccount>(Ok(api_result));
             }
@@ -3417,6 +3537,9 @@ async fn sub_account_stats(
     Path(parent_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &parent_id) {
+        return e;
+    }
+    if let Err(e) = require_plan_feature(&state, &parent_id, FeatureKey::Subaccounts).await {
         return e;
     }
     service_result(state.sub_accounts.get_stats(parent_id).await)
@@ -3443,6 +3566,11 @@ async fn sub_account_api_key(
         },
         Err(e) => return service_result::<SubAccount>(Err(e)),
     };
+    if let Some(ref parent_tenant) = parent_tenant {
+        if let Err(e) = require_plan_feature(&state, parent_tenant, FeatureKey::Subaccounts).await {
+            return e;
+        }
+    }
     let result = state
         .sub_accounts
         .create_api_key(id, &body.name, body.permissions, body.rate_limit)
@@ -3487,6 +3615,11 @@ async fn sub_account_api_keys_list(
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
+                if let Err(e) =
+                    require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+                {
+                    return e;
+                }
             } else {
                 return service_result::<SubAccount>(Ok(api_result));
             }
@@ -3507,6 +3640,11 @@ async fn sub_account_api_key_revoke(
         Ok(api_result) => {
             if let Some(ref sub) = api_result.data {
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
+                    return e;
+                }
+                if let Err(e) =
+                    require_plan_feature(&state, &sub.parent_id, FeatureKey::Subaccounts).await
+                {
                     return e;
                 }
             } else {
@@ -3717,6 +3855,15 @@ async fn template_submit(
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
+    if let Err(e) = require_plan_feature(
+        &state,
+        &body.tenant_id,
+        FeatureKey::TemplateApprovalWorkflow,
+    )
+    .await
+    {
+        return e;
+    }
     service_result(
         state
             .templates
@@ -3741,6 +3888,10 @@ async fn template_get(
     if let Some(e) = guard_resource_tenant(&auth, &result).await {
         return e;
     }
+    if let Some(e) = guard_plan_feature(&state, &result, FeatureKey::TemplateApprovalWorkflow).await
+    {
+        return e;
+    }
     service_result(result)
 }
 
@@ -3751,6 +3902,11 @@ async fn template_list(
     Query(q): Query<StatusFilterParams>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
+    if let Err(e) =
+        require_plan_feature(&state, &tenant_id, FeatureKey::TemplateApprovalWorkflow).await
+    {
         return e;
     }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
@@ -3782,6 +3938,11 @@ async fn template_approve(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
+    if let Some(e) =
+        guard_plan_feature(&state, &existing, FeatureKey::TemplateApprovalWorkflow).await
+    {
+        return e;
+    }
     service_result(
         state
             .templates
@@ -3801,6 +3962,11 @@ async fn template_reject(
     }
     let existing = state.templates.get_submission(id).await;
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
+    if let Some(e) =
+        guard_plan_feature(&state, &existing, FeatureKey::TemplateApprovalWorkflow).await
+    {
         return e;
     }
     service_result(
@@ -3824,6 +3990,11 @@ async fn template_request_changes(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
+    if let Some(e) =
+        guard_plan_feature(&state, &existing, FeatureKey::TemplateApprovalWorkflow).await
+    {
+        return e;
+    }
     match &body.notes {
         Some(notes) => service_result(
             state
@@ -3844,6 +4015,11 @@ async fn template_stats(
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
+    if let Err(e) =
+        require_plan_feature(&state, &tenant_id, FeatureKey::TemplateApprovalWorkflow).await
+    {
         return e;
     }
     service_result(state.templates.get_stats(tenant_id).await)
@@ -4430,6 +4606,262 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Capability wave 1: template approval + subaccounts are gated on the
+    // PLAN entitlement (Business and above), never on the tenant type.
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Same fixture as the data-access guards: canonical pool, real router,
+    /// soft-skip without TEST_DATABASE_URL.
+    async fn provision_capability_router(tag: &str) -> Option<(Router, Arc<AppState>)> {
+        provision_data_access_router(tag).await
+    }
+
+    /// Insert a plan whose only distinguishing features are the wave-1 flags.
+    async fn seed_capability_plan(
+        state: &AppState,
+        plan: &'static str,
+        template_approval_workflow: bool,
+        subaccounts: bool,
+        max_subaccounts: i32,
+    ) {
+        use billing_service::plans::PlanSeed;
+        use billing_service::types::PlanFeatures;
+        let seed = PlanSeed {
+            name: plan,
+            display_name: "Capability Test",
+            description: "test",
+            price_monthly: 0,
+            price_yearly: 0,
+            email_limit: 1_000,
+            api_call_limit: 1_000,
+            sort_order: 999,
+            features: PlanFeatures {
+                api_access: true,
+                template_approval_workflow,
+                subaccounts,
+                max_subaccounts,
+                ..PlanFeatures::default()
+            },
+        };
+        billing_service::plans::upsert_plan(&state.db, &seed)
+            .await
+            .expect("upsert capability plan");
+    }
+
+    async fn seed_capability_tenant(state: &AppState, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!("Capability Tenant {tenant}"))
+        .bind(format!("cap-{tenant}"))
+        .bind(plan)
+        .execute(&state.db)
+        .await
+        .expect("seed capability tenant");
+    }
+
+    /// Insert the CANONICAL Business seed row (the real number the runtime
+    /// sells), so the tests below prove the seeded values, not a fixture
+    /// invented here.
+    async fn seed_canonical_business_plan(state: &AppState) -> billing_service::plans::PlanSeed {
+        let seed = billing_service::plans::default_plans()
+            .into_iter()
+            .find(|plan| plan.name == "scale")
+            .expect("canonical Business seed");
+        billing_service::plans::upsert_plan(&state.db, &seed)
+            .await
+            .expect("seed the canonical Business plan");
+        seed
+    }
+
+    fn template_submit_body(tenant: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tenant_id": tenant,
+            "name": name,
+            "subject": "Approval probe",
+            "html_content": "<p>hello</p>",
+            "text_content": "hello",
+            "submitted_by": "maker-1",
+        })
+    }
+
+    /// A Business tenant passes on the entitlement — submit AND approve —
+    /// proving the gate is the plan flag, not a tenant type (the plan is
+    /// `scale`, not `enterprise`).
+    #[tokio::test]
+    async fn business_plan_can_submit_and_approve_templates() {
+        let Some((app, state)) = provision_capability_router("cap-tpl-ok").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let business = seed_canonical_business_plan(&state).await;
+        assert!(business.features.template_approval_workflow);
+        let tenant = "cap-biz-tenant";
+        seed_capability_tenant(&state, tenant, "scale").await;
+        let token = mint_sso_owner_token(tenant, "owner-cap");
+
+        let response = post_json(
+            &app,
+            "/templates/submit",
+            &token,
+            &template_submit_body(tenant, "cap-template"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["success"], serde_json::json!(true), "{body}");
+        let id = body["data"]["id"]
+            .as_str()
+            .expect("submission id")
+            .to_string();
+
+        let response = post_json(
+            &app,
+            &format!("/templates/{id}/approve"),
+            &token,
+            &serde_json::json!({"reviewed_by": "ignored", "notes": "ship it"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["success"], serde_json::json!(true), "{body}");
+        assert_eq!(body["data"]["status"], "approved", "{body}");
+    }
+
+    /// A plan that does not sell the workflow is refused 403 naming the
+    /// capability, and nothing is persisted.
+    #[tokio::test]
+    async fn non_entitled_plan_is_refused_with_the_named_capability() {
+        let Some((app, state)) = provision_capability_router("cap-tpl-deny").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_capability_plan(&state, "cap-no-approval", false, false, 0).await;
+        let tenant = "cap-noappr-tenant";
+        seed_capability_tenant(&state, tenant, "cap-no-approval").await;
+        let token = mint_sso_owner_token(tenant, "owner-noappr");
+
+        let response = post_json(
+            &app,
+            "/templates/submit",
+            &token,
+            &template_submit_body(tenant, "denied"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(error.contains("template_approval_workflow"), "{body}");
+        assert!(error.contains("cap-no-approval"), "{body}");
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ent_template_submissions WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&state.db)
+        .await
+        .expect("submission count");
+        assert_eq!(count, 0, "a refused submit must not persist");
+    }
+
+    /// The canonical Business cap of 10 is the number that refuses: creates
+    /// 1..=10 succeed, the 11th is a named quota refusal, and the row count
+    /// stays at the cap.
+    #[tokio::test]
+    async fn subaccount_cap_refuses_the_cap_plus_one_with_a_named_reason() {
+        let Some((app, state)) = provision_capability_router("cap-sub-cap").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let business = seed_canonical_business_plan(&state).await;
+        assert!(business.features.subaccounts);
+        assert_eq!(business.features.max_subaccounts, 10);
+        let tenant = "cap-cap-tenant";
+        seed_capability_tenant(&state, tenant, "scale").await;
+        let token = mint_sso_owner_token(tenant, "owner-cap");
+
+        for index in 1..=business.features.max_subaccounts {
+            let response = post_json(
+                &app,
+                "/sub-accounts",
+                &token,
+                &serde_json::json!({"parent_id": tenant, "name": format!("sub-{index}")}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(
+                body["success"],
+                serde_json::json!(true),
+                "create {index}: {body}"
+            );
+        }
+
+        let response = post_json(
+            &app,
+            "/sub-accounts",
+            &token,
+            &serde_json::json!({"parent_id": tenant, "name": "sub-11"}),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(
+            body["success"],
+            serde_json::json!(false),
+            "cap+1 must be refused: {body}"
+        );
+        assert_eq!(body["code"], "QUOTA_EXCEEDED", "{body}");
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(error.contains("max_subaccounts"), "{body}");
+        assert!(error.contains("(10)"), "{body}");
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ent_sub_accounts WHERE parent_id = $1")
+                .bind(tenant)
+                .fetch_one(&state.db)
+                .await
+                .expect("subaccount count");
+        assert_eq!(count, 10, "the refused create must not persist");
+    }
+
+    /// A plan without the subaccounts flag is refused 403 naming it, and no
+    /// row is created.
+    #[tokio::test]
+    async fn non_entitled_plan_cannot_create_subaccounts() {
+        let Some((app, state)) = provision_capability_router("cap-sub-deny").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_capability_plan(&state, "cap-no-subaccounts", false, false, 0).await;
+        let tenant = "cap-nosub-tenant";
+        seed_capability_tenant(&state, tenant, "cap-no-subaccounts").await;
+        let token = mint_sso_owner_token(tenant, "owner-nosub");
+
+        let response = post_json(
+            &app,
+            "/sub-accounts",
+            &token,
+            &serde_json::json!({"parent_id": tenant, "name": "denied"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(error.contains("subaccounts"), "{body}");
+        assert!(error.contains("cap-no-subaccounts"), "{body}");
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ent_sub_accounts WHERE parent_id = $1")
+                .bind(tenant)
+                .fetch_one(&state.db)
+                .await
+                .expect("subaccount count");
+        assert_eq!(count, 0, "a refused create must not persist");
     }
 
     #[test]

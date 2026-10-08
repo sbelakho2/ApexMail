@@ -484,8 +484,9 @@ module ApexMail
     # @option options [Integer, String] :priority  Queue priority: integer
     #   1-10 or a named level "high"/"normal"/"low" (API queue integers
     #   7/5/3 — F48 shared contract, packages/contract/send-contract.json)
-    # @option options [String] :template_id
-    # @option options [Hash] :template_data
+    # @option options [String] :template_id  Stored template UUID; supplies
+    #   subject/html/text, so subject/html/text may be omitted
+    # @option options [Hash] :template_data  Variables for template rendering
     # @option options [Array<String, Hash>] :tags  (flattened to strings)
     # @option options [String]  :scheduled_at  ISO 8601 datetime (snake_case on the wire)
     # @option options [Hash]    :metadata
@@ -493,12 +494,25 @@ module ApexMail
     # @return [Hash] The API response: {id:, status:, created_at:}. An
     #   idempotency key is generated automatically when not supplied so that
     #   transport-level retries can never cause a duplicate send (SDK-B).
-    def send_email(from:, to:, subject:, html: nil, text: nil, **options)
+    def send_email(from:, to:, subject: nil, html: nil, text: nil, **options)
       raise ArgumentError, '"from" is required' if from.nil?
       raise ArgumentError, '"to" is required' if to.nil?
-      raise ArgumentError, '"subject" is required' if subject.to_s.strip.empty?
-      if (html.nil? || html.to_s.strip.empty?) && (text.nil? || text.to_s.strip.empty?)
-        raise ArgumentError, 'Either "html" or "text" body is required'
+      # Template sends (docs/api/endpoints/messages.md): template_id names a
+      # stored tenant-scoped template that supplies subject/html/text,
+      # rendered with template_data. A template-only send is valid.
+      template_id = fetch_option(options, :template_id)
+      template_data = fetch_option(options, :template_data)
+      if template_data && template_id.nil?
+        raise ArgumentError, '"template_data" requires "template_id"'
+      end
+      unless template_data.nil? || template_data.is_a?(Hash)
+        raise ArgumentError, '"template_data" must be a hash of template variables'
+      end
+      if subject.to_s.strip.empty? && template_id.nil?
+        raise ArgumentError, '"subject" is required (or provide template_id)'
+      end
+      if (html.nil? || html.to_s.strip.empty?) && (text.nil? || text.to_s.strip.empty?) && template_id.nil?
+        raise ArgumentError, 'Either "html" or "text" body is required (or provide template_id)'
       end
 
       validate_recipients(from, 'from')
@@ -569,8 +583,9 @@ module ApexMail
     # Wire body for a send: address strings with display names preserved
     # ("Name <addr>"), string tags, snake_case scheduled_at, and every
     # accepted option (reply_to, attachments, headers, priority,
-    # template_id/template_data) serialized (F48).
-    def build_send_payload(from:, to:, subject:, html: nil, text: nil, **options)
+    # template_id/template_data) serialized (F48). A template-only send
+    # omits subject/html/text — the stored template supplies them.
+    def build_send_payload(from:, to:, subject: nil, html: nil, text: nil, **options)
       compact({
         from:          serialize_address(from),
         to:            serialize_recipients(to),
@@ -728,14 +743,22 @@ module ApexMail
       html = params[:html] || params["html"]
       text = params[:text] || params["text"]
       template_id = params[:template_id] || params["template_id"] || params[:templateId] || params["templateId"]
+      template_data = params[:template_data] || params["template_data"] ||
+                      params[:templateData] || params["templateData"]
 
       raise ArgumentError, "#{label} missing \"from\"" if from.nil?
       raise ArgumentError, "#{label} missing \"to\"" if to.nil?
-      raise ArgumentError, "#{label} missing \"subject\"" if subject.to_s.strip.empty?
-      if (html.nil? || html.to_s.strip.empty?) && (text.nil? || text.to_s.strip.empty?)
-        raise ArgumentError, template_id.nil? ?
-          "#{label} missing html or text body" :
-          "#{label} missing html or text body (template_id alone cannot provide the body)"
+      if template_data && template_id.nil?
+        raise ArgumentError, "#{label} has template_data without template_id"
+      end
+      unless template_data.nil? || template_data.is_a?(Hash)
+        raise ArgumentError, "#{label} template_data must be a hash of template variables"
+      end
+      if subject.to_s.strip.empty? && template_id.nil?
+        raise ArgumentError, "#{label} missing \"subject\" (or template_id)"
+      end
+      if (html.nil? || html.to_s.strip.empty?) && (text.nil? || text.to_s.strip.empty?) && template_id.nil?
+        raise ArgumentError, "#{label} missing html or text body (or template_id)"
       end
 
       validate_recipients(from, 'from')

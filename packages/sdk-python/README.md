@@ -80,10 +80,21 @@ response = client.emails.send(
 # attachments, headers) is transmitted under its documented
 # snake_case field name.
 
+# Template send: template_id names a stored template that supplies
+# subject/html/text, rendered with template_data. A template-only send may
+# omit subject/html/text; an explicit subject/html/text overrides the
+# rendered field.
+response = client.emails.send(
+    from_="hello@example.com",
+    to="user@example.com",
+    template_id="tpl_welcome000000000001",
+    template_data={"firstName": "Ada"},
+)
+
 # Batch send
 responses = client.emails.batch([
     {"from_": "hello@example.com", "to": "user1@example.com", "subject": "Hi", "html": "<h1>Hi</h1>"},
-    {"from_": "hello@example.com", "to": "user2@example.com", "subject": "Hi", "html": "<h1>Hi</h1>"},
+    {"from_": "hello@example.com", "to": "user2@example.com", "template_id": "tpl_welcome000000000001", "template_data": {"firstName": "Bob"}},
 ])
 
 # Get email status

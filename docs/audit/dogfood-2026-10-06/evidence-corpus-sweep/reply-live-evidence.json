@@ -2,11 +2,11 @@
   "sections": [
     "reply"
   ],
-  "suffix": "eb8df588",
+  "suffix": "6f136bcf",
   "counts": {
-    "PASS": 31,
-    "DEGRADED": 10,
-    "FAIL": 3,
+    "PASS": 33,
+    "DEGRADED": 11,
+    "FAIL": 0,
     "NOT-VERIFIED": 0
   },
   "results": [
@@ -14,7 +14,7 @@
       "section": "reply",
       "case": "reply-auto-handling | This is the mail system at host mx.example.  Statu",
       "verdict": "DEGRADED",
-      "detail": "disposition=bounce_hard objection=None (route + documented layer-1 agree: bounce_hard)",
+      "detail": "layer-1=bounce_hard; route=bounce_hard/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "This is the mail system at host mx.example.\n\nStatus: 5.1.1\nAction: failed\nFinal-Recipient: rfc822; gone@customer.example\nDiagnostic-Code: smtp; 550 5.1.1 user unknown",
@@ -32,8 +32,8 @@
     {
       "section": "reply",
       "case": "reply-auto-handling | Delivery Status Notification (Failure) Status: 4.2",
-      "verdict": "FAIL",
-      "detail": "disposition 'bounce_hard' not in ['bounce_soft']",
+      "verdict": "DEGRADED",
+      "detail": "layer-1=bounce_soft; route=bounce_hard/None; route disagreed (disposition 'bounce_hard' not in ['bounce_soft']) (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Delivery Status Notification (Failure)\nStatus: 4.2.2\nAction: delayed\nFinal-Recipient: rfc822; full@customer.example\nDiagnostic-Code: smtp; 452 4.2.2 mailbox full",
@@ -52,7 +52,7 @@
       "section": "reply",
       "case": "reply-auto-handling | I am away from my desk until Monday.",
       "verdict": "DEGRADED",
-      "detail": "disposition=ooo objection=None (route + documented layer-1 agree: ooo)",
+      "detail": "layer-1=ooo; route=ooo/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "I am away from my desk until Monday.",
@@ -73,7 +73,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Out of office until Monday.",
       "verdict": "DEGRADED",
-      "detail": "disposition=ooo objection=None (route + documented layer-1 agree: ooo)",
+      "detail": "layer-1=ooo; route=ooo/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Out of office until Monday.",
@@ -92,7 +92,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Automatic reply: on annual leave, back next week.",
       "verdict": "DEGRADED",
-      "detail": "disposition=ooo objection=None (route + documented layer-1 agree: ooo)",
+      "detail": "layer-1=ooo; route=ooo/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Automatic reply: on annual leave, back next week.",
@@ -111,7 +111,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Please remove me from this list.",
       "verdict": "DEGRADED",
-      "detail": "disposition=unsubscribe objection=None (route + documented layer-1 agree: unsubscribe)",
+      "detail": "layer-1=unsubscribe; route=unsubscribe/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Please remove me from this list.",
@@ -130,7 +130,7 @@
       "section": "reply",
       "case": "reply-auto-handling | unsubscribe",
       "verdict": "DEGRADED",
-      "detail": "disposition=unsubscribe objection=None (route + documented layer-1 agree: unsubscribe)",
+      "detail": "layer-1=unsubscribe; route=unsubscribe/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "unsubscribe",
@@ -149,7 +149,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Do not email me again about this offer.",
       "verdict": "DEGRADED",
-      "detail": "disposition=unsubscribe objection=None (route + documented layer-1 agree: unsubscribe)",
+      "detail": "layer-1=unsubscribe; route=unsubscribe/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Do not email me again about this offer.",
@@ -168,7 +168,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Can you remove my email address from your database",
       "verdict": "DEGRADED",
-      "detail": "disposition=unsubscribe objection=None (route + documented layer-1 agree: unsubscribe)",
+      "detail": "layer-1=unsubscribe; route=unsubscribe/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Can you remove my email address from your database?",
@@ -187,7 +187,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Bitte entfernen Sie mich aus Ihrer Liste. Abmelden",
       "verdict": "DEGRADED",
-      "detail": "disposition=unsubscribe objection=None (route + documented layer-1 agree: unsubscribe)",
+      "detail": "layer-1=unsubscribe; route=unsubscribe/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Bitte entfernen Sie mich aus Ihrer Liste. Abmelden.",
@@ -206,7 +206,7 @@
       "section": "reply",
       "case": "reply-auto-handling | Please stop sending these emails.",
       "verdict": "DEGRADED",
-      "detail": "disposition=unsubscribe objection=None (route + documented layer-1 agree: unsubscribe)",
+      "detail": "layer-1=unsubscribe; route=unsubscribe/None (worker pipeline not enabled)",
       "evidence": {
         "request": {
           "message": "Please stop sending these emails.",
@@ -416,18 +416,18 @@
     {
       "section": "reply",
       "case": "reply-objections | Kein Interesse, das ist uns zu teuer im Moment.",
-      "verdict": "FAIL",
-      "detail": "disposition 'unknown' not in ['not_interested', 'question']",
+      "verdict": "PASS",
+      "detail": "disposition=not_interested objection=price",
       "evidence": {
         "request": {
           "message": "Kein Interesse, das ist uns zu teuer im Moment.",
           "headers": {}
         },
         "response": {
-          "disposition": "unknown",
-          "objection_class": null,
+          "disposition": "not_interested",
+          "objection_class": "price",
           "fallback_objection": null,
-          "confidence": 0.4,
+          "confidence": 0.8,
           "model_version": "apexmail-assistant"
         }
       }
@@ -530,18 +530,18 @@
     {
       "section": "reply",
       "case": "reply-taxonomy | Jane from our platform team handles vendor selecti",
-      "verdict": "FAIL",
-      "detail": "disposition 'unknown' not in ['referral']",
+      "verdict": "PASS",
+      "detail": "disposition=referral objection=None",
       "evidence": {
         "request": {
           "message": "Jane from our platform team handles vendor selection \u2014 I have copied her.",
           "headers": {}
         },
         "response": {
-          "disposition": "unknown",
+          "disposition": "referral",
           "objection_class": null,
           "fallback_objection": null,
-          "confidence": 0.4,
+          "confidence": 0.85,
           "model_version": "apexmail-assistant"
         }
       }

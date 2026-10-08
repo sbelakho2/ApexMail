@@ -537,6 +537,71 @@ pub async fn mark_overdue(db: &PgPool, today: NaiveDate) -> Result<u64, String> 
     Ok(result.rows_affected())
 }
 
+/// Outcome of one scheduler pass over every legal entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObligationSyncRun {
+    /// Legal entities whose obligations were derived and upserted.
+    pub entities: u64,
+    /// Obligation rows inserted or refreshed (upsert count).
+    pub upserted: u64,
+    /// Pending rows moved to `overdue` by this pass.
+    pub marked_overdue: u64,
+}
+
+/// One monthly-tick pass over EVERY legal entity (dogfood 2026-10-06 wave B).
+///
+/// The module's contract says obligations are re-derived on the scheduler's
+/// monthly tick, but before this function no production code called
+/// [`load_filing_facts`] / [`sync_obligations`] / [`mark_overdue`]: the
+/// `statutory_obligations` table was written only by tests and stayed EMPTY
+/// in the live stack (verified 2026-10-07). This is the missing caller — the
+/// compliance server's monthly cron arm.
+///
+/// Horizon: `today` through one year ahead. The forward window makes every
+/// upcoming monthly KMD/TSD/VD, quarterly OSS and the annual-report deadline
+/// (up to 6 months after the financial year end) visible before they are due.
+/// Re-derivation is idempotent (upsert keyed by
+/// `(legal_entity_id, obligation_type, period_start)`, pending rows only), so
+/// running it daily is harmless — `mark_overdue` is what advances state.
+pub async fn sync_all_obligations(
+    db: &PgPool,
+    today: NaiveDate,
+) -> Result<ObligationSyncRun, String> {
+    let entity_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM legal_entities ORDER BY id")
+        .fetch_all(db)
+        .await
+        .map_err(|error| format!("failed to list legal entities: {error}"))?;
+
+    let horizon = ObligationHorizon::from_start(today, 366);
+    let mut run = ObligationSyncRun {
+        entities: 0,
+        upserted: 0,
+        marked_overdue: 0,
+    };
+
+    for entity_id in entity_ids {
+        // `load_filing_facts` falls back to the `legal_entities` defaults, so
+        // an absent facts row is normal; a hard error (entity deleted between
+        // the listing and the load) must not abort the whole pass.
+        match load_filing_facts(db, entity_id).await {
+            Ok(facts) => {
+                run.upserted += sync_obligations(db, &facts, horizon).await?;
+                run.entities += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    legal_entity_id = %entity_id,
+                    error,
+                    "skipping legal entity: filing facts could not be loaded"
+                );
+            }
+        }
+    }
+
+    run.marked_overdue = mark_overdue(db, today).await?;
+    Ok(run)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

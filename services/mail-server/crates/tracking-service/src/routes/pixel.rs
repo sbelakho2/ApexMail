@@ -20,6 +20,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use crate::processor::OpenData;
+use crate::routes::custom_host::{ensure_token_matches_host, host_scope_or_refuse, HostScope};
 use crate::routes::{extract_client_ip, TRANSPARENT_GIF};
 use crate::state::AppState;
 
@@ -65,7 +66,15 @@ pub async fn handle_pixel(
     headers: HeaderMap,
     Path(tracking_id): Path<String>,
 ) -> Response {
-    record_open(tracking_id, &headers, addr, &state).await;
+    // Capability wave 2: unconfigured custom hosts are refused by name
+    // (never a silent 200-GIF bounce).
+    let scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+    if let Some(refusal) = record_open(tracking_id, &headers, addr, &state, &scope).await {
+        return refusal;
+    }
     pixel_response()
 }
 
@@ -82,19 +91,34 @@ pub async fn handle_pixel_gif(
     headers: HeaderMap,
     Query(q): Query<PixelQuery>,
 ) -> Response {
+    let scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
     if let Some(tid) = q.t {
-        record_open(tid, &headers, addr, &state).await;
+        if let Some(refusal) = record_open(tid, &headers, addr, &state, &scope).await {
+            return refusal;
+        }
     }
     pixel_response()
 }
 
 // ── Shared open-recording logic ───────────────────────────────────────────────
 
-async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr, state: &AppState) {
+/// Record one open. `None` means "serve the pixel"; `Some(response)` is the
+/// honest refusal for a token that does not belong to the custom host's
+/// workspace.
+async fn record_open(
+    tracking_id: String,
+    headers: &HeaderMap,
+    addr: SocketAddr,
+    state: &AppState,
+    scope: &HostScope,
+) -> Option<Response> {
     // E-148:Validate length before any decryption attempt.
     if tracking_id.len() < 10 || tracking_id.len() > 4096 {
         debug!(len = tracking_id.len(), "Pixel: invalid trackingId length");
-        return;
+        return None;
     }
 
     let user_agent = headers
@@ -108,7 +132,7 @@ async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr,
     let is_bot = state.bot_detector.is_bot(user_agent.as_deref(), Some(&ip));
     if is_bot {
         info!("E-190: Bot detected on open pixel, skipping recording");
-        return;
+        return None;
     }
 
     let data = match state.codec.decode(&tracking_id) {
@@ -120,9 +144,15 @@ async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr,
                 id_prefix = crate::token_shape::token_log_prefix(&tracking_id, 20),
                 "Pixel: invalid tracking token"
             );
-            return;
+            return None;
         }
     };
+
+    // Capability wave 2: a valid token on a custom tracking host must belong
+    // to that host's workspace.
+    if let Err(refusal) = ensure_token_matches_host(scope, &data.tenant_id) {
+        return Some(refusal);
+    }
 
     let processor = state.processor.clone();
     tokio::spawn(async move {
@@ -151,6 +181,7 @@ async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr,
             error!(error = %e, "Failed to record open event");
         }
     });
+    None
 }
 
 #[cfg(test)]

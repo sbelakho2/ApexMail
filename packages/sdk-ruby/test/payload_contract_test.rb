@@ -95,6 +95,54 @@ expect("send scheduled_at is snake_case", body[:scheduled_at] == "2026-09-01T09:
   expect("send never uses camelCase #{forbidden}", !body.key?(forbidden.to_sym) && !body.key?(forbidden))
 end
 
+# Template-only sends are valid: template_id supplies subject/html/text
+# (docs/api/endpoints/messages.md), so the content keys are omitted.
+t = transport
+ApexMail::EmailsAPI.new(t).send_email(
+  from: "hello@example.com",
+  to: "user@example.com",
+  template_id: "tpl_1",
+  template_data: { name: "Ada" },
+)
+template_body = t.calls[0][:body]
+expect("template-only send serializes template_id", template_body[:template_id] == "tpl_1")
+expect("template-only send serializes template_data", template_body[:template_data] == { name: "Ada" })
+%i[subject html text].each do |omitted|
+  expect("template-only send omits #{omitted}", !template_body.key?(omitted))
+end
+
+# Shapes the server refuses are refused client-side, before any request.
+t = transport
+begin
+  ApexMail::EmailsAPI.new(t).send_email(
+    from: "hello@example.com", to: "user@example.com",
+    subject: "Hi", text: "body", template_data: { name: "Ada" },
+  )
+  expect("template_data without template_id refused", false, "no ArgumentError raised")
+rescue ArgumentError => e
+  expect("template_data without template_id refused", e.message.include?("template_data"))
+end
+begin
+  ApexMail::EmailsAPI.new(t).send_email(
+    from: "hello@example.com", to: "user@example.com",
+    template_id: "tpl_1", template_data: ["not", "an", "object"],
+  )
+  expect("non-hash template_data refused", false, "no ArgumentError raised")
+rescue ArgumentError => e
+  expect("non-hash template_data refused", e.message.include?("template_data"))
+end
+expect("refused template shapes never reach the wire", t.calls.empty?)
+
+# The batch validator accepts template-only items and forwards the fields.
+t = transport
+ApexMail::EmailsAPI.new(t).batch(messages: [
+  { from: "hello@example.com", to: "user@example.com", template_id: "tpl_2", template_data: { name: "Grace" } },
+])
+batch_template_message = t.calls[0][:body][:messages][0]
+expect("batch template_id forwarded", batch_template_message[:template_id] == "tpl_2")
+expect("batch template_data forwarded", batch_template_message[:template_data] == { name: "Grace" })
+expect("batch template-only item omits subject", !batch_template_message.key?(:subject))
+
 # batch uses the same serialization
 t = transport
 ApexMail::EmailsAPI.new(t).batch(messages: [

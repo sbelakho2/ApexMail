@@ -547,6 +547,10 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::compliance_overview::router(),
         )
         .nest("/v1/admin/risk", routes::admin::risk::router())
+        .nest(
+            "/v1/admin/alerts/rules",
+            routes::admin::alert_rules::router(),
+        )
         .nest("/v1/admin/revenue", routes::admin::revenue::router())
         .nest("/v1/admin/inbox", routes::admin::inbox::router())
         .nest("/v1/admin/calendar", routes::admin::calendar::router())
@@ -661,16 +665,30 @@ pub fn build_app(state: AppState) -> Router {
             Router::<AppState>::new()
         })
         .nest("/v1/messages", routes::messages::router())
+        // Time-travel debugging: the state-replay timeline over the
+        // append-only delivery sources (separate file, same prefix — the
+        // route tables merge; `/:id/timeline` is distinct from the base
+        // router's `/` and `/:id`).
+        .nest("/v1/messages", routes::message_timeline::router())
         .nest("/v1/domains", routes::domains::router())
+        .nest("/v1/tracking-domains", routes::tracking_domains::router())
+        .nest("/v1/retention", routes::retention::router())
         .nest("/v1/templates", routes::templates::router())
         .nest("/v1/suppressions", routes::suppressions::router())
         .nest("/v1/events", routes::events::router())
         .nest("/v1/webhooks", routes::webhooks::router())
+        // Customer audit trail (audit_logs, Growth and above): tenant-scoped
+        // read + export, scope `audit:read` (see routes/audit.rs).
+        .nest("/v1/audit", routes::audit::router())
         .nest("/v1/analytics", routes::analytics::router())
         .nest("/v1/support", routes::support::router())
         .nest("/v1/scim", routes::scim::router())
         .nest("/v1/billing", routes::billing::router())
         .nest("/v1/campaigns", routes::campaigns::router())
+        // Experiment results/declaration (own file; `/:id/experiment` and
+        // `/:id/experiment/winner` are distinct from the base campaign
+        // routes).
+        .nest("/v1/campaigns", routes::campaign_experiments::router())
         .nest("/v1/segments", routes::segments::router())
         .nest("/v1/contacts", routes::contacts::router())
         .nest("/v1/lists", routes::lists::router())
@@ -1620,12 +1638,11 @@ async fn render_ui_response_with_state(
             }
         }
 
-        // Fix 7: /alerts/rules has no alert-rule table or CRUD service. The
-        // route stays routable but honest: an explanatory 501 instead of a
-        // fake empty rule surface.
-        if uri.path() == "/alerts/rules" {
-            return Some(cp_alert_rules_not_implemented_response(cp_role.as_deref()));
-        }
+        // /alerts/rules is a REAL management surface: the CP render path
+        // loads the evaluated usage-alert store (usage_alert_configs) and
+        // renders the rules page. No 501 short-circuit — the page's RBAC
+        // comes from the CP gate above, and its mutations post to
+        // /web/admin/alert-rules* (system-tenant + CP-session gated).
     }
 
     // Resolved once: the data loader AND the shell identity below both read
@@ -1726,28 +1743,6 @@ async fn render_ui_response_with_state(
         }
     }
     Some(response)
-}
-
-/// Fix 7: `/alerts/rules` is routable but has no backing rule store or CRUD
-/// service; the page previously rendered an empty "rule list" that implied
-/// one existed. Return an explicit 501 with an explanatory, zero-JS page so
-/// the surface is honest instead of broken.
-fn cp_alert_rules_not_implemented_response(cp_role: Option<&str>) -> Response {
-    let inner = "<section class=\"mx-auto max-w-2xl py-16 text-center\">\
-        <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">Control Plane</p>\
-        <h1 class=\"mt-4 text-3xl font-bold tracking-tighter text-surface-950\">Alert rules are not implemented</h1>\
-        <p class=\"mt-4 text-sm font-medium text-surface-600\">There is no alert-rule store or rule-management API in this deployment, so there is nothing to list or edit here. Alerting policy is enforced by the fleet alerting engine. This route returns 501 Not Implemented until a rule store is provisioned.</p>\
-        <a href=\"/alerts\" class=\"mt-8 inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-brand-700\">Back to Alerts</a>\
-        </section>";
-    let page = ui_foundation::leptos_views::control_plane_app_layout(inner);
-    let page = match cp_role {
-        Some(role) => ui_foundation::shell::apply_control_plane_role(&page, role),
-        None => page,
-    };
-    let page = ui_foundation::leptos_views::control_plane_root_layout(&page);
-    let mut response = html_response_with_csp(page, browser_csp_header());
-    *response.status_mut() = StatusCode::NOT_IMPLEMENTED;
-    response
 }
 
 /// Set the response cookies every browser GET render owes:
@@ -6295,12 +6290,65 @@ mod tests {
         );
     }
 
-    /// Fix 7: /alerts/rules is routable but has no backing rule store — the
-    /// page must return an explicit not-implemented response instead of a
-    /// fabricated empty rule surface.
+    /// `/alerts/rules` is a REAL surface now: an authenticated CP render
+    /// lists the evaluated usage-alert store, the create form posts to the
+    /// registered CP route, and the old 501 copy is gone.
     #[tokio::test]
-    async fn cp_alert_rules_route_returns_not_implemented() {
-        let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_501").await else {
+    async fn cp_alert_rules_route_renders_the_real_management_surface() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_real").await else {
+            return;
+        };
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, true);
+        // One real rule in the evaluated store: the page must list it.
+        sqlx::query(
+            "INSERT INTO usage_alert_configs
+                 (tenant_id, name, metric_type, threshold_percent,
+                  notification_channel, severity, enabled)
+             VALUES ('system_internal_tenant01', 'Platform email burn',
+                     'emails', 75, 'email', 'warning', true)",
+        )
+        .execute(&db)
+        .await
+        .expect("seed evaluated rule");
+
+        let response = app
+            .oneshot(
+                Request::get("/alerts/rules")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", format!("am_session={am_session}; {cp_cookie}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("Platform email burn"),
+            "the page must list the real rule"
+        );
+        assert!(
+            body.contains("Emails sent ≥ 75% of the plan limit"),
+            "the rule condition must render: {body}"
+        );
+        assert!(
+            body.contains("action=\"/web/admin/alert-rules\""),
+            "the create form must target the registered CP route"
+        );
+        assert!(
+            !body.to_lowercase().contains("not implemented"),
+            "the 501 copy must be gone"
+        );
+    }
+
+    /// The empty-state render is honest: no rules yet (not a 501, not
+    /// fabricated rows).
+    #[tokio::test]
+    async fn cp_alert_rules_empty_state_is_honest() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_empty").await else {
             return;
         };
         let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
@@ -6318,12 +6366,167 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response_body_string(response).await;
         assert!(
-            body.to_lowercase().contains("not implemented"),
-            "the 501 page must explain that alert rules are not implemented"
+            body.contains("No alert rules yet — create one"),
+            "the honest empty state must render: {body}"
         );
+    }
+
+    /// The CP create form persists into the evaluated store AND lands on the
+    /// audit trail — the operator surface is not a decorative form.
+    #[tokio::test]
+    async fn cp_alert_rules_form_creates_persists_and_audits() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_form").await else {
+            return;
+        };
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, true);
+        let token = test_csrf_token();
+
+        let body = format!(
+            "tenant=system_internal_tenant01&name=Form+created+rule&metric=emails&threshold=42&channel=email&severity=info&enabled=true&_csrf={token}"
+        );
+        let response = app
+            .oneshot(
+                Request::post("/web/admin/alert-rules")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header(
+                        "cookie",
+                        format!("am_session={am_session}; {cp_cookie}; csrf_token={token}"),
+                    )
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let stored: (String, i32, String, bool) = sqlx::query_as(
+            "SELECT name, threshold_percent, severity, enabled
+             FROM usage_alert_configs WHERE tenant_id = 'system_internal_tenant01'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("the created rule must persist");
+        assert_eq!(
+            stored,
+            (
+                "Form created rule".to_string(),
+                42,
+                "info".to_string(),
+                true
+            )
+        );
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE resource = 'alert_rule' AND action = 'control_plane.alert_rule.created'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("audit rows");
+        assert_eq!(audits, 1, "the CP mutation must be audited");
+    }
+
+    /// A non-operator session (customer tenant, even with the wildcard
+    /// scope) never reaches the rules surface: the CP gate bounces it to
+    /// login, exactly like every other control-plane page.
+    #[tokio::test]
+    async fn cp_alert_rules_rejects_non_operator_sessions() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_rbac").await else {
+            return;
+        };
+        // A customer tenant + user (not the system tenant).
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ('customer_tenant_alert', 'Customer', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("seed customer tenant");
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, 'customer_tenant_alert', $2, 'Customer User', 'x', 'owner', 'active',
+                     true, true, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(user_id)
+        .bind(format!("customer-{user_id}@example.com"))
+        .execute(&db)
+        .await
+        .expect("seed customer user");
+        let am_session = mint_am_session(&config, &user_id.to_string(), "customer_tenant_alert");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/alerts/rules")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", format!("am_session={am_session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "non-operator sessions are bounced"
+        );
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            location.starts_with("/login"),
+            "the bounce must target the CP login, got {location}"
+        );
+        let body = response_body_string(response).await;
+        assert!(
+            !body.contains("Alert Rules") && !body.contains("usage_alert"),
+            "no rule surface may leak to a non-operator: {body}"
+        );
+        // And the mutation route refuses the same session too.
+        let token = test_csrf_token();
+        let post = format!(
+            "tenant=customer_tenant_alert&name=Nope&metric=emails&threshold=10&channel=email&severity=info&enabled=true&_csrf={token}"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/admin/alert-rules")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header(
+                        "cookie",
+                        format!("am_session={am_session}; csrf_token={token}"),
+                    )
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(post))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::SEE_OTHER | StatusCode::FORBIDDEN
+            ),
+            "the form route must refuse a customer session: {}",
+            response.status()
+        );
+        let written: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_alert_configs WHERE tenant_id = 'customer_tenant_alert'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("count");
+        assert_eq!(written, 0, "a refused session writes no rule");
     }
 
     /// A cursor that decodes to something OTHER than a timestamp must be
@@ -7163,16 +7366,20 @@ mod adversarial_helper_tests {
         }
     }
 
+    /// The real rules page rides the same verified-role application as every
+    /// other CP page: the rendered shell carries the CP session's role, not
+    /// the hardcoded placeholder.
     #[test]
-    fn cp_alert_rules_response_applies_the_verified_role() {
-        let anonymous = cp_alert_rules_not_implemented_response(None);
-        assert_eq!(anonymous.status(), StatusCode::NOT_IMPLEMENTED);
-        let owner = cp_alert_rules_not_implemented_response(Some("owner"));
-        assert_eq!(owner.status(), StatusCode::NOT_IMPLEMENTED);
-        let body = futures::executor::block_on(axum::body::to_bytes(owner.into_body(), usize::MAX))
-            .unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("Alert rules are not implemented"));
+    fn cp_alert_rules_page_applies_the_verified_role() {
+        let inner = ui_foundation::leptos_views::control_plane_alert_rules_page(None);
+        let page = ui_foundation::leptos_views::control_plane_app_layout(&inner);
+        let owner = ui_foundation::shell::apply_control_plane_role(&page, "owner");
+        assert!(
+            owner.contains("data-user-role=\"owner\""),
+            "the verified role must be applied"
+        );
+        let admin = ui_foundation::shell::apply_control_plane_role(&page, "admin");
+        assert!(admin.contains("data-user-role=\"admin\""));
     }
 
     #[test]

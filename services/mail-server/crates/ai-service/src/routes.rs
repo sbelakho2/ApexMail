@@ -30,6 +30,18 @@ use crate::{
     types::{AiError, Model, ModelStatus, ModelType},
 };
 
+/// Maximum connections in the shared docs pool (chat retrieval + audit,
+/// indexer, draft-only email agent, first-response poller). Pinned to the
+/// documented chat concurrency budget (16 concurrent conversations): see the
+/// dogfood note at the pool construction site — 4 was enough for indexing +
+/// point reads but starved chat under combined load (64 x 500).
+pub const DOCS_POOL_MAX_CONNECTIONS: u32 = 16;
+
+/// How long a caller waits for a docs-pool connection before the honest
+/// "pool timed out" degradation. Bounded so a slow query cannot pin a chat
+/// request for the whole 45s proxy budget.
+pub const DOCS_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Shared state for the AI API. All model and training configuration is
 /// deployment-controlled; HTTP request bodies cannot select endpoints, keys,
 /// runner paths, or artifact paths.
@@ -79,13 +91,24 @@ impl AppState {
         };
 
         // Docs corpus pool for grounded chat + the indexer. Reuses the same
-        // DATABASE_URL as DomainDnsStore; small pool (indexing + point reads).
+        // DATABASE_URL as DomainDnsStore.
+        //
+        // Dogfood 2026-10-06 (P2, combined-load exhaustion): this pool is
+        // SHARED by the chat HTTP path (retrieval + audit persistence), the
+        // indexer, the draft-only email agent and the first-response poller.
+        // The previous size (4) was chosen for "indexing + point reads" and
+        // could not carry the documented concurrency: under a 16-conversation
+        // perf run with the mailbot's inbound probes active the service
+        // logged `pool timed out while waiting for an open connection` and
+        // the proxy surfaced 64 x 500 (`assistant unavailable`). Sized to the
+        // chat concurrency budget (16) with a fresh acquire timeout so a slow
+        // query cannot pin a caller for the old 8s.
         let docs_pool = if config.database_url.trim().is_empty() {
             None
         } else {
             match sqlx::postgres::PgPoolOptions::new()
-                .max_connections(4)
-                .acquire_timeout(std::time::Duration::from_secs(8))
+                .max_connections(DOCS_POOL_MAX_CONNECTIONS)
+                .acquire_timeout(DOCS_POOL_ACQUIRE_TIMEOUT)
                 .connect(&config.database_url)
                 .await
             {
@@ -441,6 +464,31 @@ pub(crate) fn required_tenant_identity(headers: &HeaderMap) -> Result<String, Te
         .map_err(TenantIdentityError::Invalid)
 }
 
+/// Resolve the REQUIRED forwarded USER identity for the history route.
+///
+/// P2-SECURITY (dogfood 2026-10-06, live-confirmed): `/admin/chat/history`
+/// used to return every `user_id` in the tenant, so any same-tenant
+/// credential read its teammates' conversations. The console surface is
+/// per-user and `docs/user-guide/assistant.md` documents that conversations
+/// are "visible only to the user they belong to" — so this route now REQUIRES
+/// the caller's user identity and filters on it, exactly like the tenant
+/// header: a caller that omits it gets no data, never the tenant-wide view.
+pub(crate) fn required_user_identity(headers: &HeaderMap) -> Result<String, TenantIdentityError> {
+    let Some(value) = headers.get("x-apexmail-user-id") else {
+        return Err(TenantIdentityError::Missing);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| TenantIdentityError::Invalid("must be valid UTF-8 header text"))?
+        .trim();
+    if raw.is_empty() {
+        return Err(TenantIdentityError::Missing);
+    }
+    validate_tenant_identity(raw)
+        .map(str::to_string)
+        .map_err(TenantIdentityError::Invalid)
+}
+
 /// Shared charset/length validation for a trimmed tenant identity value.
 fn validate_tenant_identity(raw: &str) -> Result<&str, &'static str> {
     if raw.len() > MAX_TENANT_RATE_KEY_LEN {
@@ -675,11 +723,16 @@ pub struct ChatHistoryRequest {
     pub limit: Option<i64>,
 }
 
-/// POST /admin/chat/history — a tenant's chat audit rows (newest first),
-/// scoped to the REQUIRED `x-apexmail-tenant-id` header. P1-SECURITY: the
-/// old body-carried `tenant_id` was a cross-tenant confidentiality breach
-/// protected only by the universal internal token; the body can no longer
-/// select a tenant (and a missing header is a 401, never a default bucket).
+/// POST /admin/chat/history — ONE USER's chat audit rows (newest first),
+/// scoped to the REQUIRED `x-apexmail-tenant-id` AND `x-apexmail-user-id`
+/// headers. P1-SECURITY: the old body-carried `tenant_id` was a
+/// cross-tenant confidentiality breach protected only by the universal
+/// internal token; the body can no longer select a tenant (and a missing
+/// header is a 401, never a default bucket). P2-SECURITY (dogfood
+/// 2026-10-06): the tenant header alone returned every teammate's turns, so
+/// the user header is now required too and the query filters on it — the
+/// console session surface and `docs/user-guide/assistant.md` define history
+/// as per-user.
 async fn chat_history_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -706,17 +759,36 @@ async fn chat_history_handler(
             );
         }
     };
+    // P2-SECURITY: require the caller's own user identity and scope the read
+    // to it — the tenant header alone must never return teammates' turns.
+    let user = match required_user_identity(&headers) {
+        Ok(user) => user,
+        Err(TenantIdentityError::Missing) => {
+            return error_response_json(
+                StatusCode::UNAUTHORIZED,
+                "x-apexmail-user-id is required: this route returns the calling user's own history",
+            );
+        }
+        Err(TenantIdentityError::Invalid(reason)) => {
+            return error_response_json(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid x-apexmail-user-id: {reason}"),
+            );
+        }
+    };
     let limit = body.limit.unwrap_or(50).clamp(1, 200);
     match sqlx::query_as::<_, (String, String, String, String, bool, chrono::DateTime<chrono::Utc>)>(
-        "SELECT role, content, docs_version, user_id, escalated, created_at          FROM ai_chat_messages WHERE tenant_id = $1          ORDER BY created_at DESC LIMIT $2",
+        "SELECT role, content, docs_version, user_id, escalated, created_at          FROM ai_chat_messages WHERE tenant_id = $1 AND user_id = $2          ORDER BY created_at DESC LIMIT $3",
     )
     .bind(tenant.clone())
+    .bind(user.clone())
     .bind(limit)
     .fetch_all(pool)
     .await
     {
         Ok(rows) => Json(serde_json::json!({
             "tenant_id": tenant,
+            "user_id": user,
             "messages": rows.iter().map(|(role, content, dv, user, esc, ts)| serde_json::json!({
                 "role": role, "content": content, "user_id": user,
                 "escalated": esc, "docs_version": dv, "created_at": ts.to_rfc3339(),
@@ -2340,5 +2412,113 @@ mod tests {
         assert_eq!(state.ai_admin_token, "env-admin-token");
         assert!(!state.model_enabled);
         std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// P2-SECURITY (dogfood 2026-10-06, live-confirmed): /admin/chat/history
+    /// returns ONLY the forwarded user's turns, and a request that omits the
+    /// user header is refused — the tenant-wide read returned every
+    /// teammate's conversation to any same-tenant credential.
+    #[tokio::test]
+    async fn chat_history_is_scoped_to_the_forwarded_user() {
+        let Some(_lock) = crate::test_support::serial_lock("chat-audit-serial").await else {
+            return;
+        };
+        let Some(url) = crate::test_support::test_db_url() else {
+            return;
+        };
+        let Some(db) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        let config = AiConfig {
+            database_url: url,
+            ..AiConfig::default()
+        };
+        let app = app_with(config, "test-key").await;
+        let tenant = crate::test_support::unique("chat_h");
+        for (user, content) in [("alice", "alice-turn"), ("bob", "bob-turn")] {
+            sqlx::query(
+                "INSERT INTO ai_chat_messages \
+                     (tenant_id, user_id, role, content, citations, escalated, docs_version) \
+                 VALUES ($1, $2, 'user', $3, '[]'::jsonb, false, 'v1')",
+            )
+            .bind(&tenant)
+            .bind(user)
+            .bind(content)
+            .execute(&db)
+            .await
+            .expect("seed audit row");
+        }
+
+        // Alice's read: only Alice's turn, even though Bob shares the tenant.
+        let response = app
+            .clone()
+            .oneshot(json_request_with_headers(
+                "/admin/chat/history",
+                serde_json::json!({ "limit": 50 }),
+                &[
+                    ("x-api-key", "test-key"),
+                    ("x-apexmail-tenant-id", &tenant),
+                    ("x-apexmail-user-id", "alice"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let rendered = body.to_string();
+        assert!(rendered.contains("alice-turn"), "{rendered}");
+        assert!(
+            !rendered.contains("bob-turn"),
+            "the same tenant's other user must never appear: {rendered}"
+        );
+        assert!(
+            body["messages"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().all(|row| row["user_id"] == "alice")),
+            "{rendered}"
+        );
+
+        // No user header: refused, never a tenant-wide read.
+        let response = app
+            .clone()
+            .oneshot(json_request_with_headers(
+                "/admin/chat/history",
+                serde_json::json!({ "limit": 50 }),
+                &[
+                    ("x-api-key", "test-key"),
+                    ("x-apexmail-tenant-id", &tenant),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let _ = sqlx::query("DELETE FROM ai_chat_messages WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+    }
+
+    /// Dogfood 2026-10-06 (P2, combined-load exhaustion): the docs pool is
+    /// shared by chat retrieval/audit, the indexer, the email agent and the
+    /// first-response poller, so it must carry the documented chat
+    /// concurrency budget. The old size (4) produced "pool timed out while
+    /// waiting for an open connection" and 64 x 500 under a 16-conversation
+    /// perf run with mailbot probes active. Pinned so a future "small pool"
+    /// revert has to explain itself.
+    #[test]
+    fn docs_pool_carries_the_chat_concurrency_budget() {
+        assert!(
+            DOCS_POOL_MAX_CONNECTIONS >= 16,
+            "the shared docs pool must carry 16 concurrent conversations, got {DOCS_POOL_MAX_CONNECTIONS}"
+        );
+        assert!(
+            DOCS_POOL_ACQUIRE_TIMEOUT >= Duration::from_secs(5)
+                && DOCS_POOL_ACQUIRE_TIMEOUT <= Duration::from_secs(15),
+            "acquire timeout must stay bounded but not starve callers: {DOCS_POOL_ACQUIRE_TIMEOUT:?}"
+        );
     }
 }

@@ -31,6 +31,17 @@ response = client.emails.send_email(
 )
 
 puts "Email sent! ID: #{response[:id]}"
+
+# Template send: template_id names a stored template that supplies
+# subject/html/text, rendered with template_data. A template-only send may
+# omit subject/html/text; an explicit subject/html/text overrides the
+# rendered field.
+response = client.emails.send_email(
+  from:          'hello@yourdomain.com',
+  to:            'user@example.com',
+  template_id:   'tpl_welcome000000000001',
+  template_data: { firstName: 'Ada' }
+)
 ```
 
 ## Features

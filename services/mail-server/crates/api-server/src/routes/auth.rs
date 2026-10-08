@@ -783,6 +783,14 @@ pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
             "dedicated_ips:write".into(),
             "support:read".into(),
             "support:write".into(),
+            // `retention:read`/`retention:write` are the scopes REQUIRED by
+            // the /v1/retention surface (custom retention editing). Leaving
+            // them out of the mintable registry made the documented
+            // retention flow impossible for scoped keys — only wildcard
+            // holders could ever call it (the exact defect the
+            // domains:write/lists:* fixes closed for their surfaces).
+            "retention:read".into(),
+            "retention:write".into(),
         ],
         "viewer" => vec![
             "messages:read".into(),
@@ -797,6 +805,7 @@ pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
             "suppressions:read".into(),
             "dedicated_ips:read".into(),
             "support:read".into(),
+            "retention:read".into(),
         ],
         _ => vec!["messages:read".into()],
     }

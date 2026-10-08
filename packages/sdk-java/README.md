@@ -42,6 +42,17 @@ public class Main {
         ));
 
         System.out.println("Email sent! ID: " + response.id());
+
+        // Template send: template_id names a stored template that supplies
+        // subject/html/text, rendered with template_data. A template-only
+        // send may omit subject/html/text; an explicit subject/html/text
+        // overrides the rendered field.
+        Emails.SendResponse templateResponse = client.emails().send(Map.of(
+            "from", "hello@yourdomain.com",
+            "to", java.util.List.of("user@example.com"),
+            "template_id", "tpl_welcome000000000001",
+            "template_data", Map.of("firstName", "Ada")
+        ));
     }
 }
 ```

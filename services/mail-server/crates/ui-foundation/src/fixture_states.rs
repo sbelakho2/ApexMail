@@ -218,6 +218,7 @@ pub fn drafts_populated() -> AiDraftsPageData {
             AiDraftData {
                 id: "draft_dogfood_ui_visual_0001".to_string(),
                 tenant_id: "wsp_dogfood_ui_visual".to_string(),
+                tenant_label: "Northwind SaaS".to_string(),
                 from_email: "lena.moreau@northwind-saas.example".to_string(),
                 subject: "Re: Question about the annual discount and the 4,000-character assistant limit before we migrate forty thousand contacts next quarter".to_string(),
                 draft_reply: long_reply(),
@@ -229,6 +230,7 @@ pub fn drafts_populated() -> AiDraftsPageData {
             AiDraftData {
                 id: "draft_dogfood_ui_visual_0002".to_string(),
                 tenant_id: "wsp_dogfood_ui_visual".to_string(),
+                tenant_label: "Northwind SaaS".to_string(),
                 from_email: "ops@northwind-saas.example".to_string(),
                 subject: "Re: Webhook retries during the maintenance window".to_string(),
                 draft_reply: "Hi,\n\nDuring the maintenance window webhook deliveries are retried with exponential backoff for up to twenty-four hours. No events are dropped.\n\n— ApexMail".to_string(),
@@ -240,6 +242,7 @@ pub fn drafts_populated() -> AiDraftsPageData {
             AiDraftData {
                 id: "draft_dogfood_ui_visual_0003".to_string(),
                 tenant_id: "wsp_dogfood_ui_visual".to_string(),
+                tenant_label: "Northwind SaaS".to_string(),
                 from_email: "capped-787ff32e256c4c618025bd9495cd19e2@example.com".to_string(),
                 subject: String::new(),
                 draft_reply: "Hi,\n\nWe can move the subscription to annual billing at the next renewal without downtime. Your account manager will confirm the date.\n\n— ApexMail".to_string(),
@@ -260,6 +263,7 @@ pub fn drafts_many() -> AiDraftsPageData {
         data.drafts.push(AiDraftData {
             id: format!("draft_dogfood_ui_visual_{index:04}"),
             tenant_id: "wsp_dogfood_ui_visual".to_string(),
+            tenant_label: "Northwind SaaS".to_string(),
             from_email: format!("capped-{index:02}-787ff32e256c4c618025bd9495cd19e2@example.com"),
             subject: format!(
                 "Re: Follow-up {index} on the migration checklist for the shared IP pool and the dedicated IP warm-up schedule"

@@ -2,11 +2,14 @@ pub mod account;
 pub mod ai_chat;
 pub mod ai_insights;
 pub mod analytics;
+pub mod audit;
 pub mod auth;
 pub mod automations;
 pub mod bank_statements;
 pub mod billing;
+pub mod campaign_experiments;
 pub mod campaigns;
+pub mod capability_gate;
 pub mod client_errors;
 pub mod contact;
 pub mod contacts;
@@ -19,8 +22,11 @@ pub mod explorer;
 pub mod health;
 pub mod helpers;
 pub mod lists;
+pub mod message_timeline;
 pub mod messages;
+pub mod notification_drain;
 pub mod pagination;
+pub mod retention;
 pub mod scim;
 pub mod segments;
 pub mod self_hosted_bounces;
@@ -29,6 +35,7 @@ pub mod support;
 pub mod suppressions;
 pub(crate) mod system_sender;
 pub mod templates;
+pub mod tracking_domains;
 pub mod web;
 pub mod webhooks;
 
@@ -70,6 +77,7 @@ mod tests {
         "support.rs",
         "suppressions.rs",
         "templates.rs",
+        "tracking_domains.rs",
         "webhooks.rs",
     ];
 
@@ -89,6 +97,7 @@ mod tests {
         "suppressions",
         "support_tickets",
         "templates",
+        "tracking_domains",
         "users",
         "webhooks",
     ];

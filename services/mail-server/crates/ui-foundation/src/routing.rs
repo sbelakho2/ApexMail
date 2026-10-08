@@ -182,7 +182,10 @@ mod tests {
         // SalesCloser plan §5.2: the console assistant joins the web manifest
         // (data-backed conversation page, nav entry under Account) — web
         // 36 → 37, total 121 → 122.
-        assert_eq!(declared_route_count("web"), Some(37));
+        // Time-travel debugging: the message timeline page joins the web
+        // manifest (data-backed /messages/{id}/timeline, linked from the
+        // delivery events surface) — web 37 → 38, total 126 → 127.
+        assert_eq!(declared_route_count("web"), Some(38));
         // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
         // demo viewer (/demo) join the baseline — control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
@@ -190,7 +193,7 @@ mod tests {
         assert_eq!(declared_route_count("control-plane"), Some(32));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 126);
+        assert_eq!(total_route_count(), 127);
     }
 
     #[test]

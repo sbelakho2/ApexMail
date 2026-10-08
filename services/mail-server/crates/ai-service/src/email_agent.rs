@@ -992,6 +992,32 @@ impl EmailAnswerer {
         Ok(())
     }
 
+    /// The id of an EARLIER delivery of the same (tenant, RFC Message-ID) that
+    /// already reached a terminal agent write (a draft or a human-review
+    /// note), if any. This is the durable inbound-dedup identity the analytics
+    /// handoff already uses (`reply_events` F67: SHA-256 over the
+    /// tenant-qualified Message-ID), applied at the point where duplicates
+    /// would otherwise create a second draft: a re-delivered message (MTA
+    /// retry, alias fan-out, a forwarder replaying the same Message-ID) must
+    /// not put two copies of the same email in the review queue.
+    async fn prior_delivery(&self, id: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT prior.id FROM inbound_messages prior \
+             JOIN inbound_messages current ON current.id = $1 \
+             WHERE prior.id <> current.id \
+               AND prior.message_id_header IS NOT NULL \
+               AND current.message_id_header IS NOT NULL \
+               AND prior.message_id_header = current.message_id_header \
+               AND prior.tenant_id IS NOT DISTINCT FROM current.tenant_id \
+               AND (prior.ai_response IS NOT NULL OR prior.processed = true) \
+             ORDER BY prior.received_at ASC \
+             LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
     /// Fetch the leading bytes of the stored raw MIME for header inspection.
     /// Returns None when the message has no raw copy or the deployment's
     /// `inbound_messages` lacks the `raw_message` column (logged once).
@@ -1059,6 +1085,44 @@ impl EmailAnswerer {
             suggested_action: row.suggested_action.clone(),
         };
         let row = &row;
+
+        // ── Loop guard 0: duplicate delivery (same tenant + Message-ID) ───
+        // The FIRST delivery wins; a replay of the same RFC 5322 Message-ID
+        // is terminally declined with a named note, so the review queue holds
+        // ONE copy of the email and the duplicate cannot be re-claimed. The
+        // identity is the same tenant-qualified Message-ID the analytics
+        // handoff already collapses on (reply_events F67). FAIL CLOSED: a
+        // check that cannot run must not let a duplicate draft through.
+        match self.prior_delivery(&row.id).await {
+            Ok(Some(prior_id)) => {
+                tracing::info!(
+                    msg_id = %row.id,
+                    prior_msg_id = %prior_id,
+                    "Duplicate delivery (same Message-ID) — no second draft"
+                );
+                return self
+                    .decline(
+                        &row.id,
+                        "[NO DRAFT — duplicate delivery: this message (same Message-ID) was \
+                         already answered or reviewed; the earlier copy is the one to review]",
+                    )
+                    .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    msg_id = %row.id,
+                    error = %error,
+                    "duplicate-delivery lookup failed — declining to human review (fail closed)"
+                );
+                return self
+                    .decline(
+                        &row.id,
+                        "[NO DRAFT — duplicate-delivery check unavailable; message routed to human review]",
+                    )
+                    .await;
+            }
+        }
 
         // ── Loop guard 1: sender-based ────────────────────────────────────
         if is_loop_sender(&row.from_email, &self.config.reply_from) {

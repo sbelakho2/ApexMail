@@ -31,6 +31,23 @@ pub struct PlanRow {
     /// volume (None = no automatic overage: Free's quota gate blocks, PAYG
     /// is usage-priced, Enterprise is contractual).
     pub overage_millicents_per_email: Option<i64>,
+    /// `audit_logs` — customer read/export of the tenant audit trail.
+    /// Sold on Growth and above (docs/pricing.md "Included feature gates").
+    pub audit_logs: bool,
+    /// `ab_testing` — campaign experiment execution + results API.
+    /// Sold on Growth and above.
+    pub ab_testing: bool,
+    /// `time_travel_debugging` — historical message-state replay.
+    /// Sold on Growth and above.
+    pub time_travel_debugging: bool,
+    /// `template_approval_workflow` — maker/checker template publishing.
+    /// Sold on Business and Enterprise Cloud.
+    pub template_approval_workflow: bool,
+    /// `subaccounts` — child workspaces with isolated quotas/keys.
+    /// Sold on Business and Enterprise Cloud.
+    pub subaccounts: bool,
+    /// `max_subaccounts` — child-workspace ceiling (-1 = unlimited).
+    pub max_subaccounts: i64,
 }
 
 /// The canonical catalog, ordered by sort order. Mirrors the deployed
@@ -48,6 +65,12 @@ pub const PLANS: &[PlanRow] = &[
         max_retention_days: 7,
         max_team_members: 1,
         overage_millicents_per_email: None,
+        audit_logs: false,
+        ab_testing: false,
+        time_travel_debugging: false,
+        template_approval_workflow: false,
+        subaccounts: false,
+        max_subaccounts: 0,
     },
     PlanRow {
         name: "starter",
@@ -59,6 +82,12 @@ pub const PLANS: &[PlanRow] = &[
         max_retention_days: 30,
         max_team_members: 5,
         overage_millicents_per_email: Some(80),
+        audit_logs: false,
+        ab_testing: false,
+        time_travel_debugging: false,
+        template_approval_workflow: false,
+        subaccounts: false,
+        max_subaccounts: 0,
     },
     PlanRow {
         name: "pro",
@@ -70,6 +99,12 @@ pub const PLANS: &[PlanRow] = &[
         max_retention_days: 60,
         max_team_members: 10,
         overage_millicents_per_email: Some(60),
+        audit_logs: false,
+        ab_testing: false,
+        time_travel_debugging: false,
+        template_approval_workflow: false,
+        subaccounts: false,
+        max_subaccounts: 0,
     },
     PlanRow {
         name: "growth",
@@ -81,6 +116,12 @@ pub const PLANS: &[PlanRow] = &[
         max_retention_days: 90,
         max_team_members: 25,
         overage_millicents_per_email: Some(35),
+        audit_logs: true,
+        ab_testing: true,
+        time_travel_debugging: true,
+        template_approval_workflow: false,
+        subaccounts: false,
+        max_subaccounts: 0,
     },
     PlanRow {
         name: "scale",
@@ -92,6 +133,12 @@ pub const PLANS: &[PlanRow] = &[
         max_retention_days: 365,
         max_team_members: 50,
         overage_millicents_per_email: Some(35),
+        audit_logs: true,
+        ab_testing: true,
+        time_travel_debugging: true,
+        template_approval_workflow: true,
+        subaccounts: true,
+        max_subaccounts: 10,
     },
     PlanRow {
         name: "enterprise",
@@ -104,6 +151,12 @@ pub const PLANS: &[PlanRow] = &[
         max_team_members: -1,
         // Contractual: 22–35 by contract; 35 is the runtime default.
         overage_millicents_per_email: Some(35),
+        audit_logs: true,
+        ab_testing: true,
+        time_travel_debugging: true,
+        template_approval_workflow: true,
+        subaccounts: true,
+        max_subaccounts: -1,
     },
     PlanRow {
         name: "payg",
@@ -116,6 +169,12 @@ pub const PLANS: &[PlanRow] = &[
         max_team_members: 5,
         // Usage-priced already; no subscription overage.
         overage_millicents_per_email: None,
+        audit_logs: false,
+        ab_testing: false,
+        time_travel_debugging: false,
+        template_approval_workflow: false,
+        subaccounts: false,
+        max_subaccounts: 0,
     },
 ];
 
@@ -149,6 +208,52 @@ mod tests {
         let len = names.len();
         names.dedup();
         assert_eq!(names.len(), len);
+    }
+
+    /// `docs/pricing.md` "Included feature gates": audit logs, A/B testing
+    /// and time-travel debugging are sold on Growth and above; template
+    /// approval and subaccounts on Business and Enterprise Cloud. The
+    /// canonical catalog is the first half of the two files the
+    /// knowledge-consistency gate pins (the billing seeds mirror these
+    /// values), so this test is the fail-before proof that the tables above
+    /// match what is sold.
+    #[test]
+    fn feature_gates_match_the_public_pricing_table() {
+        let cases: &[(&str, bool, bool, bool, bool, bool)] = &[
+            // plan, audit, approval, subaccounts, ab_testing, time_travel
+            ("free", false, false, false, false, false),
+            ("starter", false, false, false, false, false),
+            ("pro", false, false, false, false, false),
+            ("growth", true, false, false, true, true),
+            ("scale", true, true, true, true, true),
+            ("enterprise", true, true, true, true, true),
+            ("payg", false, false, false, false, false),
+        ];
+        for (name, audit, approval, subaccounts, ab_testing, time_travel) in cases {
+            let plan = plan_by_name(name).unwrap_or_else(|| panic!("plan {name} exists"));
+            assert_eq!(plan.audit_logs, *audit, "{name}.audit_logs");
+            assert_eq!(
+                plan.template_approval_workflow, *approval,
+                "{name}.template_approval_workflow"
+            );
+            assert_eq!(plan.subaccounts, *subaccounts, "{name}.subaccounts");
+            assert_eq!(plan.ab_testing, *ab_testing, "{name}.ab_testing");
+            assert_eq!(
+                plan.time_travel_debugging, *time_travel,
+                "{name}.time_travel_debugging"
+            );
+        }
+        // The Business subaccount ceiling is 10 (training prompts and gap
+        // scenarios: "subaccounts (10)"); Enterprise is unlimited.
+        assert_eq!(plan_by_name("scale").unwrap().max_subaccounts, 10);
+        assert_eq!(plan_by_name("enterprise").unwrap().max_subaccounts, -1);
+        for name in ["free", "starter", "pro", "growth", "payg"] {
+            assert_eq!(
+                plan_by_name(name).unwrap().max_subaccounts,
+                0,
+                "{name} must not seed subaccount capacity"
+            );
+        }
     }
 
     #[test]

@@ -52,7 +52,13 @@ impl From<TemplateSubmissionDbRow> for TemplateSubmission {
 }
 
 impl TemplateApprovalService {
-    pub fn new(db: PgPool, _auto_approve_threshold: i32, auto_reject_threshold: i32) -> Self {
+    /// `auto_reject_threshold` is the spam score at (or above) which a
+    /// submission is auto-REJECTED. There is deliberately no auto-approve
+    /// threshold (audit M-01: every submission requires a human review), and
+    /// since dogfood 2026-10-06 wave B there is no `_auto_approve_threshold`
+    /// parameter either — the env knob that fed it was removed because M-01
+    /// makes every value unhonorable.
+    pub fn new(db: PgPool, auto_reject_threshold: i32) -> Self {
         Self {
             db,
             auto_reject_threshold,

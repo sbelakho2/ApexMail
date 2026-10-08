@@ -208,6 +208,32 @@ pub struct MultiRegionConfig {
 
 // ── Top-Level Config ───────────────────────────────────────
 
+/// Runtime configuration loaded from the environment.
+///
+/// # Knobs that are parsed but not yet honored (verified 2026-10-07)
+///
+/// Parsing a variable an operator sets is a promise; these are the ones
+/// this service currently reads from the environment but never consults at
+/// runtime, kept here so the next reader does not have to re-derive it:
+///
+/// * `failover.failback_delay_ms` (`FAILBACK_DELAY`) — no automatic
+///   failback timer exists; failback is manual (`FAILBACK_ENABLED` gates the
+///   endpoint only).
+/// * `chaos.failure_rate` — experiments carry their own typed config; the
+///   process-wide rate is unused.
+/// * `multi_region.regions` / `primary_region` / `health_check_interval_ms`
+///   / `sync_interval_ms` — the multi-region service routes by the live
+///   `ha_regions` table, and there is no cross-region sync loop; only
+///   `routing_mode` is honored.
+/// * `alerting_webhook` (`ALERTING_WEBHOOK`) — no alert dispatch path.
+/// * `rpo_target_secs` / `rto_target_secs` (`RPO_TARGET`/`RTO_TARGET`) — the
+///   targets are not surfaced in any report or check.
+/// * `redis.sentinel_master` (`REDIS_SENTINEL_MASTER`) — connections are
+///   built from `redis.url()`, not through Sentinel.
+///
+/// `circuit_breaker.{threshold,timeout_ms,reset_timeout_ms}` and
+/// `health.timeout_ms` ARE honored (see `circuit_breaker.rs` and
+/// `health_check.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

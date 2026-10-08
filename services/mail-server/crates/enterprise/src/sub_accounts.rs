@@ -26,14 +26,7 @@ impl SubAccountService {
         }
     }
 
-    /// Create a sub-account
-    ///
-    /// F10 (quota race): the count-then-insert pair ran on the pool, so two
-    /// concurrent creates for the same parent both counted N, both passed the
-    /// limit check and both inserted — the quota silently drifted. The whole
-    /// sequence now runs in ONE transaction that takes a per-parent advisory
-    /// xact lock BEFORE the count: creators for the same parent serialise,
-    /// the count is exact, and the lock releases at commit.
+    /// Create a sub-account with only the operator-configured global ceiling.
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
@@ -44,6 +37,48 @@ impl SubAccountService {
         plan: Option<&str>,
         volume_limit: Option<i64>,
         inherit_parent_settings: bool,
+    ) -> Result<ApiResult<SubAccount>, String> {
+        self.create_with_plan_limit(
+            parent_id,
+            name,
+            email,
+            domain,
+            plan,
+            volume_limit,
+            inherit_parent_settings,
+            None,
+        )
+        .await
+    }
+
+    /// Create a sub-account under BOTH the operator-configured global ceiling
+    /// and the paying plan's `max_subaccounts` entitlement.
+    ///
+    /// `plan_max_subaccounts` is the resolved plan capacity (`-1` = unlimited,
+    /// `None` = caller has no plan cap to apply). The plan cap is enforced
+    /// INSIDE the same per-parent advisory-lock transaction as the global cap:
+    /// a count checked outside the lock would let two concurrent creates both
+    /// pass (exactly the quota race F10 fixed), so the entitlement check and
+    /// the insert must share the lock. The refusal is a `QUOTA_EXCEEDED` whose
+    /// message names `max_subaccounts` and the effective ceiling.
+    ///
+    /// F10 (quota race): the count-then-insert pair ran on the pool, so two
+    /// concurrent creates for the same parent both counted N, both passed the
+    /// limit check and both inserted — the quota silently drifted. The whole
+    /// sequence runs in ONE transaction that takes a per-parent advisory
+    /// xact lock BEFORE the count: creators for the same parent serialise,
+    /// the count is exact, and the lock releases at commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_plan_limit(
+        &self,
+        parent_id: String,
+        name: &str,
+        email: Option<&str>,
+        domain: Option<&str>,
+        plan: Option<&str>,
+        volume_limit: Option<i64>,
+        inherit_parent_settings: bool,
+        plan_max_subaccounts: Option<i32>,
     ) -> Result<ApiResult<SubAccount>, String> {
         let mut tx = self
             .db
@@ -67,12 +102,22 @@ impl SubAccountService {
                 .await
                 .map_err(|e| format!("Count sub-accounts: {e}"))?;
 
-        if count.0 >= self.max_sub_accounts as i64 {
+        // The plan ceiling can only TIGHTEN the operator-configured global
+        // cap, never widen it: `-1` (unlimited plan) keeps the global cap,
+        // `0` refuses every create (defense in depth under the feature gate),
+        // a finite value takes the minimum.
+        let effective_cap = match plan_max_subaccounts {
+            Some(limit) if limit >= 0 => (self.max_sub_accounts as i64).min(limit as i64),
+            _ => self.max_sub_accounts as i64,
+        };
+        if count.0 >= effective_cap {
             // Drop the transaction (rolling back and releasing the advisory
             // lock) before reporting the quota rejection.
             drop(tx);
             return Ok(ApiResult::err(
-                format!("Maximum sub-accounts ({}) reached", self.max_sub_accounts),
+                format!(
+                    "Maximum sub-accounts ({effective_cap}) reached for this plan (max_subaccounts)"
+                ),
                 "QUOTA_EXCEEDED",
             ));
         }

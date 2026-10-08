@@ -214,6 +214,78 @@ class BatchCoercionContract(unittest.TestCase):
         self.assertEqual("/v1/messages/batch", self.client.calls[0]["path"])
 
 
+class TemplateSendContract(unittest.TestCase):
+    """Template sends (docs/api/endpoints/messages.md): template_id names a
+    stored template that supplies subject/html/text, rendered with
+    template_data. A template-only send is valid; template_data shapes the
+    server refuses are refused before any request."""
+
+    def test_template_only_send_reaches_the_wire(self) -> None:
+        client = FakeClient()
+        EmailsResource(client).send(
+            from_="hello@example.com",
+            to="user@example.com",
+            template_id="tpl_1",
+            template_data={"name": "Ada"},
+        )
+        payload = client.calls[0]["json"]
+        self.assertEqual("tpl_1", payload["template_id"])
+        self.assertEqual({"name": "Ada"}, payload["template_data"])
+        for absent in ("subject", "html", "text"):
+            self.assertNotIn(absent, payload, f"{absent} must be omitted for a template-only send")
+
+    def test_build_payload_serializes_template_fields(self) -> None:
+        payload = build_send_payload(
+            from_="hello@example.com",
+            to="user@example.com",
+            template_id="tpl_1",
+            template_data={"name": "Ada"},
+        )
+        self.assertEqual("tpl_1", payload["template_id"])
+        self.assertEqual({"name": "Ada"}, payload["template_data"])
+        self.assertNotIn("subject", payload)
+
+    def test_template_shape_refusals_never_reach_the_wire(self) -> None:
+        # template_data without a template_id.
+        client = FakeClient()
+        with self.assertRaises(ContractValidationError):
+            EmailsResource(client).send(
+                from_="hello@example.com",
+                to="user@example.com",
+                subject="Hi",
+                text="body",
+                template_data={"name": "Ada"},
+            )
+        # Non-object template_data.
+        with self.assertRaises(ContractValidationError):
+            EmailsResource(client).send(
+                from_="hello@example.com",
+                to="user@example.com",
+                template_id="tpl_1",
+                template_data=["not", "an", "object"],
+            )
+        self.assertEqual([], client.calls, "refused shapes must not reach the wire")
+
+    def test_batch_template_only_item_is_normalized(self) -> None:
+        client = FakeClient()
+        results = EmailsResource(client).batch(
+            [
+                {
+                    "from": "hello@example.com",
+                    "to": "user@example.com",
+                    "template_id": "tpl_1",
+                    "template_data": {"name": "Ada"},
+                }
+            ]
+        )
+        self.assertEqual(results[0].id, "msg_1")
+        message = client.calls[0]["json"]["messages"][0]
+        self.assertEqual("tpl_1", message["template_id"])
+        self.assertEqual({"name": "Ada"}, message["template_data"])
+        self.assertNotIn("subject", message)
+        self.assertNotIn("html", message)
+
+
 class WebhookPayloadContract(unittest.TestCase):
     def setUp(self) -> None:
         self.client = FakeClient()

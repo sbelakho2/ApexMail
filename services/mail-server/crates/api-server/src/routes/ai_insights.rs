@@ -94,14 +94,31 @@ async fn send_time_optimization(
     crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::SendTimeOptimization)
         .await?;
 
-    let tz = params.timezone.clone().unwrap_or_else(|| "UTC".into());
+    // The requested timezone is REAL: an unknown name is a named 400 (never
+    // silently treated as UTC), and the recommended UTC hour is rendered in
+    // this zone — before this, `timezone` was echoed back untouched while
+    // `local_time` printed the UTC hour (dogfood 2026-10-06 wave B).
+    let tz: chrono_tz::Tz = params
+        .timezone
+        .as_deref()
+        .unwrap_or("UTC")
+        .parse()
+        .map_err(|_| {
+            ApiError::BadRequest(format!(
+                "unknown timezone: {:?} (use an IANA name such as Europe/Tallinn)",
+                params.timezone.as_deref().unwrap_or("UTC")
+            ))
+        })?;
+    let tz = tz.name().to_string();
     let recipient = params.recipient.as_deref();
 
-    // Query historical engagement data - when did recipients open emails most
+    // Query historical engagement data - when did recipients open emails most.
+    // Hours are extracted in UTC explicitly (`AT TIME ZONE 'UTC'`), so the
+    // histogram does not depend on the database session timezone.
     let hour_data: Vec<(i32, i64)> = if let Some(email) = recipient {
         // For specific recipient, analyze their personal open patterns
         sqlx::query_as(
-            "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
+            "SELECT EXTRACT(HOUR FROM (timestamp AT TIME ZONE 'UTC'))::int as hour, COUNT(*) as opens
              FROM events
              WHERE tenant_id = $1 AND event_type IN ('opened', 'open') AND recipient = $2
              GROUP BY hour
@@ -114,7 +131,7 @@ async fn send_time_optimization(
     } else {
         // For tenant-wide, analyze all open patterns
         sqlx::query_as(
-            "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
+            "SELECT EXTRACT(HOUR FROM (timestamp AT TIME ZONE 'UTC'))::int as hour, COUNT(*) as opens
              FROM events
              WHERE tenant_id = $1 AND event_type IN ('opened', 'open') AND timestamp > NOW() - INTERVAL '90 days'
              GROUP BY hour
@@ -207,13 +224,41 @@ async fn send_time_optimization(
         )
     };
 
+    // Render the recommended UTC hour in the REQUESTED zone. The zone is
+    // applied to today's date so the offset follows the current DST rules.
+    let local_time = local_hour_label(&tz, recommended_hour);
+    let reasoning = format!("{reasoning} That is {local_time} in the requested timezone.");
+
     Ok(Json(SendTimeResponse {
         recommended_hour_utc: recommended_hour,
         confidence,
         timezone: tz,
-        local_time: format!("{}:00", recommended_hour),
+        local_time,
         reasoning,
     }))
+}
+
+/// Format the local-time label (`HH:MM`) of a UTC hour in an IANA zone.
+///
+/// Falls back to the bare UTC hour only if the date arithmetic cannot produce
+/// a single instant (never for real zones at hour precision).
+fn local_hour_label(tz: &str, utc_hour: u8) -> String {
+    use chrono::TimeZone as _;
+
+    let fallback = format!("{utc_hour:02}:00");
+    let Ok(zone) = tz.parse::<chrono_tz::Tz>() else {
+        return fallback;
+    };
+    let today = chrono::Utc::now().date_naive();
+    let Some(naive) = today.and_hms_opt(u32::from(utc_hour), 0, 0) else {
+        return fallback;
+    };
+    match chrono::Utc.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(instant) => {
+            instant.with_timezone(&zone).format("%H:%M").to_string()
+        }
+        _ => fallback,
+    }
 }
 
 async fn subject_analysis(
@@ -291,35 +336,30 @@ async fn churn_prediction(
 ) -> Result<Json<ChurnPredictionResponse>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
 
-    // Simple heuristic:contacts with no events in the last 90 days
-    let at_risk = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT c.id) FROM contacts c
-         LEFT JOIN events e ON e.recipient = c.email AND e.tenant_id = c.tenant_id
-            AND e.timestamp > NOW() - INTERVAL '90 days'
-         WHERE c.tenant_id = $1 AND c.status = 'active' AND e.id IS NULL",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| ApiError::Internal(format!("churn prediction query failed: {e}")))?;
-
-    let total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM contacts WHERE tenant_id = $1 AND status = 'active'",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| ApiError::Internal(format!("churn prediction total query failed: {e}")))?
-    .max(1);
+    // Audience-level churn is computed by the analytics engine's signal rules
+    // (complaint / bounce / inactivity / decay, with their weights) — the
+    // route must never fabricate factor strings again. Before this wiring the
+    // engine was dead outside its tests and the route returned two hardcoded
+    // factors plus two hardcoded recommendations.
+    let engine = apexmail_analytics::churn_prediction::ChurnPredictionEngine::new(
+        state.db.clone(),
+        state.redis.clone(),
+    );
+    let overview = engine
+        .tenant_overview(&auth.tenant_id)
+        .await
+        .map_err(|error| ApiError::Internal(format!("churn prediction failed: {error}")))?;
 
     Ok(Json(ChurnPredictionResponse {
-        at_risk_contacts: at_risk,
-        churn_probability: at_risk as f64 / total as f64,
-        top_risk_factors: vec!["No opens in 90 days".into(), "Engagement declining".into()],
-        recommendations: vec![
-            "Send a re-engagement campaign".into(),
-            "Offer an incentive to inactive subscribers".into(),
-        ],
+        at_risk_contacts: overview.at_risk_contacts,
+        churn_probability: overview.churn_probability,
+        top_risk_factors: overview
+            .risk_factors
+            .iter()
+            .take(3)
+            .map(|factor| format!("{} ({} contacts)", factor.factor, factor.contacts))
+            .collect(),
+        recommendations: overview.recommendations,
     }))
 }
 
@@ -968,8 +1008,29 @@ mod adversarial_tests {
             .expect("churn");
         assert_eq!(churn.at_risk_contacts, 1, "only the idle active contact");
         assert!(churn.churn_probability > 0.0 && churn.churn_probability <= 1.0);
-        assert_eq!(churn.top_risk_factors.len(), 2);
-        assert!(!churn.recommendations.is_empty());
+        // Dogfood 2026-10-06 wave B: the factors are DERIVED from the seeded
+        // data (the previous implementation returned two hardcoded strings).
+        // Only the idle contact carries a signal → exactly one real factor.
+        assert_eq!(
+            churn.top_risk_factors.len(),
+            1,
+            "exactly the one real signal, got {:?}",
+            churn.top_risk_factors
+        );
+        assert!(
+            churn.top_risk_factors[0].contains("no opens or clicks in 90 days")
+                && churn.top_risk_factors[0].contains("1 contacts"),
+            "the inactivity factor must carry its real count, got {:?}",
+            churn.top_risk_factors
+        );
+        assert!(
+            churn
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.contains("re-engagement")),
+            "the recommendation must follow the present signal, got {:?}",
+            churn.recommendations
+        );
 
         // Empty tenant: total is clamped to 1 → probability 0.
         let empty = apexmail_lib::id::generate_id("", 26);
@@ -1054,6 +1115,46 @@ mod adversarial_tests {
         assert_eq!(first.timezone, "Europe/Tallinn");
         assert!(first.confidence > 0.5);
         assert!(first.reasoning.contains("opens analyzed"));
+        // The requested timezone is APPLIED to the answer. Tallinn is UTC+3 in
+        // October (EEST), so 09:00 UTC renders as 12:00 local — the previous
+        // implementation echoed "09:00" as the local time.
+        assert_eq!(
+            first.local_time, "12:00",
+            "09:00 UTC must render in the requested zone"
+        );
+        assert!(first.reasoning.contains("12:00"));
+
+        // A fixed-offset zone proves the conversion is real and deterministic
+        // (Tokyo is UTC+9 year-round, no DST ambiguity).
+        let Json(tokyo) = send_time_optimization(
+            State(state.clone()),
+            auth_for(&tenant, &["ai:read"]),
+            Query(SendTimeQuery {
+                recipient: Some("reader@example.com".into()),
+                timezone: Some("Asia/Tokyo".into()),
+            }),
+        )
+        .await
+        .expect("send-time in a fixed-offset zone");
+        assert_eq!(tokyo.recommended_hour_utc, 9);
+        assert_eq!(tokyo.local_time, "18:00");
+        assert_eq!(tokyo.timezone, "Asia/Tokyo");
+
+        // An unknown timezone name is a named 400, never a silent UTC answer.
+        let bad_tz = send_time_optimization(
+            State(state.clone()),
+            auth_for(&tenant, &["ai:read"]),
+            Query(SendTimeQuery {
+                recipient: None,
+                timezone: Some("Mars/Olympus_Mons".into()),
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&bad_tz, Err(ApiError::BadRequest(message))
+                if message.contains("unknown timezone")),
+            "an unknown timezone must be refused, got {bad_tz:?}"
+        );
 
         // The second call is served from the cache row written above.
         let Json(second) = send_time_optimization(

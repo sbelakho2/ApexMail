@@ -7,6 +7,7 @@
 //! 5. Request body limit on POST endpoints (10 KB)
 
 pub mod click;
+pub mod custom_host;
 pub mod health;
 pub mod pixel;
 pub mod sse;

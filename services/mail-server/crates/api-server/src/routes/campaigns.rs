@@ -902,10 +902,13 @@ async fn expand_audience(
     Ok(result.rows_affected())
 }
 
-/// Assign A/B phases for a freshly expanded audience — the same
-/// deterministic split the worker applies to scheduled campaigns (see
-/// `worker_processors::campaigns::split_ab_recipients`). The immediate-send
-/// path splits synchronously so the first drain tick already routes arms.
+/// Assign A/B phases for a freshly expanded audience — the SAME shared
+/// deterministic contract the worker applies to scheduled campaigns
+/// (`apexmail_lib::ab_testing::AB_SPLIT_SQL`): a hash of
+/// `(campaign_id, contact_id)` picks the test sample and its arm, so the
+/// immediate-send path and the worker produce identical assignments and a
+/// replay lands on the same arm. The immediate-send path splits
+/// synchronously so the first drain tick already routes arms.
 async fn split_ab_recipients_api(
     state: &AppState,
     campaign_id: Uuid,
@@ -924,31 +927,12 @@ async fn split_ab_recipients_api(
     if arm_count < 2 {
         return Ok(0);
     }
-    let split = sqlx::query(
-        "WITH ranked AS ( \
-             SELECT id, row_number() OVER (ORDER BY md5(id::text)) - 1 AS rn, \
-                    COUNT(*) OVER () AS total \
-             FROM campaign_recipients \
-             WHERE campaign_id = $1 AND phase IS NULL \
-         ) \
-         UPDATE campaign_recipients cr \
-         SET phase = CASE \
-                 WHEN r.rn < CEIL(r.total * $2)::int THEN 'test' \
-                 ELSE 'holdout' \
-             END, \
-             arm_index = CASE \
-                 WHEN r.rn < CEIL(r.total * $2)::int THEN (r.rn % $3)::int \
-                 ELSE NULL \
-             END, \
-             updated_at = NOW() \
-         FROM ranked r \
-         WHERE cr.id = r.id",
-    )
-    .bind(campaign_id)
-    .bind(test_percentage)
-    .bind(arm_count)
-    .execute(&state.db)
-    .await?;
+    let split = sqlx::query(apexmail_lib::ab_testing::AB_SPLIT_SQL)
+        .bind(campaign_id)
+        .bind(test_percentage)
+        .bind(arm_count)
+        .execute(&state.db)
+        .await?;
     if split.rows_affected() > 0 {
         sqlx::query("UPDATE campaign_ab_arms SET updated_at = NOW() WHERE campaign_id = $1")
             .bind(campaign_id)

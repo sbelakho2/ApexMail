@@ -33,6 +33,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::processor::UnsubscribeData;
+use crate::routes::custom_host::{ensure_token_matches_host, host_scope_or_refuse};
 use crate::routes::extract_client_ip;
 use crate::state::AppState;
 use crate::templates::{
@@ -97,6 +98,13 @@ pub async fn handle_unsub_post(
     Path(token): Path<String>,
     body: String,
 ) -> Response {
+    // Capability wave 2: a custom tracking host must be a verified custom
+    // domain; unconfigured hosts are refused by name before any token work.
+    let host_scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+
     // F37:structure first — a malformed (e.g. multi-byte) token is rejected
     // before it can reach any byte-slicing or verification code.
     if !is_valid_token_shape(&token) {
@@ -150,6 +158,12 @@ pub async fn handle_unsub_post(
     // F13:attribute to the token's message (v2 tokens), else resolve via
     // the canonical recipient arrays, else "unknown" — never invent.
     let message_id = resolve_message_id(&state, &data).await;
+
+    // Capability wave 2: the token must belong to the custom host's
+    // workspace.
+    if let Err(refusal) = ensure_token_matches_host(&host_scope, &data.tenant_id) {
+        return refusal;
+    }
 
     // A token pointing at a tenant that no longer exists must answer an
     // honest 4xx: the suppression INSERT would violate
@@ -248,9 +262,16 @@ pub struct UnsubQuery {
 
 pub async fn handle_unsub_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(token): Path<String>,
     Query(_q): Query<UnsubQuery>,
 ) -> Response {
+    // Capability wave 2: refuse unconfigured custom hosts by name.
+    let host_scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+
     // F37:shape check before anything else.
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("unsub_get", &token);
@@ -266,6 +287,12 @@ pub async fn handle_unsub_get(
             return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()
         }
     };
+
+    // Capability wave 2: the token must belong to the custom host's
+    // workspace.
+    if let Err(refusal) = ensure_token_matches_host(&host_scope, &data.tenant_id) {
+        return refusal;
+    }
 
     let unsub_path = &state.config.tracking.unsubscribe_path;
 
@@ -303,6 +330,12 @@ pub async fn handle_unsub_confirm_post(
     Path(token): Path<String>,
     Form(form): Form<UnsubConfirmForm>,
 ) -> Response {
+    // Capability wave 2: refuse unconfigured custom hosts by name.
+    let host_scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("unsub_confirm_post", &token);
         return Html(render_error_page("Invalid or expired unsubscribe link")).into_response();
@@ -321,6 +354,12 @@ pub async fn handle_unsub_confirm_post(
             return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()
         }
     };
+
+    // Capability wave 2: the token must belong to the custom host's
+    // workspace.
+    if let Err(refusal) = ensure_token_matches_host(&host_scope, &data.tenant_id) {
+        return refusal;
+    }
 
     let ua = headers
         .get("user-agent")
@@ -389,9 +428,16 @@ pub struct PrefsQuery {
 
 pub async fn handle_prefs_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(token): Path<String>,
     Query(q): Query<PrefsQuery>,
 ) -> Response {
+    // Capability wave 2: refuse unconfigured custom hosts by name.
+    let host_scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+
     // F37:shape check before any processing.
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("prefs_get", &token);
@@ -404,6 +450,12 @@ pub async fn handle_prefs_get(
             return Html(render_error_page("Invalid or expired preferences link")).into_response()
         }
     };
+
+    // Capability wave 2: the token must belong to the custom host's
+    // workspace.
+    if let Err(refusal) = ensure_token_matches_host(&host_scope, &data.tenant_id) {
+        return refusal;
+    }
 
     let email_lc = data.recipient.to_lowercase();
     let prefs_path = &state.config.tracking.preferences_path;
@@ -504,9 +556,16 @@ fn prefs_error_page(status: StatusCode, message: &str) -> Response {
 
 pub async fn handle_prefs_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(token): Path<String>,
     Form(form): Form<PrefsForm>,
 ) -> Response {
+    // Capability wave 2: refuse unconfigured custom hosts by name.
+    let host_scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+
     // F37:shape check before any processing.
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("prefs_post", &token);
@@ -527,6 +586,12 @@ pub async fn handle_prefs_post(
             );
         }
     };
+
+    // Capability wave 2: the token must belong to the custom host's
+    // workspace.
+    if let Err(refusal) = ensure_token_matches_host(&host_scope, &data.tenant_id) {
+        return refusal;
+    }
 
     let email = data.recipient.to_lowercase();
     let prefs_path = &state.config.tracking.preferences_path;

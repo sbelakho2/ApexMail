@@ -349,6 +349,26 @@ impl SpamEngine {
     }
 
     /// Add an approved reviewer identity.
+    ///
+    /// # Wiring constraint (read before assuming the workflow is live)
+    ///
+    /// The reviewer-gated training workflow (`add_reviewer`,
+    /// `submit_training_sample`, `pending_training_samples`,
+    /// `approve_training_sample`, `reject_training_sample`) is NOT reachable
+    /// from any serving path: no production crate calls any of these
+    /// methods, and no HTTP route exposes them. The live path
+    /// (`mta::servers::content_security`) only calls `analyze` /
+    /// `analyze_for_tenant`; nothing feeds the pending queue, so model
+    /// updates currently happen only through the direct
+    /// `train_spam`/`train_ham` calls that production does not make either.
+    ///
+    /// `docs/security/Security_Systems.md` advertises "reviewer-gated
+    /// training queue, model snapshots/rollback, and drift monitoring" —
+    /// that is this API, and it needs an admin endpoint (submit a
+    /// misclassified message, list pending samples, approve/reject as an
+    /// approved reviewer) plus a reviewer allow-list source before the claim
+    /// is true. Until that endpoint exists, treat the queue as a library
+    /// surface exercised only by this crate's tests.
     pub fn add_reviewer(&self, reviewer: &str) {
         self.approved_reviewers.write().insert(reviewer.to_string());
     }

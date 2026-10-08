@@ -270,14 +270,11 @@ ROUTE_CHECKS = (
         expected_fragments=CP_LOGIN_GATE_FRAGMENTS,
         host_override=CP_HOST,
         auth_cookie_env=CP_COOKIE_ENV,
-        # The route currently answers 501 with this honest not-implemented
-        # page (flagged in the dogfood report; it is not linked from /alerts);
-        # the assertion tracks the shipped page instead of the old empty-state
-        # copy, and 501 is an allowed body-carrying status here.
-        allowed_statuses=(501,),
+        # The real management surface for the evaluated usage-alert store
+        # (the old 501 honest-page was replaced by the rules page).
         authed_fragments=(
-            "Alert rules are not implemented",
-            "Monitor tenants, infrastructure, security events, and Enterprise workflows.",
+            "Alert Rules",
+            "Create a rule",
         ),
     ),
     RouteCheck(

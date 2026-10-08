@@ -1,10 +1,31 @@
 //! # SMTP Protocol-Level DDoS Protection
 //!
-//! Implements://! - SMTP protocol state machine with strict command sequence validation
+//! Implements:
+//! - SMTP protocol state machine with strict command sequence validation
 //! - Tarpit (artificial delay) for suspicious connections
 //! - Slowloris detection (minimum data rate enforcement)
 //! - Per-IP connection rate limiting
 //! - Phase-based timeouts
+//!
+//! # Wiring constraint (read before adopting)
+//!
+//! This module is NOT wired into any serving path. The only SMTP listeners
+//! in this repository belong to the `mta` crate, which does not depend on
+//! `ddos-protection` at all; the MTA already enforces the same protections
+//! through its own admission path (`ids_engine` session admission, the
+//! per-IP connection counters in `mta::servers::util`, the per-command idle
+//! timeout, the DATA timeout and the session error cap — see
+//! `mta/src/servers/inbound.rs`). Wiring this second, parallel state machine
+//! in front of the MTA's would double-enforce the same limits and give two
+//! sources of truth for SMTP state.
+//!
+//! Adopting it (instead of the MTA's inline checks) is a deliberate future
+//! consolidation: move the MTA's SMTP admission and command-loop checks to
+//! this module in one change, delete the inline duplicates, and keep the
+//! per-connection `SmtpConnectionTracker` registration around the accept
+//! loop. Until then, treat `SmtpConnectionProtection` / `SmtpConnectionTracker`
+//! as an unwired library surface: it is exercised only by this crate's own
+//! tests.
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};

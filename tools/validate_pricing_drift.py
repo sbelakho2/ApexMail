@@ -82,7 +82,16 @@ class PlanExpectation:
 EXPECTED_CATALOG: dict[str, PlanExpectation] = {
     "free": PlanExpectation(
         "Free", 0, 0, 3_000, 30_000, 1, 1, 7, 0, "Community",
-        {"api_access": True, "webhooks_enabled": False, "dedicated_ip": False},
+        {
+            "api_access": True,
+            "webhooks_enabled": False,
+            "dedicated_ip": False,
+            "audit_logs": False,
+            "ab_testing": False,
+            "time_travel_debugging": False,
+            "template_approval_workflow": False,
+            "subaccounts": False,
+        },
     ),
     "starter": PlanExpectation(
         "Developer", 2_900, 29_000, 50_000, 500_000, 5, 5, 30, 0, "Email",
@@ -92,6 +101,11 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "advanced_analytics": True,
             "data_export": True,
             "custom_templates": True,
+            "audit_logs": False,
+            "ab_testing": False,
+            "time_travel_debugging": False,
+            "template_approval_workflow": False,
+            "subaccounts": False,
         },
     ),
     "pro": PlanExpectation(
@@ -100,6 +114,11 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "dedicated_ip": True,
             "send_time_optimization": True,
             "priority_onboarding": True,
+            "audit_logs": False,
+            "ab_testing": False,
+            "time_travel_debugging": False,
+            "template_approval_workflow": False,
+            "subaccounts": False,
             # `custom_tracking_domain` was EXPECTED here until 2026-09-13 and
             # drifted: it is classified NotYetImplemented and is deliberately
             # not seeded (billing-service/src/plans.rs), so the catalog — and
@@ -111,11 +130,16 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         "Growth", 22_900, 229_000, 500_000, 5_000_000, 100, 25, 90, 1, "Email",
         {
             "dedicated_ip": True,
-            # `audit_logs`, `ab_testing`, `time_travel_debugging` and
-            # `custom_retention` were EXPECTED here until 2026-09-13 and
-            # drifted: all four are classified NotYetImplemented and are
-            # deliberately not seeded. The marketing copy that promised them
-            # was corrected in the same change.
+            # Capability waves 1+3: `audit_logs` (customer /v1/audit),
+            # `ab_testing` (campaign experiment execution + results API) and
+            # `time_travel_debugging` (message timeline replay) are
+            # RuntimeEnforced and sold on Growth and above. `custom_retention`
+            # remains NotYetImplemented until wave 2 lands.
+            "audit_logs": True,
+            "ab_testing": True,
+            "time_travel_debugging": True,
+            "template_approval_workflow": False,
+            "subaccounts": False,
         },
     ),
     "scale": PlanExpectation(
@@ -125,8 +149,15 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "sso_enabled": True,
             "inbound_email": True,
             "sla_guarantee": True,
-            # `subaccounts` was EXPECTED here until 2026-09-13 and drifted:
-            # classified NotYetImplemented, not seeded, not sold.
+            # Capability waves 1+3: audit logs, A/B testing, time-travel
+            # debugging, the maker/checker template approval workflow and
+            # subaccounts are implemented and sold on Business; the runtime
+            # seeds carry the same flags.
+            "audit_logs": True,
+            "ab_testing": True,
+            "time_travel_debugging": True,
+            "template_approval_workflow": True,
+            "subaccounts": True,
         },
     ),
     "enterprise": PlanExpectation(
@@ -139,6 +170,11 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "byoip": True,
             "hipaa_compliance": False,
             "soc2_compliance": False,
+            "audit_logs": True,
+            "ab_testing": True,
+            "time_travel_debugging": True,
+            "template_approval_workflow": True,
+            "subaccounts": True,
         },
     ),
     "payg": PlanExpectation(
@@ -149,8 +185,26 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "advanced_analytics": True,
             "data_export": True,
             "custom_templates": True,
+            "audit_logs": False,
+            "ab_testing": False,
+            "time_travel_debugging": False,
+            "template_approval_workflow": False,
+            "subaccounts": False,
         },
     ),
+}
+
+# Per-plan `max_subaccounts` ceiling (-1 = unlimited): Business 10 and
+# Enterprise unlimited are the numbers the AI pricing prompts/tables use and
+# the numbers `SubAccountService::create_with_plan_limit` refuses on.
+EXPECTED_MAX_SUBACCOUNTS: dict[str, int] = {
+    "free": 0,
+    "starter": 0,
+    "pro": 0,
+    "growth": 0,
+    "scale": 10,
+    "enterprise": -1,
+    "payg": 0,
 }
 
 
@@ -167,6 +221,7 @@ class ParsedPlan:
     retention_days: int
     dedicated_ips: int
     support: str
+    max_subaccounts: int
     feature_flags: dict[str, bool]
 
 
@@ -262,6 +317,7 @@ def extract_runtime_catalog(source: str) -> dict[str, ParsedPlan]:
             email_limit=numeric_values["email_limit"],  # type: ignore[arg-type]
             api_call_limit=numeric_values["api_call_limit"],  # type: ignore[arg-type]
             domains=parse_int_field(feature_block, "max_sending_domains", 0) or 0,
+            max_subaccounts=parse_int_field(feature_block, "max_subaccounts", 0) or 0,
             team_members=parse_int_field(feature_block, "max_team_members", 0) or 0,
             retention_days=parse_int_field(feature_block, "max_retention_days", 0) or 0,
             dedicated_ips=parse_int_field(feature_block, "dedicated_ip_count", 0) or 0,
@@ -285,6 +341,7 @@ def extract_runtime_catalog(source: str) -> dict[str, ParsedPlan]:
                     "sso_enabled",
                     "inbound_email",
                     "subaccounts",
+                    "template_approval_workflow",
                     "sla_guarantee",
                     "white_label",
                     "private_cloud",
@@ -362,6 +419,13 @@ def validate_runtime_catalog(errors: list[str]) -> dict[str, ParsedPlan]:
                 f"runtime {plan_id}.{feature} drift: expected {expected_value}, got {actual.feature_flags[feature]}",
                 errors,
             )
+        expected_subaccounts = EXPECTED_MAX_SUBACCOUNTS[plan_id]
+        check(
+            actual.max_subaccounts == expected_subaccounts,
+            f"runtime {plan_id}.max_subaccounts drift: expected {expected_subaccounts}, "
+            f"got {actual.max_subaccounts}",
+            errors,
+        )
     return catalog
 
 

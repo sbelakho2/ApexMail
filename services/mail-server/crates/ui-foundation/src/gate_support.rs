@@ -354,6 +354,12 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     "/web/admin/sales/leads/update",
     "/web/admin/alerts/ack",
     "/web/admin/alerts/ack-bulk",
+    // The /alerts/rules management surface: create/edit/enable/disable/
+    // delete over the evaluated usage-alert store (web.rs handlers).
+    "/web/admin/alert-rules",
+    "/web/admin/alert-rules/:id/update",
+    "/web/admin/alert-rules/:id/toggle",
+    "/web/admin/alert-rules/:id/delete",
     "/web/admin/tenants/:id/suspend",
     "/web/admin/tenants/:id/resume",
     "/web/admin/tenants/:id/delete",

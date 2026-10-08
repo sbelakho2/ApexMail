@@ -60,17 +60,30 @@ impl CircuitRuntime {
 }
 
 /// Default circuits created at startup.
-const DEFAULT_CIRCUITS: &[(&str, u32, u32, u64)] = &[
-    ("database", 5, 2, 30000),
-    ("redis", 5, 2, 30000),
-    ("external-api", 10, 3, 60000),
-    ("email-sender", 5, 2, 30000),
-    ("webhook-delivery", 8, 3, 45000),
+///
+/// Names and the success-threshold/half-open width stay compiled in; the
+/// failure threshold and both timeouts come from
+/// [`crate::config::CircuitBreakerConfig`] so the documented
+/// `CIRCUIT_BREAKER_THRESHOLD` / `CIRCUIT_BREAKER_TIMEOUT` /
+/// `CIRCUIT_BREAKER_RESET_TIMEOUT` environment knobs actually govern the
+/// runtime circuits (previously every value was hardcoded here and the
+/// parsed config fields were read nowhere).
+const DEFAULT_CIRCUITS: &[(&str, u32, u32)] = &[
+    ("database", 2, 30000),
+    ("redis", 2, 30000),
+    ("external-api", 3, 60000),
+    ("email-sender", 2, 30000),
+    ("webhook-delivery", 3, 45000),
 ];
 
-/// CircuitBreakerService manages multiple named circuits.
+/// Circuit breaker pattern — CLOSED → OPEN → HALF_OPEN state machine.
+/// Tracks per-circuit failure/success counts, enforces thresholds.
 pub struct CircuitBreakerService {
     circuits: Arc<RwLock<HashMap<String, CircuitRuntime>>>,
+    /// Reset timeout from the deployment config: an OPEN circuit that has
+    /// not been re-probed, or a HALF_OPEN probe that never reports back,
+    /// force-resets after this window (see [`Self::allow_request`]).
+    reset_timeout_ms: u64,
     #[expect(
         dead_code,
         reason = "config is retained for circuit policy inspection and future reload support"
@@ -80,22 +93,32 @@ pub struct CircuitBreakerService {
 
 impl CircuitBreakerService {
     pub fn new(config: Arc<Config>) -> Self {
+        let breaker_config = &config.circuit_breaker;
         let mut map = HashMap::new();
-        for &(name, fail_thresh, succ_thresh, timeout) in DEFAULT_CIRCUITS {
+        for &(name, succ_thresh, timeout) in DEFAULT_CIRCUITS {
             map.insert(
                 name.into(),
                 CircuitRuntime::new(CircuitConfig {
                     name: name.into(),
-                    failure_threshold: fail_thresh,
+                    // The deployment threshold governs every default circuit;
+                    // the per-circuit defaults above were unreachable config.
+                    failure_threshold: breaker_config.threshold,
                     success_threshold: succ_thresh,
-                    timeout_ms: timeout,
+                    // The OPEN → HALF_OPEN wait. A zero value would flap, so
+                    // leave the compiled per-circuit default in that case.
+                    timeout_ms: if breaker_config.timeout_ms > 0 {
+                        breaker_config.timeout_ms
+                    } else {
+                        u64::from(timeout)
+                    },
                     half_open_max_calls: 3,
-                    enabled: config.circuit_breaker.enabled,
+                    enabled: breaker_config.enabled,
                 }),
             );
         }
         Self {
             circuits: Arc::new(RwLock::new(map)),
+            reset_timeout_ms: breaker_config.reset_timeout_ms,
             config,
         }
     }
@@ -131,6 +154,24 @@ impl CircuitBreakerService {
                 }
             }
             CircuitState::HalfOpen => {
+                // Probe deadline (CIRCUIT_BREAKER_RESET_TIMEOUT): a
+                // half-open circuit whose probes never report back must not
+                // admit traffic forever. After the reset window without a
+                // completed probe, fail the admission and go back to OPEN.
+                let elapsed = (Utc::now() - circuit.state_changed_at)
+                    .num_milliseconds()
+                    .max(0) as u64;
+                if self.reset_timeout_ms > 0 && elapsed >= self.reset_timeout_ms {
+                    circuit.state = CircuitState::Open;
+                    circuit.half_open_calls = 0;
+                    circuit.state_changed_at = Utc::now();
+                    warn!(
+                        circuit = circuit_name,
+                        reset_timeout_ms = self.reset_timeout_ms,
+                        "half-open probe deadline elapsed without a result — circuit re-opened"
+                    );
+                    return Ok(false);
+                }
                 if circuit.half_open_calls < circuit.config.half_open_max_calls as u64 {
                     circuit.half_open_calls += 1;
                     Ok(true)
@@ -558,6 +599,60 @@ mod tests {
             assert!(svc.report_success("ghost").await.is_err());
             assert!(svc.report_failure("ghost").await.is_err());
             assert!(svc.reset("ghost").await.is_err());
+        });
+    }
+
+    /// The deployment config (CIRCUIT_BREAKER_THRESHOLD / _TIMEOUT) must
+    /// govern the DEFAULT circuits — previously those values were hardcoded
+    /// and the parsed fields were read nowhere, so operators could set the
+    /// env vars and no runtime circuit changed.
+    #[test]
+    fn configured_threshold_and_open_timeout_govern_default_circuits() {
+        test_runtime().block_on(async {
+            let mut cfg = Config::from_env().expect("HA config must load in development");
+            cfg.circuit_breaker.threshold = 2;
+            cfg.circuit_breaker.timeout_ms = 1;
+            let svc = CircuitBreakerService::new(Arc::new(cfg));
+
+            svc.report_failure("database").await.unwrap();
+            assert_eq!(
+                svc.get_stats("database").await.unwrap().state,
+                "closed",
+                "one failure must not open a threshold-2 circuit"
+            );
+            svc.report_failure("database").await.unwrap();
+            assert_eq!(svc.get_stats("database").await.unwrap().state, "open");
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert!(
+                svc.allow_request("database").await.unwrap(),
+                "the configured 1ms open timeout must admit the probe"
+            );
+            assert_eq!(svc.get_stats("database").await.unwrap().state, "half_open");
+        });
+    }
+
+    /// CIRCUIT_BREAKER_RESET_TIMEOUT is the HALF_OPEN probe deadline: a
+    /// probe that never reports back must not leave the circuit admitting
+    /// traffic forever.
+    #[test]
+    fn half_open_probe_deadline_honors_reset_timeout() {
+        test_runtime().block_on(async {
+            let mut cfg = Config::from_env().expect("HA config must load in development");
+            cfg.circuit_breaker.reset_timeout_ms = 5;
+            let svc = CircuitBreakerService::new(Arc::new(cfg));
+            {
+                let mut circuits = svc.circuits.write().await;
+                let circuit = circuits.get_mut("database").unwrap();
+                circuit.state = CircuitState::HalfOpen;
+                // The probe went out longer ago than the reset window.
+                circuit.state_changed_at = Utc::now() - chrono::Duration::milliseconds(50);
+            }
+            assert!(
+                !svc.allow_request("database").await.unwrap(),
+                "an expired half-open probe must be refused"
+            );
+            assert_eq!(svc.get_stats("database").await.unwrap().state, "open");
         });
     }
 }

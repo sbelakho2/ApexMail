@@ -4,6 +4,17 @@ All notable changes to the ApexMail Ruby SDK will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Template sends.** `client.emails.send_email` / `batch` accept
+  `template_id` + `template_data`: the stored template supplies
+  subject/html/text, rendered with the supplied variables, and a template-only
+  send may omit `subject`/`html`/`text`. An explicit `subject`/`html`/`text`
+  overrides the rendered field. `template_data` without `template_id` (or a
+  non-hash `template_data`) is refused client-side, naming the contract.
+
 ## [1.0.0] — 2026-03-11
 
 ### Added

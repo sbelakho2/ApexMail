@@ -89,7 +89,10 @@ pub struct PlanUpsertInput {
 /// `billing-entitlements::PLAN_FEATURE_CLASSIFICATION` are deliberately NOT
 /// seeded: the audit found `time_travel_debugging` (and other flags) sold as
 /// pricing metadata with no runtime implementation, which this catalog no
-/// longer does. Re-add a flag only together with its runtime gate.
+/// longer does. Re-add a flag only together with its runtime gate — the
+/// capability wave 1 re-added `audit_logs` (Growth+), the
+/// `template_approval_workflow` and `subaccounts`/`max_subaccounts`
+/// (Business 10, Enterprise unlimited) exactly this way.
 ///
 /// 2026-09-08 pricing review: the Free tier moved from 30,000/mo to
 /// 3,000/mo — 30k/month forever gave away a meaningful production
@@ -192,6 +195,11 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 send_time_optimization: true,
                 data_export: true,
                 custom_templates: true,
+                // Growth+ sells customer audit read/export, A/B experiment
+                // execution and time-travel debugging (docs/pricing.md).
+                audit_logs: true,
+                ab_testing: true,
+                time_travel_debugging: true,
                 max_sending_domains: 100,
                 max_retention_days: 90,
                 max_team_members: 25,
@@ -225,6 +233,15 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 send_time_optimization: true,
                 data_export: true,
                 custom_templates: true,
+                // Business+ sells audit read/export, the maker/checker
+                // template approval workflow and subaccounts (10 — the
+                // canonical number from the pricing prompts/tables).
+                audit_logs: true,
+                ab_testing: true,
+                time_travel_debugging: true,
+                template_approval_workflow: true,
+                subaccounts: true,
+                max_subaccounts: 10,
                 max_retention_days: 365,
                 max_team_members: 50,
                 dedicated_csm: true,
@@ -261,6 +278,14 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 data_export: true,
                 custom_templates: true,
                 white_label: true,
+                // Enterprise Cloud sells audit read/export, template
+                // approval and unlimited subaccounts (docs/pricing.md).
+                audit_logs: true,
+                ab_testing: true,
+                time_travel_debugging: true,
+                template_approval_workflow: true,
+                subaccounts: true,
+                max_subaccounts: -1,
                 max_retention_days: 730,
                 max_team_members: -1,
                 dedicated_csm: true,
@@ -1150,12 +1175,14 @@ mod tests {
         assert!(pro_features.send_time_optimization);
         assert!(!pro_features.ab_testing);
         assert!(growth_features.send_time_optimization);
-        // A/B testing is NotYetImplemented (no experiment-creation handler in
-        // api-server) and is therefore not seeded on any plan. Re-enable this
-        // assertion only together with the runtime gate.
-        assert!(!growth_features.ab_testing);
+        // A/B testing and time-travel debugging are RuntimeEnforced and sold
+        // on Growth and above (docs/pricing.md); the send pipeline and the
+        // replay API behind them are the gates.
+        assert!(growth_features.ab_testing);
+        assert!(growth_features.time_travel_debugging);
         assert!(enterprise_features.send_time_optimization);
-        assert!(!enterprise_features.ab_testing);
+        assert!(enterprise_features.ab_testing);
+        assert!(enterprise_features.time_travel_debugging);
     }
 
     #[test]
@@ -1286,7 +1313,9 @@ mod tests {
             .as_ref()
             .map(|f| f.send_time_optimization)
             .unwrap_or(false));
-        assert!(!ent_features.as_ref().map(|f| f.ab_testing).unwrap_or(true));
+        // A/B testing is RuntimeEnforced and sold on Growth and above, so the
+        // Enterprise seed grants it.
+        assert!(ent_features.as_ref().map(|f| f.ab_testing).unwrap_or(false));
         assert!(ent_features
             .as_ref()
             .map(|f| f.private_cloud)
@@ -1359,14 +1388,61 @@ mod tests {
                 }
             }
         }
-        // The one unimplemented capacity that was previously sold.
-        for plan in &plans {
-            assert_eq!(
-                plan.features.max_subaccounts, 0,
-                "plan `{}` seeds an unimplemented subaccount capacity",
-                plan.name
+    }
+
+    /// Capability wave 1: the seeds are true to `docs/pricing.md` — audit
+    /// logs on Growth and above, template approval and subaccounts on
+    /// Business and Enterprise Cloud, with the canonical Business cap of 10
+    /// and unlimited Enterprise. The classification flip is pinned by
+    /// `seeds_never_advertise_not_yet_implemented_features` above: the same
+    /// seed cannot be read as selling an unimplemented flag.
+    #[test]
+    fn paid_feature_gates_match_public_pricing() {
+        let plans = default_plans();
+        let features = |name: &str| {
+            plans
+                .iter()
+                .find(|plan| plan.name == name)
+                .map(|plan| plan.features.clone())
+                .unwrap_or_else(|| panic!("plan `{name}` must exist"))
+        };
+
+        for name in ["free", "starter", "pro", "payg"] {
+            let plan = features(name);
+            assert!(!plan.audit_logs, "{name} must not sell audit logs");
+            assert!(
+                !plan.template_approval_workflow,
+                "{name} must not sell template approval"
             );
+            assert!(!plan.subaccounts, "{name} must not sell subaccounts");
+            assert_eq!(plan.max_subaccounts, 0, "{name} must not seed a cap");
         }
+
+        let growth = features("growth");
+        assert!(growth.audit_logs, "Growth sells audit logs");
+        assert!(!growth.template_approval_workflow);
+        assert!(!growth.subaccounts);
+
+        let scale = features("scale");
+        assert!(scale.audit_logs, "Business sells audit logs");
+        assert!(
+            scale.template_approval_workflow,
+            "Business sells the approval workflow"
+        );
+        assert!(scale.subaccounts, "Business sells subaccounts");
+        assert_eq!(
+            scale.max_subaccounts, 10,
+            "Business subaccount cap is the canonical 10"
+        );
+
+        let enterprise = features("enterprise");
+        assert!(enterprise.audit_logs);
+        assert!(enterprise.template_approval_workflow);
+        assert!(enterprise.subaccounts);
+        assert_eq!(
+            enterprise.max_subaccounts, -1,
+            "Enterprise subaccounts are unlimited"
+        );
     }
 
     /// Resolution parity: the snapshot comes from the same effective plan

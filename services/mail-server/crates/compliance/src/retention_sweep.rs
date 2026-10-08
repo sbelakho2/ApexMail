@@ -27,6 +27,16 @@
 //! `ent_compliance_configs.zero_retention_mode = true` are purged immediately
 //! regardless of window.
 //!
+//! Capability wave 2 — plan ceiling: the resolved window is additionally
+//! clamped to the tenant's plan `max_retention_days` (from `plans.features`,
+//! override-aware via `plan_overrides` — the SAME precedence the entitlement
+//! snapshot uses). A stored override above the ceiling deletes at the
+//! ceiling, never beyond it: the editing API refuses such values and this
+//! clamp is the enforcement backstop for anything else that writes the
+//! column (direct SQL, a downgrade, a plan-override change). When the
+//! ceiling cannot be resolved (no plans table/row in a partial deployment)
+//! the registry guard alone applies, exactly as before.
+//!
 //! Legal holds (F5): tenants with `tenants.legal_hold = true` (migration 121)
 //! are excluded from EVERY purge this module performs — event stores,
 //! gdpr_exports, the DSR outbox and the audit trim (the exclusion lives in
@@ -183,6 +193,10 @@ pub struct CategorySweepResult {
     pub zero_retention_tenants: usize,
     /// Tenants whose tenants.retention_days override was honored (F4).
     pub custom_retention_tenants: usize,
+    /// Overrides that exceeded the tenant's plan `max_retention_days` and
+    /// were clamped TO the ceiling for this run (capability wave 2) — the
+    /// sweep never deletes beyond the plan ceiling.
+    pub retention_clamped_to_plan_ceiling: usize,
     pub status: SweepStatus,
     pub error: Option<String>,
 }
@@ -205,6 +219,10 @@ struct TenantRetention {
     /// tenants.retention_days override (NULL → registry plan-tier default).
     /// INT (INT4) — the canonical migration-121 column type.
     retention_days: Option<i32>,
+    /// The plan's `max_retention_days` (capability wave 2): the enforced
+    /// ceiling for `retention_days`. `None` when the plans table/row cannot
+    /// be read (partial deployment) — the registry guard alone applies.
+    plan_ceiling_days: Option<u32>,
     held: bool,
     zero_retention: bool,
 }
@@ -389,6 +407,7 @@ impl RetentionSweeper {
                     id: row.id,
                     plan: row.plan,
                     retention_days: row.retention_days,
+                    plan_ceiling_days: None,
                     held: row.legal_hold,
                     zero_retention: false,
                 })
@@ -408,6 +427,7 @@ impl RetentionSweeper {
                             id,
                             plan,
                             retention_days: None,
+                            plan_ceiling_days: None,
                             held: false,
                             zero_retention: false,
                         })
@@ -423,6 +443,21 @@ impl RetentionSweeper {
                 return None;
             }
         };
+
+        // Plan ceilings (capability wave 2): the enforced `max_retention_days`
+        // per plan, plus the active plan OVERRIDES (the same precedence the
+        // entitlement snapshot resolves: override plan > tenant plan). Both
+        // degrade independently — a missing plans table must not disable
+        // per-tenant retention or legal holds.
+        let ceilings = self.plan_retention_ceilings().await;
+        let overrides = self.active_plan_overrides().await;
+        for tenant in &mut tenants {
+            let effective_plan = overrides
+                .get(&tenant.id)
+                .map(String::as_str)
+                .unwrap_or(tenant.plan.as_str());
+            tenant.plan_ceiling_days = ceilings.get(effective_plan).copied();
+        }
 
         // Zero-retention overlay (F4): ent_compliance_configs.zero_retention_mode
         // (migration 092). Absent table/column degrades to "none"; other
@@ -449,38 +484,101 @@ impl RetentionSweeper {
         Some(tenants)
     }
 
+    /// Plan name → enforced `max_retention_days` ceiling (capability wave 2).
+    /// Read from `plans.features` — the same source the entitlement snapshot
+    /// resolves — with the same graceful degradation as every other
+    /// auxiliary lookup in this module: a missing table/column means "no
+    /// ceiling resolvable" and the registry guard alone applies.
+    async fn plan_retention_ceilings(&self) -> std::collections::HashMap<String, u32> {
+        match sqlx::query_as::<_, (String, i64)>(
+            "SELECT name, COALESCE((features->>'max_retention_days')::bigint, -1) \
+             FROM plans",
+        )
+        .fetch_all(&self.db)
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(name, days)| u32::try_from(days).ok().map(|days| (name, days)))
+                .collect(),
+            Err(e) if is_missing_store(&e) => {
+                warn!(error = %e, "retention sweep: plans table absent — no plan retention ceiling");
+                Default::default()
+            }
+            Err(e) => {
+                warn!(error = %e, "retention sweep: plans unreadable — no plan retention ceiling");
+                Default::default()
+            }
+        }
+    }
+
+    /// tenant id → active override plan (the entitlement snapshot's
+    /// precedence). Missing table/columns degrade to "no overrides".
+    async fn active_plan_overrides(&self) -> std::collections::HashMap<String, String> {
+        match sqlx::query_as::<_, (String, String)>(
+            "SELECT tenant_id, plan FROM plan_overrides \
+             WHERE active = true AND (expires_at IS NULL OR expires_at > NOW())",
+        )
+        .fetch_all(&self.db)
+        .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) if is_missing_store(&e) => Default::default(),
+            Err(e) => {
+                warn!(error = %e, "retention sweep: plan overrides unreadable — tenant plan applies");
+                Default::default()
+            }
+        }
+    }
+
     /// F4: the effective retention for one tenant against one target. The
     /// override is honored only when the registry accepts it for EVERY mapped
     /// category under the tenant's plan; otherwise the plan-tier default
     /// applies (with a warning — never longer than the plan allows).
+    ///
+    /// Capability wave 2: an accepted override is additionally CLAMPED to the
+    /// tenant's plan `max_retention_days` — the sweep never deletes data
+    /// beyond the plan ceiling even if the stored value does. Returns
+    /// `(days, clamped)`.
     fn effective_retention_days(
         &self,
         target: &SweepTarget,
         default_days: u32,
         tenant: &TenantRetention,
-    ) -> u32 {
+    ) -> (u32, bool) {
         let Some(requested) = tenant.retention_days else {
-            return default_days;
+            return (default_days, false);
         };
         let Some(requested) = u32::try_from(requested.max(0)).ok() else {
-            return default_days;
+            return (default_days, false);
         };
         let accepted = target.category_ids.iter().all(|category| {
             self.registry
                 .validate_customer_selection(category, &tenant.plan, requested)
                 .is_ok()
         });
-        if accepted {
-            requested
-        } else {
+        if !accepted {
             warn!(
                 tenant = %tenant.id,
                 store = target.store,
                 requested,
                 "tenants.retention_days violates the plan/registry bounds — using plan-tier default"
             );
-            default_days
+            return (default_days, false);
         }
+        if let Some(ceiling) = tenant.plan_ceiling_days {
+            if requested > ceiling {
+                warn!(
+                    tenant = %tenant.id,
+                    store = target.store,
+                    requested,
+                    ceiling,
+                    "tenants.retention_days exceeds the plan ceiling — clamped to the plan maximum"
+                );
+                return (ceiling, true);
+            }
+        }
+        (requested, false)
     }
 
     /// Sweep one canonical store: resolve per-tenant cutoffs (F4), skip held
@@ -513,6 +611,7 @@ impl RetentionSweeper {
         let mut held_ids: Vec<String> = Vec::new();
         let mut zero_ids: Vec<String> = Vec::new();
         let mut custom_retention_tenants = 0usize;
+        let mut retention_clamped_to_plan_ceiling = 0usize;
         // cutoff-days → tenant ids (the default group also sweeps NULL-tenant rows).
         let mut groups: std::collections::BTreeMap<u32, Vec<String>> =
             std::collections::BTreeMap::new();
@@ -527,7 +626,11 @@ impl RetentionSweeper {
                         zero_ids.push(tenant.id.clone());
                         continue;
                     }
-                    let days = self.effective_retention_days(target, default_days, tenant);
+                    let (days, clamped) =
+                        self.effective_retention_days(target, default_days, tenant);
+                    if clamped {
+                        retention_clamped_to_plan_ceiling += 1;
+                    }
                     if days != default_days {
                         custom_retention_tenants += 1;
                     }
@@ -660,6 +763,7 @@ impl RetentionSweeper {
                 legal_hold_check,
                 zero_retention_tenants: zero_ids.len(),
                 custom_retention_tenants,
+                retention_clamped_to_plan_ceiling,
                 status: SweepStatus::Deleted,
                 error: None,
             },
@@ -670,6 +774,7 @@ impl RetentionSweeper {
                 r.deleted = deleted;
                 r.considered = considered;
                 r.skipped_legal_hold = skipped_hold;
+                r.retention_clamped_to_plan_ceiling = retention_clamped_to_plan_ceiling;
                 r
             }
         }
@@ -804,6 +909,7 @@ fn skipped_result(
         legal_hold_check,
         zero_retention_tenants: 0,
         custom_retention_tenants: 0,
+        retention_clamped_to_plan_ceiling: 0,
         status: SweepStatus::SkippedMissingStore,
         error: Some(err.to_string()),
     }
@@ -827,6 +933,7 @@ fn failed_result(
         legal_hold_check: LegalHoldCheck::TenantsTableMissing,
         zero_retention_tenants: 0,
         custom_retention_tenants: 0,
+        retention_clamped_to_plan_ceiling: 0,
         status: SweepStatus::Failed,
         error: Some(err.to_string()),
     }
@@ -852,6 +959,7 @@ fn failedish_result(
         legal_hold_check,
         zero_retention_tenants: zero,
         custom_retention_tenants: custom,
+        retention_clamped_to_plan_ceiling: 0,
         status: SweepStatus::Failed,
         error: Some(message.to_string()),
     }
@@ -938,43 +1046,85 @@ mod tests {
     /// F4: a per-tenant override within the plan's bounds is honored; one
     /// that violates the plan (or the category minimum) falls back to the
     /// plan-tier default.
-    #[test]
-    fn test_tenant_retention_override_validation() {
-        let sweeper_like_registry = seed_retention_registry();
-        let target = SweepTarget {
-            store: "events",
-            table: "events",
-            timestamp_column: "timestamp",
-            category_ids: &["RET-007"],
-        };
-        let default_days = target.retention_days(&sweeper_like_registry).unwrap();
+    ///
+    /// Capability wave 2: an accepted override above the tenant's plan
+    /// `max_retention_days` ceiling is CLAMPED to the ceiling (and reported
+    /// as clamped) — the sweep never deletes beyond the plan maximum.
+    #[tokio::test]
+    async fn test_tenant_retention_override_validation() {
+        let sweeper = offline_sweeper();
+        let target = sweeper_target_events();
+        let default_days = target.retention_days(&seed_retention_registry()).unwrap();
 
         let pro_tenant = TenantRetention {
             id: "t1".into(),
             plan: "pro".into(),
-            retention_days: Some(90),
+            retention_days: Some(45),
+            plan_ceiling_days: Some(60),
             held: false,
             zero_retention: false,
         };
-        // validate_customer_selection is the gate the sweep uses; replicate
-        // its decision to prove the wiring.
-        let accepted = sweeper_like_registry
-            .validate_customer_selection("RET-007", &pro_tenant.plan, 90)
-            .is_ok();
-        let effective = if accepted { 90 } else { default_days };
-        assert_eq!(effective, 90, "pro allows up to 90d for RET-007");
+        assert_eq!(
+            sweeper.effective_retention_days(&target, default_days, &pro_tenant),
+            (45, false),
+            "an in-ceiling override is honored as-is"
+        );
 
+        // RED-BEFORE (capability wave 2): 90 days is registry-acceptable for
+        // pro (RET-007 plan limit 90) but EXCEEDS the plan's 60-day
+        // max_retention_days — the sweep must clamp, not delete at 90.
+        let pro_over_ceiling = TenantRetention {
+            retention_days: Some(90),
+            ..pro_tenant.clone()
+        };
+        assert_eq!(
+            sweeper.effective_retention_days(&target, default_days, &pro_over_ceiling),
+            (60, true),
+            "an over-ceiling override is clamped to the plan ceiling"
+        );
+
+        // Without a resolvable ceiling (partial deployment) the registry
+        // decision alone applies — never MORE restrictive than before.
+        let pro_no_ceiling = TenantRetention {
+            plan_ceiling_days: None,
+            ..pro_over_ceiling.clone()
+        };
+        assert_eq!(
+            sweeper.effective_retention_days(&target, default_days, &pro_no_ceiling),
+            (90, false)
+        );
+
+        // A registry violation still falls back to the plan-tier default.
         let free_tenant = TenantRetention {
             id: "t2".into(),
             plan: "free".into(),
             retention_days: Some(90),
+            plan_ceiling_days: Some(7),
             held: false,
             zero_retention: false,
         };
-        let accepted_free = sweeper_like_registry
-            .validate_customer_selection("RET-007", &free_tenant.plan, 90)
-            .is_ok();
-        assert!(!accepted_free, "free is capped at 7d for RET-007");
+        assert_eq!(
+            sweeper.effective_retention_days(&target, default_days, &free_tenant),
+            (default_days, false),
+            "free is capped at 7d for RET-007 by the registry"
+        );
+    }
+
+    fn offline_sweeper() -> RetentionSweeper {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgresql://offline:offline@127.0.0.1:1/offline")
+            .expect("lazy offline pool");
+        RetentionSweeper::new(pool, 7, 30, 365)
+    }
+
+    fn sweeper_target_events() -> SweepTarget {
+        SweepTarget {
+            store: "events",
+            table: "events",
+            timestamp_column: "timestamp",
+            category_ids: &["RET-007"],
+        }
     }
 
     /// Out-of-scope stores are listed with their REGISTRY durations — the
@@ -1107,6 +1257,224 @@ mod tests {
         assert!(
             !free_purged,
             "an unheld tenant's expired export must be purged by the same sweep"
+        );
+    }
+
+    // ── Capability wave 2: the sweep never deletes beyond the plan ceiling ──
+
+    async fn seed_plan(pool: &PgPool, name: &str, max_retention_days: i64) {
+        sqlx::query(
+            "INSERT INTO plans (name, display_name, features) \
+             VALUES ($1, $1, jsonb_build_object('max_retention_days', $2)) \
+             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+        )
+        .bind(name)
+        .bind(max_retention_days)
+        .execute(pool)
+        .await
+        .expect("seed plan");
+    }
+
+    async fn seed_tenant(
+        pool: &PgPool,
+        tenant: &str,
+        plan: &str,
+        retention_days: Option<i32>,
+        legal_hold: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, legal_hold, retention_days, created_at, updated_at) \
+             VALUES ($1, 'n', $1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(plan)
+        .bind(legal_hold)
+        .bind(retention_days)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_event(pool: &PgPool, tenant: &str, days_old: i32) -> String {
+        let id = format!("evt_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, event_type, timestamp) \
+             VALUES ($1, $2, 'delivered', NOW() - make_interval(days => $3))",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(days_old)
+        .execute(pool)
+        .await
+        .expect("seed event");
+        id
+    }
+
+    async fn event_exists(pool: &PgPool, id: &str) -> bool {
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM events WHERE id = $1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("probe event")
+    }
+
+    async fn run(sweeper: &RetentionSweeper, pool: &PgPool) -> RetentionSweepReport {
+        let logger = crate::audit_logger::AuditLogger::new(
+            pool.clone(),
+            crate::config::AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: false,
+                signing_key: "unit-test-sweep-signing-key".into(),
+            },
+        );
+        sweeper.run_sweep(&logger).await.expect("sweep completes")
+    }
+
+    /// RED-BEFORE (capability wave 2): a stored override of 90 days on a
+    /// plan whose `max_retention_days` is 60 must NOT extend the window.
+    /// Before the clamp the registry accepted 90 (RET-007 pro limit) and the
+    /// 70-day-old row survived; after the clamp the row is deleted at the
+    /// 60-day ceiling and the 40-day-old row is kept.
+    #[tokio::test]
+    async fn over_ceiling_override_is_clamped_to_the_plan_maximum() {
+        let Some(pool) =
+            crate::test_support::canonical_pool("sweep_ceiling", "sweep_ceiling").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_plan(&pool, "pro", 60).await;
+        let tenant = crate::test_support::unique_tenant();
+        seed_tenant(&pool, &tenant, "pro", Some(90), false).await;
+        let old = seed_event(&pool, &tenant, 70).await;
+        let recent = seed_event(&pool, &tenant, 40).await;
+
+        let sweeper = RetentionSweeper::new(pool.clone(), 7, 30, 365);
+        let report = run(&sweeper, &pool).await;
+
+        assert!(
+            !event_exists(&pool, &old).await,
+            "a 70-day-old event must be deleted once the plan ceiling (60d) clamps the 90d override"
+        );
+        assert!(
+            event_exists(&pool, &recent).await,
+            "a 40-day-old event is inside the 60-day ceiling and must survive"
+        );
+        let events = report
+            .categories
+            .iter()
+            .find(|category| category.store == "events")
+            .expect("events category in report");
+        assert!(
+            events.retention_clamped_to_plan_ceiling >= 1,
+            "the run must REPORT the clamp, got {events:?}"
+        );
+    }
+
+    /// A within-ceiling override is honored verbatim (no regression).
+    #[tokio::test]
+    async fn within_ceiling_override_is_honored() {
+        let Some(pool) = crate::test_support::canonical_pool("sweep_within", "sweep_within").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_plan(&pool, "growth", 90).await;
+        let tenant = crate::test_support::unique_tenant();
+        seed_tenant(&pool, &tenant, "growth", Some(45), false).await;
+        let old = seed_event(&pool, &tenant, 50).await;
+        let recent = seed_event(&pool, &tenant, 40).await;
+
+        let sweeper = RetentionSweeper::new(pool.clone(), 7, 30, 365);
+        let report = run(&sweeper, &pool).await;
+
+        assert!(
+            !event_exists(&pool, &old).await,
+            "a 50-day-old event is beyond the tenant's 45-day choice"
+        );
+        assert!(
+            event_exists(&pool, &recent).await,
+            "a 40-day-old event is inside the 45-day choice"
+        );
+        assert!(
+            report
+                .categories
+                .iter()
+                .find(|category| category.store == "events")
+                .is_some_and(|category| category.retention_clamped_to_plan_ceiling == 0),
+            "an in-ceiling override is never reported as clamped"
+        );
+    }
+
+    /// RED-BEFORE (capability wave 2): an ACTIVE plan override tightens the
+    /// effective ceiling on the next run. Growth (90d) with a 60-day
+    /// override first keeps a 45-day-old row; after an active override to
+    /// the 30-day Developer plan the same row is deleted.
+    #[tokio::test]
+    async fn active_plan_override_tightens_the_ceiling() {
+        let Some(pool) =
+            crate::test_support::canonical_pool("sweep_override", "sweep_override").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_plan(&pool, "growth", 90).await;
+        seed_plan(&pool, "starter", 30).await;
+        let tenant = crate::test_support::unique_tenant();
+        seed_tenant(&pool, &tenant, "growth", Some(60), false).await;
+        let row = seed_event(&pool, &tenant, 45).await;
+
+        let sweeper = RetentionSweeper::new(pool.clone(), 7, 30, 365);
+        run(&sweeper, &pool).await;
+        assert!(
+            event_exists(&pool, &row).await,
+            "under growth (ceiling 90) the 45-day-old row is inside the 60-day override"
+        );
+
+        sqlx::query(
+            "INSERT INTO plan_overrides (tenant_id, plan, active) VALUES ($1, 'starter', true)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("activate a plan override");
+
+        run(&sweeper, &pool).await;
+        assert!(
+            !event_exists(&pool, &row).await,
+            "after the override to the 30-day plan the row must be deleted — the ceiling tightened"
+        );
+    }
+
+    /// A legal hold still wins over any custom retention override.
+    #[tokio::test]
+    async fn legal_hold_wins_over_a_custom_retention_override() {
+        let Some(pool) =
+            crate::test_support::canonical_pool("sweep_hold_custom", "sweep_hold_custom").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_plan(&pool, "pro", 60).await;
+        let tenant = crate::test_support::unique_tenant();
+        seed_tenant(&pool, &tenant, "pro", Some(1), true).await;
+        let old = seed_event(&pool, &tenant, 400).await;
+
+        let sweeper = RetentionSweeper::new(pool.clone(), 7, 30, 365);
+        let report = run(&sweeper, &pool).await;
+
+        assert!(
+            event_exists(&pool, &old).await,
+            "a legally held tenant's rows survive regardless of the retention setting"
+        );
+        let events = report
+            .categories
+            .iter()
+            .find(|category| category.store == "events")
+            .expect("events category in report");
+        assert!(
+            events.skipped_legal_hold >= 1,
+            "the held rows must be reported as skipped, got {events:?}"
         );
     }
 }

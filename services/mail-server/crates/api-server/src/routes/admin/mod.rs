@@ -18,6 +18,7 @@
 //!   `analytics_export`.
 
 pub mod ai_drafts;
+pub mod alert_rules;
 pub mod analytics;
 pub mod analytics_export;
 pub mod audit;

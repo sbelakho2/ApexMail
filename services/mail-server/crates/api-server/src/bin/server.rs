@@ -199,6 +199,48 @@ async fn run(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    // ── Billing notification queue drainer (audit: producer with no consumer) ──
+    // `notification_queue` is written by billing-service (usage/cost alerts,
+    // dunning, payment_failed, trial_ending, messages_purged) with nothing
+    // reading it — the live stack carried 64 pending usage alerts, oldest two
+    // days, attempts=0. The drainer hands each row to the platform mail
+    // pipeline (`email_queue` via the DKIM-ready system sender) and records
+    // retries/park-failed on the row. A pass failure is logged and retried on
+    // the next tick, never fatal.
+    {
+        let drain_db = state.db.clone();
+        const DRAIN_INTERVAL_SECS: u64 = 60;
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(DRAIN_INTERVAL_SECS));
+            // The first tick fires immediately — a restart drains the backlog
+            // instead of waiting a full interval.
+            loop {
+                interval.tick().await;
+                match api_server::routes::notification_drain::drain_notification_queue(
+                    &drain_db,
+                    api_server::routes::notification_drain::DRAIN_BATCH_SIZE,
+                )
+                .await
+                {
+                    Ok(stats) if stats.is_empty() => {}
+                    Ok(stats) => tracing::info!(
+                        claimed = stats.claimed,
+                        sent = stats.sent,
+                        retried = stats.retried,
+                        failed = stats.failed,
+                        "billing notification drain completed"
+                    ),
+                    Err(error) => tracing::error!(
+                        error = %error,
+                        "billing notification drain failed — retrying next interval"
+                    ),
+                }
+            }
+        });
+        api_server::routes::notification_drain::drain_interval_log(DRAIN_INTERVAL_SECS);
+    }
+
     // The migration only creates a pending platform domain. Provisioning is
     // opt-in so a deployment never invents DNS state, but operators can safely
     // request encrypted per-domain key material during a controlled rollout.

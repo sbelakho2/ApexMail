@@ -482,6 +482,49 @@ pub struct DemosPageData {
     pub viewer_url: Option<String>,
 }
 
+/// One alert rule on the control-plane `/alerts/rules` surface. Rows are the
+/// EXISTING evaluated store (`usage_alert_configs`, migrations 024 + 246):
+/// the billing-service maintenance sweep reads exactly these rows, so what
+/// the page shows is what fires into `system_alerts`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AlertRuleData {
+    pub id: String,
+    pub tenant_id: String,
+    /// Operator label; empty for legacy rows written before migration 246
+    /// (the view falls back to the metric).
+    pub name: String,
+    pub metric_type: String,
+    pub threshold_percent: i32,
+    pub notification_channel: String,
+    /// info | warning | critical — carried onto the fired incident.
+    pub severity: String,
+    pub enabled: bool,
+    /// Preformatted "last fired" line; None when the rule never fired.
+    pub last_triggered: Option<String>,
+}
+
+/// A selectable tenant on the rule create form.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TenantChoiceData {
+    pub id: String,
+    pub label: String,
+}
+
+/// Control-plane alert-rules management page (`/alerts/rules`).
+///
+/// `unavailable` is the honest failure state of the store queries — the page
+/// then says the list could not be loaded instead of rendering the empty
+/// state (`unavailable_note` carries the correlation reference). `editing`
+/// is the `?edit=<id>` target when that rule exists.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AlertRulesPageData {
+    pub rules: Vec<AlertRuleData>,
+    pub tenants: Vec<TenantChoiceData>,
+    pub unavailable: bool,
+    pub unavailable_note: String,
+    pub editing: Option<AlertRuleData>,
+}
+
 /// One step of a demo as the public viewer renders it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DemoViewerStep {
@@ -511,6 +554,9 @@ pub struct DemoViewerData {
 pub struct AiDraftData {
     pub id: String,
     pub tenant_id: String,
+    /// Human label for the workspace (tenant name, else slug, else a short
+    /// marker). Rendered to operators instead of the raw tenant id (F-6).
+    pub tenant_label: String,
     pub from_email: String,
     pub subject: String,
     /// The drafted reply body (rendered inside an expandable block).

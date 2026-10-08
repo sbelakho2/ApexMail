@@ -93,6 +93,10 @@ kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
 # Account-takeover risk evaluation wired into the real login flows
 # (routes/auth.rs JSON login + routes/web.rs SSR password step).
 ato-protection = { path = "../ato-protection" }
+# The ONE template renderer: POST /v1/messages renders `template_id` sends
+# through the same sandbox/transpiler pipeline the template-renderer service
+# and the templates routes expose — no second renderer.
+template-renderer = { path = "../template-renderer" }
 
 [features]
 default = []

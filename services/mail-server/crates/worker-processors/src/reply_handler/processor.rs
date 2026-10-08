@@ -869,11 +869,39 @@ impl ReplyHandler {
                 })?;
         }
 
+        // F-5 (live mailbot dogfood 2026-10-06): a data-subject request
+        // delivered as email must reach the platform's statutory automation
+        // instead of stopping at a human-review draft. The detector is
+        // deterministic and narrow (explicit rights / article references);
+        // the intake writes the SAME canonical tables the compliance
+        // automation's API intake writes, and its outbox flush / verification
+        // / processing stages take over from there. A failure here NEVER
+        // fails the message — the outcome, including the failure reason, is
+        // recorded on the row for the reviewer.
+        let mut suggested_action = serde_json::to_value(&outcome.result.suggested_action)?;
+        if let Some(request_type) = super::dsr::detect(&input.subject, &input.body) {
+            let intake = super::dsr::submit(
+                &self.db,
+                msg.tenant_id.as_deref().unwrap_or_default(),
+                &msg.from_email,
+                request_type,
+                msg.received_at,
+            )
+            .await;
+            tracing::info!(
+                msg_id = %msg.id,
+                request_type,
+                status = intake.get("status").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                "Inbound DSR intent recorded via the GDPR automation intake"
+            );
+            suggested_action["dsr"] = intake;
+        }
+
         // Update the message record
         sqlx::query(MARK_PROCESSED_SQL)
             .bind(outcome.result.classification.as_str())
             .bind(outcome.result.confidence)
-            .bind(serde_json::to_value(&outcome.result.suggested_action)?)
+            .bind(suggested_action)
             .bind(&action_taken)
             .bind(&msg.id)
             .execute(&self.db)
@@ -3077,6 +3105,153 @@ mod tests {
         .await
         .unwrap();
         assert!(!disposition.is_empty());
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// F-5 live: a data-subject request delivered as email must reach the
+    /// GDPR automation's canonical intake — a `data_subject_requests` row with
+    /// the statutory receipt clock and a pending verification outbox row the
+    /// compliance service's flush sends. A replayed request must collapse onto
+    /// the open request (never a second statutory row), and one customer-service
+    /// question that merely mentions GDPR must NOT open a request.
+    #[tokio::test]
+    async fn live_inbound_dsr_reaches_the_gdpr_automation_intake(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_dsr_intake").await else { return Ok(()) };
+
+        let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+        let fixture = seed_live_fixture(&pool, &tenant).await;
+        let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+
+        // 1. A real erasure request opens exactly one statutory request.
+        let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &msg_id,
+            &tenant,
+            &fixture.email,
+            "Re: my data",
+            "Under GDPR Article 17 I request erasure of all personal data you hold about me.",
+            serde_json::json!({}),
+        )
+        .await;
+        process_message_by_id(&handler, &msg_id).await.unwrap();
+
+        let request: (String, String, String, bool, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+            "SELECT id, request_type, status, verified, statutory_due_at \
+             FROM data_subject_requests WHERE tenant_id = $1 AND lower(email) = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&fixture.email)
+        .fetch_one(&pool)
+        .await
+        .expect("the DSR intake must create the canonical request");
+        assert_eq!(request.1, "erasure");
+        assert_eq!(request.2, "pending_verification");
+        assert!(!request.3);
+        assert!(request.4.is_some(), "the statutory clock is persisted at intake");
+
+        let (outbox_status, verify_url, token): (String, String, String) = sqlx::query_as(
+            "SELECT status, verify_url, verification_token FROM dsr_verification_outbox \
+             WHERE tenant_id = $1 AND request_id = $2",
+        )
+        .bind(&tenant)
+        .bind(&request.0)
+        .fetch_one(&pool)
+        .await
+        .expect("the verification mail is staged for the automation's flush");
+        assert_eq!(outbox_status, "pending");
+        assert!(
+            verify_url.contains(&format!("/gdpr/verify/{}", request.0)),
+            "verify_url: {verify_url}"
+        );
+        assert!(!token.is_empty());
+
+        let dsr_record: serde_json::Value = sqlx::query_scalar(
+            "SELECT suggested_action->'dsr' FROM inbound_messages WHERE id = $1",
+        )
+        .bind(&msg_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dsr_record["status"], serde_json::json!("pending_verification"));
+        assert_eq!(dsr_record["request_type"], serde_json::json!("erasure"));
+        assert_eq!(
+            dsr_record["request_id"].as_str(),
+            Some(request.0.as_str()),
+            "the row names the request the reviewer should reference"
+        );
+
+        // 2. A replay collapses onto the open request (idempotent intake).
+        let replay_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &replay_id,
+            &tenant,
+            &fixture.email,
+            "Re: my data again",
+            "Please delete my personal data now.",
+            serde_json::json!({}),
+        )
+        .await;
+        process_message_by_id(&handler, &replay_id).await.unwrap();
+        let replay_record: serde_json::Value = sqlx::query_scalar(
+            "SELECT suggested_action->'dsr' FROM inbound_messages WHERE id = $1",
+        )
+        .bind(&replay_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(replay_record["status"], serde_json::json!("already_open"));
+        assert_eq!(replay_record["request_id"].as_str(), Some(request.0.as_str()));
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM data_subject_requests WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "a replay must not open a second statutory request");
+
+        // 3. A GDPR-shaped QUESTION must not open a request.
+        let question_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &question_id,
+            &tenant,
+            &fixture.email,
+            "Re: compliance",
+            "What does your DPA cover, and is GDPR compliance included in every plan?",
+            serde_json::json!({}),
+        )
+        .await;
+        process_message_by_id(&handler, &question_id).await.unwrap();
+        let question_dsr: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT suggested_action->'dsr' FROM inbound_messages WHERE id = $1",
+        )
+        .bind(&question_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(question_dsr.is_none(), "ordinary questions never open a DSR");
+
+        for id in [&msg_id, &replay_id, &question_id] {
+            let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM dsr_verification_outbox WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM data_subject_requests WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
 
         pool.close().await;
         Ok(())

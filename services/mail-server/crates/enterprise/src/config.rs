@@ -239,14 +239,14 @@ pub struct SSOConfig {
     pub encryption_key: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct WhiteLabelConfig {
-    pub enabled: bool,
-    pub custom_domain_prefix: String,
-    pub default_logo_url: String,
-    pub default_primary_color: String,
-    pub default_company_name: String,
-}
+// Dogfood 2026-10-06 wave B: `WhiteLabelConfig` was REMOVED. It parsed
+// WHITE_LABEL_ENABLED / CUSTOM_DOMAIN_PREFIX / DEFAULT_LOGO_URL /
+// DEFAULT_PRIMARY_COLOR / DEFAULT_COMPANY_NAME and no code path read ANY of
+// the parsed values (the `WhiteLabelService` takes only a PgPool and stores
+// per-tenant brand rows; `get_config` answers NOT_FOUND, not defaults). The
+// same principle as audit F10 below: a knob that does nothing is
+// configuration theater. The branded values may only return together with
+// the mechanism that applies them.
 
 #[derive(Debug, Clone)]
 pub struct SubAccountConfig {
@@ -255,20 +255,19 @@ pub struct SubAccountConfig {
     pub volume_allocation_mode: VolumeAllocationMode,
 }
 
-/// Compliance-relevant environment knobs for the enterprise service.
-///
-/// Audit F10: `data_residency` / `data_residency_regions` were REMOVED.
-/// They were parsed from `DATA_RESIDENCY` / `DATA_RESIDENCY_REGIONS` and
-/// never read by any code path — no routing, pinning or replication
-/// constraint backed them. A knob that does nothing is configuration
-/// theater; a residency knob may only return together with the mechanism
-/// that enforces it.
-#[derive(Debug, Clone)]
-pub struct ComplianceEnvConfig {
-    pub hipaa_enabled: bool,
-    pub zero_retention_enabled: bool,
-    pub audit_retention_days: i32,
-}
+// Dogfood 2026-10-06 wave B: `ComplianceEnvConfig` was REMOVED.
+//
+// Audit F10 removed `data_residency` / `data_residency_regions` from it for
+// being parsed-but-never-read. The remaining three knobs had the same
+// defect and are now gone too:
+//  * `HIPAA_ENABLED` / `ZERO_RETENTION_ENABLED` — `ComplianceService::new`
+//    takes only a PgPool; framework enablement and zero-retention mode are
+//    per-tenant rows written by the API, never global env defaults.
+//  * `AUDIT_RETENTION_DAYS` — the CANONICAL consumer is the compliance
+//    service (`compliance::config` → `retention_sweep`); this crate's copy
+//    was never read.
+// A knob that does nothing is configuration theater; each may only return
+// with the enforcement point that reads it.
 
 #[derive(Debug, Clone)]
 pub struct LogStreamEnvConfig {
@@ -279,11 +278,18 @@ pub struct LogStreamEnvConfig {
     pub encryption_key: String,
 }
 
+/// Template-approval thresholds.
+///
+/// Dogfood 2026-10-06 wave B: `require_review_for_new` (env
+/// `TEMPLATE_REQUIRE_REVIEW_NEW`) and `auto_approve_threshold` (env
+/// `TEMPLATE_AUTO_APPROVE_THRESHOLD`) were REMOVED. Audit M-01
+/// (`template_approval.rs`) forbids auto-approval outright — every submission
+/// requires a human review — so no value of either knob could ever be
+/// honored. `max_spam_score` remains: it is the real auto-REJECT threshold
+/// consumed by `TemplateApprovalService`.
 #[derive(Debug, Clone)]
 pub struct TemplateConfig {
     pub max_spam_score: i32,
-    pub require_review_for_new: bool,
-    pub auto_approve_threshold: i32,
 }
 
 // ── Main Config ────────────────────────────────────────────────────────
@@ -315,9 +321,7 @@ pub struct Config {
     pub db: DatabaseConfig,
     pub redis: RedisConfig,
     pub sso: SSOConfig,
-    pub whitelabel: WhiteLabelConfig,
     pub sub_account: SubAccountConfig,
-    pub compliance: ComplianceEnvConfig,
     pub log_stream: LogStreamEnvConfig,
     pub template: TemplateConfig,
 }
@@ -456,18 +460,6 @@ impl Config {
                     encryption_key: env::var("SSO_ENCRYPTION_KEY").unwrap_or_default(),
                 }
             },
-            whitelabel: WhiteLabelConfig {
-                enabled: env::var("WHITE_LABEL_ENABLED")
-                    .map(|v| v == "true")
-                    .unwrap_or(false),
-                custom_domain_prefix: env::var("CUSTOM_DOMAIN_PREFIX")
-                    .unwrap_or_else(|_| "mail".into()),
-                default_logo_url: env::var("DEFAULT_LOGO_URL").unwrap_or_default(),
-                default_primary_color: env::var("DEFAULT_PRIMARY_COLOR")
-                    .unwrap_or_else(|_| "#dc2626".into()),
-                default_company_name: env::var("DEFAULT_COMPANY_NAME")
-                    .unwrap_or_else(|_| "ApexMail".into()),
-            },
             sub_account: SubAccountConfig {
                 max_sub_accounts: env::var("MAX_SUB_ACCOUNTS")
                     .ok()
@@ -480,18 +472,6 @@ impl Config {
                     .unwrap_or_else(|_| "shared".into())
                     .parse()
                     .unwrap_or(VolumeAllocationMode::Shared),
-            },
-            compliance: ComplianceEnvConfig {
-                hipaa_enabled: env::var("HIPAA_ENABLED")
-                    .map(|v| v == "true")
-                    .unwrap_or(false),
-                zero_retention_enabled: env::var("ZERO_RETENTION_ENABLED")
-                    .map(|v| v == "true")
-                    .unwrap_or(false),
-                audit_retention_days: env::var("AUDIT_RETENTION_DAYS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(2555),
             },
             log_stream: LogStreamEnvConfig {
                 buffer_size: env::var("LOG_STREAM_BUFFER_SIZE")
@@ -516,13 +496,6 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(50),
-                require_review_for_new: env::var("TEMPLATE_REQUIRE_REVIEW_NEW")
-                    .map(|v| v != "false")
-                    .unwrap_or(true),
-                auto_approve_threshold: env::var("TEMPLATE_AUTO_APPROVE_THRESHOLD")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(10),
             },
         })
     }
@@ -713,16 +686,46 @@ mod tests {
     }
 
     #[test]
-    fn test_compliance_defaults() {
-        env::remove_var("HIPAA_ENABLED");
-        env::remove_var("AUDIT_RETENTION_DAYS");
-        // Audit F10: DATA_RESIDENCY* are gone — the env vars are no longer
-        // read anywhere, so a stale environment cannot reintroduce the knob.
-        env::remove_var("DATA_RESIDENCY");
-        env::remove_var("DATA_RESIDENCY_REGIONS");
+    fn removed_knobs_are_no_longer_read_anywhere() {
+        // Dogfood 2026-10-06 wave B (continuing audit F10): every knob below
+        // was parsed into a field with zero readers. They are gone from the
+        // struct entirely, so a stale environment can no longer pretend to
+        // configure behaviour — the assertion is that the vars are inert.
+        for knob in [
+            "DATA_RESIDENCY",
+            "DATA_RESIDENCY_REGIONS",
+            "HIPAA_ENABLED",
+            "ZERO_RETENTION_ENABLED",
+            "WHITE_LABEL_ENABLED",
+            "CUSTOM_DOMAIN_PREFIX",
+            "DEFAULT_LOGO_URL",
+            "DEFAULT_PRIMARY_COLOR",
+            "DEFAULT_COMPANY_NAME",
+            "TEMPLATE_REQUIRE_REVIEW_NEW",
+            "TEMPLATE_AUTO_APPROVE_THRESHOLD",
+        ] {
+            env::set_var(knob, "true");
+        }
+        // Loading still succeeds and the parsed config carries no such fields
+        // (this test fails to COMPILE if one is reintroduced without a
+        // consumer).
         let cfg = Config::from_env().unwrap();
-        assert!(!cfg.compliance.hipaa_enabled);
-        assert_eq!(cfg.compliance.audit_retention_days, 2555);
+        assert_eq!(cfg.template.max_spam_score, 50);
+        for knob in [
+            "DATA_RESIDENCY",
+            "DATA_RESIDENCY_REGIONS",
+            "HIPAA_ENABLED",
+            "ZERO_RETENTION_ENABLED",
+            "WHITE_LABEL_ENABLED",
+            "CUSTOM_DOMAIN_PREFIX",
+            "DEFAULT_LOGO_URL",
+            "DEFAULT_PRIMARY_COLOR",
+            "DEFAULT_COMPANY_NAME",
+            "TEMPLATE_REQUIRE_REVIEW_NEW",
+            "TEMPLATE_AUTO_APPROVE_THRESHOLD",
+        ] {
+            env::remove_var(knob);
+        }
     }
 
     #[test]
@@ -730,8 +733,6 @@ mod tests {
         env::remove_var("TEMPLATE_MAX_SPAM_SCORE");
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.template.max_spam_score, 50);
-        assert!(cfg.template.require_review_for_new);
-        assert_eq!(cfg.template.auto_approve_threshold, 10);
     }
 
     #[test]

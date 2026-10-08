@@ -206,10 +206,10 @@ still exist as **pending human-review drafts** — nothing sends itself.
 | --- | --- | --- | --- |
 | F-1 | **P0** | The AI-draft approval path bypassed the shared send-admission consent gate: an approved AI reply is a MARKETING-class send (`email_queue.message_category` defaults to `marketing`) and no consent record was ever consulted, so an AI-composed reply could be mailed to a recipient with no marketing consent. Live pre-fix: approval returned 200 + `queued_message_id` for an unconsented recipient. | **FIXED** (§5.1, live-verified both arms) |
 | F-2 | **P0** | Stolen jobs between the worker reply handler and the AI draft agent: both claimed the same rows with predicates keyed on the OTHER consumer's marker (`processed_at IS NULL` for the agent — the worker's marker; `processed_at IS NULL` for the worker — the agent's marker). Live pre-fix, 37 taxonomy inbounds produced **26 classification-only rows, 11 draft-only rows, 0 rows with both**; the review queue showed "not classified" for agent-won rows and *no draft at all* for worker-won rows (a canary classified `meeting_request` was never claimed by the agent). The reviewer's page and the draft queue were each half-empty, non-deterministically. | **FIXED** (§5.2, live canary + N=6 + 36/37 taxonomy drafts) |
-| F-3 | P2 | No inbound idempotency key: re-delivering the identical message (same Message-ID, identical bytes) creates a second `inbound_messages` row (`id = inb_<random>`, migration 088 shape) and a second draft. Both drafts are visible to the reviewer; two approvals would send two replies. No automatic double-send. Suggested owner: the MTA ingest (key the row on tenant + `message_id_header`, or an explicit dedup ledger) — outside this brief's owned paths. Repro: `tools/dogfood-mailbot-live.py concurrency` (dedup probe). | OPEN (filed, P2, MTA/delivery-plane lane) |
-| F-4 | P2 | The MTA's inbound mirror drops `List-Unsubscribe` values that parse as an address (`<mailto:…>`): `parse_inbound_mirrors` falls back to `HeaderValue::as_text()`, which is `None` for address-typed values, so the deterministic mailto-unsubscribe arm can never fire on live mail. Verified live: sent `List-Unsubscribe: <mailto:unsubscribe@…>` → `inbound_messages.headers` has content-type only; the same message with `List-Unsubscribe-Post` mirrors fine; classification ends `unknown`/ai. Fix suggestion: render address-typed header values in the mirror fallback. Owner: MTA lane. | OPEN (filed, P2, MTA lane) |
-| F-5 | P3 | Inbound legal/DSR mail has no automated routing: the classification is `question` and a human-review draft is produced; the documented GDPR automation is the API `POST /gdpr/submit` + double opt-in, which inbound email never reaches. Nothing auto-deletes or promises anything (drafts passed the deny-list), so this is a process gap, not a data-safety one. | REPORTED (P3; product decision, compliance lane) |
-| F-6 | P3 | The drafts review page renders the raw `tenant_id` as "Workspace <id>" in operator-visible copy (`ai_drafts` SSR template) — an internal identifier where the workspace name belongs. Also `tools/contrast-audit/gate.sh` failed on `/reviews/ai-drafts` in dark themes (first-response pill 2.74:1, flash text 1.27:1) — relayed to the UI-visual agent, whose shared-primitive lane owns it; re-run at hand-in is in §6. | REPORTED (P3 / UI lane) |
+| F-3 | P2 | No inbound idempotency key: re-delivering the identical message (same Message-ID, identical bytes) created a second `inbound_messages` row and a second draft. | **FIXED** (§9.1, red→green) |
+| F-4 | P2 | The MTA's inbound mirror dropped `List-Unsubscribe` values that parse as an address (`<mailto:…>`), so the deterministic mailto-unsubscribe arm could never fire on live mail. | **FIXED** (§9.2, red→green) |
+| F-5 | P3 | Inbound legal/DSR mail had no automated routing: it stopped at a human-review draft and never reached the GDPR automation. | **FIXED** (§9.3, red→green) |
+| F-6 | P3 | The drafts review page rendered the raw `tenant_id` as "Workspace <id>" in operator copy (the dark-mode contrast half was the UI agent's and is fixed). | **FIXED** (§9.4, red→green) |
 
 ## 5. Fixes (with red→green proofs)
 
@@ -332,3 +332,122 @@ classifier gained German price/referral keywords. Verified locally (0 bad in a
   regression) were run and passed on this revision before those edits landed,
   and the leg is re-run when the tree compiles (outcome appended here:
   `_____`).
+
+
+## 9. Scope extension — the four filed findings, fixed
+
+All four were fixed after hand-in, each with a proof that FAILS without the
+fix (the fail-before experiment is stated per item) and passes with it.
+
+### 9.1 F-3 — inbound Message-ID dedup (agent claim/terminal guard)
+
+File: `crates/ai-service/src/email_agent.rs` (+ tests in
+`email_agent/adversarial_tests.rs`).
+
+The agent now runs **loop guard 0** before anything else: `prior_delivery()`
+finds an EARLIER row with the same (tenant, RFC 5322 Message-ID) that already
+reached a terminal agent write (`ai_response IS NOT NULL OR processed = true`).
+The first delivery wins; a replay is terminally declined with the named note
+`[NO DRAFT — duplicate delivery: … the earlier copy is the one to review]`, so
+the review queue holds ONE copy and the duplicate cannot be re-claimed. The
+identity is the same tenant-qualified Message-ID the analytics handoff already
+collapses on (`reply_events` F67: SHA-256 over tenant+Message-ID). A lookup
+that fails FAILS CLOSED (declines to human review, never a silent second
+draft). The live harness dedup probe was updated to assert the real contract:
+rows may be 2 (MTA ingest is not identity-keyed) but **drafts must be 1**, the
+duplicate must be named, and no extra queue row may appear.
+
+* Test: `duplicate_delivery_gets_no_second_draft`.
+* Fail-before proof: guard disabled → the second row became a second pending
+  draft (`the duplicate must never become a second pending draft`); with the
+  guard: exactly one pending draft for the identity, duplicate declined with
+  zero tokens spent.
+
+### 9.2 F-4 — MTA mirror preserves address-typed headers
+
+File: `crates/mta/src/servers/inbound.rs` (+ unit test in the same module).
+
+`parse_inbound_mirrors` gained a `HeaderValue::Address(address)` arm that
+renders every address (`Name <addr>` when a display name exists, else the bare
+address; joined with ", "). `List-Unsubscribe: <mailto:…>` now survives into
+`inbound_messages.headers`, so the reply pipeline's deterministic
+mailto-unsubscribe arm is reachable on live mail (it reads the mirror, never
+the raw MIME).
+
+* Test: `mirror_preserves_address_typed_list_unsubscribe` — asserts the mailto
+  target and its query survive verbatim and that the plain-text sibling
+  `List-Unsubscribe-Post` still mirrors.
+* Fail-before proof: arm disabled → `the mailto target must survive the
+  mirror: ""` (the header vanished); with the arm: green, and the existing
+  mirror end-to-end test still passes.
+
+### 9.3 F-5 — inbound DSR reaches the GDPR automation
+
+Files: `crates/worker-processors/src/reply_handler/dsr.rs` (new),
+`reply_handler/processor.rs` hook, `reply_handler/mod.rs`.
+
+A deterministic, narrow detector (`detect()`: GDPR article references and
+named rights, EN/DE/FR/ES) runs on the classified reply. On a match the worker
+performs the intake into the **same canonical tables the compliance
+automation's API intake writes** — `data_subject_requests` (with
+`received_at` starting the Art. 12(3) clock and `statutory_due_at` = one
+calendar month, mirroring `compliance::gdpr_automation::statutory_due_at`) and
+`dsr_verification_outbox` (pending; verification token + verify URL) — plus
+the control plane's `gdpr_requests` mirror. From there the EXISTING automation
+takes over end to end: the outbox flush sends the verification mail, the
+double opt-in verifies, and the processing queue executes the request.
+
+Contract/invariants: idempotent by the open-request check plus the
+`uq_dsr_outbox_request` key (a replay reports `already_open` with the original
+request id); the SEC-15 per-user DSAR limit (1 new request / 24h) is honored
+before any write; only the token HASH is stored in
+`data_subject_requests.verification_token_hash`; a failure never fails the
+message — the outcome (including the failure reason) is recorded at
+`inbound_messages.suggested_action.dsr` for the reviewer. Ordinary
+GDPR-shaped QUESTIONS ("what does the DPA cover?") deliberately do not match.
+
+* Tests: detector unit tests (`detector_names_each_right_and_stays_narrow`,
+  `statutory_deadline_is_one_calendar_month`) and the live
+  `live_inbound_dsr_reaches_the_gdpr_automation_intake` (request row + statutory
+  clock + pending outbox + verify URL + row marker; replay collapses; a DPA
+  question opens nothing).
+* Fail-before proof: hook disabled → `the DSR intake must create the canonical
+  request: RowNotFound`; with the hook: green.
+
+### 9.4 F-6 — the drafts page shows a workspace label, never the raw id
+
+Files: `crates/api-server/src/routes/web/data.rs` (loader LEFT JOINs
+`tenants`), `crates/ui-foundation/src/{view_data,leptos_views}.rs` (new
+`AiDraftData.tenant_label`, rendered in place of the id), fixtures updated.
+
+The loader resolves the workspace NAME (slug as the fallback; a short
+`workspace <8 chars>…` marker when the tenant row is gone — never the full id).
+The raw `tenant_id` stays on the record for routing/audit, and the CP
+system-tenant gate is untouched.
+
+* Test: `ai_drafts_label_shows_the_workspace_name_never_the_raw_id` — seeds a
+  named tenant + draft, asserts the label resolves, the page contains the name
+  and does NOT contain the raw id.
+* Fail-before proof: loader label reverted to `tenant_id` → `operators see the
+  workspace name — left: "ten33faefd41d7b44b3aaea857" right: "Northwind SaaS"`;
+  with the fix: green.
+
+### 9.5 CS-7
+
+Not reproduced on this or the previous fixed revision: the agent's claimable
+backlog drained 12→3 rows in ~4 minutes under load, and N=20 simultaneous
+inbounds drained in 61 s with 0 loss/duplication. The pre-fix stall mechanism
+was the stolen-jobs predicate (F-2, fixed).
+
+### 9.6 Suites after the fixes
+
+`cargo nextest run -p worker-processors -p ai-service` (no-fail-fast):
+**1210/1211 passed, 0 skipped** — the single failure is
+`ai-service routes::tests::chat_route_delivers_answer_and_persists_audit`
+(401 vs 200), a NEW test inside the chatbot agent's uncommitted
+`ai-service/src/routes.rs` work (it fails identically in isolation and touches
+no reply/mailbot path); every worker-processors test and every ai-service
+email-agent/chat-pipeline test passes, including the four new regression
+tests. The api-server leg (`cargo nextest run --no-fail-fast -p api-server`)
+runs after the fixes; its outcome and the exact command lines are recorded in
+`evidence-mailbot-live/suites-*.log`.

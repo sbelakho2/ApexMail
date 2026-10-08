@@ -209,7 +209,7 @@ async fn wait_for_shutdown_signal(
     info!("Shutdown signal received");
 }
 
-/// 8 background cron jobs:
+/// 9 background cron jobs:
 /// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
 /// 3. GDPR request expiry — every 5min
@@ -218,6 +218,9 @@ async fn wait_for_shutdown_signal(
 /// 6. Retention sweep (H-6: registry-driven event-store purges + report) — daily
 /// 7. DSR verification-outbox flush (D: queue tokens as system email) — every 60s
 /// 8. Statutory ledger sweeps (payroll/expenses/bank statement lines) — every 5min
+/// 9. Statutory obligation sync (derive/upsert `statutory_obligations` for every
+///    legal entity + mark overdue) — daily. Dogfood 2026-10-06 wave B: the
+///    obligations engine existed only for tests and the table stayed empty.
 async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     run_cron_jobs_with_intervals(
         state,
@@ -231,12 +234,13 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
             sweep: Duration::from_secs(86400),
             outbox_flush: Duration::from_secs(60),
             ledger: Duration::from_secs(300),
+            obligations: Duration::from_secs(86400),
         },
     )
     .await;
 }
 
-/// Tick periods for the eight cron jobs, in declaration order. Split from
+/// Tick periods for the nine cron jobs, in declaration order. Split from
 /// [`run_cron_jobs`] so tests can drive every job arm in milliseconds.
 #[derive(Clone, Copy)]
 struct CronIntervals {
@@ -248,6 +252,7 @@ struct CronIntervals {
     sweep: Duration,
     outbox_flush: Duration,
     ledger: Duration,
+    obligations: Duration,
 }
 
 async fn run_cron_jobs_with_intervals(
@@ -266,6 +271,10 @@ async fn run_cron_jobs_with_intervals(
     // dedicated accounting service; see compliance::ledger_sweep. Bank lines
     // arrive through the compliance route POST /accounting/bank-statements/import.
     let mut ledger_ticker = interval(intervals.ledger);
+    // Statutory filing calendar: derive/upsert every entity's obligations and
+    // mark pending-but-past-due rows overdue (dogfood 2026-10-06 wave B — the
+    // engine previously had no production caller and the table stayed empty).
+    let mut obligations_ticker = interval(intervals.obligations);
 
     loop {
         tokio::select! {
@@ -419,6 +428,23 @@ async fn run_cron_jobs_with_intervals(
                             Err(e) => error!(error = %e, "Statutory ledger sweep failed"),
                         }
                     }
+                    _ = obligations_ticker.tick() => {
+                        // 9: derive/upsert every legal entity's statutory
+                        // filing obligations (KMD/TSD/VD/OSS/annual report)
+                        // over the forward year and mark pending-but-past-due
+                        // rows overdue. Idempotent; the upsert only touches
+                        // pending rows.
+                        let today = chrono::Utc::now().date_naive();
+                        match compliance::obligations::sync_all_obligations(&state.db, today).await {
+                            Ok(run) => info!(
+                                entities = run.entities,
+                                upserted = run.upserted,
+                                marked_overdue = run.marked_overdue,
+                                "Statutory obligation sync completed"
+                            ),
+                            Err(e) => error!(error = %e, "Statutory obligation sync failed"),
+                        }
+                    }
                 }
     }
 }
@@ -482,7 +508,7 @@ mod tests {
         };
         let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
 
-        // All eight tickers fire their first tick immediately and then every
+        // All nine tickers fire their first tick immediately and then every
         // 5 ms: one loop pass exercises every job arm against real SQL.
         let task = tokio::spawn(run_cron_jobs_with_intervals(
             state.clone(),
@@ -496,6 +522,7 @@ mod tests {
                 sweep: Duration::from_millis(5),
                 outbox_flush: Duration::from_millis(5),
                 ledger: Duration::from_millis(5),
+                obligations: Duration::from_millis(5),
             },
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;

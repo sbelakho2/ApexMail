@@ -10,9 +10,9 @@ use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
 use crate::view_data::{
-    render_data_cell, AiDraftsPageData, AssistantPageData, AssistantTurnData, DemoViewerData,
-    DemosPageData, ListPageData, SalesAutonomyData, SalesDeadLetterData, SalesDecisionData,
-    SalesOverviewData, SalesPageData,
+    render_data_cell, AiDraftsPageData, AlertRulesPageData, AssistantPageData, AssistantTurnData,
+    DemoViewerData, DemosPageData, ListPageData, SalesAutonomyData, SalesDeadLetterData,
+    SalesDecisionData, SalesOverviewData, SalesPageData,
 };
 
 fn ui_icon(name: &str, class_name: &str) -> String {
@@ -3478,6 +3478,21 @@ pub fn web_campaign_detail_page() -> String {
     )
 }
 
+/// Message timeline page (time-travel debugging) — the static SSR fallback.
+/// The api-server renders the real reconstruction through the data path
+/// (`web_data_page` + the `message_timeline` module); this skeleton backs
+/// the route inventory and is the honest empty state if it is ever reached
+/// without data — it never fabricates a transition.
+pub fn web_message_timeline_page() -> String {
+    "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/events\" class=\"hover:text-surface-900 transition-colors\">Events</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">Message Timeline</li></ol></nav>\
+     <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Message Timeline</h1>\
+     <p class=\"text-sm text-muted-foreground\">Replay a message's state as of a timestamp from the append-only delivery sources.</p></div>\
+     <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">No message selected</h3>\
+     <p class=\"text-sm text-muted-foreground\">Open a message from the events table to reconstruct its state at a specific time.</p>\
+     <a href=\"/events\" class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Back to events</a></div></div>"
+        .to_string()
+}
+
 /// Campaign edit page.
 pub fn web_campaign_edit_page() -> String {
     render_campaign_editor_page(
@@ -4425,7 +4440,7 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
                 subject = html_escape(display_subject(&draft.subject)),
                 received_at = html_escape(&draft.received_at),
                 from = html_escape(display_or(&draft.from_email, "(unknown sender)")),
-                tenant = html_escape(&draft.tenant_id),
+                tenant = html_escape(display_or(&draft.tenant_label, "(unknown workspace)")),
                 classification = classification,
                 first_response = first_response,
                 reply = html_escape(&draft.draft_reply),
@@ -5955,43 +5970,221 @@ pub fn control_plane_alerts_page() -> String {
     )
 }
 
-/// CP alert rules page.
-pub fn control_plane_alert_rules_page() -> String {
-    let table = Table {
-        caption: Some("Alert rules"),
-        columns: vec![
-            TableColumn {
-                label: "Rule",
-                align: "left",
-            },
-            TableColumn {
-                label: "Condition",
-                align: "left",
-            },
-            TableColumn {
-                label: "Severity",
-                align: "left",
-            },
-            TableColumn {
-                label: "Enabled",
-                align: "left",
-            },
-        ],
-        rows: vec![],
+/// CP alert rules page — the REAL management surface for the evaluated
+/// usage-alert store (`usage_alert_configs`, migrations 024 + 246).
+///
+/// Every row shown here is read by the billing-service maintenance sweep, so
+/// a rule created/edited on this page changes what actually fires into
+/// `system_alerts` on `/alerts` — there is no second, dead rule store.
+/// `data: None` (unit tests / the static export) renders the same surface
+/// with the honest empty state instead of fabricated rules.
+pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> String {
+    let rules = data.map(|d| d.rules.as_slice()).unwrap_or(&[]);
+    let tenants = data.map(|d| d.tenants.as_slice()).unwrap_or(&[]);
+    let unavailable = data.is_some_and(|d| d.unavailable);
+    let editing = data.and_then(|d| d.editing.as_ref());
+
+    let mut tenant_options = String::from("<option value=\"\">Select a tenant</option>");
+    for tenant in tenants {
+        tenant_options.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            html_escape(&tenant.id),
+            html_escape(&tenant.label),
+        ));
+    }
+
+    let edit_form = match editing {
+        Some(rule) => {
+            let channel_options: String = [
+                ("email", "Email"),
+                ("webhook", "Webhook"),
+                ("both", "Email + webhook"),
+            ]
+            .iter()
+            .map(|(value, label)| {
+                format!(
+                    "<option value=\"{value}\"{selected}>{label}</option>",
+                    selected = if *value == rule.notification_channel {
+                        " selected"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect();
+            let severity_options: String = [
+                ("info", "Info"),
+                ("warning", "Warning"),
+                ("critical", "Critical"),
+            ]
+            .iter()
+            .map(|(value, label)| {
+                format!(
+                    "<option value=\"{value}\"{selected}>{label}</option>",
+                    selected = if *value == rule.severity {
+                        " selected"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect();
+            format!(
+                "<form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/alert-rules/{id}/update\" data-form-id=\"alert-rule-edit\">\
+<h2 class=\"apex-panel-title\">Edit rule</h2>\
+<p class=\"text-sm text-surface-600\">Tenant <span class=\"apex-mono\">{tenant}</span> · metric <span class=\"apex-mono\">{metric}</span> (fixed — delete and recreate the rule to change them).</p>\
+<div class=\"grid gap-4 md:grid-cols-2\">\
+<div class=\"apex-field\"><label for=\"rule-edit-name\">Name</label><input id=\"rule-edit-name\" name=\"name\" type=\"text\" maxlength=\"80\" required value=\"{name}\"></div>\
+<div class=\"apex-field\"><label for=\"rule-edit-threshold\">Threshold (% of plan limit)</label><input id=\"rule-edit-threshold\" name=\"threshold\" type=\"number\" min=\"1\" max=\"100\" required value=\"{threshold}\"></div>\
+<div class=\"apex-field\"><label for=\"rule-edit-channel\">Notify via</label><select id=\"rule-edit-channel\" name=\"channel\">{channels}</select></div>\
+<div class=\"apex-field\"><label for=\"rule-edit-severity\">Severity</label><select id=\"rule-edit-severity\" name=\"severity\">{severities}</select></div>\
+</div>\
+<label class=\"flex items-center gap-2 text-sm font-medium\"><input type=\"checkbox\" name=\"enabled\" value=\"true\"{checked}> Enabled</label>\
+<div class=\"flex flex-wrap gap-3\"><button type=\"submit\" class=\"apex-btn\">Save changes</button><a class=\"apex-btn apex-btn--sm\" href=\"/alerts/rules\">Cancel</a></div>\
+</form>",
+                id = html_escape(&rule.id),
+                tenant = html_escape(&rule.tenant_id),
+                metric = html_escape(&rule.metric_type),
+                name = html_escape(&rule.name),
+                threshold = rule.threshold_percent,
+                channels = channel_options,
+                severities = severity_options,
+                checked = if rule.enabled { " checked" } else { "" },
+            )
+        }
+        None => String::new(),
     };
-    render_cp_collection_page(
-        "Alert Rules",
-        "Govern which operational signals page operators and which remain informational.",
-        None,
-        table,
-        "No alert rules configured",
-        "Create your first alert rule to get notified of important events.",
-        &[
-            ("Enabled", "0", "Rules actively paging."),
-            ("Draft", "0", "Rules not yet armed."),
-            ("Critical", "0", "Rules with top severity."),
-        ],
+
+    let create_form = format!(
+        "<form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/alert-rules\" data-form-id=\"alert-rule-create\">\
+<h2 class=\"apex-panel-title\">Create a rule</h2>\
+<div class=\"grid gap-4 md:grid-cols-2\">\
+<div class=\"apex-field\"><label for=\"rule-tenant\">Tenant</label><select id=\"rule-tenant\" name=\"tenant\" required>{tenants}</select></div>\
+<div class=\"apex-field\"><label for=\"rule-name\">Name</label><input id=\"rule-name\" name=\"name\" type=\"text\" maxlength=\"80\" required placeholder=\"Emails near plan limit\"></div>\
+<div class=\"apex-field\"><label for=\"rule-metric\">Metric</label><select id=\"rule-metric\" name=\"metric\"><option value=\"emails\">Emails sent</option><option value=\"api_calls\">API calls</option></select></div>\
+<div class=\"apex-field\"><label for=\"rule-threshold\">Threshold (% of plan limit)</label><input id=\"rule-threshold\" name=\"threshold\" type=\"number\" min=\"1\" max=\"100\" required value=\"80\"></div>\
+<div class=\"apex-field\"><label for=\"rule-channel\">Notify via</label><select id=\"rule-channel\" name=\"channel\"><option value=\"email\">Email</option><option value=\"webhook\">Webhook</option><option value=\"both\">Email + webhook</option></select></div>\
+<div class=\"apex-field\"><label for=\"rule-severity\">Severity</label><select id=\"rule-severity\" name=\"severity\"><option value=\"info\">Info</option><option value=\"warning\" selected>Warning</option><option value=\"critical\">Critical</option></select></div>\
+</div>\
+<label class=\"flex items-center gap-2 text-sm font-medium\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked> Enabled</label>\
+<button type=\"submit\" class=\"apex-btn\">Create rule</button>\
+</form>",
+        tenants = tenant_options,
+    );
+
+    let mut rows = String::new();
+    if unavailable {
+        rows.push_str(
+            "<tr><td colspan=\"8\" class=\"text-surface-600\">The rule list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+        );
+    } else if rules.is_empty() {
+        rows.push_str(
+            "<tr><td colspan=\"8\" class=\"text-surface-600\">No alert rules yet — create one above. Every rule here is evaluated against live usage and fires onto the Alerts page.</td></tr>",
+        );
+    } else {
+        for rule in rules {
+            let label = if rule.name.trim().is_empty() {
+                format!(
+                    "Unnamed rule ({})",
+                    alert_rule_metric_label(&rule.metric_type)
+                )
+            } else {
+                rule.name.clone()
+            };
+            let severity_class = match rule.severity.as_str() {
+                "critical" => "text-error font-semibold",
+                "warning" => "text-warning-700 font-semibold",
+                _ => "text-surface-600",
+            };
+            let next_enabled = if rule.enabled { "false" } else { "true" };
+            let toggle_label = if rule.enabled { "Disable" } else { "Enable" };
+            let last_fired = rule.last_triggered.as_deref().unwrap_or("Never");
+            rows.push_str(&format!(
+                "<tr>\
+<td>{name}</td>\
+<td class=\"apex-mono text-xs\">{tenant}</td>\
+<td>{metric} ≥ {threshold}% of the plan limit</td>\
+<td class=\"{severity_class}\">{severity}</td>\
+<td>{channel}</td>\
+<td>{state}</td>\
+<td>{last_fired}</td>\
+<td><div class=\"flex flex-wrap items-center gap-2\">\
+<a class=\"apex-btn apex-btn--sm\" href=\"/alerts/rules?edit={id}\">Edit</a>\
+<form method=\"post\" action=\"/web/admin/alert-rules/{id}/toggle\"><input type=\"hidden\" name=\"enabled\" value=\"{next_enabled}\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\">{toggle_label}</button></form>\
+<form method=\"post\" action=\"/web/admin/alert-rules/{id}/delete\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\">Delete</button></form>\
+</div></td>\
+</tr>",
+                name = html_escape(&label),
+                tenant = html_escape(&rule.tenant_id),
+                metric = alert_rule_metric_label(&rule.metric_type),
+                threshold = rule.threshold_percent,
+                severity_class = severity_class,
+                severity = html_escape(&rule.severity),
+                channel = alert_rule_channel_label(&rule.notification_channel),
+                state = if rule.enabled { "Enabled" } else { "Disabled" },
+                last_fired = html_escape(last_fired),
+                id = html_escape(&rule.id),
+                next_enabled = next_enabled,
+                toggle_label = toggle_label,
+            ));
+        }
+    }
+
+    let unavailable_note = data
+        .map(|d| d.unavailable_note.as_str())
+        .unwrap_or_default();
+    let unavailable_banner = if unavailable && !unavailable_note.is_empty() {
+        format!(
+            "<div class=\"apex-callout apex-callout--error\" role=\"status\"><strong>Alert rules could not be loaded</strong><span>{}</span></div>",
+            html_escape(unavailable_note),
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "<div class=\"space-y-6\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Alert Rules</h1>\
+<p class=\"text-sm text-surface-600\">Tenant usage thresholds evaluated by the billing maintenance sweep. When a threshold holds, the incident lands on <a class=\"text-primary font-medium\" href=\"/alerts\">Alerts</a> for triage.</p>\
+{unavailable_banner}\
+{edit_form}\
+{create_form}\
+<h2 class=\"apex-panel-title\">Rules</h2>\
+<div class=\"apex-table-wrap\"><table class=\"apex-table\"><thead><tr>\
+<th scope=\"col\">Rule</th>\
+<th scope=\"col\">Tenant</th>\
+<th scope=\"col\">Condition</th>\
+<th scope=\"col\">Severity</th>\
+<th scope=\"col\">Notify</th>\
+<th scope=\"col\">State</th>\
+<th scope=\"col\">Last fired</th>\
+<th scope=\"col\"><span class=\"sr-only\">Actions</span></th>\
+</tr></thead><tbody>{rows}</tbody></table></div>\
+</div>",
+        unavailable_banner = unavailable_banner,
+        edit_form = edit_form,
+        create_form = create_form,
+        rows = rows,
     )
+}
+
+/// Human label for a rule metric on the control-plane rules page.
+fn alert_rule_metric_label(metric: &str) -> &'static str {
+    match metric {
+        "emails" => "Emails sent",
+        "api_calls" => "API calls",
+        _ => "Unknown metric",
+    }
+}
+
+/// Human label for a rule notification channel on the rules page.
+fn alert_rule_channel_label(channel: &str) -> &'static str {
+    match channel {
+        "email" => "Email",
+        "webhook" => "Webhook",
+        "both" => "Email + webhook",
+        _ => "Unknown channel",
+    }
 }
 
 /// CP settings page.
@@ -8448,7 +8641,7 @@ mod tests {
             ("cp_compliance", control_plane_compliance_page()),
             ("cp_gdpr", control_plane_gdpr_page()),
             ("cp_alerts", control_plane_alerts_page()),
-            ("cp_alert_rules", control_plane_alert_rules_page()),
+            ("cp_alert_rules", control_plane_alert_rules_page(None)),
             ("cp_settings", control_plane_settings_page()),
             ("cp_security", control_plane_security_page()),
             ("cp_audit", control_plane_audit_page()),

@@ -75,6 +75,19 @@ def _int(text: str) -> int:
     return int(text.replace("_", ""))
 
 
+def _bool_field(block: str, field: str) -> bool:
+    """A `field: true|false` literal; absent means the Rust default (false
+    for the capability flags, so a seed that stops setting one still compares
+    honestly against the catalog)."""
+    match = re.search(rf"\b{re.escape(field)}:\s*(true|false)\b", block)
+    return match.group(1) == "true" if match else False
+
+
+def _int_field(block: str, field: str, default: int = 0) -> int:
+    match = re.search(rf"\b{re.escape(field)}:\s*(-?[\d_]+)\s*,", block)
+    return _int(match.group(1)) if match else default
+
+
 # ---------------------------------------------------------------------------
 # Parsers
 # ---------------------------------------------------------------------------
@@ -113,6 +126,16 @@ def parse_catalog(src: str) -> list[dict]:
                 )
                 if overage
                 else None,
+                # Feature gates sold in docs/pricing.md — pinned to the
+                # billing seeds below so a flag can never be sold on one side
+                # only (capability wave 1: audit_logs, template approval,
+                # subaccounts/max_subaccounts).
+                "audit_logs": _bool_field(block, "audit_logs"),
+                "ab_testing": _bool_field(block, "ab_testing"),
+                "time_travel_debugging": _bool_field(block, "time_travel_debugging"),
+                "template_approval_workflow": _bool_field(block, "template_approval_workflow"),
+                "subaccounts": _bool_field(block, "subaccounts"),
+                "max_subaccounts": _int_field(block, "max_subaccounts"),
             }
         )
     assert rows, "platform-catalog parse produced no rows"
@@ -159,6 +182,18 @@ def parse_billing_seeds(src: str) -> dict[str, dict]:
         if features:
             seeds[name.group(1)]["retention_days"] = _int(features.group(1))
             seeds[name.group(1)]["team_members"] = _int(features.group(2))
+        # Feature gates (absent = the PlanFeatures default false/0, so the
+        # comparison stays honest when a seed stops setting one).
+        seeds[name.group(1)]["audit_logs"] = _bool_field(block, "audit_logs")
+        seeds[name.group(1)]["ab_testing"] = _bool_field(block, "ab_testing")
+        seeds[name.group(1)]["time_travel_debugging"] = _bool_field(
+            block, "time_travel_debugging"
+        )
+        seeds[name.group(1)]["template_approval_workflow"] = _bool_field(
+            block, "template_approval_workflow"
+        )
+        seeds[name.group(1)]["subaccounts"] = _bool_field(block, "subaccounts")
+        seeds[name.group(1)]["max_subaccounts"] = _int_field(block, "max_subaccounts")
     assert seeds, "billing seed parse produced no seeds"
     return seeds
 
@@ -360,6 +395,23 @@ def check_billing_matches_catalog(
                 fail(
                     f"billing seed '{name}'.{field} = {seed[field]} but the canonical catalog "
                     f"says {row[field]}"
+                )
+        # Feature gates sold in docs/pricing.md: the canonical catalog and the
+        # billing runtime seeds must agree on every one, or the plan that is
+        # sold is not the plan that is enforced.
+        for field in (
+            "audit_logs",
+            "ab_testing",
+            "time_travel_debugging",
+            "template_approval_workflow",
+            "subaccounts",
+            "max_subaccounts",
+        ):
+            if seed.get(field) != row.get(field):
+                fail(
+                    f"billing seed '{name}'.{field} = {seed.get(field)} but the canonical "
+                    f"catalog says {row.get(field)} (billing-service/src/plans.rs vs "
+                    f"platform-catalog)"
                 )
         expected_overage = row["overage_millicents"]
         if overage_arms:
@@ -706,6 +758,29 @@ def _self_test() -> int:
         "price_monthly: 2_900,",
         "price_monthly: 3_900,",
         "billing seed 'starter'.monthly_cents",
+    )
+    expect_failure(
+        "seed flag removed vs catalog",
+        BILLING_PLANS,
+        "                // Growth+ sells customer audit read/export, A/B experiment\n"
+        "                // execution and time-travel debugging (docs/pricing.md).\n"
+        "                audit_logs: true,\n",
+        "",
+        "'growth'.audit_logs",
+    )
+    expect_failure(
+        "seed ab_testing flag removed vs catalog",
+        BILLING_PLANS,
+        "                ab_testing: true,\n                time_travel_debugging: true,\n",
+        "                time_travel_debugging: true,\n",
+        "'growth'.ab_testing",
+    )
+    expect_failure(
+        "seed subaccount cap drifts vs catalog",
+        BILLING_PLANS,
+        "                subaccounts: true,\n                max_subaccounts: 10,\n",
+        "                subaccounts: true,\n                max_subaccounts: 25,\n",
+        "'scale'.max_subaccounts",
     )
     expect_failure(
         "reintroduced literal overage arm drifts vs catalog",

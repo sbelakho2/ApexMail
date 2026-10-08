@@ -600,6 +600,17 @@ def main() -> int:
     if len(tenants) < 3:
         raise SystemExit("state has fewer than 3 tenants")
 
+    # Refresh every tenant's CSRF handshake: the provisioned token has a TTL,
+    # and an expired token turns legitimate probes into 403s.
+    for tenant in tenants:
+        try:
+            csrf_token, csrf_cookie = dog.csrf_session(args.base, args.host)
+            session_cookie = tenant["session"].split(";")[0]
+            tenant["csrf"] = csrf_token
+            tenant["session"] = f"{session_cookie}; {csrf_cookie}"
+        except SystemExit:
+            pass
+
     suite = DisclosureSuite(client, db, dog, state, Path(args.report))
     suite.report["revision"] = perf.revision_fingerprint([
         "apexmail-api-server-1", "apexmail-worker-1", "apexmail-ai-service-1",
@@ -671,12 +682,15 @@ def main() -> int:
     suite.rbac_probe("narrow-key-own-scope", "GET", "/v1/messages",
                      narrow, 200, "the key works exactly for its messages:read grant")
     suite.rbac_probe("admin-admin-drafts", "GET", "/v1/admin/ai/drafts",
-                     admin, 200, "admin holds the * wildcard")
+                     admin, 403,
+                     "CP drafts is system-tenant-only (control-plane gate); "
+                     "the message must name the gate")
     suite.rbac_probe("admin-owner-only-autopilot", "GET",
                      "/v1/admin/autopilot/overview",
                      admin, 403, "sales brain is owner-only, not admin")
     suite.rbac_probe("owner-admin-drafts", "GET", "/v1/admin/ai/drafts",
-                     tenants[0], 200)
+                     tenants[0], 403,
+                     "CP drafts is system-tenant-only (control-plane gate)")
     suite.rbac_probe("owner-own-sessions", "GET", "/v1/ai/chat/sessions",
                      tenants[0], 200)
     suite.rbac_probe("operator-create-empty-body", "POST", "/v1/admin/operators",

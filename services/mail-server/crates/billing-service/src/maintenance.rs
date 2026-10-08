@@ -1187,10 +1187,14 @@ pub(crate) struct MeteringDrainResult {
     pub(crate) discarded_count: i64,
 }
 
+/// Outcome of one usage-alert sweep. Public because the SAME evaluation the
+/// periodic loop runs is exposed to integration tests through
+/// [`process_usage_alerts`] — a test that re-implemented the sweep would
+/// prove nothing about the running path.
 #[derive(Debug)]
-struct UsageAlertSweepResult {
-    tenants_checked: i64,
-    alerts_triggered: i64,
+pub struct UsageAlertSweepResult {
+    pub tenants_checked: i64,
+    pub alerts_triggered: i64,
 }
 
 #[derive(Debug)]
@@ -1232,9 +1236,16 @@ struct PreparedMeterEvent {
 #[derive(Debug, FromRow)]
 struct UsageAlertConfigRow {
     id: Uuid,
+    /// Operator-facing rule label (migration 246). NULL on rows created by
+    /// the tenant-facing upsert before names existed; the fired incident
+    /// falls back to the metric in that case.
+    name: Option<String>,
     metric_type: String,
     threshold_percent: i32,
     notification_channel: String,
+    /// info | warning | critical (migration 246 CHECK) — carried onto the
+    /// fired `system_alerts` row.
+    severity: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -1831,7 +1842,14 @@ async fn process_scheduled_retries(
     })
 }
 
-async fn process_usage_alerts(
+/// One usage-alert sweep across every tenant with at least one enabled rule.
+///
+/// This is the function the periodic billing loop calls (see
+/// [`start_periodic_jobs`]); it is PUBLIC so integration tests can drive the
+/// exact running evaluation — seeding a rule through the admin API and
+/// observing the fired `system_alerts` row — instead of re-implementing the
+/// sweep in test code.
+pub async fn process_usage_alerts(
     state: &AppState,
     client: &Client,
 ) -> Result<UsageAlertSweepResult, String> {
@@ -1876,7 +1894,7 @@ async fn process_usage_alerts_for_tenant(
 
     let configs = sqlx::query_as::<_, UsageAlertConfigRow>(
         r#"
-        SELECT id, metric_type, threshold_percent, notification_channel
+        SELECT id, name, metric_type, threshold_percent, notification_channel, severity
         FROM usage_alert_configs
         WHERE tenant_id = $1
           AND enabled = true
@@ -1928,6 +1946,22 @@ async fn process_usage_alerts_for_tenant(
             continue;
         }
 
+        // The condition HOLDS: raise the incident on the control-plane alert
+        // rail. This is independent of channel delivery on purpose — the CP
+        // /alerts page is a first-class destination, so a rule whose webhook
+        // is down or absent still fires where operators look. `delivered`
+        // below keeps its exact prior semantics (channel acceptance gates the
+        // cooldown and `alerts_triggered`), so a failed webhook still retries.
+        record_usage_alert_incident(
+            state,
+            tenant_id,
+            &config,
+            current_value,
+            limit_value,
+            current_percent,
+        )
+        .await;
+
         let delivered = send_usage_alert(
             state,
             client,
@@ -1969,6 +2003,68 @@ async fn process_usage_alerts_for_tenant(
     }
 
     Ok(alerts_triggered)
+}
+
+/// Persist a fired usage rule into `system_alerts` — the store the control
+/// plane's `/alerts` page, SSE stream, and dashboard risk counts read.
+///
+/// Idempotent per rule: `source = 'usage_alert'` plus `fingerprint = <rule
+/// id>` collide on the unique index migration 108 installed
+/// (`(source, fingerprint) WHERE source <> 'system' AND fingerprint IS NOT
+/// NULL`), so a rule whose condition keeps holding refreshes its single
+/// incident row (message / severity / timestamp) instead of piling up a
+/// duplicate every sweep. `acknowledged` is deliberately left untouched: an
+/// operator's acknowledgement must not be silently reopened by the next
+/// sweep.
+async fn record_usage_alert_incident(
+    state: &AppState,
+    tenant_id: &str,
+    config: &UsageAlertConfigRow,
+    current_value: i64,
+    limit_value: i64,
+    current_percent: f64,
+) {
+    let label = config
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(config.metric_type.as_str());
+    let message = format!(
+        "Alert rule \"{label}\" fired: {} at {}% of the plan limit ({} / {}).",
+        config.metric_type,
+        current_percent.round() as i64,
+        current_value,
+        limit_value,
+    );
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO system_alerts
+            (alert_type, message, severity, component, tenant_id, source, fingerprint)
+        VALUES ('usage_alert', $1, $2, 'usage', $3, 'usage_alert', $4)
+        ON CONFLICT (source, fingerprint)
+            WHERE source <> 'system' AND fingerprint IS NOT NULL
+        DO UPDATE SET
+            message = EXCLUDED.message,
+            severity = EXCLUDED.severity,
+            tenant_id = EXCLUDED.tenant_id,
+            created_at = NOW()
+        "#,
+    )
+    .bind(&message)
+    .bind(&config.severity)
+    .bind(tenant_id)
+    .bind(config.id.to_string())
+    .execute(&state.db)
+    .await
+    {
+        warn!(
+            tenant_id = %tenant_id,
+            rule_id = %config.id,
+            error = %error,
+            "failed to record usage alert incident in system_alerts"
+        );
+    }
 }
 
 fn resolve_usage_alert_metric(
@@ -2051,6 +2147,12 @@ async fn send_usage_alert(
     let mut delivered = false;
 
     if email_enabled {
+        // Enqueue = accepted for delivery: the api-server's notification-queue
+        // drainer (`api_server::routes::notification_drain`, spawned in
+        // `bin/server.rs`) is the consumer that hands every pending row to the
+        // platform mail pipeline and records retries on the row. Before that
+        // drainer existed this INSERT was a silent no-op (dogfood 2026-10-06
+        // wave B: 64 pending usage_alert rows, oldest 2 days, attempts=0).
         match sqlx::query(
             r#"
             INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
@@ -5096,6 +5198,118 @@ mod coverage_adversarial {
             .expect("alerts replay");
         assert_eq!(second.alerts_triggered, 0, "cooldown suppresses duplicates");
         assert_eq!(mock.call_count("/hook"), 1);
+    });
+
+    // The rules surface's core promise: a rule in the evaluated store fires
+    // through the RUNNING sweep into `system_alerts` (the store the CP
+    // /alerts page reads), carrying the rule's name, severity, and tenant —
+    // and a still-holding rule refreshes ONE incident row, never a pile.
+    env_test!(usage_alert_rule_fires_into_system_alerts, |env| {
+        let tenant = "mtcov_rule_fire";
+        seed_tenant(env, tenant, "rulefire", "active").await;
+        seed_plan(env, "rulefire", 1_000, json!({})).await;
+        let rule_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO usage_alert_configs
+                 (id, tenant_id, name, metric_type, threshold_percent,
+                  notification_channel, severity)
+             VALUES ($1, $2, 'Emails near plan limit', 'emails', 50, 'email', 'critical')",
+        )
+        .bind(rule_id)
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("rule");
+        sqlx::query(
+            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', 600, NOW())",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("usage");
+        // The cooldown key is shared Redis and may survive a prior run.
+        redis_del(env, &format!("alert:cooldown:{tenant}:emails:50")).await;
+
+        let client = Client::new();
+        let first = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("sweep");
+        assert_eq!(first.alerts_triggered, 1, "{first:?}");
+
+        let (severity, message, recorded_tenant): (String, String, String) = sqlx::query_as(
+            "SELECT severity, message, COALESCE(tenant_id, '')
+             FROM system_alerts
+             WHERE source = 'usage_alert' AND fingerprint = $1",
+        )
+        .bind(rule_id.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .expect("the fired rule must land in system_alerts");
+        assert_eq!(severity, "critical");
+        assert!(
+            message.contains("Emails near plan limit"),
+            "the rule's name must ride the incident message: {message}"
+        );
+        assert!(message.contains("600 / 1000"), "message: {message}");
+        assert_eq!(recorded_tenant, tenant);
+
+        // A second sweep (condition still holds, cooldown active) must not
+        // duplicate the incident: one rule = one open control-plane incident.
+        let second = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("sweep replay");
+        assert_eq!(second.alerts_triggered, 0);
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM system_alerts
+             WHERE source = 'usage_alert' AND fingerprint = $1",
+        )
+        .bind(rule_id.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .expect("incident count");
+        assert_eq!(incidents, 1, "one rule, one incident row");
+    });
+
+    // A rule whose condition does NOT hold must leave `system_alerts`
+    // alone — firing on a sweep where usage is below the threshold would
+    // make the console lie about the tenant's state.
+    env_test!(usage_alert_rule_below_threshold_never_fires, |env| {
+        let tenant = "mtcov_rule_quiet";
+        seed_tenant(env, tenant, "rulequiet", "active").await;
+        seed_plan(env, "rulequiet", 1_000, json!({})).await;
+        sqlx::query(
+            "INSERT INTO usage_alert_configs
+                 (tenant_id, name, metric_type, threshold_percent,
+                  notification_channel, severity)
+             VALUES ($1, 'Should stay quiet', 'emails', 80, 'email', 'warning')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("rule");
+        sqlx::query(
+            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', 100, NOW())",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("usage");
+
+        let client = Client::new();
+        let sweep = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("sweep");
+        assert_eq!(sweep.alerts_triggered, 0, "{sweep:?}");
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM system_alerts WHERE tenant_id = $1 AND source = 'usage_alert'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("incident count");
+        assert_eq!(incidents, 0, "10% usage must not fire an 80% rule");
     });
 
     env_test!(

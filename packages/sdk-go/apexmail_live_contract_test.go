@@ -226,18 +226,20 @@ func TestLiveStackContract(t *testing.T) {
 	}
 
 	// 9. Client-side refusals never reach the wire: cursor on the
-	// deny_unknown_fields routes (GO-8) and template fields on send (GO-6).
+	// deny_unknown_fields routes (GO-8) and template_data without a
+	// template_id on send. Template sends themselves are supported (the
+	// server renders template_id/template_data).
 	if _, err := client.Events.List(ctx, ListEventsOptions{Cursor: "abc"}); err == nil || !strings.Contains(err.Error(), "cursor") {
 		t.Fatalf("cursor must be rejected client-side, got: %v", err)
 	}
 	if _, err := client.Emails.Send(ctx, &SendEmailRequest{
-		From:       EmailAddress{Email: "sender@sdkfix-live-test.example"},
-		To:         []EmailAddress{{Email: "go-live@example.test"}},
-		Subject:    "must not send",
-		HTML:       "<p>x</p>",
-		TemplateID: "tpl_must_be_rejected",
-	}); err == nil || !strings.Contains(err.Error(), "template_id") {
-		t.Fatalf("template_id must be rejected client-side, got: %v", err)
+		From:         EmailAddress{Email: "sender@sdkfix-live-test.example"},
+		To:           []EmailAddress{{Email: "go-live@example.test"}},
+		Subject:      "must not send",
+		HTML:         "<p>x</p>",
+		TemplateData: map[string]interface{}{"name": "Ada"},
+	}); err == nil || !strings.Contains(err.Error(), "template_data") {
+		t.Fatalf("template_data without template_id must be rejected client-side, got: %v", err)
 	}
-	t.Logf("PASS client-side refusals (cursor, template_id)")
+	t.Logf("PASS client-side refusals (cursor, template_data without template_id)")
 }

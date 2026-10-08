@@ -712,11 +712,21 @@ async fn run_worker(
                 redis.clone(),
             ),
         );
-        let executor = Arc::new(worker_processors::campaigns::CampaignExecutor::new(
-            db.clone(),
-            billing_service::send_admission::SendAdmissionService::new(admission),
-            unique_worker_id(),
-        ));
+        let executor = Arc::new(
+            worker_processors::campaigns::CampaignExecutor::new(
+                db.clone(),
+                billing_service::send_admission::SendAdmissionService::new(admission),
+                unique_worker_id(),
+            )
+            // STO: `settings.sendTimeOptimization` schedules each recipient at
+            // their optimal engagement window (documented Pro+ contract). The
+            // engine reads the tenant-scoped `events` profile and caches
+            // windows in Redis.
+            .with_send_time_optimizer(analytics::send_time_optimizer::SendTimeOptimizer::new(
+                db.clone(),
+                redis.clone(),
+            )),
+        );
         let interval_secs = automation_tick_secs();
         info!(
             interval_secs,

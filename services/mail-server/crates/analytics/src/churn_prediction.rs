@@ -17,6 +17,35 @@ const DECAY_WEIGHT: f64 = 20.0;
 const SIGMOID_MIDPOINT: f64 = 50.0;
 const SIGMOID_STEEPNESS: f64 = 15.0;
 
+/// One aggregated churn signal for a tenant audience, with the number of
+/// active contacts it applies to and the engine weight it carries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiskFactorCount {
+    pub factor: String,
+    pub contacts: i64,
+    pub weight: f64,
+}
+
+/// Audience-level churn answer for `GET /v1/ai/churn-prediction`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantChurnOverview {
+    pub active_contacts: i64,
+    pub at_risk_contacts: i64,
+    pub churn_probability: f64,
+    pub risk_factors: Vec<RiskFactorCount>,
+    pub recommendations: Vec<String>,
+}
+
+/// Raw aggregate row for [`ChurnPredictionEngine::tenant_overview`].
+#[derive(Debug, sqlx::FromRow)]
+struct TenantChurnTotals {
+    active_contacts: i64,
+    at_risk_contacts: i64,
+    complained_contacts: i64,
+    bounced_contacts: i64,
+    decaying_contacts: i64,
+}
+
 /// F10:the Redis-cached form of a churn prediction.
 ///
 /// Redis is an external store, so the cache carries ONLY the salted
@@ -91,6 +120,163 @@ impl ChurnPredictionEngine {
 
         self.set_cached(&cache_key, &prediction, 21600).await.ok();
         Ok(prediction)
+    }
+
+    /// Audience-level churn overview for a tenant
+    /// (`GET /v1/ai/churn-prediction`).
+    ///
+    /// Before this method the route returned TWO HARDCODED factor strings
+    /// ("No opens in 90 days", "Engagement declining") and two hardcoded
+    /// recommendations without touching any data beyond the at-risk count,
+    /// while this engine (with its weights and thresholds) was dead code
+    /// outside its tests. This aggregates the SAME signal rules the
+    /// per-subscriber [`Self::predict`] applies — complaint / bounce /
+    /// inactivity / decay, weighted by the constants above — over the tenant's
+    /// active contacts, so the route's factors are real counts.
+    pub async fn tenant_overview(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<TenantChurnOverview> {
+        // One aggregate pass; every sub-select is tenant-scoped. `at_risk` is
+        // the route's original definition: an active contact with no open or
+        // click in 90 days (cold-start contacts count as at risk).
+        let totals: TenantChurnTotals = sqlx::query_as(
+            r#"
+            WITH active AS (
+                SELECT c.email FROM contacts c
+                WHERE c.tenant_id = $1 AND c.status = 'active'
+            ),
+            engaged_90d AS (
+                SELECT DISTINCT c.email FROM contacts c
+                JOIN events e ON e.tenant_id = $1 AND e.recipient = c.email
+                    AND e.event_type IN ('opened','clicked')
+                    AND e.timestamp > NOW() - INTERVAL '90 days'
+                WHERE c.tenant_id = $1 AND c.status = 'active'
+            ),
+            complained AS (
+                SELECT DISTINCT c.email FROM contacts c
+                JOIN events e ON e.tenant_id = $1 AND e.recipient = c.email
+                    AND e.event_type = 'complained'
+                    AND e.timestamp > NOW() - INTERVAL '90 days'
+                WHERE c.tenant_id = $1 AND c.status = 'active'
+            ),
+            bounced AS (
+                SELECT DISTINCT c.email FROM contacts c
+                JOIN events e ON e.tenant_id = $1 AND e.recipient = c.email
+                    AND e.event_type = 'bounced'
+                    AND e.timestamp > NOW() - INTERVAL '90 days'
+                WHERE c.tenant_id = $1 AND c.status = 'active'
+            ),
+            decaying AS (
+                SELECT c.email FROM contacts c
+                WHERE c.tenant_id = $1 AND c.status = 'active'
+                  AND (SELECT COUNT(*) FROM events e
+                        WHERE e.tenant_id = $1 AND e.recipient = c.email
+                          AND e.event_type IN ('opened','clicked')
+                          AND e.timestamp > NOW() - INTERVAL '30 days')
+                    < (SELECT COUNT(*) FROM events e
+                        WHERE e.tenant_id = $1 AND e.recipient = c.email
+                          AND e.event_type IN ('opened','clicked')
+                          AND e.timestamp BETWEEN NOW() - INTERVAL '60 days'
+                                              AND NOW() - INTERVAL '30 days')
+            )
+            SELECT
+                (SELECT COUNT(*) FROM active) AS active_contacts,
+                (SELECT COUNT(*) FROM active a
+                  WHERE NOT EXISTS (SELECT 1 FROM engaged_90d g WHERE g.email = a.email))
+                    AS at_risk_contacts,
+                (SELECT COUNT(*) FROM complained) AS complained_contacts,
+                (SELECT COUNT(*) FROM bounced) AS bounced_contacts,
+                (SELECT COUNT(*) FROM decaying) AS decaying_contacts
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let active_contacts = totals.active_contacts;
+        let at_risk_contacts = totals.at_risk_contacts.min(active_contacts);
+
+        let mut risk_factors = Vec::new();
+        if totals.complained_contacts > 0 {
+            risk_factors.push(RiskFactorCount {
+                factor: "complained in the last 90 days".to_string(),
+                contacts: totals.complained_contacts,
+                weight: COMPLAINT_WEIGHT,
+            });
+        }
+        if totals.bounced_contacts > 0 {
+            risk_factors.push(RiskFactorCount {
+                factor: "bounced in the last 90 days".to_string(),
+                contacts: totals.bounced_contacts,
+                weight: BOUNCE_WEIGHT,
+            });
+        }
+        if at_risk_contacts > 0 {
+            risk_factors.push(RiskFactorCount {
+                factor: "no opens or clicks in 90 days".to_string(),
+                contacts: at_risk_contacts,
+                weight: INACTIVITY_WEIGHT,
+            });
+        }
+        if totals.decaying_contacts > 0 {
+            risk_factors.push(RiskFactorCount {
+                factor: "engagement declining (last 30 days vs the previous 30)".to_string(),
+                contacts: totals.decaying_contacts,
+                weight: DECAY_WEIGHT,
+            });
+        }
+        // Highest-weight factor first; a stable sort keeps equal weights in
+        // the fixed complaint → bounce → inactivity → decay order above.
+        risk_factors.sort_by(|a, b| {
+            b.weight
+                .partial_cmp(&a.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut recommendations = Vec::new();
+        if totals.complained_contacts > 0 {
+            recommendations.push(
+                "Review the complaint sources and pause the campaign(s) they came from"
+                    .to_string(),
+            );
+        }
+        if totals.bounced_contacts > 0 {
+            recommendations.push(
+                "Suppress hard bounces and clean the affected list before the next send"
+                    .to_string(),
+            );
+        }
+        if at_risk_contacts > 0 {
+            recommendations.push(
+                "Send a re-engagement campaign to the inactive segment".to_string(),
+            );
+        }
+        if totals.decaying_contacts > 0 {
+            recommendations.push(
+                "Reduce send frequency for declining segments and test new subject lines"
+                    .to_string(),
+            );
+        }
+        if recommendations.is_empty() {
+            recommendations.push(
+                "No churn signals in the last 90 days — no action needed".to_string(),
+            );
+        }
+
+        let churn_probability = if active_contacts > 0 {
+            at_risk_contacts as f64 / active_contacts as f64
+        } else {
+            0.0
+        };
+
+        Ok(TenantChurnOverview {
+            active_contacts,
+            at_risk_contacts,
+            churn_probability,
+            risk_factors,
+            recommendations,
+        })
     }
 
     /// Compute individual churn signals for a subscriber, scoped to `tenant_id`.
@@ -242,7 +428,6 @@ impl ChurnPredictionEngine {
         let val: String = redis::cmd("GET").arg(key).query_async(&mut *conn).await?;
         Ok(serde_json::from_str(&val)?)
     }
-
     /// F10:stores the hashed-identifier cache form (no raw email).
     async fn set_cached(&self, key: &str, val: &ChurnPrediction, ttl: u64) -> anyhow::Result<()> {
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;

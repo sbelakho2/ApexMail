@@ -49,7 +49,7 @@ pub struct PlanFeatures {
     // Auth & Security
     /// RuntimeEnforced — enterprise SSO is gated at the SSO-enforced login path.
     pub sso_enabled: bool,
-    /// NotYetImplemented — no customer audit read/export surface exists in api-server; not sold.
+    /// RuntimeEnforced — the customer `GET /v1/audit` + `/v1/audit/export` routes require this entitlement.
     pub audit_logs: bool,
 
     // API & Integrations
@@ -65,9 +65,9 @@ pub struct PlanFeatures {
     pub advanced_analytics: bool,
     /// RuntimeEnforced — the send-time recommendation endpoint requires this entitlement.
     pub send_time_optimization: bool,
-    /// NotYetImplemented — no experiment creation surface exists; not sold.
+    /// RuntimeEnforced — campaign experiment execution (arm assignment, holdout, guarded winner selection) and the results API gate on it.
     pub ab_testing: bool,
-    /// NotYetImplemented — no runtime implementation; removed from pricing.
+    /// RuntimeEnforced — historical message-state replay (`/v1/messages/:id/timeline`) gates on it.
     pub time_travel_debugging: bool,
     /// RuntimeEnforced — export handlers (analytics export/PDF/download, contacts CSV) require this entitlement.
     pub data_export: bool,
@@ -77,7 +77,7 @@ pub struct PlanFeatures {
     pub custom_tracking_domain: bool,
     /// RuntimeEnforced — template create/update requires this entitlement.
     pub custom_templates: bool,
-    /// NotYetImplemented — no approval-workflow state exists; removed from pricing.
+    /// RuntimeEnforced — the enterprise maker/checker template routes require this entitlement.
     pub template_approval_workflow: bool,
     /// ContractualOnly — renderer/deployment branding; never a request-path gate.
     pub white_label: bool,
@@ -93,9 +93,9 @@ pub struct PlanFeatures {
     // Team
     /// RuntimeEnforced capacity — team invitations check seats transactionally.
     pub max_team_members: i32,
-    /// NotYetImplemented — no subaccount resource exists in the runtime; removed from pricing.
+    /// RuntimeEnforced — the enterprise sub-account CRUD routes require this entitlement.
     pub subaccounts: bool,
-    /// NotYetImplemented capacity — no subaccount creation surface exists; removed from pricing.
+    /// RuntimeEnforced capacity — sub-account creation enforces the ceiling transactionally (Business 10, Enterprise -1).
     pub max_subaccounts: i32,
 
     // Support

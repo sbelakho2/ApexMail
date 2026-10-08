@@ -1292,6 +1292,31 @@ def main() -> int:
             save_state()
             log(f"  storm key minted for tenant {tenant['tenant_id']}")
 
+    # Re-login tenant owners whose sessions may have expired between runs.
+    for tenant in state["tenants"]:
+        status, text, _, _ = client.call(
+            "GET", "/v1/auth/me", cookie=tenant["session"],
+            csrf=(tenant["csrf"], tenant["session"]),
+        )
+        if status != 200:
+            session, secret, csrf_token = provisioner.login(
+                tenant["email"], tenant.get("totp_secret")
+            )
+            tenant.update({"session": session, "csrf": csrf_token,
+                           "totp_secret": secret})
+    # Refresh the CSRF handshakes: the provisioned token has its own TTL and
+    # an expired one turns every session write into a 403 (the state may be
+    # hours old on a repeat run).
+    for tenant in state["tenants"]:
+        try:
+            csrf_token, csrf_cookie = dog.csrf_session(client.base, client.host)
+            session_cookie = tenant["session"].split(";")[0]
+            tenant["csrf"] = csrf_token
+            tenant["session"] = f"{session_cookie}; {csrf_cookie}"
+        except SystemExit:
+            pass
+    save_state()
+
     # Conversation drivers: each tenant contributes its owner SESSION (a
     # per-user bucket) and its tenant API KEY (a per-tenant bucket); the 16
     # conversations spread 6/5/5 across the tenants, round-robin over the two
@@ -1327,19 +1352,6 @@ def main() -> int:
             log(f"  mailbox {mailbox['mailbox']} (tenant {tenant['tenant_id']})")
     save_state()
 
-    # Re-login tenant owners whose sessions may have expired between runs.
-    for tenant in state["tenants"]:
-        status, text, _, _ = client.call(
-            "GET", "/v1/auth/me", cookie=tenant["session"],
-            csrf=(tenant["csrf"], tenant["session"]),
-        )
-        if status != 200:
-            session, secret, csrf_token = provisioner.login(
-                tenant["email"], tenant.get("totp_secret")
-            )
-            tenant.update({"session": session, "csrf": csrf_token,
-                           "totp_secret": secret})
-    save_state()
 
     results: dict = {"run": state["run"], "budgets": BUDGET, "started_at": time.time()}
     results["container_restarts_before"] = restarts_before

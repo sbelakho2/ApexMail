@@ -32,6 +32,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 use crate::processor::{ClickData, RefusedClickData};
+use crate::routes::custom_host::{ensure_token_matches_host, host_scope_or_refuse};
 use crate::routes::extract_client_ip;
 use crate::state::AppState;
 use crate::token_shape::token_log_prefix;
@@ -56,6 +57,14 @@ pub async fn handle_click(
 ) -> Response {
     let fallback = state.config.tracking.fallback_url.clone();
     let redirect_status = state.config.tracking.redirect_status;
+
+    // Capability wave 2: a request on a custom tracking host must be a
+    // VERIFIED custom domain; an unconfigured host is refused by name here,
+    // before any token work — never silently served or bounced.
+    let host_scope = match host_scope_or_refuse(&state, &headers).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
 
     // E-148:Length guard
     if tracking_id.len() < 10 || tracking_id.len() > 4096 {
@@ -88,6 +97,15 @@ pub async fn handle_click(
     );
 
     let data = state.codec.decode(&tracking_id);
+
+    // Capability wave 2: the token must belong to the custom host's
+    // workspace — a link for tenant B served on tenant A's tracking host is
+    // refused by name, never attributed to the wrong tenant.
+    if let Some(decoded) = &data {
+        if let Err(refusal) = ensure_token_matches_host(&host_scope, &decoded.tenant_id) {
+            return refusal;
+        }
+    }
 
     let redirect_url = determine_redirect_url(&data, q.r.as_deref(), &fallback);
 

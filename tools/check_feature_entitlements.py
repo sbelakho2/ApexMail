@@ -21,8 +21,11 @@ and the table from `billing-entitlements/src/classify.rs` and FAILS when:
   * a field is classified twice;
   * a class is not one of the three allowed values;
   * a rationale is missing/empty;
-  * a RuntimeEnforced gate is not referenced by any api-server handler
-    (src/entitlements.rs excluded — that is the gate helper itself, not wiring).
+  * a RuntimeEnforced gate is not referenced by any customer handler. The
+    customer surface spans two services — api-server (`/v1/*`) and the
+    enterprise service (`/templates/*`, `/sub-accounts/*`) — so both source
+    trees are scanned (api-server `src/entitlements.rs` excluded — that is
+    the gate helper itself, not wiring).
 
 A built-in self-test re-runs the checker against a synthetic struct with an
 extra unclassified field and fails if the checker does not catch it. The
@@ -45,6 +48,10 @@ CLASSIFY_RS = (
     ROOT / "services" / "mail-server" / "crates" / "billing-entitlements" / "src" / "classify.rs"
 )
 API_SERVER_SRC = ROOT / "services" / "mail-server" / "crates" / "api-server" / "src"
+# The enterprise service owns the template-approval and sub-account routes,
+# which are plan-gated exactly like api-server handlers; a RuntimeEnforced
+# classification whose only wiring lives there is legitimate.
+ENTERPRISE_SRC = ROOT / "services" / "mail-server" / "crates" / "enterprise" / "src"
 
 ALLOWED_CLASSES = {"RuntimeEnforced", "ContractualOnly", "NotYetImplemented"}
 
@@ -93,19 +100,20 @@ def parse_classifications(source: str) -> list[dict]:
     return entries
 
 
-def api_server_references(gate_owner: str, gate_key: str) -> bool:
-    """True when a handler (not the gate helper) references the gate key."""
+def handler_references(gate_owner: str, gate_key: str) -> bool:
+    """True when a customer handler (not the gate helper) references the key."""
     if not gate_owner or not gate_key:
         return False
     needle = f"{gate_owner}::{gate_key}"
-    for path in sorted(API_SERVER_SRC.rglob("*.rs")):
-        if path.name == "entitlements.rs":
-            continue  # the helper's own tests enumerate keys; that is not wiring
-        try:
-            if needle in path.read_text(encoding="utf-8", errors="ignore"):
-                return True
-        except OSError:
-            continue
+    for src in (API_SERVER_SRC, ENTERPRISE_SRC):
+        for path in sorted(src.rglob("*.rs")):
+            if path.name == "entitlements.rs":
+                continue  # the helper's own tests enumerate keys; that is not wiring
+            try:
+                if needle in path.read_text(encoding="utf-8", errors="ignore"):
+                    return True
+            except OSError:
+                continue
     return False
 
 
@@ -134,13 +142,13 @@ def check(fields: list[str], entries: list[dict]) -> list[str]:
                 )
             if not row["rationale"].strip():
                 violations.append(f"`{field}` classification has an empty rationale")
-            if row["class"] == "RuntimeEnforced" and not api_server_references(
+            if row["class"] == "RuntimeEnforced" and not handler_references(
                 row["gate_owner"], row["gate_key"]
             ):
                 violations.append(
                     f"`{field}` is marked RuntimeEnforced but "
                     f"{row['gate_owner']}::{row['gate_key']} is not referenced by any "
-                    f"api-server handler"
+                    f"handler (api-server or enterprise-service)"
                 )
 
     for field in by_field:

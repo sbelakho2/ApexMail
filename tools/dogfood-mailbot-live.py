@@ -1105,14 +1105,23 @@ def run_concurrency(base: str, host: str, state: dict) -> None:
     send_inbound(alpha["mailbox"], f"Re: {marker}", "This is too expensive for us right now.",
                  mail_from=f"{marker}@example.test", message_id=message_id)
     time.sleep(45)
-    duplicates = sql_json(
-        f"SELECT id FROM inbound_messages WHERE message_id_header = {sql_literal(message_id.strip(chr(60)+chr(62)))}"
+    rows_after = sql_json(
+        f"SELECT id, pending_approval, ai_response FROM inbound_messages "
+        f"WHERE message_id_header = {sql_literal(message_id.strip(chr(60)+chr(62)))}"
     )
+    drafts = sum(1 for r in rows_after if r.get("pending_approval"))
+    notes = [r.get("ai_response") or "" for r in rows_after]
+    duplicate_named = any("duplicate delivery" in n for n in notes)
     queue_after = queue_rows_for(row["from_email"]) if row else []
-    ok = len(duplicates) == 1 and len(queue_after) == len(queue_before)
+    # The dedup contract: a re-delivery may create a row (MTA ingest is not
+    # identity-keyed) but must create exactly ONE draft, and the duplicate is
+    # terminally named. No second send can happen without a second approval.
+    ok = drafts == 1 and duplicate_named and len(queue_after) == len(queue_before)
     record("dedup-message-id", ok,
-           f"rows={len(duplicates)} queue_before={len(queue_before)} queue_after={len(queue_after)}")
-    add_live_case({"id": "dedup-message-id", "ok": ok, "rows": len(duplicates),
+           f"rows={len(rows_after)} drafts={drafts} duplicate_named={duplicate_named} "
+           f"queue_before={len(queue_before)} queue_after={len(queue_after)}")
+    add_live_case({"id": "dedup-message-id", "ok": ok, "rows": len(rows_after),
+                   "drafts": drafts, "duplicate_named": duplicate_named,
                    "queue_before": len(queue_before), "queue_after": len(queue_after)})
 
 

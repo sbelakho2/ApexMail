@@ -60,12 +60,17 @@ public final class Emails {
          * template_id/template_data, attachments, priority and headers
          * under their documented snake_case field names. Nothing the SDK
          * accepts is dropped silently.
+         *
+         * <p>A template-only send omits subject/html/text entirely — the
+         * stored template supplies them.
          */
         Map<String, Object> toMap() {
             Map<String, Object> body = new HashMap<>();
             body.put("from", Emails.formatAddress(from));
             body.put("to", Emails.coerceAddressList(to));
-            body.put("subject", subject);
+            if (subject != null && !subject.isBlank()) {
+                body.put("subject", subject);
+            }
             if (html != null) {
                 body.put("html", html);
             }
@@ -246,8 +251,12 @@ public final class Emails {
     /**
      * Send a single email.
      *
-     * <p>Required keys: {@code from}, {@code to}, {@code subject} plus at
-     * least one of {@code html} or {@code text}.
+     * <p>Required keys: {@code from}, {@code to}, and either {@code subject}
+     * plus at least one of {@code html} or {@code text}, OR a
+     * {@code template_id} (a stored tenant-scoped template supplies
+     * subject/html/text, rendered with {@code template_data}; a
+     * template-only send is valid). An explicit {@code subject}/{@code html}/
+     * {@code text} overrides the rendered template field.
      *
      * <p>Every accepted option is serialized (F48): from/to/cc/bcc/reply_to
      * go out as address strings with display names preserved as RFC 5322
@@ -334,15 +343,29 @@ public final class Emails {
         if (!params.containsKey("to")) {
             throw new IllegalArgumentException("to is required");
         }
-        if (!params.containsKey("subject")) {
-            throw new IllegalArgumentException("subject is required");
+        // Template sends are supported (docs/api/endpoints/messages.md):
+        // template_id names a stored tenant-scoped template that supplies
+        // subject/html/text, rendered with template_data. A template-only
+        // send is valid.
+        String templateId = null;
+        Object templateIdValue = params.get("template_id");
+        if (templateIdValue instanceof String value && !value.isBlank()) {
+            templateId = value;
         }
-        if (!params.containsKey("html") && !params.containsKey("text")) {
-            if (params.containsKey("template_id")) {
-                throw new IllegalArgumentException(
-                    "html or text body is required (template_id alone cannot provide the body)");
+        Object subject = params.get("subject");
+        if ((subject == null || subject.toString().isBlank()) && templateId == null) {
+            throw new IllegalArgumentException("subject is required (or provide template_id)");
+        }
+        if (!params.containsKey("html") && !params.containsKey("text") && templateId == null) {
+            throw new IllegalArgumentException("html or text is required (or provide template_id)");
+        }
+        if (params.containsKey("template_data") && params.get("template_data") != null) {
+            if (templateId == null) {
+                throw new IllegalArgumentException("template_data requires template_id");
             }
-            throw new IllegalArgumentException("html or text is required");
+            if (!isJsonObjectShaped(params.get("template_data"))) {
+                throw new IllegalArgumentException("template_data must be a JSON object of template variables");
+            }
         }
 
         validateRecipients(params.get("from"), "from");
@@ -356,6 +379,20 @@ public final class Emails {
         if (params.containsKey("reply_to")) {
             validateRecipients(params.get("reply_to"), "reply_to");
         }
+    }
+
+    /** Whether a template_data value serializes to a JSON object — maps and
+     *  POJOs do; collections, arrays and scalars serialize to JSON
+     *  array/scalar shapes the server rejects. */
+    private static boolean isJsonObjectShaped(Object value) {
+        if (value instanceof Map<?, ?>) {
+            return true;
+        }
+        return !(value instanceof java.util.Collection<?>)
+            && !value.getClass().isArray()
+            && !(value instanceof Number)
+            && !(value instanceof Boolean)
+            && !(value instanceof CharSequence);
     }
 
     /**
@@ -479,15 +516,23 @@ public final class Emails {
             if (message.containsKey("bcc")) {
                 validateRecipients(message.get("bcc"), "bcc");
             }
-            if (!message.containsKey("subject")) {
-                throw new IllegalArgumentException("message at index " + i + " missing subject");
+            String templateId = firstString(message, "template_id", "templateId");
+            boolean hasTemplate = templateId != null && !templateId.isBlank();
+            if (!message.containsKey("subject") && !hasTemplate) {
+                throw new IllegalArgumentException("message at index " + i + " missing subject (or template_id)");
             }
-            if (!message.containsKey("html") && !message.containsKey("text")) {
-                if (message.containsKey("templateId") || message.containsKey("template_id")) {
-                    throw new IllegalArgumentException("message at index " + i
-                        + " missing html or text (template_id alone cannot provide the body)");
+            if (!message.containsKey("html") && !message.containsKey("text") && !hasTemplate) {
+                throw new IllegalArgumentException("message at index " + i + " missing html or text (or template_id)");
+            }
+            Object templateData = first(message, "template_data", "templateData");
+            if (templateData != null) {
+                if (!hasTemplate) {
+                    throw new IllegalArgumentException("message at index " + i + " has template_data without template_id");
                 }
-                throw new IllegalArgumentException("message at index " + i + " missing html or text");
+                if (!isJsonObjectShaped(templateData)) {
+                    throw new IllegalArgumentException("message at index " + i
+                        + " template_data must be a JSON object of template variables");
+                }
             }
             normalized.add(normalizeBatchMessage(message));
         }
