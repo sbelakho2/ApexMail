@@ -359,6 +359,24 @@ two drafts owned by `tenant-a` / `tenant-b`):
 `cargo nextest run -p api-server -p worker-processors` with the standard
 `TEST_DATABASE_URL`/`TEST_REDIS_URL`:
 
+- **api-server full suite: 2083 run, 2072 passed, 11 failed** (1045 s,
+  `-j 2`, final tree). Every failure is the same infrastructure message —
+  `api-server test DB bootstrap: cannot connect to admin URL: pool timed out
+  while waiting for an open connection` (the suite's isolated-database
+  bootstrap against a Postgres under load from the live stack and sibling
+  agents; the earlier full-parallel attempt OOM-killed the server). All 11
+  re-run in isolation: **11 passed, 0 failed** (13 s, `-j 1`). The list:
+  `deferred_feature_tests::{unscheduled_campaign_keeps_the_neutral_hint,
+  wrong_recovery_code_counts_toward_lockout,
+  zero_send_campaign_shows_honest_zeros_with_hints}`,
+  `outage_matrix_tests::redis_down_degrades_no_web_nav_page`,
+  `residual_zero_tests::{admin_domain_transfer_rotates_dkim_for_a_bare_domain,
+  admin_tenant_and_operator_storage_failures_are_honest,
+  api_key_and_webhook_forms_report_unreadable_and_failed_storage,
+  audit_export_shapes_default_days_and_outage,
+  campaign_detail_without_a_wired_audience_degrades_honestly,
+  campaign_lifecycle_races_and_faults_flash_honestly,
+  campaign_recipients_segment_and_contact_rules}`.
 - **worker-processors: 736 run, 735 passed, 1 SIGKILL** (164 s, `-j 2`).
   The SIGKILL was `webhook::processor::adversarial_tests::
   retryable_failure_schedules_backoff_and_stale_token_cannot_reschedule`
@@ -369,21 +387,46 @@ two drafts owned by `tenant-a` / `tenant-b`):
   (`live_claim_decodes_a_reply_row_with_null_to_email`) is among the 735
   passes; its red proof is the same test failing without the COALESCE with
   `ColumnDecode { index: "toEmail", source: UnexpectedNullError }`.
-- **api-server: did not compile at 23:20–23:50 UTC** — the shared tree held
-  other agents' in-flight edits throughout: first
-  `app.rs:672 routes::message_timeline not found` and `capability_gate.rs:43
-  non-exhaustive match (EntitlementError::CapacityExceeded)`, then
-  `compliance` lib errors, then (after another agent commit)
-  `error[E0382]: use of moved value: app` at `app.rs:6494` in the lib tests.
-  None are in this brief's paths; the standard two-crate suite cannot be
-  green until those land.
+
+Between 23:20 and 00:20 UTC sibling agents' in-flight edits made the shared
+tree transiently uncompilable (`message_timeline` missing,
+`capability_gate` non-exhaustive match, `compliance` errors, a moved `app`
+in a test, an unclosed delimiter in `campaign_experiments.rs`); each cleared
+on its own. The final `cargo check -p api-server --all-targets` is clean
+(1 pre-existing warning) and the two suites above are the final runs.
 
 **Environment event (disclosed):** at 23:20:35 UTC the shared Postgres
 container's checkpointer was OOM-killed (signal 9; container memory limit
 1 GB) and the database went through crash recovery for ~25 s. The first
 full-parallel nextest attempt plus concurrent sibling-agent load preceded it;
 that is the documented dev-stack failure mode (see the `shm_size` comment in
-`docker-compose.yml`). The re-run used `-j 2`.
+`docker-compose.yml`). All later runs used `-j 2` (or `-j 1` for the
+timeout-class subset).
+
+## Post-fix live regression runs (same live stack, pre-fix images)
+
+The two scope-extension fixes are in the tree, not yet in the running
+api-server image (revision recorded below), so the live suites were re-run
+as REGRESSION checks only — their in-tree red→green tests above are the
+fixes' proof:
+
+- `tools/bots_perf_budget.py --chat-only` (repeat, 100 s): **PASS, 0
+  breaches** — 160/160 turns 200, p50 105 / p95 174 / p99 196 ms, 8/8
+  parallel creates, 0 lost/dup, pool peak 34/50, api-server memory
+  -0.1%, 0 worker/panic/pool-timeout logs
+  (`/tmp/apexmail-bots-perf-report-final2.json`).
+- `tools/bots_disclosure_suite.py` (repeat): **PASS** — 36/36 probes
+  public-only, all RBAC verdicts unchanged, cross-tenant session read 404
+  with no leak, cross-tenant drafts 403/SCOPED; the mailbot's hostile
+  inbound drafts now come back as the named security-policy refusal
+  (`[NO DRAFT — security policy: message content matched prompt-injection
+  patterns…]`) from the mailbot agent's new defense. The previously filed
+  P2 cross-user history finding is unchanged (still open, live-confirmed).
+  Report: `/tmp/apexmail-bots-disclosure-report2.json`.
+
+Live image revision at the regression runs:
+`api-server sha256:8977957c8742…`, `worker sha256:54e240a541ca…`,
+`ai-service sha256:f987762b92e5…`, `mta sha256:2b698d9aecce…`.
 
 ## Method / disclosure
 

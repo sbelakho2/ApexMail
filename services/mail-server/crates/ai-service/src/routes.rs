@@ -1857,12 +1857,19 @@ mod tests {
             "test-key",
         )
         .await;
+        // P2-SECURITY (dogfood 2026-10-06): the read is scoped to the
+        // caller's own user too — the user header is REQUIRED alongside the
+        // tenant header, so the helper always sends `u1` unless a case is
+        // exercising the missing-header refusal.
         let history_request = |tenant_header: Option<&str>, body: serde_json::Value| {
             let mut request = authenticated_json_request("/admin/chat/history", body);
             if let Some(tenant) = tenant_header {
                 request
                     .headers_mut()
                     .insert("x-apexmail-tenant-id", tenant.parse().unwrap());
+                request
+                    .headers_mut()
+                    .insert("x-apexmail-user-id", "u1".parse().unwrap());
             }
             request
         };
@@ -1891,6 +1898,17 @@ mod tests {
             status_of(&app, history_request(None, serde_json::json!({"limit": 5}))).await,
             StatusCode::UNAUTHORIZED
         );
+        // P2-SECURITY: WITHOUT the user header it is likewise a 401 — the
+        // tenant header alone must not return teammates' turns.
+        let tenant_only = {
+            let mut request =
+                authenticated_json_request("/admin/chat/history", serde_json::json!({"limit": 5}));
+            request
+                .headers_mut()
+                .insert("x-apexmail-tenant-id", tenant.parse().unwrap());
+            request
+        };
+        assert_eq!(status_of(&app, tenant_only).await, StatusCode::UNAUTHORIZED);
         // A tenant_id in the body is an unknown field → 422: the body can no
         // longer select the target tenant.
         assert_eq!(

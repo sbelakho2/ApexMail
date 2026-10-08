@@ -387,13 +387,18 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Customization ──────────────────────────────────────────────
-    // NotYetImplemented — no tracking-domain setup handler exists in
-    // api-server; removed from the paid seeds.
+    // RuntimeEnforced — the lifecycle routes `POST/GET/DELETE
+    // /v1/tracking-domains[/:id]`, `/:id/dns-records`, `/:id/verify`
+    // (api-server `routes/tracking_domains.rs`) require
+    // `FeatureKey::CustomTrackingDomain` on create/verify, and the tracking
+    // service serves only VERIFIED custom hosts
+    // (`tracking-service/src/routes/custom_host.rs`). Seeded Pro and above,
+    // exactly as docs/pricing.md sells it.
     FieldClassification {
         field: "custom_tracking_domain",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::CustomTrackingDomain),
-        rationale: "Domains are created without a tracking-domain surface, so the flag cannot be enforced and is not sold.",
+        rationale: "The tracking-domain lifecycle (create/verify/delete + DNS records) is a real gated handler surface and the tracking service serves only verified custom hosts; the entitlement is the runtime gate.",
     },
     // RuntimeEnforced — template create/update (JSON and form) require
     // `FeatureKey::CustomTemplates`.
@@ -432,21 +437,25 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
     },
 
     // ── Retention ──────────────────────────────────────────────────
-    // NotYetImplemented — there is no retention-editing handler; removed
-    // from the paid seeds.
+    // RuntimeEnforced — `PUT /v1/retention` requires
+    // `FeatureKey::CustomRetention` (read/reset stay open so visibility and
+    // downgrade cleanup always work) and the retention sweep applies the
+    // stored override. Seeded Growth and above, exactly as docs/pricing.md
+    // sells it.
     FieldClassification {
         field: "custom_retention",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::CustomRetention),
-        rationale: "No customer retention-editing surface exists; retention is operator-set until an editing handler lands.",
+        rationale: "/v1/retention read/update/reset enforces the gate and the retention sweep reads the stored column; the entitlement is the runtime gate.",
     },
-    // NotYetImplemented — the ceiling is displayed but no editing handler
-    // validates against it yet.
+    // RuntimeEnforced — the editing handler refuses values above this
+    // ceiling by name and the retention sweep clamps stored overrides to it
+    // (reported per run as `retention_clamped_to_plan_ceiling`).
     FieldClassification {
         field: "max_retention_days",
-        class: FeatureClass::NotYetImplemented,
+        class: FeatureClass::RuntimeEnforced,
         gate: Gate::Capacity(CapacityKey::RetentionDays),
-        rationale: "Advertised retention ceiling without a validated editing surface; must not be treated as enforced.",
+        rationale: "The retention-editing handler refuses above this ceiling by name and the retention sweep clamps stored overrides to it.",
     },
 
     // ── Team ───────────────────────────────────────────────────────

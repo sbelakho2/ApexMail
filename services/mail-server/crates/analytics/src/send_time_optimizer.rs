@@ -169,10 +169,13 @@ impl SendTimeOptimizer {
         utc_offset_minutes: i32,
     ) -> anyhow::Result<RecipientProfile> {
         let rows = sqlx::query_as::<_, (i32, i32, i64)>(
+            // ISODOW is 1=Monday..7=Sunday; the engine's DAY_PRIORS are
+            // 0=Monday..6=Sunday, so subtract 1. (Postgres DOW would be
+            // 0=Sunday — the old expression shifted every day bucket by one.)
             "SELECT EXTRACT(HOUR FROM (timestamp AT TIME ZONE 'UTC') \
                  + make_interval(mins => $3))::int as hour, \
-             EXTRACT(DOW FROM (timestamp AT TIME ZONE 'UTC') \
-                 + make_interval(mins => $3))::int as dow, \
+             (EXTRACT(ISODOW FROM (timestamp AT TIME ZONE 'UTC') \
+                 + make_interval(mins => $3))::int - 1) as dow, \
              COUNT(*) as cnt \
              FROM events \
              WHERE tenant_id = $1 AND recipient = $2 \
@@ -209,17 +212,18 @@ impl SendTimeOptimizer {
             }
         }
 
-        // Get profile age (same tenant scope as the histogram above).
-        let first_event: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
+        // Get profile age (same tenant scope as the histogram above). MIN()
+        // over zero rows is NULL, so the aggregate column decodes as Option.
+        let first_event: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
             "SELECT MIN(timestamp) FROM events WHERE tenant_id = $1 AND recipient = $2",
         )
         .bind(tenant_id)
         .bind(email)
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
 
         let age_days = first_event
-            .map(|(t,)| (Utc::now() - t).num_days() as u32)
+            .map(|t| (Utc::now() - t).num_days() as u32)
             .unwrap_or(0);
 
         Ok(RecipientProfile {

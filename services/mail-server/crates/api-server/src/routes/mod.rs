@@ -9,7 +9,6 @@ pub mod bank_statements;
 pub mod billing;
 pub mod campaign_experiments;
 pub mod campaigns;
-pub mod capability_gate;
 pub mod client_errors;
 pub mod contact;
 pub mod contacts;

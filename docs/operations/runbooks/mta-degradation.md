@@ -61,15 +61,20 @@ helper defined in the [Redis failure runbook](./redis-failure.md)).
      "SELECT status, count(*) FROM email_queue GROUP BY status;"
    ```
 
-2. **Check dead letter queue:**
+2. **Check dead letter queue (`email_dlq`, written by the worker's
+   permanent-failure paths):**
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
-     "SELECT count(*), reason FROM dead_letter_queue
+     "SELECT count(*), error_message FROM email_dlq
       WHERE created_at > now() - interval '1 hour'
-      GROUP BY reason
+      GROUP BY error_message
       ORDER BY count(*) DESC
       LIMIT 10;"
    ```
+   (`email_dlq` is the live dead-letter store — migration 088, written by
+   `worker-processors` `handle_permanent_job_failure`/`handle_error`. The old
+   `dead_letter_queue` table was never written by anything and was dropped by
+   migration 249.)
 
 3. **Check bounce rate by domain:**
    ```bash
@@ -299,9 +304,9 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres ps
   "SELECT count(*) FROM email_queue WHERE status = 'queued';"
 # Should be decreasing
 
-# 2. Verify dead letter queue is not growing
+# 2. Verify the dead letter queue is not growing
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
-  "SELECT count(*) FROM dead_letter_queue
+  "SELECT count(*) FROM email_dlq
    WHERE created_at > now() - interval '30 minutes';"
 
 # 3. Send a test email and verify delivery

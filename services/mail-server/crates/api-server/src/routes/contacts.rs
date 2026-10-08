@@ -24,6 +24,10 @@ pub fn router() -> Router<AppState> {
             "/:id",
             get(get_contact).put(update_contact).delete(delete_contact),
         )
+        // Engagement Trust Score — the endpoint documented in
+        // docs/security/advanced-analytics.md ("Engagement Trust Score"),
+        // served by the analytics crate's `engagement_trust` engine.
+        .route("/:id/trust-score", get(get_contact_trust_score))
         .route("/bulk", post(bulk_import))
         .route("/counts", get(contact_counts))
         .route("/bulk/delete", post(bulk_delete))
@@ -415,6 +419,84 @@ async fn get_contact(
     let id = parse_contact_id(&id)?;
     let row = fetch_contact(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
+}
+
+/// The Engagement Trust Score response documented in
+/// `docs/security/advanced-analytics.md` (`GET /v1/contacts/:id/trust-score`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustScoreResponse {
+    /// The contact id (the documented example uses `subscriberId`).
+    subscriber_id: String,
+    /// 0..=100, rounded for the integer contract in the docs.
+    overall: u8,
+    /// A..F (see `compute_grade`).
+    grade: String,
+    /// low | medium | high | critical.
+    risk_level: String,
+    components: TrustScoreComponents,
+    /// improving | declining | stable | unknown (last 30d vs prior 30d).
+    trend: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustScoreComponents {
+    credibility: u8,
+    reliability: u8,
+    intimacy: u8,
+    /// Self-orientation as a ratio, 0.0 (best) ..= 1.0 (worst) — the
+    /// documented example shape (`"selfOrientation": 0.3`).
+    self_orientation: f64,
+}
+
+/// `GET /v1/contacts/:id/trust-score` — compute the contact's Engagement
+/// Trust Score from the tenant's real engagement stream.
+///
+/// The engine (`analytics::engagement_trust`) is tenant-scoped: the same
+/// address under another tenant contributes no events. A contact that does
+/// not belong to the caller's tenant is a 404 before any score is computed.
+async fn get_contact_trust_score(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<TrustScoreResponse>, ApiError> {
+    require_scopes(&auth, &["contacts:read"])?;
+    let id = parse_contact_id(&id)?;
+    let contact = fetch_contact(&state, &auth.tenant_id, id).await?;
+
+    let service =
+        apexmail_analytics::engagement_trust::EngagementTrustService::new(state.db.clone());
+    let trust = service
+        .calculate_trust(&auth.tenant_id, &contact.email)
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!("trust score computation failed: {error}"))
+        })?;
+    // The trend is an enrichment: a failure to compute it never withholds
+    // the score itself, but it is recorded rather than silently defaulted.
+    let trend = match service.trust_trend(&auth.tenant_id, &contact.email).await {
+        Ok(trend) => trend.to_string(),
+        Err(error) => {
+            tracing::warn!(error = %error, contact_id = %id, "trust trend computation failed");
+            "unknown".to_string()
+        }
+    };
+
+    let rounded = |value: f64| -> u8 { value.round().clamp(0.0, 100.0) as u8 };
+    Ok(Json(TrustScoreResponse {
+        subscriber_id: id.to_string(),
+        overall: rounded(trust.score),
+        grade: trust.grade,
+        risk_level: trust.risk_level,
+        components: TrustScoreComponents {
+            credibility: rounded(trust.credibility),
+            reliability: rounded(trust.reliability),
+            intimacy: rounded(trust.intimacy),
+            self_orientation: (trust.self_orientation / 100.0).clamp(0.0, 1.0),
+        },
+        trend,
+    }))
 }
 
 async fn update_contact(
@@ -3170,5 +3252,133 @@ mod pagination_adversarial_tests {
         let (decoded_ts, decoded_id) = decode_keyset_cursor(&minted).expect("minted cursor valid");
         assert_eq!(decoded_ts, ts);
         assert_eq!(decoded_id, id);
+    }
+}
+
+/// Wave G: the documented `GET /v1/contacts/:id/trust-score` endpoint must be
+/// served by the real `analytics::engagement_trust` engine over the canonical
+/// `events` stream — and must stay tenant-scoped.
+#[cfg(test)]
+mod trust_score_tests {
+    use super::*;
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_contact(pool: &sqlx::PgPool, tenant: &str, email: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at) \
+             VALUES ($1::uuid, $2, $3, 'Trust Seeded', 'active', NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed contact");
+        id
+    }
+
+    /// Distinct delivered+opened messages inside the recent 30-day window
+    /// (a delivered denominator is required for the open rate; each message
+    /// carries its own id so the DISTINCT-message cardinality is real).
+    async fn seed_recent_opens(pool: &sqlx::PgPool, tenant: &str, email: &str, count: i64) {
+        for i in 0..count {
+            let message_id = Uuid::new_v4().to_string();
+            for event_type in ["delivered", "opened"] {
+                sqlx::query(
+                    "INSERT INTO events \
+                     (id, tenant_id, message_id, event_type, recipient, timestamp) \
+                     VALUES ($1, $2, $3, $4, $5, NOW() - INTERVAL '1 day')",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(tenant)
+                .bind(&message_id)
+                .bind(event_type)
+                .bind(email)
+                .execute(pool)
+                .await
+                .expect("seed engagement event");
+            }
+            if i % 2 == 0 {
+                sqlx::query(
+                    "INSERT INTO events \
+                     (id, tenant_id, message_id, event_type, recipient, timestamp) \
+                     VALUES ($1, $2, $3, 'clicked', $4, NOW() - INTERVAL '1 day')",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(tenant)
+                .bind(&message_id)
+                .bind(email)
+                .execute(pool)
+                .await
+                .expect("seed click event");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn trust_score_route_serves_the_engine_and_stays_tenant_scoped() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_trust_score").await else {
+            return;
+        };
+        let (env, tenant) =
+            AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        let (other_env, other_tenant) =
+            AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+
+        let email = format!(
+            "trust-{}@example.test",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let contact = seed_contact(&pool, &tenant, &email).await;
+        let other_contact = seed_contact(&pool, &other_tenant, &email).await;
+
+        // The caller tenant has strong recent engagement; the other tenant's
+        // contact shares the address but has no events of its own.
+        seed_recent_opens(&pool, &tenant, &email, 10).await;
+
+        let (status, body) = env
+            .get(&format!("/v1/contacts/{contact}/trust-score"))
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["subscriberId"], contact.to_string());
+        let overall = body["overall"].as_u64().expect("overall integer");
+        assert!(overall > 0, "real engagement must produce a positive score: {body}");
+        assert!(
+            ["A", "B", "C", "D", "F"].contains(&body["grade"].as_str().unwrap_or("")),
+            "{body}"
+        );
+        assert!(
+            ["low", "medium", "high", "critical"].contains(&body["riskLevel"].as_str().unwrap_or("")),
+            "{body}"
+        );
+        assert!(
+            body["components"]["credibility"].as_u64().unwrap_or(0) > 0,
+            "opens must raise credibility: {body}"
+        );
+        assert!(body["components"]["selfOrientation"].is_f64() || body["components"]["selfOrientation"].is_u64(), "{body}");
+        assert_eq!(body["trend"], "improving", "{body}");
+
+        // Same address, other tenant: no events there, so the score MUST NOT
+        // include the first tenant's opens.
+        let (status, other_body) = other_env
+            .get(&format!("/v1/contacts/{other_contact}/trust-score"))
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{other_body}");
+        assert_eq!(other_body["trend"], "unknown", "{other_body}");
+        assert!(
+            other_body["components"]["credibility"].as_u64().unwrap_or(0) == 0,
+            "another tenant's opens must not leak into this score: {other_body}"
+        );
+        assert!(
+            other_body["overall"].as_u64().unwrap_or(0) < overall,
+            "the leaking score would equal the engaged tenant's: {other_body}"
+        );
+
+        // Unknown contact id → 404 before any engine call.
+        let (status, _) = env
+            .get(&format!("/v1/contacts/{}/trust-score", Uuid::new_v4()))
+            .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
     }
 }

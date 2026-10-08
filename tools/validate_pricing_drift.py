@@ -90,6 +90,8 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "ab_testing": False,
             "time_travel_debugging": False,
             "template_approval_workflow": False,
+            "custom_tracking_domain": False,
+            "custom_retention": False,
             "subaccounts": False,
         },
     ),
@@ -105,6 +107,8 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "ab_testing": False,
             "time_travel_debugging": False,
             "template_approval_workflow": False,
+            "custom_tracking_domain": False,
+            "custom_retention": False,
             "subaccounts": False,
         },
     ),
@@ -114,30 +118,33 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "dedicated_ip": True,
             "send_time_optimization": True,
             "priority_onboarding": True,
+            # Capability wave 2: `custom_tracking_domain` is RuntimeEnforced
+            # (the /v1/tracking-domains lifecycle + verified-host serving) and
+            # sold on Pro and above per docs/pricing.md; `custom_retention`
+            # starts one tier higher.
+            "custom_tracking_domain": True,
+            "custom_retention": False,
             "audit_logs": False,
             "ab_testing": False,
             "time_travel_debugging": False,
             "template_approval_workflow": False,
             "subaccounts": False,
-            # `custom_tracking_domain` was EXPECTED here until 2026-09-13 and
-            # drifted: it is classified NotYetImplemented and is deliberately
-            # not seeded (billing-service/src/plans.rs), so the catalog — and
-            # now this expectation — reports false. Selling it again requires
-            # the runtime gate, not an edit to this table.
         },
     ),
     "growth": PlanExpectation(
         "Growth", 22_900, 229_000, 500_000, 5_000_000, 100, 25, 90, 1, "Email",
         {
             "dedicated_ip": True,
-            # Capability waves 1+3: `audit_logs` (customer /v1/audit),
-            # `ab_testing` (campaign experiment execution + results API) and
-            # `time_travel_debugging` (message timeline replay) are
-            # RuntimeEnforced and sold on Growth and above. `custom_retention`
-            # remains NotYetImplemented until wave 2 lands.
+            # Capability waves 1+2+3: `audit_logs` (customer /v1/audit),
+            # `ab_testing` (campaign experiment execution + results API),
+            # `time_travel_debugging` (message timeline replay),
+            # `custom_tracking_domain` (Pro and above) and `custom_retention`
+            # (Growth and above) are RuntimeEnforced; the seeds carry them.
             "audit_logs": True,
             "ab_testing": True,
             "time_travel_debugging": True,
+            "custom_tracking_domain": True,
+            "custom_retention": True,
             "template_approval_workflow": False,
             "subaccounts": False,
         },
@@ -149,14 +156,17 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "sso_enabled": True,
             "inbound_email": True,
             "sla_guarantee": True,
-            # Capability waves 1+3: audit logs, A/B testing, time-travel
-            # debugging, the maker/checker template approval workflow and
-            # subaccounts are implemented and sold on Business; the runtime
-            # seeds carry the same flags.
+            # Capability waves 1–3: audit logs, A/B testing, time-travel
+            # debugging, the maker/checker template approval workflow,
+            # subaccounts, a custom tracking domain and custom retention are
+            # implemented and sold on Business; the runtime seeds carry the
+            # same flags.
             "audit_logs": True,
             "ab_testing": True,
             "time_travel_debugging": True,
             "template_approval_workflow": True,
+            "custom_tracking_domain": True,
+            "custom_retention": True,
             "subaccounts": True,
         },
     ),
@@ -174,6 +184,8 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "ab_testing": True,
             "time_travel_debugging": True,
             "template_approval_workflow": True,
+            "custom_tracking_domain": True,
+            "custom_retention": True,
             "subaccounts": True,
         },
     ),
@@ -189,6 +201,8 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "ab_testing": False,
             "time_travel_debugging": False,
             "template_approval_workflow": False,
+            "custom_tracking_domain": False,
+            "custom_retention": False,
             "subaccounts": False,
         },
     ),

@@ -176,6 +176,8 @@ mod tests {
             FeatureKey::AbTesting,
             FeatureKey::TimeTravelDebugging,
             FeatureKey::TemplateApprovalWorkflow,
+            FeatureKey::CustomTrackingDomain,
+            FeatureKey::CustomRetention,
             FeatureKey::Subaccounts,
         ];
         for key in gated {
@@ -205,6 +207,8 @@ mod tests {
             "ab_testing": true,
             "time_travel_debugging": true,
             "template_approval_workflow": true,
+            "custom_tracking_domain": true,
+            "custom_retention": true,
             "subaccounts": true
         }));
         for key in [
@@ -221,6 +225,8 @@ mod tests {
             FeatureKey::AbTesting,
             FeatureKey::TimeTravelDebugging,
             FeatureKey::TemplateApprovalWorkflow,
+            FeatureKey::CustomTrackingDomain,
+            FeatureKey::CustomRetention,
             FeatureKey::Subaccounts,
         ] {
             assert!(
@@ -231,22 +237,19 @@ mod tests {
         }
     }
 
-    /// `ContractualOnly`/`NotYetImplemented` fields must never be usable as
-    /// runtime gates: that is a server bug, surfaced as 500.
+    /// `ContractualOnly` fields must never be usable as runtime gates: that
+    /// is a server bug, surfaced as 500. (`NotYetImplemented` fields are
+    /// empty after the capability flips; the class still maps here.)
     #[test]
-    fn non_runtime_fields_are_never_gates() {
+    fn contractual_fields_are_never_gates() {
         let snap = snapshot(serde_json::json!({
             "sla_guarantee": true,
             "hipaa_compliance": true,
-            "custom_retention": true,
-            "custom_tracking_domain": true,
             "white_label": true
         }));
         for key in [
             FeatureKey::SlaGuarantee,
             FeatureKey::HipaaCompliance,
-            FeatureKey::CustomRetention,
-            FeatureKey::CustomTrackingDomain,
             FeatureKey::WhiteLabel,
         ] {
             let error = gate_feature(&snap, key)
@@ -284,11 +287,31 @@ mod tests {
         assert!(gate_capacity(&snap, CapacityKey::SendingDomains, 1_000_000).is_ok());
     }
 
+    /// `custom_retention`/`max_retention_days` are runtime gates now: the
+    /// capacity check passes at the ceiling and refuses above it with 403.
     #[test]
-    fn unimplemented_capacity_maps_to_internal() {
-        let snap = snapshot(serde_json::json!({"max_retention_days": 90}));
+    fn retention_capacity_is_enforced() {
+        let snap =
+            snapshot(serde_json::json!({"custom_retention": true, "max_retention_days": 90}));
+        assert!(gate_capacity(&snap, CapacityKey::RetentionDays, 90).is_ok());
+        let error = gate_capacity(&snap, CapacityKey::RetentionDays, 91)
+            .expect_err("above the ceiling must be refused");
+        match error {
+            ApiError::Forbidden(message) => {
+                assert!(message.contains("max_retention_days"), "{message}");
+                assert!(message.contains("90"), "{message}");
+            }
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    /// A ContractualOnly capacity (`dedicated_ip_count` — extra IPs are
+    /// billed, never refused) must never be usable as a gate: 500.
+    #[test]
+    fn contractual_capacity_maps_to_internal() {
+        let snap = snapshot(serde_json::json!({"dedicated_ip_count": 3}));
         assert!(matches!(
-            gate_capacity(&snap, CapacityKey::RetentionDays, 1),
+            gate_capacity(&snap, CapacityKey::DedicatedIps, 1),
             Err(ApiError::Internal(_))
         ));
     }

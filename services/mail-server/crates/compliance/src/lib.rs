@@ -33,6 +33,7 @@ pub mod security_questionnaires;
 pub mod signing;
 pub mod soc2;
 pub mod statutory_calendar;
+pub mod statutory_routes;
 pub mod suppressions;
 pub mod tax_policy;
 pub mod trust_portal;

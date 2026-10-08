@@ -16,8 +16,8 @@
 //!   `campaigns.ab_config`, and writes an audit row.
 //!
 //! Gated on `FeatureKey::AbTesting` (Growth and above per `docs/pricing.md`)
-//! through [`require_feature_with_fixture`] — see that module for the
-//! transitional pre-classification-flip seam (wave-1 owns `classify.rs`).
+//! through the canonical entitlement gate
+//! ([`crate::entitlements::require_feature`]).
 //! Tenant-isolated: the campaign is always looked up with the caller's
 //! tenant; there is no cross-tenant arm on this surface.
 
@@ -32,7 +32,6 @@ use billing_entitlements::FeatureKey;
 
 use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::{require_scopes, AuthUser};
-use crate::routes::capability_gate::require_feature_with_fixture;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -126,7 +125,7 @@ async fn get_experiment(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<CampaignExperimentResponse>>, ApiError> {
     require_scopes(&auth, &["campaigns:read"])?;
-    require_feature_with_fixture(&state, &auth.tenant_id, FeatureKey::AbTesting).await?;
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::AbTesting).await?;
     let campaign_id = parse_campaign_id(&id)?;
     let campaign = load_experiment_campaign(&state, &auth.tenant_id, campaign_id).await?;
     let response = build_experiment_response(&state, campaign).await?;
@@ -140,7 +139,7 @@ async fn declare_winner(
     Json(body): Json<DeclareWinnerRequest>,
 ) -> Result<Json<ApiResponse<CampaignExperimentResponse>>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    require_feature_with_fixture(&state, &auth.tenant_id, FeatureKey::AbTesting).await?;
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::AbTesting).await?;
     let campaign_id = parse_campaign_id(&id)?;
     let campaign = load_experiment_campaign(&state, &auth.tenant_id, campaign_id).await?;
 
@@ -584,9 +583,8 @@ mod tests {
         })
     }
 
-    /// Fixture-seeded entitlement: a unique plan row carrying the flag the
-    /// classification flip will make official (wave-1 applies it), with the
-    /// tenant on that plan.
+    /// Fixture-seeded entitlement: a unique plan row carrying the flag, with
+    /// the tenant on that plan.
     async fn seed_tenant_with_plan(
         pool: &sqlx::PgPool,
         tenant: &str,

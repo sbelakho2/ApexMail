@@ -73,7 +73,7 @@ pub struct PlanFeatures {
     pub data_export: bool,
 
     // Customization
-    /// NotYetImplemented — no tracking-domain setup surface exists; not sold.
+    /// RuntimeEnforced — the tracking-domain lifecycle (create/verify/delete, DNS records) requires this entitlement; the tracking service serves only verified custom hosts.
     pub custom_tracking_domain: bool,
     /// RuntimeEnforced — template create/update requires this entitlement.
     pub custom_templates: bool,
@@ -85,9 +85,9 @@ pub struct PlanFeatures {
     pub powered_by_footer: bool,
 
     // Retention
-    /// NotYetImplemented — no retention-editing handler exists; not sold.
+    /// RuntimeEnforced — retention editing (`PUT /v1/retention`) requires this entitlement; the sweep applies the stored override.
     pub custom_retention: bool,
-    /// NotYetImplemented capacity — advertised ceiling without a validated editing surface.
+    /// RuntimeEnforced capacity — the editing handler refuses above this ceiling by name and the retention sweep clamps stored overrides to it.
     pub max_retention_days: i32,
 
     // Team

@@ -539,6 +539,34 @@ impl PlacementEngine {
         Ok(())
     }
 
+    // ── Placement analytics (wave G: the `analytics` field's reader) ──
+
+    /// Tenant-wide measured-placement summary (measured seed results, SMTP
+    /// delivery counts and provider recommendations) from the analytics
+    /// service the engine was constructed with.
+    ///
+    /// This is the reader of [`Self::analytics`]: the placement report
+    /// (`GET /v1/inbox-placement/tests/:id`) attaches the block when a client
+    /// is injected and omits it (None) otherwise — an absent client must never
+    /// be rendered as a fabricated healthy summary. The queries are
+    /// tenant-scoped inside the service.
+    pub async fn placement_summary(
+        &self,
+        tenant_id: &str,
+        days: i64,
+    ) -> Result<Option<analytics::types::PlacementSummary>, sqlx::Error> {
+        let Some(client) = self.analytics.as_ref() else {
+            return Ok(None);
+        };
+        client
+            .get_placement_summary(tenant_id, days)
+            .await
+            .map(Some)
+            .map_err(|error| {
+                sqlx::Error::Protocol(format!("placement analytics summary failed: {error}"))
+            })
+    }
+
     // ── Get Test Results ─────────────────────────────────────────
 
     /// Load placement results for a test, group by provider, and compute

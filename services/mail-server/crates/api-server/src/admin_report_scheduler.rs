@@ -3,8 +3,11 @@
 //! This module is compiled by nothing: `lib.rs` has no
 //! `mod admin_report_scheduler;`, and the route module it was written to
 //! serve (`routes/admin/reports.rs`) has been deleted (report export is
-//! served live by `routes/admin/analytics_export`). It must stay dead until
-//! BOTH known defects are fixed:
+//! served live by `routes/admin/analytics_export`). The `report_history`
+//! table it would write was DROPPED by migration 249 (2026-10-07, dogfood
+//! wave G) as a zero-writer/zero-reader schema orphan, so reviving this
+//! module now also requires re-creating that table (with an upsert key) in
+//! the same change. It must stay dead until BOTH known defects are fixed:
 //!
 //! 1. **Duplicate generation** — `should_generate` gates on
 //!    `generated_at > now - 1h` per (type, period_start), so after one hour

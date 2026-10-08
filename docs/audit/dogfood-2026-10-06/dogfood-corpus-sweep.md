@@ -131,7 +131,7 @@ path with the resulting row and draft read back from PostgreSQL.
 | Passes 1-2 images | api-server `sha256:9fc3894c…`, ai-service `sha256:6fec8fca…`, worker `sha256:8c5c40a0…` |
 | Final images (pass 3) | api-server `sha256:8977957c…`, ai-service `sha256:f987762b…`, worker `sha256:54e240a5…`, mta `sha256:2b698d9a…` (`runtime-final.txt`) |
 | AI runtime | `AI_MODEL_ENABLED=true`, `AI_MODEL_ENDPOINT=http://mock-llm:8099/v1`, `AI_EMAIL_AGENT_ENABLED=true` |
-| mock revisions | pass 1 `881f50a9` (21:32Z); pass 2 `465701f5`/`feaa0c08`; pass 3 `c9cfe049` (22:57:24Z); pass 4 `3d8e5df3` (23:27:08Z); FINAL pass 5 `32aff52e` (`runtime-v4.txt`), md5 stable across all three v4 sections |
+| mock revisions | pass 1 `881f50a9` (21:32Z); pass 2 `465701f5`/`feaa0c08`; pass 3 `c9cfe049` (22:57:24Z); pass 4 `3d8e5df3` (23:27:08Z); pass 5 `32aff52e`; pass 6 `42cbc4d4` (00:39:19Z, `runtime-v5.txt`), md5 stable across all three v5 sections |
 | `/health/ready` | db connected, redis connected, schema complete |
 
 ### 5.2 Chat — 174 cases
@@ -192,6 +192,19 @@ were the two-owner interaction described below; saved as
   (`100K` = `100,000`), and an honest not-covered answer counts as DEGRADED
   where the case allows an escalation.
 
+**Pass 6 (mock v5 `42cbc4d4`, same final images): 115 PASS, 15 DEGRADED,
+44 FAIL.** Evidence: `evidence-corpus-sweep/chat-live-evidence.json`.
+
+- v5 added the region/allowance/volumes/invoicing families and title-aware
+  passage quoting, and no prompt material can be emitted. The remaining 44
+  failures are all MOCK-DEPENDENT family-precedence misses: 11 return the
+  PAYG paragraph, 6 the overage line, 6 a plan sentence, 1 the price list,
+  11 return another family's line (the security sentence for MFA and
+  rate-limit questions, the encryption line, the deliverability line), and 9
+  take the honest not-covered route. No verifier, corpus or route defect.
+- Runner refinements from the v4 pass carry over (k/m numeric matching,
+  honest not-covered as DEGRADED where allowed).
+
 | Pass | PASS | DEGRADED | FAIL (all causes) |
 |---|---|---|---|
 | 1 (old verifier) | 30 | 37 | 107 (53 verifier-class + 54 mock) |
@@ -199,6 +212,7 @@ were the two-owner interaction described below; saved as
 | 3 (corrected mock `c9cfe049`) | 101 | 5 | 68 (all mock-dependent) |
 | 4 (mock v3 `3d8e5df3`) | 99 | 0 | 75 (prompt-echo fallback) |
 | 5 (mock v4 `32aff52e`) | 111 | 10 | 53 (all mock-dependent family selection) |
+| 6 (mock v5 `42cbc4d4`) | 115 | 15 | 44 (all mock-dependent family selection) |
 
 Per-category pass-1 split (`PASS/DEGRADED/FAIL`): chat-plans 3/0/14,
 chat-use-cases 0/7/4, chat-refusals 4/0/9, chat-mutations 1/0/5, chat-gdpr
@@ -242,14 +256,12 @@ cases stay marked MOCK-DEPENDENT until the final re-run.
 ### 5.3 Reply — 44 cases
 
 **Pass 1 (pre-fix, old mock revision): 26 PASS, 9 DEGRADED, 9 FAIL.**
-**Mock v4 pass (`32aff52e`): 33 PASS, 11 DEGRADED, 0 FAIL.**
-Evidence: `reply-live-evidence.json`. The reply lane is at its floor: every
-classification case now lands on the canonical expectation, including the
-German price objection and the referral wording that v4 fixed. The 11
-DEGRADED are deterministic-layer cases whose production path is worker layer
-1; the runner asserts the documented layer-1 rule and records the route's
-answer alongside (full-pipeline evidence still needs the worker reply handler
-enabled).
+**Mock v5 pass (`42cbc4d4`): 33 PASS, 11 DEGRADED, 0 FAIL.**
+Evidence: `reply-live-evidence.json`. The reply lane holds at its floor: every
+classification case lands on the canonical expectation. The 11 DEGRADED are
+deterministic-layer cases whose production path is worker layer 1; the runner
+asserts the documented layer-1 rule and records the route's answer alongside
+(full-pipeline evidence still needs the worker reply handler enabled).
 
 ### 5.4 Mailbot — live inbound lane
 
@@ -278,14 +290,15 @@ and auto-submitted cases; `[NO DRAFT — security policy: message content
 matched prompt-injection patterns…]` for the hostile inbound case; and the
 per-sender cap decline for the 4th message from one sender.
 
-Mock v4 pass (`mailbot-v4`, 33 messages): 27 PASS, 3 DEGRADED, 0 FAIL,
-1 NOT-VERIFIED — the mailbot lane is at its floor. The 3 DEGRADED are
+Mock v5 pass (`mailbot-v5`, 33 messages): 27 PASS, 3 DEGRADED, 0 FAIL,
+1 NOT-VERIFIED — the mailbot lane holds at its floor. The 3 DEGRADED are
 suppression/reschedule cases that need the worker reply handler for
 pipeline-side evidence; the NOT-VERIFIED row is the admin mutation case owned
-by the mailbot agent's review suite. The per-sender-cap case PASSES with the
-race-tolerant invariant (3 drafts plus a named cap decline); the
-quote-stripping check keeps the customer's own quoted text out of the bot
-claims.
+by the mailbot agent's review suite. The GDPR/DSR inbound case now PASSES
+(draft pending approval, constraints hold), consistent with the mailbot
+agent's F-5 (inbound DSR intake) fix; the lane's unique Message-IDs and
+subjects keep F-3 (dedup guard) and F-4 (MTA mirror header) from affecting
+these cases. F-3..F-6 are recorded as FIXED upstream.
 
 Contract note (recorded per the coordinator, and verified in the code): the
 email agent's prompt carries NO language mandate. The default operator
@@ -309,8 +322,8 @@ question.
 | ID | Severity | Finding | Owner | Status |
 |---|---|---|---|---|
 | CS-1 | P2 | Verifier `repetition` rule rejected legitimate parallel-list answers: 53 chat cases escalated. **VERIFIER-CLASS** | verifier lane (chatbot agent) | FIXED — pass 2 has zero repetition rejections; 92 PASS |
-| CS-2 | P2 | Mock answer-selection gaps (family selection). v4 removed all prompt-echo shapes; 53 chat cases remain: 38 wrong-family lines (PAYG/overage/plan/price lists) and 15 honest not-covered, of which 8 are facts-block-answerable and 7 are docs-only topics. **MOCK-DEPENDENT** | mock lane | 53 chat cases on v4 `32aff52e` |
-| CS-3 | P3 | Mock does not compose from retrieved passages; docs-only topics take the honest not-covered route (7 chat cases). **MOCK-DEPENDENT** | mock lane | open |
+| CS-2 | P2 | Mock answer-selection gaps (family precedence). v5 added region/allowance/volumes/invoicing families; 44 chat cases remain: 35 wrong-family lines (11 PAYG, 6 overage, 6 plan, 1 price list, 11 other-family) and 9 honest not-covered. **MOCK-DEPENDENT** | mock lane | 44 chat cases on v5 `42cbc4d4` |
+| CS-3 | P3 | Mock does not compose from retrieved passages; docs-only topics take the honest not-covered route (9 chat cases). **MOCK-DEPENDENT** | mock lane | open |
 | CS-4 | P3 | Mock classifier gaps: 9 misses in pass 1 → 0 in the v4 pass. | mock lane | CLOSED |
 | CS-5 | P3 | Worker reply handler not enabled: deterministic-layer cases are route-side only (10 DEGRADED) | mailbot lane | NOTED (evidence captured) |
 | CS-6 | P4 | Second provisioning attempt hit the login limiter (`429`); honest, expected, session re-used | - | INFORMATIONAL |
@@ -331,14 +344,14 @@ unique per run and named `eval-sweep-*` / `eval-*` for identification. The
 completed corpus gate needs none of them; the mailbot lane's CS-7 repro uses
 the newest mailbox.
 
-Mock v4 PASS NUMBERS (final images, mock `32aff52e`, md5 stable across all
-three sections): chat 111 PASS / 10 DEGRADED / 53 FAIL, reply 33 PASS /
+Mock v5 PASS NUMBERS (final images, mock `42cbc4d4`, md5 stable across all
+three sections): chat 115 PASS / 15 DEGRADED / 44 FAIL, reply 33 PASS /
 11 DEGRADED / 0 FAIL, mailbot 27 PASS / 3 DEGRADED / 0 FAIL / 1 NOT-VERIFIED.
-Reply and mailbot are at their floor (no failures; remaining DEGRADED need
-the worker reply handler). Chat's 53 failures are ALL MOCK-DEPENDENT
-family-selection misses with no verifier, corpus or route defect: 38
-wrong-family lines and 15 honest not-covered (8 facts-block-answerable, 7
-docs-only). CS-4 is CLOSED; CS-7 stays OPEN-ASSIGNED to the mailbot agent.
+Reply and mailbot hold at their floor; the mailbot DSR case passes with the
+F-5 intake fix. Chat's 44 failures are ALL MOCK-DEPENDENT family-precedence
+misses (no verifier, corpus or route defect): 11 PAYG, 6 overage, 6 plan,
+1 price list, 11 other-family lines, 9 honest not-covered. CS-4 is CLOSED;
+CS-7 stays OPEN-ASSIGNED to the mailbot agent; F-3..F-6 are FIXED upstream.
 No internal material ever reached a caller, no fabricated answer passed
 verification, and every unverifiable answer escalated honestly. The corpus
 lane is complete as a coverage proof: every enumerated row has a live-verified

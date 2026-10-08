@@ -351,18 +351,15 @@ mod tests {
     }
 
     #[test]
-    fn contractual_and_unimplemented_fields_are_never_runtime_gates() {
+    fn contractual_fields_are_never_runtime_gates() {
         let snap = snapshot(json!({
             "sla_guarantee": true,
             "hipaa_compliance": true,
-            "custom_retention": true,
-            "custom_tracking_domain": true
+            "white_label": true
         }));
         for key in [
             FeatureKey::SlaGuarantee,
             FeatureKey::HipaaCompliance,
-            FeatureKey::CustomRetention,
-            FeatureKey::CustomTrackingDomain,
             FeatureKey::WhiteLabel,
         ] {
             let error = snap
@@ -409,17 +406,28 @@ mod tests {
             .is_ok());
     }
 
+    /// Capability wave 2: `custom_retention`/`max_retention_days` are REAL
+    /// gates now — the Growth ceiling (90) passes at 90 and refuses 91 by
+    /// name, and Enterprise's 730 behaves the same.
     #[test]
-    fn unimplemented_capacity_is_refused() {
+    fn retention_capacity_is_runtime_enforced() {
         let snap = snapshot(json!({"max_retention_days": 730}));
-        assert!(
-            matches!(
-                snap.require_capacity(CapacityKey::RetentionDays, 1),
-                Err(EntitlementError::NotRuntimeEnforced { .. })
-            ),
-            "max_retention_days is not runtime-enforced until the retention-editing surface lands"
+        assert!(snap
+            .require_capacity(CapacityKey::RetentionDays, 730)
+            .is_ok());
+        let error = snap
+            .require_capacity(CapacityKey::RetentionDays, 731)
+            .expect_err("above the plan ceiling must be refused");
+        assert_eq!(
+            error,
+            EntitlementError::CapacityExceeded {
+                capacity: "max_retention_days",
+                limit: 730,
+                requested: 731,
+                plan: "growth".into(),
+            }
         );
-        // Presentation still exposes the raw advertised number.
+        // Presentation exposes the same advertised number.
         assert_eq!(snap.capacity(CapacityKey::RetentionDays), 730);
     }
 
@@ -479,11 +487,17 @@ mod tests {
 
         // Unknown names never apply.
         assert!(!snap.apply_override("ai_chat", &json!(true)));
-        // Non-runtime-enforced fields never apply, regardless of value.
-        assert!(!snap.apply_override("custom_retention", &json!(true)));
+        // Contractual-only fields never apply, regardless of value.
         assert!(!snap.apply_override("sla_guarantee", &json!(true)));
-        // A capability that has since become RuntimeEnforced (time-travel
-        // debugging) is override-able like any other real gate.
+        // Capabilities flipped to RuntimeEnforced (custom retention, custom
+        // tracking domain, time-travel debugging) are override-able like any
+        // other real gate.
+        assert!(snap.apply_override("custom_retention", &json!(true)));
+        assert!(snap.require_feature(FeatureKey::CustomRetention).is_ok());
+        assert!(snap.apply_override("custom_tracking_domain", &json!(true)));
+        assert!(snap
+            .require_feature(FeatureKey::CustomTrackingDomain)
+            .is_ok());
         assert!(snap.apply_override("time_travel_debugging", &json!(true)));
         assert!(snap.require_feature(FeatureKey::TimeTravelDebugging).is_ok());
     }
@@ -525,13 +539,32 @@ mod tests {
         assert!(!ttd.granted, "this fixture's plan does not grant ttd");
         assert_eq!(ttd.class, "RuntimeEnforced");
 
-        let unimplemented = view
+        let retention = view
             .features
             .iter()
             .find(|f| f.key == "custom_retention")
             .expect("retention row");
-        assert!(!unimplemented.granted);
-        assert_eq!(unimplemented.class, "NotYetImplemented");
+        assert!(
+            !retention.granted,
+            "this fixture's plan does not grant custom retention"
+        );
+        assert_eq!(retention.class, "RuntimeEnforced");
+
+        let contractual = view
+            .features
+            .iter()
+            .find(|f| f.key == "sla_guarantee")
+            .expect("sla row");
+        assert!(!contractual.granted);
+        assert_eq!(contractual.class, "ContractualOnly");
+
+        let retention_capacity = view
+            .capacities
+            .iter()
+            .find(|c| c.key == "max_retention_days")
+            .expect("retention capacity row");
+        assert_eq!(retention_capacity.limit, 7);
+        assert_eq!(retention_capacity.class, "RuntimeEnforced");
 
         let seats = view
             .capacities

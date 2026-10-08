@@ -1107,6 +1107,170 @@ pub fn analyse_deliverability_at(
 }
 
 // ---------------------------------------------------------------------------
+// Raw observation collection (wave G) — the production caller path
+// ---------------------------------------------------------------------------
+
+/// The raw observation set [`analyse_email_stack`] consumes, collected for
+/// one domain.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EmailStackObservations {
+    pub spf_records: Vec<String>,
+    pub dkim_selectors: Vec<String>,
+    pub dkim_cnames: Vec<String>,
+    pub dmarc_record: Option<String>,
+    pub mx_hosts: Vec<String>,
+    pub tracking_hosts: Vec<String>,
+    pub account_domain: String,
+}
+
+/// Source of raw email-stack observations. Production uses
+/// [`DnsEmailStackObserver`]; tests inject a scripted observer so the
+/// inference rules are exercised without network access.
+#[async_trait::async_trait]
+pub trait EmailStackObserver: Send + Sync {
+    async fn observe(&self, domain: &str) -> Result<EmailStackObservations, String>;
+}
+
+/// Common DKIM selectors probed during observation. Selectors cannot be
+/// enumerated (see the module docs), so the observer records only selectors
+/// that actually resolve; absence of all of them stays
+/// `deficiency_no_dkim_selector_observed`, never a claim.
+pub const DKIM_SELECTORS_PROBED: &[&str] = &[
+    "default", "google", "selector1", "selector2", "k1", "s1", "mail", "dkim",
+];
+
+/// Live DNS observer over the shared cached resolver
+/// (`apexmail-dns-resolver`): real SPF/DMARC/MX/DKIM lookups with caching.
+///
+/// A definitive "no records" is an observed ABSENCE (empty vector / None);
+/// a transient resolver failure fails the whole observation so the caller
+/// cannot persist a wrong deficiency for a domain that merely had a blip.
+pub struct DnsEmailStackObserver {
+    resolver: apexmail_dns_resolver::CachedDnsResolver,
+}
+
+impl DnsEmailStackObserver {
+    pub fn new() -> Result<Self, String> {
+        apexmail_dns_resolver::CachedDnsResolver::default_resolver()
+            .map(|resolver| Self { resolver })
+            .map_err(|error| format!("DNS resolver unavailable: {error}"))
+    }
+}
+
+#[async_trait::async_trait]
+impl EmailStackObserver for DnsEmailStackObserver {
+    async fn observe(&self, domain: &str) -> Result<EmailStackObservations, String> {
+        use apexmail_dns_resolver::lookup::DnsError;
+
+        let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        if domain.is_empty() {
+            return Err("cannot observe an empty domain".into());
+        }
+
+        let spf_records = match self.resolver.spf(&domain).await {
+            Ok(Some(record)) => vec![record.raw],
+            Ok(None) => Vec::new(),
+            Err(DnsError::NoRecords(_)) => Vec::new(),
+            Err(error) => return Err(format!("SPF lookup failed: {error}")),
+        };
+
+        let mx_hosts = match self.resolver.mx(&domain).await {
+            Ok(records) => records.into_iter().map(|record| record.exchange).collect(),
+            Err(DnsError::NoRecords(_)) => Vec::new(),
+            Err(error) => return Err(format!("MX lookup failed: {error}")),
+        };
+
+        let dmarc_record = match self.resolver.dmarc(&domain).await {
+            Ok(Some(record)) => Some(record.raw),
+            Ok(None) | Err(DnsError::NoRecords(_)) => None,
+            Err(error) => return Err(format!("DMARC lookup failed: {error}")),
+        };
+
+        let mut dkim_selectors = Vec::new();
+        for selector in DKIM_SELECTORS_PROBED {
+            match self.resolver.dkim(selector, &domain).await {
+                Ok(Some(_)) => dkim_selectors.push((*selector).to_string()),
+                Ok(None) | Err(DnsError::NoRecords(_)) => {}
+                Err(error) => return Err(format!("DKIM lookup failed: {error}")),
+            }
+        }
+
+        Ok(EmailStackObservations {
+            spf_records,
+            dkim_selectors,
+            // The shared resolver returns the record, not the CNAME chain;
+            // the CNAME-specific analyser simply contributes nothing here.
+            dkim_cnames: Vec::new(),
+            dmarc_record,
+            mx_hosts,
+            tracking_hosts: Vec::new(),
+            account_domain: domain,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Authentication quality — the scalar the scorer consumes
+// ---------------------------------------------------------------------------
+
+/// Reconstruct the 0.0..=1.0 authentication quality from the EVIDENCE rows
+/// [`analyse_email_stack`] emits (the exact weights of
+/// [`deliverability_quality`], applied to the observation propositions).
+///
+/// This is the reader that feeds `EmailStackFeatures.authentication_quality`
+/// in the sequence worker: the composite analyser produces the propositions,
+/// they are persisted as `sales_evidence` rows, and the scorer re-derives the
+/// scalar from them (tenant-scoped). `None` means no authentication
+/// observation exists at all — the caller keeps its fail-closed zero rather
+/// than treating "unobserved" as "authenticated".
+///
+/// Only positive observation propositions count; deficiency propositions are
+/// evidence of absence and add nothing.
+pub fn authentication_quality_from_propositions(propositions: &[String]) -> Option<f32> {
+    let has = |proposition: &str| propositions.iter().any(|value| value == proposition);
+
+    let mut quality = 0.0f32;
+    let mut observed = false;
+
+    if has("spf_record_published") {
+        quality += 0.30;
+        observed = true;
+    }
+    if has("dkim_selector_present") {
+        quality += 0.20;
+        observed = true;
+    }
+    if has("dmarc_policy_reject") || has("dmarc_policy_quarantine") {
+        quality += 0.35;
+        observed = true;
+    } else if has("dmarc_policy_monitoring_only") {
+        quality += 0.10;
+        observed = true;
+    } else if has("dmarc_record_published") || has("dmarc_record_missing") {
+        // A published-but-non-enforcing or missing record is an observed
+        // state (quality 0 contribution), not an absence of observation.
+        observed = true;
+    }
+    if has("mx_hosts_observed") {
+        quality += 0.15;
+        observed = true;
+    }
+
+    observed.then(|| quality.clamp(0.0, 1.0))
+}
+
+/// [`authentication_quality_from_propositions`] over already-built evidence
+/// rows (any non-DNS source is ignored).
+pub fn authentication_quality_from_evidence(rows: &[Evidence]) -> Option<f32> {
+    let propositions: Vec<String> = rows
+        .iter()
+        .filter(|row| row.source_kind == EvidenceSourceKind::DnsObservation)
+        .map(|row| row.proposition.clone())
+        .collect();
+    authentication_quality_from_propositions(&propositions)
+}
+
+// ---------------------------------------------------------------------------
 // Composite
 // ---------------------------------------------------------------------------
 
@@ -1592,6 +1756,59 @@ mod tests {
         // p=none is partial, not enforcing.
         let rows = analyse_deliverability_at(&spf, &dkim, Some("v=DMARC1; p=none"), &mx, observed);
         assert!(find(&rows, "deficiency_dmarc_not_enforcing").is_some());
+    }
+
+    // ---- Authentication quality from persisted propositions (wave G) -------
+
+    /// The scorer's reader: the composite entry point's propositions map back
+    /// to the same scalar `deliverability_quality` computes from raw records.
+    #[test]
+    fn authentication_quality_matches_the_composite_propositions() {
+        let observed = at();
+        let spf = vec!["v=spf1 include:_spf.google.com -all".to_string()];
+        let dkim = vec!["google".to_string()];
+        let dmarc = Some("v=DMARC1; p=reject; rua=mailto:dmarc@example.com");
+        let mx = vec!["aspmx.l.google.com".to_string()];
+
+        let rows = analyse_email_stack_at(&spf, &dkim, &[], dmarc, &mx, &[], "example.com", observed);
+        let propositions: Vec<String> =
+            rows.iter().map(|row| row.proposition.clone()).collect();
+        let quality =
+            authentication_quality_from_propositions(&propositions).expect("observed stack");
+        assert!(
+            (quality - deliverability_quality(&spf, &dkim, dmarc, &mx)).abs() < 1e-6,
+            "reader ({quality}) must agree with the raw-record scorer"
+        );
+        // The same rows through the evidence-shaped wrapper.
+        let from_rows = authentication_quality_from_evidence(&rows).expect("evidence rows");
+        assert!((from_rows - quality).abs() < 1e-6);
+
+        // A monitoring-only DMARC policy is partial enforcement.
+        let partial = vec![
+            "spf_record_published".to_string(),
+            "dkim_selector_present".to_string(),
+            "dmarc_policy_monitoring_only".to_string(),
+            "mx_hosts_observed".to_string(),
+        ];
+        assert!(
+            (authentication_quality_from_propositions(&partial).unwrap() - 0.75).abs() < 1e-6
+        );
+
+        // No authentication observation at all → None, never a zero that
+        // could be confused with "observed as unauthenticated".
+        assert_eq!(
+            authentication_quality_from_propositions(&["company_may_use_sendgrid".to_string()]),
+            None
+        );
+        assert_eq!(authentication_quality_from_propositions(&[]), None);
+
+        // Deficiency-only rows are an observed unauthenticated stack → 0.0.
+        let deficient = vec![
+            "deficiency_missing_spf".to_string(),
+            "deficiency_missing_dmarc".to_string(),
+            "dmarc_record_missing".to_string(),
+        ];
+        assert_eq!(authentication_quality_from_propositions(&deficient), Some(0.0));
     }
 
     // ---- Composite + change detection -------------------------------------

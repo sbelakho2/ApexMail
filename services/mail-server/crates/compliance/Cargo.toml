@@ -58,6 +58,9 @@ x509-parser = { version = "0.16", features = ["verify"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# Route-level tests drive the REAL router through tower::ServiceExt::oneshot
+# (wave G) so a route that exists in source but is never mounted fails here.
+tower.workspace = true
 # Canonical test fixtures (audits F76/F77): provision throwaway databases
 # carrying the REAL production migration chain through the production
 # migrator's test_support, instead of hand-written schema subsets.

@@ -6652,8 +6652,8 @@ async fn web_message_timeline(
         }
     }
 
-    // The entitlement gate (same transitional fixture seam as the API).
-    if let Err(error) = crate::routes::capability_gate::require_feature_with_fixture(
+    // The entitlement gate (the same canonical gate the JSON API uses).
+    if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
         billing_entitlements::FeatureKey::TimeTravelDebugging,

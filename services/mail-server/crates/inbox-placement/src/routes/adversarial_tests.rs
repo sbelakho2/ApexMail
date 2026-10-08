@@ -361,3 +361,114 @@ async fn providers_handler_lists_and_degrades_honestly() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body.0["error"], "failed to list providers");
 }
+
+// ── Wave G: the engine's analytics reader reaches the report surface ────────
+
+fn state_with_analytics(db: PgPool) -> Arc<PlacementState> {
+    let client = Arc::new(analytics::inbox_placement::InboxPlacementService::new(
+        db.clone(),
+    ));
+    Arc::new(PlacementState {
+        engine: Arc::new(PlacementEngine::with_analytics(
+            PlacementConfig::default(),
+            db.clone(),
+            Some(client),
+        )),
+        db,
+    })
+}
+
+async fn seed_result(db: &PgPool, test_id: Uuid, account: Uuid, inbox_type: &str) {
+    sqlx::query(
+        "INSERT INTO placement_results \
+         (test_id, seed_account_id, inbox_type, delivery_time_ms, checked_at) \
+         VALUES ($1, $2, $3, 900, NOW())",
+    )
+    .bind(test_id)
+    .bind(account)
+    .bind(inbox_type)
+    .execute(db)
+    .await
+    .expect("insert placement result");
+}
+
+#[tokio::test]
+async fn report_attaches_the_tenant_scoped_analytics_summary() {
+    let Some(db) = canonical_pool("ipx_routes_analytics_reader").await else {
+        return;
+    };
+    let tenant = tenant_key("ar");
+    let other = tenant_key("ao");
+    seed_tenant(&db, &tenant).await;
+    seed_tenant(&db, &other).await;
+
+    let test_id = Uuid::new_v4();
+    let other_test = Uuid::new_v4();
+    for (id, tenant_id) in [(&test_id, &tenant), (&other_test, &other)] {
+        sqlx::query(
+            "INSERT INTO placement_tests \
+             (id, tenant_id, name, status, from_email, subject, total_accounts, \
+              completed_accounts, seed_accounts_used, created_at) \
+             VALUES ($1, $2, NULL, 'completed', 's@send.example', 's', 0, 0, '{}', NOW())",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .execute(&db)
+        .await
+        .expect("insert test");
+    }
+    let account: (Uuid,) = sqlx::query_as(
+        "INSERT INTO seed_accounts (provider_id, email, imap_password_encrypted, is_active) \
+         SELECT p.id, $1, 'pw', true FROM seed_providers p WHERE p.name = 'gmail' RETURNING id",
+    )
+    .bind(format!("{tenant}@seed.example"))
+    .fetch_one(&db)
+    .await
+    .expect("seed account");
+    let other_account: (Uuid,) = sqlx::query_as(
+        "INSERT INTO seed_accounts (provider_id, email, imap_password_encrypted, is_active) \
+         SELECT p.id, $1, 'pw', true FROM seed_providers p WHERE p.name = 'gmail' RETURNING id",
+    )
+    .bind(format!("{other}@seed.example"))
+    .fetch_one(&db)
+    .await
+    .expect("seed other account");
+
+    // The caller's test: two inbox, one spam. The other tenant: five inboxes
+    // that must never appear in this summary.
+    seed_result(&db, test_id, account.0, "inbox").await;
+    seed_result(&db, test_id, account.0, "inbox").await;
+    seed_result(&db, test_id, account.0, "spam").await;
+    for _ in 0..5 {
+        seed_result(&db, other_test, other_account.0, "inbox").await;
+    }
+
+    let st = state_with_analytics(db.clone());
+    let (status, body) = get_placement_test(st.clone(), tenant.clone(), test_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let analytics = &body.0["analytics"];
+    assert!(analytics.is_object(), "analytics summary attached: {}", body.0);
+    assert_eq!(analytics["measured"]["inbox"], 2, "{}", body.0);
+    assert_eq!(analytics["measured"]["spam"], 1, "{}", body.0);
+    assert_eq!(
+        analytics["measured"]["measured_total"], 3,
+        "another tenant's measurements must not leak: {}",
+        body.0
+    );
+    let rate = analytics["overall_inbox_rate"].as_f64().expect("rate");
+    assert!((rate - 2.0 / 3.0).abs() < 1e-9, "{rate}");
+    assert!(
+        analytics["recommendations"]
+            .as_array()
+            .is_some_and(|recs| !recs.is_empty()),
+        "recommendations must be present: {}",
+        body.0
+    );
+
+    // Without a client the key exists but is null — never a fabricated
+    // all-zero "healthy" block.
+    let plain = state(db.clone());
+    let (status, body) = get_placement_test(plain, tenant.clone(), test_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.0["analytics"].is_null(), "{}", body.0);
+}

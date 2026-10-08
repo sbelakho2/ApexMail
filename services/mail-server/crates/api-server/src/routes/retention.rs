@@ -1,9 +1,9 @@
 //! Custom retention editing (+ `max_retention_days` enforcement).
 //!
-//! `custom_retention` was classified `NotYetImplemented` because no
-//! retention-editing handler existed: the plan's `max_retention_days` was a
-//! displayed value only, and `tenants.retention_days` (migration 121) had no
-//! customer-facing write surface. This module is that surface:
+//! `custom_retention` is RuntimeEnforced and this module is the customer
+//! surface behind it: the plan's `max_retention_days` is the enforced
+//! ceiling and `tenants.retention_days` (migration 121) is the per-tenant
+//! override.
 //!
 //! * `GET /v1/retention` — the tenant's current setting, the plan ceiling and
 //!   whether the custom-retention capability is granted (`retention:read`).
@@ -11,7 +11,8 @@
 //!   the `custom_retention` entitlement (Growth and above per
 //!   docs/pricing.md) and `retention:write`; the value must be at least the
 //!   1-day legal minimum and at most the plan's `max_retention_days` — both
-//!   refusals name the bound (`retention:write`).
+//!   refusals name the bound, and the capacity gate names the plan/limit
+//!   (`retention:write`).
 //! * `DELETE /v1/retention` — clear the override (plan-tier defaults apply);
 //!   cleanup is deliberately not entitlement-gated.
 //!
@@ -131,11 +132,9 @@ async fn update_retention(
     Json(body): Json<UpdateRetentionRequest>,
 ) -> Result<Json<RetentionSettingsResponse>, ApiError> {
     require_scopes(&auth, &["retention:write"])?;
-    // The capability gate: Growth and above per docs/pricing.md. The fixture
-    // seam keeps the refusal honest (403 naming the plan/field) while the
-    // classify flip is in flight; after the flip the canonical gate is the
-    // only authority.
-    let snapshot = crate::routes::capability_gate::require_feature_with_fixture(
+    // The capability gate: Growth and above per docs/pricing.md, through the
+    // canonical entitlement gate.
+    let snapshot = crate::entitlements::require_feature(
         &state,
         &auth.tenant_id,
         FeatureKey::CustomRetention,
@@ -145,18 +144,11 @@ async fn update_retention(
     // Named 400/403 bounds check (legal minimum + plan ceiling).
     validate_retention_update(body.retention_days, ceiling)?;
     // Authoritative capacity gate (override-aware; names the plan + limit).
-    // While `max_retention_days` is still classified NotYetImplemented the
-    // canonical capacity gate would 500 as a misconfiguration; the bounds
-    // check above already enforced the SAME ceiling with the SAME named
-    // reason, so the pre-flip path stays honest. REMOVE the class check once
-    // the classify flip lands.
-    if CapacityKey::RetentionDays.class() == billing_entitlements::FeatureClass::RuntimeEnforced {
-        crate::entitlements::gate_capacity(
-            &snapshot,
-            CapacityKey::RetentionDays,
-            body.retention_days,
-        )?;
-    }
+    crate::entitlements::gate_capacity(
+        &snapshot,
+        CapacityKey::RetentionDays,
+        body.retention_days,
+    )?;
 
     let previous = configured_retention(&state, &auth.tenant_id).await?;
     sqlx::query("UPDATE tenants SET retention_days = $1, updated_at = NOW() WHERE id = $2")
@@ -275,8 +267,8 @@ mod tests {
     }
 
     /// Read is available without the capability; editing without the
-    /// entitlement is refused with the named plan reason (fail-before: the
-    /// same gate 500s until `custom_retention` is RuntimeEnforced).
+    /// entitlement is refused with the named plan reason (the canonical
+    /// RuntimeEnforced gate, no transitional seam).
     #[tokio::test]
     async fn editing_requires_the_custom_retention_entitlement_but_read_does_not() {
         let Some(pool) = crate::test_db::canonical_pool("ret_gate").await else {
@@ -303,18 +295,15 @@ mod tests {
         );
     }
 
-    /// Put the tenant on a `plans` row that GRANTS `custom_retention` with a
-    /// `max_retention_days` ceiling of 90 — the row the pre-flip fixture
-    /// seam reads AND (after wave-1's classify flip) the canonical
-    /// entitlement gate reads, so the happy path is exercised identically
-    /// before and after the flip. Built from the REAL Growth seed (a partial
-    /// PlanFeatures JSON is corruption and 500s by design).
+    /// Put the tenant on the REAL Growth `plans` row — the canonical
+    /// RuntimeEnforced row the entitlement gate reads: `custom_retention`
+    /// granted with a `max_retention_days` ceiling of 90 (the seed's
+    /// `..PlanFeatures::default()` fields a partial JSON would corrupt).
     async fn seed_entitled_growth(pool: &sqlx::PgPool, tenant: &str) {
-        let mut features = serde_json::to_value(
+        let features = serde_json::to_value(
             &billing_service::plans::builtin_plan_seed(Some("growth")).features,
         )
         .expect("plan features JSON");
-        features["custom_retention"] = serde_json::json!(true);
         sqlx::query(
             "INSERT INTO plans (name, display_name, features) VALUES ('growth', 'Growth', $1) \
              ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
@@ -345,15 +334,10 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{read}");
         assert_eq!(read["plan"], "growth");
         assert_eq!(read["plan_max_retention_days"], 90);
-        // The PRESENTATION boolean follows the classification: it only
-        // reports `true` once wave-1's classify flip marks custom_retention
-        // RuntimeEnforced. The gate's admission is proven by the 200 below
-        // either way (the pre-flip fixture seam reads the raw plan flag).
-        if billing_entitlements::FeatureKey::CustomRetention.class()
-            == billing_entitlements::FeatureClass::RuntimeEnforced
-        {
-            assert_eq!(read["custom_retention_granted"], true);
-        }
+        // `custom_retention` is RuntimeEnforced and the Growth seed grants
+        // it, so the presentation boolean is true and the 200 below proves
+        // the same gate admitted the write.
+        assert_eq!(read["custom_retention_granted"], true);
 
         let (status, body) = put(&env, "/v1/retention", r#"{"retention_days":45}"#).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");

@@ -89,6 +89,7 @@ use crate::scoring::{
 };
 use crate::sender_pool;
 use crate::sequences;
+use crate::signals::email_stack::{self, EmailStackObserver};
 use crate::signals::SignalObservation;
 use crate::types::{
     ContactDecision, DecisionAction, Enforcement, OpportunityScore, SalesError, SenderPool,
@@ -365,6 +366,13 @@ pub struct SequenceStepHandler {
     /// Human-readable name of the configured provider, recorded in
     /// `model_version`.
     intelligence_label: String,
+    /// Wave G: the email-stack DNS observer. When present, the evidence
+    /// gathering branch observes the account's SPF/DKIM/DMARC/MX posture via
+    /// `signals::email_stack::analyse_email_stack` and persists the resulting
+    /// propositions; the scorer then re-derives `authentication_quality`
+    /// from those rows. `None` (test harnesses that do not inject one) skips
+    /// the observation and records that it was skipped.
+    email_stack_observer: Option<Arc<dyn EmailStackObserver>>,
 }
 
 impl SequenceStepHandler {
@@ -386,6 +394,7 @@ impl SequenceStepHandler {
             enrichment: None,
             prose: Arc::new(TemplateProseWriter::new()),
             intelligence_label: "offline-deterministic-v1".to_string(),
+            email_stack_observer: None,
         }
     }
 
@@ -417,12 +426,21 @@ impl SequenceStepHandler {
             enrichment: None,
             prose: Arc::new(TemplateProseWriter::new()),
             intelligence_label,
+            email_stack_observer: None,
         }
     }
 
     /// Attach the enrichment waterfall used for the NBA `Enrich` action.
     pub fn with_enrichment(mut self, enrichment: EnrichmentService) -> Self {
         self.enrichment = Some(enrichment);
+        self
+    }
+
+    /// Attach the email-stack DNS observer (wave G). The production binary
+    /// injects the live resolver-backed observer; tests inject scripted
+    /// observations so the inference path runs without network access.
+    pub fn with_email_stack_observer(mut self, observer: Arc<dyn EmailStackObserver>) -> Self {
+        self.email_stack_observer = Some(observer);
         self
     }
 
@@ -629,10 +647,31 @@ impl SequenceStepHandler {
             }
             stack_confidence = stack_confidence.max(confidence.clamp(0.0, 1.0) as f32);
         }
+        // Wave G: the authentication quality comes from the account's LIVE
+        // DNS-observation evidence — the propositions
+        // `signals::email_stack::analyse_email_stack` emitted and
+        // `persist_email_stack_observations` stored for THIS tenant. An
+        // account with no such evidence keeps the fail-closed 0.0 (never an
+        // assumed authentication); the query binds tenant_id so another
+        // tenant's observations can never raise this score.
+        let dns_propositions: Vec<String> = sqlx::query_scalar(
+            "SELECT proposition FROM sales_evidence \
+             WHERE tenant_id = $1 AND account_id = $2 \
+               AND source_kind = 'dns_observation' \
+               AND (expires_at IS NULL OR expires_at > NOW())",
+        )
+        .bind(&ctx.tenant_id)
+        .bind(account_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        let authentication_quality =
+            email_stack::authentication_quality_from_propositions(&dns_propositions).unwrap_or(0.0);
+
         facts.email_stack = EmailStackFeatures {
             providers,
             confidence: stack_confidence,
-            authentication_quality: 0.0,
+            authentication_quality,
         };
 
         // `sales_opportunities` columns: migration 200 lines 738-751.
@@ -823,6 +862,54 @@ impl SequenceStepHandler {
             }
         }
 
+        // Wave G: observe the account's email-stack posture over DNS and
+        // persist the propositions as `sales_evidence` rows. This is the
+        // production caller of `signals::email_stack::analyse_email_stack`:
+        // the scorer's `authentication_quality` derives from the persisted
+        // evidence (see `load_planner_facts`). Non-fatal, like every other
+        // evidence leg.
+        match &self.email_stack_observer {
+            Some(observer) => {
+                let domain = facts
+                    .account
+                    .as_ref()
+                    .map(|account| account.domain.trim().to_string())
+                    .unwrap_or_default();
+                if domain.is_empty() {
+                    notes.push(
+                        "email-stack observation skipped: the account has no domain".to_string(),
+                    );
+                } else {
+                    match observer.observe(&domain).await {
+                        Ok(observations) => {
+                            match self
+                                .persist_email_stack_observations(
+                                    &ctx.tenant_id,
+                                    account_id,
+                                    &observations,
+                                )
+                                .await
+                            {
+                                Ok(persisted) => notes.push(format!(
+                                    "email-stack observation persisted {persisted} evidence row(s)"
+                                )),
+                                Err(error) => notes.push(format!(
+                                    "email-stack evidence persistence failed: {error}"
+                                )),
+                            }
+                        }
+                        Err(error) => {
+                            notes.push(format!("email-stack DNS observation failed: {error}"))
+                        }
+                    }
+                }
+            }
+            None => notes.push(
+                "email-stack observer not configured on this worker; skipping the DNS observation"
+                    .to_string(),
+            ),
+        }
+
         match research::research_account_with_report(
             &self.db,
             &ctx.tenant_id,
@@ -857,6 +944,35 @@ impl SequenceStepHandler {
             Err(error) => notes.push(format!("research failed: {error}")),
         }
         notes
+    }
+
+    /// Run the `signals::email_stack` composite over raw observations and
+    /// persist every evidence row for the (tenant, account) subject. Returns
+    /// the number of rows persisted. The entry point
+    /// (`analyse_email_stack`) is called HERE — this is its production
+    /// caller — and `persist_evidence` binds the tenant, so no row can leak
+    /// across tenants.
+    async fn persist_email_stack_observations(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        observations: &email_stack::EmailStackObservations,
+    ) -> Result<usize, SalesError> {
+        let rows = email_stack::analyse_email_stack(
+            &observations.spf_records,
+            &observations.dkim_selectors,
+            &observations.dkim_cnames,
+            observations.dmarc_record.as_deref(),
+            &observations.mx_hosts,
+            &observations.tracking_hosts,
+            &observations.account_domain,
+        );
+        let mut persisted = 0usize;
+        for row in &rows {
+            email_stack::persist_evidence(&self.db, tenant_id, Some(account_id), None, row).await?;
+            persisted += 1;
+        }
+        Ok(persisted)
     }
 
     /// Choose an angle, build the structured strategy from evidence, draft it
@@ -5765,5 +5881,186 @@ mod tests {
         ));
         let handler = handler.with_enrichment(service);
         assert!(handler.enrichment.is_some(), "the waterfall is attached");
+    }
+
+    // ── Wave G: the email-stack observer feeds authentication_quality ────────
+
+    /// A scripted DNS observation source: the raw authenticated stack an
+    /// observer would return in production (no network in the test).
+    struct ScriptedEmailStackObserver {
+        observations: email_stack::EmailStackObservations,
+    }
+
+    #[async_trait::async_trait]
+    impl EmailStackObserver for ScriptedEmailStackObserver {
+        async fn observe(
+            &self,
+            _domain: &str,
+        ) -> Result<email_stack::EmailStackObservations, String> {
+            Ok(self.observations.clone())
+        }
+    }
+
+    fn authenticated_stack() -> email_stack::EmailStackObservations {
+        email_stack::EmailStackObservations {
+            spf_records: vec!["v=spf1 include:_spf.example.com -all".to_string()],
+            dkim_selectors: vec!["default".to_string()],
+            dkim_cnames: Vec::new(),
+            dmarc_record: Some("v=DMARC1; p=reject; rua=mailto:dmarc@example.com".to_string()),
+            mx_hosts: vec!["mx1.example.com".to_string()],
+            tracking_hosts: Vec::new(),
+            account_domain: "acct.example".to_string(),
+        }
+    }
+
+    /// The composite entry point now has a production caller: the observer's
+    /// raw observations are analysed, persisted as tenant-scoped DNS evidence
+    /// and re-read into `EmailStackFeatures.authentication_quality`. A
+    /// different tenant's identical rows must never raise this account's
+    /// quality.
+    #[tokio::test]
+    async fn email_stack_observation_feeds_authentication_quality() {
+        let Some(fx) = fixture("email_stack_auth", "allowed", "EE").await else {
+            return;
+        };
+        let handler = fx
+            .handler()
+            .with_email_stack_observer(Arc::new(ScriptedEmailStackObserver {
+                observations: authenticated_stack(),
+            }));
+        let ctx = handler
+            .load_context(fx.step_execution)
+            .await
+            .expect("load context")
+            .expect("context exists");
+
+        // No observation yet: the fail-closed zero, never an assumed quality.
+        let facts = handler.load_planner_facts(&ctx).await.expect("facts");
+        assert_eq!(
+            facts.email_stack.authentication_quality, 0.0,
+            "no DNS evidence must stay 0.0"
+        );
+
+        // The production path: observe -> analyse_email_stack -> persist.
+        let persisted = handler
+            .persist_email_stack_observations(&fx.tenant, fx.account, &authenticated_stack())
+            .await
+            .expect("persist observations");
+        assert!(
+            persisted >= 4,
+            "SPF/DKIM/DMARC/MX propositions must be persisted, got {persisted}"
+        );
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT proposition, source_kind FROM sales_evidence \
+             WHERE tenant_id = $1 AND account_id = $2 AND source_kind = 'dns_observation' \
+             ORDER BY proposition",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.account)
+        .fetch_all(&fx.db)
+        .await
+        .expect("dns evidence rows");
+        assert!(
+            rows.iter()
+                .any(|(proposition, _)| proposition == "spf_record_published"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(proposition, _)| proposition == "dkim_selector_present"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(proposition, _)| proposition == "dmarc_policy_reject"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(proposition, _)| proposition == "mx_hosts_observed"),
+            "{rows:?}"
+        );
+
+        // The scorer's input is now the real stack: 0.30 + 0.20 + 0.35 + 0.15.
+        let facts = handler.load_planner_facts(&ctx).await.expect("facts");
+        assert!(
+            (facts.email_stack.authentication_quality - 1.0).abs() < 1e-6,
+            "authenticated stack must score 1.0, got {}",
+            facts.email_stack.authentication_quality
+        );
+
+        // The signal reaches the scoring dimension: with a detected provider,
+        // a weak auth posture is the opportunity (+15 * (1 - auth)).
+        sqlx::query(
+            "INSERT INTO sales_enrichment_facts \
+                 (id, tenant_id, subject_type, subject_id, field, value, provider, confidence) \
+             VALUES (gen_random_uuid(), $1, 'account', $2, 'email_provider', \
+                     '\"sendgrid\"'::jsonb, 'lib-test', 0.9)",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.account)
+        .execute(&fx.db)
+        .await
+        .expect("insert provider fact");
+        let facts = handler.load_planner_facts(&ctx).await.expect("facts");
+        assert!(!facts.email_stack.providers.is_empty(), "provider detected");
+        let with_auth = crate::scoring::email_stack_fit_dimension(&facts.email_stack);
+        let weak = crate::scoring::EmailStackFeatures {
+            providers: facts.email_stack.providers.clone(),
+            confidence: facts.email_stack.confidence,
+            authentication_quality: 0.0,
+        };
+        assert!(
+            with_auth < crate::scoring::email_stack_fit_dimension(&weak),
+            "an authenticated stack must lower the fit score: {with_auth}"
+        );
+
+        // Tenant scoping: the identical rows under ANOTHER tenant must not
+        // raise this account's quality (fresh handler, no new rows for fx).
+        let other_tenant = crate::test_db::unique_test_tenant("email_stack_other");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, 'Other tenant', $2, 'free', 'active')",
+        )
+        .bind(&other_tenant)
+        .bind(format!("other-{}", &Uuid::new_v4().simple().to_string()[..8]))
+        .execute(&fx.db)
+        .await
+        .expect("insert other tenant");
+        for proposition in [
+            "spf_record_published",
+            "dkim_selector_present",
+            "dmarc_policy_reject",
+            "mx_hosts_observed",
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_evidence \
+                     (id, tenant_id, account_id, proposition, confidence, source_kind, observed_at) \
+                 VALUES ($1, $2, $3, $4, 0.9, 'dns_observation', NOW())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&other_tenant)
+            .bind(fx.account)
+            .bind(proposition)
+            .execute(&fx.db)
+            .await
+            .expect("insert other-tenant evidence");
+        }
+        // Delete this tenant's rows: with the other tenant's rows still
+        // present, the account's quality must return to the fail-closed zero.
+        sqlx::query(
+            "DELETE FROM sales_evidence \
+             WHERE tenant_id = $1 AND account_id = $2 AND source_kind = 'dns_observation'",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.account)
+        .execute(&fx.db)
+        .await
+        .expect("clear own dns evidence");
+        let facts = handler.load_planner_facts(&ctx).await.expect("facts");
+        assert_eq!(
+            facts.email_stack.authentication_quality, 0.0,
+            "another tenant's dns evidence must never leak into this account"
+        );
     }
 }

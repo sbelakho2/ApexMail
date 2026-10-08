@@ -2,11 +2,11 @@
   "sections": [
     "chat"
   ],
-  "suffix": "ad79c70e",
+  "suffix": "e7e0342a",
   "counts": {
-    "PASS": 111,
-    "DEGRADED": 10,
-    "FAIL": 53,
+    "PASS": 115,
+    "DEGRADED": 15,
+    "FAIL": 44,
     "NOT-VERIFIED": 0
   },
   "results": [
@@ -81,7 +81,7 @@
           "message": "How many emails does Growth include?"
         },
         "response": {
-          "answer": "The Growth plan is \u20ac229 per month, with 500000 emails per month, 5000000 API calls per month, 25 team members and 90 days event retention.",
+          "answer": "The Growth plan includes 500000 emails per month, 5000000 API calls per month, 25 team members and 90 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -173,15 +173,15 @@
     {
       "section": "chat",
       "case": "plans | Which plans include team members and event retention?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['retention']; answer='The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.'",
+      "verdict": "PASS",
+      "detail": "facts present, no forbidden content",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Which plans include team members and event retention?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "The Free plan includes 3000 emails per month, 30000 API calls per month, 1 team members and 7 days event retention.\n\nDeveloper includes 50000 emails per month, 500000 API calls per month, 5 team members and 30 days event retention.\n\nPro: 150000 emails per month, 2000000 API calls per month, 10 team members, 60 days event retention.\n\nGrowth covers 500000 emails per month with 5000000 API calls per month, 25 team members and 90 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -193,15 +193,15 @@
     {
       "section": "chat",
       "case": "rates | What is the overage rate on the Pro plan?",
-      "verdict": "PASS",
-      "detail": "facts present, no forbidden content",
+      "verdict": "FAIL",
+      "detail": "missing facts ['0.60']; answer='The overage rate for the Pro plan is \u20ac0.80 per 1,000 emails beyond the included volume; the excess is invoiced at period end.'",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "What is the overage rate on the Pro plan?"
         },
         "response": {
-          "answer": "Subscription overage per 1,000 emails beyond the included volume: Developer \u20ac0.80, Pro \u20ac0.60, Growth/Business \u20ac0.35 (Enterprise Cloud contractual, \u20ac0.35 runtime default) \u2014 paid plans keep sending into a +100% allowance and the excess is invoiced at period end; free plans stop at the limit.",
+          "answer": "The overage rate for the Pro plan is \u20ac0.80 per 1,000 emails beyond the included volume; the excess is invoiced at period end.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -221,7 +221,7 @@
           "message": "What is the overage rate for Developer?"
         },
         "response": {
-          "answer": "Subscription overage per 1,000 emails beyond the included volume: Developer \u20ac0.80, Pro \u20ac0.60, Growth/Business \u20ac0.35 (Enterprise Cloud contractual, \u20ac0.35 runtime default) \u2014 paid plans keep sending into a +100% allowance and the excess is invoiced at period end; free plans stop at the limit.",
+          "answer": "The overage rate for the Developer plan is \u20ac0.80 per 1,000 emails beyond the included volume; the excess is invoiced at period end.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -234,14 +234,14 @@
       "section": "chat",
       "case": "rates | Do paid plans stop sending at the included volume?",
       "verdict": "FAIL",
-      "detail": "missing facts ['100%']; answer='The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.'",
+      "detail": "missing facts ['100%']; answer='The Free plan includes 3000 emails per month, 30000 API calls per month, 1 team members and 7 days event retention.\\n\\nDeveloper includes 50000 emails per month, '",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Do paid plans stop sending at the included volume?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "The Free plan includes 3000 emails per month, 30000 API calls per month, 1 team members and 7 days event retention.\n\nDeveloper includes 50000 emails per month, 500000 API calls per month, 5 team members and 30 days event retention.\n\nPro: 150000 emails per month, 2000000 API calls per month, 10 team members, 60 days event retention.\n\nGrowth covers 500000 emails per month with 5000000 API calls per month, 25 team members and 90 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -373,15 +373,15 @@
     {
       "section": "chat",
       "case": "compliance | Where is my data stored and processed?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['eu/eea']; answer='The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.'",
+      "verdict": "PASS",
+      "detail": "facts present, no forbidden content",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Where is my data stored and processed?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "GDPR: EU/EEA processing; a Data Processing Agreement is available.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -701,7 +701,7 @@
           "message": "Which plans include webhooks and custom templates?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1121,7 +1121,7 @@
           "message": "How do webhooks work?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1341,7 +1341,7 @@
           "message": "Why is my webhook retrying?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1673,15 +1673,15 @@
     {
       "section": "chat",
       "case": "chat-plans | How many emails and API calls does Pro include?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['150,000', '2,000,000', '60 days']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "PASS",
+      "detail": "facts present, no forbidden content",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "How many emails and API calls does Pro include?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The Pro plan includes 150000 emails per month, 2000000 API calls per month, 10 team members and 60 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1693,15 +1693,15 @@
     {
       "section": "chat",
       "case": "chat-plans | What are the Business plan's included volumes and retention?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['2,000,000', '20,000,000', '365 days']; answer='The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.'",
+      "verdict": "PASS",
+      "detail": "facts present, no forbidden content",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "What are the Business plan's included volumes and retention?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "The Business plan includes 2000000 emails per month, 20000000 API calls per month, 50 team members and 365 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1761,7 +1761,7 @@
           "message": "What is the overage rate if I go over the Developer plan's volume?"
         },
         "response": {
-          "answer": "Subscription overage per 1,000 emails beyond the included volume: Developer \u20ac0.80, Pro \u20ac0.60, Growth/Business \u20ac0.35 (Enterprise Cloud contractual, \u20ac0.35 runtime default) \u2014 paid plans keep sending into a +100% allowance and the excess is invoiced at period end; free plans stop at the limit.",
+          "answer": "The overage rate for the Developer plan is \u20ac0.80 per 1,000 emails beyond the included volume; the excess is invoiced at period end.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1793,15 +1793,15 @@
     {
       "section": "chat",
       "case": "chat-plans | What is the overage rate on Growth and Business?",
-      "verdict": "PASS",
-      "detail": "facts present, no forbidden content",
+      "verdict": "FAIL",
+      "detail": "missing facts ['\u20ac0.35']; answer='The overage rate for the Growth plan is \u20ac0.80 per 1,000 emails beyond the included volume; the excess is invoiced at period end.'",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "What is the overage rate on Growth and Business?"
         },
         "response": {
-          "answer": "Subscription overage per 1,000 emails beyond the included volume: Developer \u20ac0.80, Pro \u20ac0.60, Growth/Business \u20ac0.35 (Enterprise Cloud contractual, \u20ac0.35 runtime default) \u2014 paid plans keep sending into a +100% allowance and the excess is invoiced at period end; free plans stop at the limit.",
+          "answer": "The overage rate for the Growth plan is \u20ac0.80 per 1,000 emails beyond the included volume; the excess is invoiced at period end.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1814,14 +1814,14 @@
       "section": "chat",
       "case": "chat-plans | Can I keep sending after I reach my included volume on a pai",
       "verdict": "FAIL",
-      "detail": "missing facts ['100', 'invoiced']; answer='The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.'",
+      "detail": "missing facts ['100', 'invoiced']; answer='The Free plan includes 3000 emails per month, 30000 API calls per month, 1 team members and 7 days event retention.\\n\\nDeveloper includes 50000 emails per month, '",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Can I keep sending after I reach my included volume on a paid plan?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "The Free plan includes 3000 emails per month, 30000 API calls per month, 1 team members and 7 days event retention.\n\nDeveloper includes 50000 emails per month, 500000 API calls per month, 5 team members and 30 days event retention.\n\nPro: 150000 emails per month, 2000000 API calls per month, 10 team members, 60 days event retention.\n\nGrowth covers 500000 emails per month with 5000000 API calls per month, 25 team members and 90 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1873,15 +1873,15 @@
     {
       "section": "chat",
       "case": "chat-plans | How many team members can each plan have?",
-      "verdict": "DEGRADED",
-      "detail": "honest not-covered without required facts ['5', '10', '25']",
+      "verdict": "PASS",
+      "detail": "facts present, no forbidden content",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "How many team members can each plan have?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "The Free plan includes 3000 emails per month, 30000 API calls per month, 1 team members and 7 days event retention.\n\nDeveloper includes 50000 emails per month, 500000 API calls per month, 5 team members and 30 days event retention.\n\nPro: 150000 emails per month, 2000000 API calls per month, 10 team members, 60 days event retention.\n\nGrowth covers 500000 emails per month with 5000000 API calls per month, 25 team members and 90 days event retention.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -1993,15 +1993,15 @@
     {
       "section": "chat",
       "case": "chat-gdpr | Where is my data processed?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['EU/EEA']; answer='The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.'",
+      "verdict": "PASS",
+      "detail": "facts present, no forbidden content",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Where is my data processed?"
         },
         "response": {
-          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
+          "answer": "GDPR: EU/EEA processing; a Data Processing Agreement is available.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -2401,7 +2401,7 @@
           "message": "How do webhooks work in ApexMail?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -3013,15 +3013,15 @@
     {
       "section": "chat",
       "case": "tech-api-endpoints | Is there a batch send endpoint?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['/v1/messages/batch']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "DEGRADED",
+      "detail": "honest not-covered without required facts ['/v1/messages/batch']",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Is there a batch send endpoint?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -3053,15 +3053,15 @@
     {
       "section": "chat",
       "case": "tech-api-endpoints | How do I register a webhook endpoint?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['POST /v1/webhooks']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "DEGRADED",
+      "detail": "honest not-covered without required facts ['POST /v1/webhooks']",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "How do I register a webhook endpoint?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -3153,15 +3153,15 @@
     {
       "section": "chat",
       "case": "tech-params | How do I paginate a list endpoint?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['limit']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "DEGRADED",
+      "detail": "honest not-covered without required facts ['limit']",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "How do I paginate a list endpoint?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -3313,15 +3313,15 @@
     {
       "section": "chat",
       "case": "tech-webhooks | Which webhook event types can I subscribe to?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['message.accepted', 'message.delivered', 'message.bounced', 'message.opened', 'message.clicked', 'message.complained', 'recipient.unsubscribed', 'message.inbound']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "DEGRADED",
+      "detail": "honest not-covered without required facts ['message.accepted', 'message.delivered', 'message.bounced', 'message.opened', 'message.clicked', 'message.complained', 'recipient.unsubscribed', 'message.inbound']",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "Which webhook event types can I subscribe to?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -3333,15 +3333,15 @@
     {
       "section": "chat",
       "case": "tech-webhooks | How are failed webhook deliveries retried?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['exponential backoff', 'Retry-After']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "DEGRADED",
+      "detail": "honest not-covered without required facts ['exponential backoff', 'Retry-After']",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "How are failed webhook deliveries retried?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,
@@ -3353,15 +3353,15 @@
     {
       "section": "chat",
       "case": "tech-webhooks | How do I verify that a webhook came from ApexMail?",
-      "verdict": "FAIL",
-      "detail": "missing facts ['signature']; answer='PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.'",
+      "verdict": "DEGRADED",
+      "detail": "honest not-covered without required facts ['signature']",
       "evidence": {
         "request": {
           "path": "/v1/ai/chat",
           "message": "How do I verify that a webhook came from ApexMail?"
         },
         "response": {
-          "answer": "PAYG per-email tiers: \u20ac0.001 (0\u201310K), \u20ac0.0008 (10K\u2013100K), \u20ac0.0005 (100K\u20131M), \u20ac0.0003 (1M+); first 100K API calls/month free, then \u20ac0.10/1K.",
+          "answer": "The documentation I can cite does not cover that. Please email support@apexmail.ee and a human will follow up.",
           "escalated": false,
           "citations": 0,
           "retrieval_state": null,

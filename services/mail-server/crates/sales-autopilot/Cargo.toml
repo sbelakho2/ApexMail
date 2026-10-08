@@ -54,6 +54,10 @@ rand.workspace             = true
 # workspace dependency table.
 base64.workspace           = true
 sha2.workspace             = true
+# Wave G: the email-stack observer performs real SPF/DKIM/DMARC/MX lookups
+# through the shared cached resolver (the entry point of
+# `signals::email_stack` now has a production caller in the planner).
+apexmail-dns-resolver = { path = "../dns-resolver" }
 
 [dev-dependencies]
 # Test databases bootstrap through the REAL production migrator (audit F01):

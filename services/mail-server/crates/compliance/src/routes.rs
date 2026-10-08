@@ -176,6 +176,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
         .merge(crate::admin_routes::public_trust_router())
+        // Wave G: the statutory filing operator surface (package build /
+        // verify, human tasks, TSD preview, annual-report acts) — the real
+        // callers of the filing builders that previously had only tests.
+        .merge(crate::statutory_routes::router())
         .with_state(state)
         // M-09: Limit JSON request body to 1 MB
         .layer(DefaultBodyLimit::max(1024 * 1024))

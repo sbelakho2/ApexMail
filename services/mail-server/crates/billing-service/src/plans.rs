@@ -90,9 +90,13 @@ pub struct PlanUpsertInput {
 /// seeded: the audit found `time_travel_debugging` (and other flags) sold as
 /// pricing metadata with no runtime implementation, which this catalog no
 /// longer does. Re-add a flag only together with its runtime gate — the
-/// capability wave 1 re-added `audit_logs` (Growth+), the
-/// `template_approval_workflow` and `subaccounts`/`max_subaccounts`
-/// (Business 10, Enterprise unlimited) exactly this way.
+/// capability waves re-added `audit_logs`, `ab_testing`,
+/// `time_travel_debugging` (Growth+), `custom_tracking_domain` (Pro+),
+/// `custom_retention` (Growth+), the `template_approval_workflow` and
+/// `subaccounts`/`max_subaccounts` (Business 10, Enterprise unlimited)
+/// exactly this way. As of the final capability flips no `PlanFeatures`
+/// field is classified `NotYetImplemented`; the class stays in the model for
+/// the next advertised-but-unbuilt flag.
 ///
 /// 2026-09-08 pricing review: the Free tier moved from 30,000/mo to
 /// 3,000/mo — 30k/month forever gave away a meaningful production
@@ -169,6 +173,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 send_time_optimization: true,
                 data_export: true,
                 custom_templates: true,
+                // Pro+ sells a custom tracking domain (docs/pricing.md).
+                custom_tracking_domain: true,
                 max_sending_domains: 25,
                 max_retention_days: 60,
                 max_team_members: 10,
@@ -196,10 +202,13 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 data_export: true,
                 custom_templates: true,
                 // Growth+ sells customer audit read/export, A/B experiment
-                // execution and time-travel debugging (docs/pricing.md).
+                // execution, time-travel debugging, a custom tracking domain
+                // and custom retention (docs/pricing.md).
                 audit_logs: true,
                 ab_testing: true,
                 time_travel_debugging: true,
+                custom_tracking_domain: true,
+                custom_retention: true,
                 max_sending_domains: 100,
                 max_retention_days: 90,
                 max_team_members: 25,
@@ -234,12 +243,15 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 data_export: true,
                 custom_templates: true,
                 // Business+ sells audit read/export, the maker/checker
-                // template approval workflow and subaccounts (10 — the
-                // canonical number from the pricing prompts/tables).
+                // template approval workflow, subaccounts (10 — the
+                // canonical number from the pricing prompts/tables), a
+                // custom tracking domain and custom retention.
                 audit_logs: true,
                 ab_testing: true,
                 time_travel_debugging: true,
                 template_approval_workflow: true,
+                custom_tracking_domain: true,
+                custom_retention: true,
                 subaccounts: true,
                 max_subaccounts: 10,
                 max_retention_days: 365,
@@ -279,11 +291,14 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 custom_templates: true,
                 white_label: true,
                 // Enterprise Cloud sells audit read/export, template
-                // approval and unlimited subaccounts (docs/pricing.md).
+                // approval, unlimited subaccounts, a custom tracking domain
+                // and custom retention (docs/pricing.md).
                 audit_logs: true,
                 ab_testing: true,
                 time_travel_debugging: true,
                 template_approval_workflow: true,
+                custom_tracking_domain: true,
+                custom_retention: true,
                 subaccounts: true,
                 max_subaccounts: -1,
                 max_retention_days: 730,
@@ -1390,12 +1405,15 @@ mod tests {
         }
     }
 
-    /// Capability wave 1: the seeds are true to `docs/pricing.md` — audit
-    /// logs on Growth and above, template approval and subaccounts on
-    /// Business and Enterprise Cloud, with the canonical Business cap of 10
-    /// and unlimited Enterprise. The classification flip is pinned by
+    /// Capability waves 1–2: the seeds are true to `docs/pricing.md` — audit
+    /// logs, A/B testing, time-travel debugging and custom retention on
+    /// Growth and above, a custom tracking domain on Pro and above, template
+    /// approval and subaccounts on Business and Enterprise Cloud, with the
+    /// canonical Business cap of 10 and unlimited Enterprise. The
+    /// classification flip is pinned by
     /// `seeds_never_advertise_not_yet_implemented_features` above: the same
-    /// seed cannot be read as selling an unimplemented flag.
+    /// seed cannot be read as selling an unimplemented flag (that set is now
+    /// empty, so the positive assertions below carry the pin).
     #[test]
     fn paid_feature_gates_match_public_pricing() {
         let plans = default_plans();
@@ -1407,7 +1425,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("plan `{name}` must exist"))
         };
 
-        for name in ["free", "starter", "pro", "payg"] {
+        for name in ["free", "starter", "payg"] {
             let plan = features(name);
             assert!(!plan.audit_logs, "{name} must not sell audit logs");
             assert!(
@@ -1416,15 +1434,44 @@ mod tests {
             );
             assert!(!plan.subaccounts, "{name} must not sell subaccounts");
             assert_eq!(plan.max_subaccounts, 0, "{name} must not seed a cap");
+            assert!(
+                !plan.custom_tracking_domain,
+                "{name} must not sell a custom tracking domain (Pro and above)"
+            );
+            assert!(
+                !plan.custom_retention,
+                "{name} must not sell custom retention (Growth and above)"
+            );
         }
+
+        let pro = features("pro");
+        assert!(
+            pro.custom_tracking_domain,
+            "Pro sells a custom tracking domain"
+        );
+        assert!(
+            !pro.custom_retention,
+            "Pro must not sell custom retention (Growth and above)"
+        );
+        assert!(!pro.audit_logs);
+        assert!(!pro.template_approval_workflow);
+        assert!(!pro.subaccounts);
 
         let growth = features("growth");
         assert!(growth.audit_logs, "Growth sells audit logs");
+        assert!(growth.custom_tracking_domain);
+        assert!(growth.custom_retention, "Growth sells custom retention");
+        assert_eq!(
+            growth.max_retention_days, 90,
+            "Growth's retention ceiling is the seeded 90 days"
+        );
         assert!(!growth.template_approval_workflow);
         assert!(!growth.subaccounts);
 
         let scale = features("scale");
         assert!(scale.audit_logs, "Business sells audit logs");
+        assert!(scale.custom_tracking_domain);
+        assert!(scale.custom_retention);
         assert!(
             scale.template_approval_workflow,
             "Business sells the approval workflow"
@@ -1434,15 +1481,19 @@ mod tests {
             scale.max_subaccounts, 10,
             "Business subaccount cap is the canonical 10"
         );
+        assert_eq!(scale.max_retention_days, 365);
 
         let enterprise = features("enterprise");
         assert!(enterprise.audit_logs);
+        assert!(enterprise.custom_tracking_domain);
+        assert!(enterprise.custom_retention);
         assert!(enterprise.template_approval_workflow);
         assert!(enterprise.subaccounts);
         assert_eq!(
             enterprise.max_subaccounts, -1,
             "Enterprise subaccounts are unlimited"
         );
+        assert_eq!(enterprise.max_retention_days, 730);
     }
 
     /// Resolution parity: the snapshot comes from the same effective plan
@@ -1482,8 +1533,22 @@ mod tests {
         assert!(snapshot
             .require_feature(FeatureKey::SendTimeOptimization)
             .is_ok());
+        // Capability waves 1–2: the Growth seed's runtime gates are live.
+        assert!(snapshot
+            .require_feature(FeatureKey::CustomTrackingDomain)
+            .is_ok());
+        assert!(snapshot
+            .require_feature(FeatureKey::CustomRetention)
+            .is_ok());
         assert!(snapshot.require_feature(FeatureKey::Sso).is_err());
         assert_eq!(snapshot.capacity(CapacityKey::TeamMembers), 25);
+        assert_eq!(snapshot.capacity(CapacityKey::RetentionDays), 90);
+        assert!(snapshot
+            .require_capacity(CapacityKey::RetentionDays, 90)
+            .is_ok());
+        assert!(snapshot
+            .require_capacity(CapacityKey::RetentionDays, 91)
+            .is_err());
         assert!(snapshot
             .require_capacity(CapacityKey::TeamMembers, 25)
             .is_ok());

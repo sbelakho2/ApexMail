@@ -1,9 +1,8 @@
 //! Custom tracking domain lifecycle (Pro and above per `docs/pricing.md`).
 //!
-//! `custom_tracking_domain` was classified `NotYetImplemented` because no
-//! setup/verification route existed and the tracking service had no tenant
-//! custom-domain lifecycle. This module is the setup half of the capability
-//! (the serving half lives in `tracking-service/src/routes/custom_host.rs`):
+//! `custom_tracking_domain` is RuntimeEnforced and this module is the setup
+//! half of the capability (the serving half lives in
+//! `tracking-service/src/routes/custom_host.rs`):
 //!
 //! * `POST /v1/tracking-domains` — create (requires `domains:write` scope and
 //!   the `custom_tracking_domain` entitlement). The tracking host must be a
@@ -272,16 +271,9 @@ pub(crate) async fn create_tracking_domain_gated(
     tenant_id: &str,
     body: &CreateTrackingDomainRequest,
 ) -> Result<(StatusCode, Json<TrackingDomainResponse>), ApiError> {
-    // The capability gate: Pro and above per docs/pricing.md. The fixture
-    // seam keeps the refusal honest (403 naming the plan/field) while the
-    // classify flip is in flight; after the flip the canonical gate is the
-    // only authority.
-    crate::routes::capability_gate::require_feature_with_fixture(
-        state,
-        tenant_id,
-        FeatureKey::CustomTrackingDomain,
-    )
-    .await?;
+    // The capability gate: Pro and above per docs/pricing.md, through the
+    // canonical entitlement gate.
+    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTrackingDomain).await?;
     let target = default_cname_target();
     create_tracking_domain_with_target(state, tenant_id, body, &target).await
 }
@@ -411,12 +403,7 @@ pub(crate) async fn verify_tracking_domain_gated(
     tenant_id: &str,
     id: &str,
 ) -> Result<Json<TrackingDomainResponse>, ApiError> {
-    crate::routes::capability_gate::require_feature_with_fixture(
-        state,
-        tenant_id,
-        FeatureKey::CustomTrackingDomain,
-    )
-    .await?;
+    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTrackingDomain).await?;
     verify_tracking_domain_with_dns(state, tenant_id, id, &SystemResolver).await
 }
 
@@ -644,18 +631,15 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
     }
 
-    /// Put the tenant on a `plans` row that GRANTS `flag`. This is the row
-    /// the pre-classification-flip fixture seam reads AND (after wave-1's
-    /// classify flip) the row the canonical entitlement gate reads — the
-    /// happy path is exercised identically before and after the flip. The
-    /// features JSON comes from the REAL builtin seed (PlanFeatures has no
-    /// per-field serde default: a partial object is corruption and would
-    /// 500 by design).
-    async fn seed_entitled_plan(pool: &sqlx::PgPool, tenant: &str, plan: &str, flag: &str) {
-        let mut features =
+    /// Put the tenant on the REAL builtin `plan` row — the canonical
+    /// RuntimeEnforced row the entitlement gate reads (`pro` grants
+    /// `custom_tracking_domain`). PlanFeatures has no per-field serde
+    /// default: a partial features object is corruption and would 500 by
+    /// design, so the JSON always comes from the real seed.
+    async fn seed_entitled_plan(pool: &sqlx::PgPool, tenant: &str, plan: &str) {
+        let features =
             serde_json::to_value(&billing_service::plans::builtin_plan_seed(Some(plan)).features)
                 .expect("plan features JSON");
-        features[flag] = serde_json::json!(true);
         sqlx::query(
             "INSERT INTO plans (name, display_name, features) VALUES ($1, $1, $2) \
              ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
@@ -745,8 +729,8 @@ mod tests {
     }
 
     /// POST /v1/tracking-domains without the entitlement is refused with the
-    /// named plan reason (fail-before: until `custom_tracking_domain` is
-    /// classified RuntimeEnforced, the same gate 500s as a misconfiguration).
+    /// named plan reason (the canonical RuntimeEnforced gate, no transitional
+    /// seam).
     #[tokio::test]
     async fn create_requires_the_custom_tracking_domain_entitlement() {
         let Some(pool) = crate::test_db::canonical_pool("td_gate").await else {
@@ -780,7 +764,7 @@ mod tests {
             return;
         };
         let (env, tenant) = AdvEnv::tenant(pool.clone(), &["domains:write", "domains:read"]).await;
-        seed_entitled_plan(&pool, &tenant, "pro", "custom_tracking_domain").await;
+        seed_entitled_plan(&pool, &tenant, "pro").await;
         seed_verified_domain(&pool, &tenant, "customer.test").await;
 
         let (status, created) = env
@@ -866,7 +850,7 @@ mod tests {
         };
         let (owner_env, owner) =
             AdvEnv::tenant(pool.clone(), &["domains:write", "domains:read"]).await;
-        seed_entitled_plan(&pool, &owner, "pro", "custom_tracking_domain").await;
+        seed_entitled_plan(&pool, &owner, "pro").await;
         seed_verified_domain(&pool, &owner, "owner.test").await;
         let (status, created) = owner_env
             .post("/v1/tracking-domains", r#"{"domain":"email.owner.test"}"#)
@@ -876,7 +860,7 @@ mod tests {
 
         let (other_env, other) =
             AdvEnv::tenant(pool.clone(), &["domains:write", "domains:read"]).await;
-        seed_entitled_plan(&pool, &other, "pro", "custom_tracking_domain").await;
+        seed_entitled_plan(&pool, &other, "pro").await;
 
         let (status, _) = other_env.get(&format!("/v1/tracking-domains/{id}")).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "cross-tenant read must 404");
@@ -926,7 +910,7 @@ mod tests {
             return;
         };
         let (env, tenant) = AdvEnv::tenant(pool.clone(), &["domains:write"]).await;
-        seed_entitled_plan(&pool, &tenant, "pro", "custom_tracking_domain").await;
+        seed_entitled_plan(&pool, &tenant, "pro").await;
         seed_verified_domain(&pool, &tenant, "customer.test").await;
 
         // Apex of an owned domain is not a subdomain.
@@ -990,7 +974,7 @@ mod tests {
             return;
         };
         let (env, tenant) = AdvEnv::tenant(pool.clone(), &["domains:write", "domains:read"]).await;
-        seed_entitled_plan(&pool, &tenant, "pro", "custom_tracking_domain").await;
+        seed_entitled_plan(&pool, &tenant, "pro").await;
         seed_verified_domain(&pool, &tenant, "customer.test").await;
         let (status, created) = env
             .post(

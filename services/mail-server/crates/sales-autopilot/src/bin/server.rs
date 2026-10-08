@@ -254,16 +254,35 @@ async fn run_(
         Some(dispatcher) => {
             let queue =
                 sales_autopilot::actions::ActionQueue::new(worker_db.clone(), unique_worker_id());
+            // Wave G: the live DNS observer feeds `signals::email_stack`, so
+            // the scorer's `authentication_quality` is derived from the
+            // account's real SPF/DKIM/DMARC/MX posture (persisted as
+            // dns_observation evidence). A resolver that cannot initialize is
+            // a named warning, not a silent skip.
+            let observer = match sales_autopilot::signals::email_stack::DnsEmailStackObserver::new() {
+                Ok(observer) => Some(std::sync::Arc::new(observer)
+                    as std::sync::Arc<dyn sales_autopilot::signals::email_stack::EmailStackObserver>),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "email-stack DNS observer unavailable; authentication_quality stays 0.0"
+                    );
+                    None
+                }
+            };
+            let mut handler_builder =
+                sales_autopilot::sequence_worker::SequenceStepHandler::with_stack(
+                    worker_db.clone(),
+                    dispatcher,
+                    intelligence,
+                    strategist,
+                )
+                .with_enrichment(enrichment);
+            if let Some(observer) = observer {
+                handler_builder = handler_builder.with_email_stack_observer(observer);
+            }
             let handler: std::sync::Arc<dyn sales_autopilot::actions::ActionHandler> =
-                std::sync::Arc::new(
-                    sales_autopilot::sequence_worker::SequenceStepHandler::with_stack(
-                        worker_db.clone(),
-                        dispatcher,
-                        intelligence,
-                        strategist,
-                    )
-                    .with_enrichment(enrichment),
-                );
+                std::sync::Arc::new(handler_builder);
 
             let mut worker_shutdown = shutdown_rx.clone();
             let interval = cfg.dispatch.dispatch_interval_secs.max(1);

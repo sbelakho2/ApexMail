@@ -763,7 +763,8 @@ def _self_test() -> int:
         "seed flag removed vs catalog",
         BILLING_PLANS,
         "                // Growth+ sells customer audit read/export, A/B experiment\n"
-        "                // execution and time-travel debugging (docs/pricing.md).\n"
+        "                // execution, time-travel debugging, a custom tracking domain\n"
+        "                // and custom retention (docs/pricing.md).\n"
         "                audit_logs: true,\n",
         "",
         "'growth'.audit_logs",

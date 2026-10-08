@@ -2,9 +2,11 @@
 
 Brief: `docs/audit/dogfood-2026-10-06/brief-live-chatbot.md` (including both
 appendices). Owner paths touched: `crates/api-server/src/routes/ai_chat.rs`,
-`crates/ui-foundation/src/{view_data,leptos_views,fixture_states}.rs`, the
-assistant handlers in `crates/api-server/src/routes/web.rs`
-(`form_assistant_message`) and `web/data.rs` (`load_assistant`) — the last two
+`crates/ai-service/src/verifier.rs` and `routes.rs` (last two under the
+coordinator's explicit scope extensions), the assistant handlers in
+`crates/api-server/src/routes/web.rs` (`form_assistant_message`) and
+`web/data.rs` (`load_assistant`), and
+`crates/ui-foundation/src/{view_data,leptos_views,fixture_states}.rs` — all
 under the coordinator's explicit scoped grant; the drafts handlers were not
 touched. Test tooling added: `tools/dogfood-chatbot-live.py`,
 `tools/mock-llm/mock_llm.py`.
@@ -397,13 +399,17 @@ cargo nextest run -p ai-service -E 'test(repetition) or test(parallel_plan) or t
 
 Suite status with these fixes:
 - `ui-foundation`: **483/483 pass**.
-- `ai-service`: **460/460 pass** (verifier arms + the docs-pool pin included).
-- `api-server`: last complete run **2021/2022** (`--no-fail-fast`); the single
-  red test is O3, the mailbot-owned stale drafts-approval test that predates
-  the F4 consent gate. Later re-runs of the full suite were blocked by
-  SIBLING in-flight edits that do not compile (`compliance` E0063 then
-  `analytics` × 6) — not files this brief touches; every chat/assistant test
-  (16) passes, including the four new regression tests.
+- `ai-service`: **463/463 pass** (the older `chat_route_delivers_answer_and_persists_audit` test was updated to send the now-REQUIRED user header, and a tenant-header-only case asserts the 401 — the coordinator's report); the targeted set
+  (`chat_history_is_scoped_to_the_forwarded_user`, `docs_pool_carries_the_chat_concurrency_budget`,
+  the three verifier arms) → **5/5 pass**.
+- `api-server`: last complete run before the sibling waves landed
+  **2021/2022** (`--no-fail-fast`); the single red test is O3, the
+  mailbot-owned stale drafts-approval test that predates the consent gate.
+  The final targeted chat/assistant set (all `ai_chat`, `assistant_message`,
+  `session_*`, `chat_history` tests) → **19/19 pass**. A later FULL-suite
+  re-run was invalidated by machine/DB contention (SIGKILLs, 8 failed admin
+  tests) and sibling in-flight edits (`compliance` E0063, `analytics` × 6);
+  `cargo check -p api-server -p ai-service --all-targets` is clean at hand-in.
 
 ## 8. Environment cleanup
 

@@ -240,3 +240,164 @@ Gates/docs:
 `tools/check_feature_entitlements.py`,
 `docs/api/endpoints/audit.md` (new),
 `docs/api/endpoints/index.md`.
+
+---
+
+## FINAL FLIPS (wave-2 closeout, 2026-10-07)
+
+Owner: final-flips agent. Consumes `fix-report-capabilities-2.md`
+§"REPORTED DIFFS" (A, B, D) and completes the §"Concurrent-wave coordination"
+plan above. The tree now has **zero** `FeatureClass::NotYetImplemented`
+classification usages: every `PlanFeatures` field is RuntimeEnforced or
+ContractualOnly, and the transitional gate seam is gone.
+
+### 1. `classify.rs` — the last three flips
+
+All three use cap2's evidence verbatim in the added comment + rationale
+(`services/mail-server/crates/billing-entitlements/src/classify.rs`):
+
+| Field | Class now | Gate (unchanged) | Evidence named |
+|---|---|---|---|
+| `custom_tracking_domain` | RuntimeEnforced | `Gate::Feature(FeatureKey::CustomTrackingDomain)` | `POST/GET/DELETE /v1/tracking-domains[/:id]`, `/:id/dns-records`, `/:id/verify` (api-server `routes/tracking_domains.rs`) gate create/verify; tracking-service `routes/custom_host.rs` serves only VERIFIED custom hosts. Seeded Pro and above. |
+| `custom_retention` | RuntimeEnforced | `Gate::Feature(FeatureKey::CustomRetention)` | `/v1/retention` read/update/reset enforces the gate and the retention sweep applies the stored column. Seeded Growth and above. |
+| `max_retention_days` | RuntimeEnforced | `Gate::Capacity(CapacityKey::RetentionDays)` | the editing handler refuses above the ceiling by name; the sweep clamps stored overrides (`retention_clamped_to_plan_ceiling`). |
+
+Verification:
+
+```
+$ grep -c "class: FeatureClass::NotYetImplemented" crates/billing-entitlements/src/classify.rs
+0
+$ grep -n "NotYetImplemented" crates/billing-entitlements/src/classify.rs
+18://! * [`FeatureClass::NotYetImplemented`] — advertised in the pricing/type
+34:    NotYetImplemented,
+42:            Self::NotYetImplemented => "NotYetImplemented",
+638:                    | FeatureClass::NotYetImplemented
+```
+
+The four remaining mentions are the CLASS DEFINITION itself (module-doc
+bullet, enum variant, `as_str` arm) plus
+`classes_are_one_of_the_three_release_classes`, which pins the closed
+three-class vocabulary; the classification table has zero usages. Also
+`grep -c NotYetImplemented crates/billing-service/src/types.rs` → `0` (no
+stale doc comments for any original entry).
+
+### 2. Seeds — `billing-service/src/plans.rs`
+
+Added (exact cap2 diff), pinning `docs/pricing.md` "Included feature gates":
+
+| Plan | `custom_tracking_domain` | `custom_retention` | line |
+|---|---|---|---|
+| free / starter / payg | false (unchanged) | false (unchanged) | — |
+| pro | **true** | false | 177 |
+| growth | **true** | **true** | 210–211 |
+| scale (Business) | **true** | **true** | 253–254 |
+| enterprise | **true** | **true** | 300–301 |
+
+`platform-catalog` unchanged, per cap2 §C: its `PlanRow` carries prices/limits
+plus the wave-1/3 capability booleans (`audit_logs`, `ab_testing`,
+`time_travel_debugging`, `template_approval_workflow`, `subaccounts`), but
+`custom_tracking_domain`/`custom_retention` are not catalog columns and no
+consumer reads them from there; `check_knowledge_consistency.py` (which
+compares the catalog booleans it does carry against the seeds) passes
+unchanged, and the seed truth for the two new flags is pinned by
+`validate_pricing_drift.py` + the Rust seed tests instead.
+
+Seed-pin tests flipped in the same commit:
+
+* `plans::tests::paid_feature_gates_match_public_pricing` — pro true / false,
+  Growth+ both true, free/starter/payg both false, plus the seeded retention
+  ceilings (90/365/730).
+* `plans::tests::entitlement_snapshot_for_features_grants_only_runtime_fields`
+  — the Growth snapshot now admits `CustomTrackingDomain` + `CustomRetention`
+  and enforces `require_capacity(RetentionDays, 90)` / refuses 91.
+* `snapshot.rs`: `unimplemented_capacity_is_refused` →
+  `retention_capacity_is_runtime_enforced`; the contractual-only test drops
+  the two flipped keys; the override test now asserts
+  `custom_retention`/`custom_tracking_domain` overrides APPLY; the
+  presentation test pins `RuntimeEnforced` for the retention row/capacity
+  and moves `ContractualOnly` to `sla_guarantee`.
+* `api-server/src/entitlements.rs`: both keys added to the refused/admitted
+  gate matrices; `non_runtime_fields_are_never_gates` →
+  `contractual_fields_are_never_gates`; `unimplemented_capacity_maps_to_internal`
+  → `retention_capacity_is_enforced` + `contractual_capacity_maps_to_internal`
+  (uses `dedicated_ip_count`, still ContractualOnly).
+* `tools/validate_pricing_drift.py`: `EXPECTED_CATALOG` now pins
+  `custom_tracking_domain` (Pro+) and `custom_retention` (Growth+), with the
+  stale "was EXPECTED here until 2026-09-13" comment removed.
+* `tools/check_knowledge_consistency.py`: the growth seed comment changed, so
+  the self-test mutation anchor "seed flag removed vs catalog" was updated to
+  the new three-line comment (behaviour identical; 16/16 cases pass).
+
+### 3. `PlanFeatures` docs — `billing-service/src/types.rs`
+
+The three "NotYetImplemented" doc comments replaced with the enforced
+behaviour (RuntimeEnforced / RuntimeEnforced capacity). `grep -c
+NotYetImplemented` → 0.
+
+### 4. Transitional seam deleted
+
+`crates/api-server/src/routes/capability_gate.rs` deleted outright (its only
+reason to exist was the now-dead `NotRuntimeEnforced` fallback +
+`raw_plan_flag_granted`; the module's own docs said to remove it once the
+flips landed). Every call site now calls the canonical gate:
+
+* `routes/mod.rs` — `pub mod capability_gate;` removed.
+* `campaign_experiments.rs` (2 handlers), `message_timeline.rs` (1),
+  `tracking_domains.rs` (2), `retention.rs` (1), `web.rs` timeline page (1)
+  → `crate::entitlements::require_feature` / `gate_capacity`.
+* `retention.rs`'s `if class() == RuntimeEnforced` conditional is now the
+  unconditional capacity gate; route module docs/comments no longer mention
+  the seam.
+* Tests updated to the flipped behaviour: `retention.rs`
+  `seed_entitled_growth` now seeds the REAL Growth row (no manual flag
+  mutation) and asserts `custom_retention_granted == true` unconditionally;
+  `tracking_domains.rs`'s `seed_entitled_plan` helper dropped its `flag`
+  parameter and the four call sites seed the real `pro` row (which now grants
+  the capability). Both refusal tests still pass through the canonical gate.
+
+`grep -rn "require_feature_with_fixture|capability_gate" crates --include="*.rs"`
+→ 0 hits.
+
+### 5. Verification (all from the brief's env; no docker)
+
+| Gate | Result |
+|---|---|
+| `grep -c "class: FeatureClass::NotYetImplemented" classify.rs` | **0** (table); only class definition + class-vocabulary test remain |
+| `grep -c NotYetImplemented billing-service/src/types.rs` | **0** |
+| `python3 tools/check_knowledge_consistency.py` | PASS |
+| `python3 tools/check_knowledge_consistency.py --self-test` | PASS — 16/16 |
+| `python3 tools/validate_pricing_drift.py` | `pricing drift validation passed` |
+| `python3 tools/check_feature_entitlements.py` (+`--selftest`) | PASS — 32 classified fields (both new keys RuntimeEnforced); self-test passed |
+| `python3 tools/check_capability_claims.py` | all green (2 in-flight warnings, unchanged) |
+| `python3 tools/check_web_error_honesty.py` | all green |
+| `cargo test -p billing-entitlements` | 16 passed; 0 failed |
+| `cargo test -p billing-service --lib` | 626 passed; 0 failed (first full run had 2 unrelated flakes — credit_notes/metering_monitor — both pass in isolation and the full rerun is green) |
+| `cargo test -p billing-service --lib -- paid_feature_gates_match_public_pricing analytics_optimization_gates_match_public_pricing seeds_never_advertise_not_yet_implemented_features entitlement_snapshot_for_features_grants_only_runtime_fields classification_covers_every_serialized_plan_features_field` | 5 passed |
+| `cargo test -p api-server --lib -- routes::tracking_domains::tests routes::retention::tests` | 12 passed |
+| `cargo test -p api-server --lib -- routes::campaign_experiments::tests routes::message_timeline::tests entitlements::tests` | 19 passed (incl. `every_runtime_enforced_field_is_wired_to_a_handler`, which now finds both new keys) |
+| `cargo test -p api-server --lib -- tracking_domain_panel_tests` | 6 passed |
+| `cargo test -p api-server --lib -- routes::tests::tenant_scoped_route_queries_enforce_tenant_id_filters` | 1 passed |
+| `cargo check -p api-server -p billing-service -p billing-entitlements --all-targets` | clean (only a pre-existing unrelated `SubsecRound` warning in compliance) |
+
+DB-backed runs used
+`TEST_DATABASE_URL=postgresql://apexmail:…@127.0.0.1:5432/apexmail` +
+`TEST_REDIS_URL=redis://…@127.0.0.1:16379/0`; Postgres briefly reported
+crash recovery at the start of the run and finished recovery before the
+tests (first poll attempts refused, then ready — no action taken).
+
+### Files touched (final flips)
+
+`services/mail-server/crates/billing-entitlements/src/classify.rs`,
+`…/billing-entitlements/src/snapshot.rs`,
+`…/billing-service/src/plans.rs`,
+`…/billing-service/src/types.rs`,
+`…/api-server/src/entitlements.rs`,
+`…/api-server/src/routes/mod.rs`,
+`…/api-server/src/routes/campaign_experiments.rs`,
+`…/api-server/src/routes/message_timeline.rs`,
+`…/api-server/src/routes/retention.rs`,
+`…/api-server/src/routes/tracking_domains.rs`,
+`…/api-server/src/routes/web.rs`,
+`…/api-server/src/routes/capability_gate.rs` (deleted),
+`tools/validate_pricing_drift.py`,
+`tools/check_knowledge_consistency.py`.

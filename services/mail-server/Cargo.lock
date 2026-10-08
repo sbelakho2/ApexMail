@@ -1775,6 +1775,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -6717,6 +6718,7 @@ version = "0.1.0"
 dependencies = [
  "analytics",
  "anyhow",
+ "apexmail-dns-resolver",
  "apexmail-lib",
  "async-trait",
  "axum 0.7.9",

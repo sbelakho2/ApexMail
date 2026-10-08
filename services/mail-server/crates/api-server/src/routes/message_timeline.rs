@@ -51,7 +51,8 @@
 //! data).
 //!
 //! Gated on `FeatureKey::TimeTravelDebugging` (Growth and above per
-//! `docs/pricing.md`) through [`require_feature_with_fixture`].
+//! `docs/pricing.md`) through the canonical entitlement gate
+//! ([`crate::entitlements::require_feature`]).
 
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
@@ -64,7 +65,6 @@ use billing_entitlements::FeatureKey;
 
 use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::{require_scopes, AuthUser};
-use crate::routes::capability_gate::require_feature_with_fixture;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -196,7 +196,7 @@ async fn message_timeline(
     }
 
     // The entitlement belongs to the tenant whose data is replayed.
-    require_feature_with_fixture(
+    crate::entitlements::require_feature(
         &state,
         &message.tenant_id,
         FeatureKey::TimeTravelDebugging,

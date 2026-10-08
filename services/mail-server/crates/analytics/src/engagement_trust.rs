@@ -68,6 +68,46 @@ impl EngagementTrustService {
         Ok(trust)
     }
 
+    /// Engagement direction over the last two 30-day windows, for the
+    /// documented `trend` member of the trust-score response.
+    ///
+    /// The comparison counts DISTINCT engaged messages (opened or clicked) —
+    /// the same cardinality the trust inputs use — and is tenant-scoped.
+    /// `unknown` is returned when neither window has any engagement: it is
+    /// an honest absence, not a fabricated "stable".
+    pub async fn trust_trend(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> anyhow::Result<&'static str> {
+        let now = Utc::now();
+        let recent_since = now - chrono::Duration::days(30);
+        let prior_since = now - chrono::Duration::days(60);
+
+        let (recent, prior): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT message_id) FILTER (WHERE timestamp >= $3)::bigint, \
+                    COUNT(DISTINCT message_id) FILTER \
+                        (WHERE timestamp >= $4 AND timestamp < $3)::bigint \
+             FROM events \
+             WHERE tenant_id = $1 AND recipient = $2 \
+               AND event_type IN ('opened', 'clicked') \
+               AND timestamp >= $4",
+        )
+        .bind(tenant_id)
+        .bind(email)
+        .bind(recent_since)
+        .bind(prior_since)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(match (recent.cmp(&prior), recent, prior) {
+            (_, 0, 0) => "unknown",
+            (std::cmp::Ordering::Greater, _, _) => "improving",
+            (std::cmp::Ordering::Less, _, _) => "declining",
+            (std::cmp::Ordering::Equal, _, _) => "stable",
+        })
+    }
+
     /// Get campaign-level trust metrics.
     /// Maximum number of recipients to fetch per page when computing campaign trust.
     const CAMPAIGN_TRUST_PAGE_SIZE: i64 = 1000;

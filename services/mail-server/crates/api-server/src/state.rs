@@ -106,7 +106,14 @@ impl AppStateInner {
                 ..Default::default()
             };
 
-            let analytics_client = None; // analytics can be wired in separately
+            // Wave G: the analytics client is the placement report's summary
+            // reader (`PlacementEngine::placement_summary` → measured seed
+            // placement + SMTP delivery counts + recommendations). It is the
+            // engine's own analytics service, so the report no longer carries
+            // a stored-but-unread field.
+            let analytics_client = Some(Arc::new(
+                apexmail_analytics::inbox_placement::InboxPlacementService::new(db.clone()),
+            ));
 
             let engine = inbox_placement::PlacementEngine::with_analytics(
                 placement_cfg,

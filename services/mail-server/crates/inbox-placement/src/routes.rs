@@ -238,6 +238,18 @@ pub async fn get_placement_test(
         }
     };
 
+    // Tenant-wide analytics block: measured placement + SMTP delivery counts
+    // + recommendations from the engine's analytics client. `None` when no
+    // client is injected (the key is then JSON null, never a fabricated
+    // all-zero "healthy" summary).
+    let analytics = match state.engine.placement_summary(tenant_id, 30).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            tracing::warn!(error = %error, "inbox-placement: analytics summary failed");
+            None
+        }
+    };
+
     // Build summary from results.
     let total_accounts = results.iter().map(|r| r.accounts_tested).sum::<i32>();
     let summary = if total_accounts > 0 {
@@ -269,6 +281,7 @@ pub async fn get_placement_test(
         "total_accounts": test.total_accounts,
         "completed_accounts": test.completed_accounts,
         "summary": summary,
+        "analytics": analytics,
         "overall_score": score.as_ref().map(|s| s.overall),
         "score": score,
         "results": results,

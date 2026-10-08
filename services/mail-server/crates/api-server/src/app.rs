@@ -611,6 +611,13 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::system_sender::router(),
         )
         .nest("/v1/admin/vat", routes::admin::vat::router())
+        // Billing abuse review (wave G): the operator surface for the
+        // billing-service abuse-report/restriction machinery (audit F09),
+        // which previously had no production caller or route.
+        .nest(
+            "/v1/admin/billing/abuse",
+            routes::admin::billing_abuse::router(),
+        )
         // Bank statement ingestion — writes bank_statement_lines, the source
         // the compliance cron's sweep posts (compliance::ledger_sweep).
         .nest("/v1/admin/accounting", routes::bank_statements::router())
