@@ -3477,7 +3477,8 @@ mod adversarial_handler_tests {
             "an override-upgraded tenant must be able to add a second domain; got {result:?}"
         );
 
-        let _ = sqlx::query("DELETE FROM domains WHERE name LIKE $1")
+        let _ = sqlx::query("DELETE FROM domains WHERE tenant_id = $1 AND name LIKE $2")
+            .bind(&tenant_id)
             .bind(format!("%-{suffix}.example.test"))
             .execute(&pool)
             .await;
