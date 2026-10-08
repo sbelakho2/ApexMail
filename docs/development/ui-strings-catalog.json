@@ -515,236 +515,240 @@
         "text": "Open Rate"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3484",
-        "text": "Edit Campaign"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3485",
-        "text": "Edit Campaign"
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3487",
+        "text": "Back to events"
       },
       {
         "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3487",
-        "text": "Save Changes"
+        "text": "Message Timeline"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3504",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3487",
+        "text": "No message selected"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3487",
+        "text": "Open a message from the events table to reconstruct its state at a specific time."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3487",
+        "text": "Replay a message's state as of a timestamp from the append-only delivery sources."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3499",
         "text": "Edit Campaign"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3505",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3500",
         "text": "Edit Campaign"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3507",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3502",
         "text": "Save Changes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3519",
+        "text": "Edit Campaign"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3520",
+        "text": "Edit Campaign"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3522",
+        "text": "Save Changes"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Back to campaigns"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Campaign Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Edit Campaign"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Everything runs server-side: save is a plain form post."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "HTML Content"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Keep the field empty to store the campaign as a draft. A scheduled time is stored with the campaign but nothing sends automatically — the campaign waits for you to press Start."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Save Changes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Saving updates this campaign in place."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Schedule (optional)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3516",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3531",
         "text": "Subject Line"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3541",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3556",
         "text": "Filter by status"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3551",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3566",
         "text": "Filter by list"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3554",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3569",
         "text": "VIP Customers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3555",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3570",
         "text": "Newsletter Subscribers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3556",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3571",
         "text": "Trial Accounts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3600",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3615",
         "text": "Alice Ngo"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3603",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3618",
         "text": "2 hours ago"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3608",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3623",
         "text": "Jamal Ortiz"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3616",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3631",
         "text": "Lina Park"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3619",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3634",
         "text": "3 days ago"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3623",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3638",
         "text": "Delete selected"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3623",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3638",
         "text": "Export selected"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3623",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3638",
         "text": "Select rows to act on them in bulk"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3623",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3638",
         "text": "There is no select-all without scripts — tick each contact you want. Checked contacts can be exported or deleted in one plain form post."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3636",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3651",
         "text": "Add Contact"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3636",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3651",
         "text": "Server-rendered filters, deterministic states, and batch actions keep list management fast at scale."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3636",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3651",
         "text": "Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3640",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3655",
         "text": "Search contacts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3642",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3657",
         "text": "Search by name or email"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Back to contacts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Edit Contact"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Email address"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Everything runs server-side: save is a plain form post."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Save Contact"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Saving updates this contact in place."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "Subscription status"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3686",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3701",
         "text": "The address is the contact's identity and cannot be changed — delete the contact and add the new address instead."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "). Quoted fields with commas follow RFC 4180. Duplicates are skipped and every row's outcome is reported."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "Add Contact"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "Import contacts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "Import contacts from CSV"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "New Contact"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "Paste CSV"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "Paste CSV rows or attach a file — one contact per line with a header row ("
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "When both are provided the file wins. The import runs server-side — validation results arrive as a flash summary."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3708",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3723",
         "text": "…or upload a .csv file"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3739",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3754",
         "text": "Jane Doe"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3740",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3755",
         "text": "Add Contact"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3750",
-        "text": "Filter by segment"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3753",
-        "text": "Active lists"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3754",
-        "text": "Archived lists"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3759",
-        "text": "Sort order"
       },
       {
         "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:376",
@@ -759,871 +763,903 @@
         "text": "Press Apply to run the search — results are rendered entirely server-side."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3762",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3765",
+        "text": "Filter by segment"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3768",
+        "text": "Active lists"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3769",
+        "text": "Archived lists"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3774",
+        "text": "Sort order"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3777",
         "text": "Largest audience"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3763",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3778",
         "text": "Recently updated"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3770",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3785",
         "text": "Contact lists"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3790",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3805",
         "text": "8 minutes ago"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3790",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3805",
         "text": "VIP Customers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3791",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3806",
         "text": "Launch Waitlist"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3806",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3821",
         "text": "List actions run through a signed confirmation page and preserve the active list page when you navigate away and back."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3806",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3821",
         "text": "New List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3806",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3821",
         "text": "Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3810",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3825",
         "text": "Search contact lists"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3812",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3827",
         "text": "Search by list name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3827",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3842",
         "text": "Delete List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3827",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3842",
         "text": "List Detail"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3827",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3842",
         "text": "Subscribers and settings for this list. Reload the page to see fresh counts."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3853",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3868",
         "text": "Edit List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3861",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3876",
         "text": "List Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3873",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3888",
         "text": "e.g. Newsletter Subscribers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3902",
         "text": "Save Changes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3904",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3919",
         "text": "Edit List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3918",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3933",
         "text": "List Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3930",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3945",
         "text": "e.g. Newsletter Subscribers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3944",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3959",
         "text": "Save Changes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3961",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3976",
         "text": "Delete List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3961",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3976",
         "text": "List Detail"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3961",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3976",
         "text": "Subscribers and settings for this list. Reload the page to see fresh counts."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3988",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4003",
         "text": "Create List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:3996",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4011",
         "text": "List Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4008",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4023",
         "text": "e.g. Newsletter Subscribers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4022",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4037",
         "text": "Create List"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4036",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4051",
         "text": "Email templates"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4054",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4069",
         "text": "New Template"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4065",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4080",
         "text": "Create Template"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4065",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4080",
         "text": "HTML Content"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4076",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4091",
         "text": "Template Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4077",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
         "text": "e.g. Welcome Email"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4078",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4093",
         "text": "Default Subject"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4079",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4094",
         "text": "Subject line..."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4080",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4095",
         "text": "Save Template"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4090",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4105",
         "text": "Edit Template"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Back to templates"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Default Subject"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Edit Template"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Everything runs server-side: save and preview are plain form posts."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "HTML Content"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Leave the content empty to keep the stored body — Preview with an empty field renders the stored version."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Save Changes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Saving creates a new version snapshot — the previous one can be restored."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4092",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4107",
         "text": "Template Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4110",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4125",
         "text": "Delivery Report"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4110",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4125",
         "text": "Track email delivery metrics"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4111",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4126",
         "text": "Engagement Report"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4111",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4126",
         "text": "Opens, clicks, and conversions"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4112",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4127",
         "text": "Bounce Report"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4112",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4127",
         "text": "Bounce reasons and trends"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4127",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4142",
         "text": "Inbox placement"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4128",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4143",
         "text": "Spam folder"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4129",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4144",
         "text": "Hard + soft"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4130",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4145",
         "text": "Retry queue"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4132",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4147",
         "text": "Deliverability Report"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4132",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4147",
         "text": "Deliverability Trend"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4147",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4162",
         "text": "No data"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4156",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4171",
         "text": "All time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4156",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4171",
         "text": "Total tests"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4157",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4172",
         "text": "Avg inbox rate"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4157",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4172",
         "text": "Last 30 days"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4158",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4173",
         "text": "Avg spam rate"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4158",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4173",
         "text": "Last 30 days"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4159",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4174",
         "text": "Last test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4159",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4174",
         "text": "Most recent run"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4161",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4176",
         "text": "Inbox Placement"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4161",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4176",
         "text": "Loaded from your placement history when the database is connected."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4161",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4176",
         "text": "Recent tests"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4161",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4176",
         "text": "Run new test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4161",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4176",
         "text": "Send a probe email to seed accounts at major mailbox providers and measure where your messages land."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4179",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4194",
         "text": "No placement tests yet"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4180",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4195",
         "text": "Run your first test to measure where your messages land at major mailbox providers."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4182",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4197",
         "text": "Run your first test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4196",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4211",
         "text": "Inbox Placement"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4196",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4211",
         "text": "New test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4196",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4211",
         "text": "Run a new placement test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4196",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4211",
         "text": "We'll send your message to active seed inboxes at the providers you select and report inbox vs. spam folder placement."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4206",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4221",
         "text": "Test configuration"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "From email"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "From name (optional)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "HTML body"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "Outlook / Hotmail"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "Start test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "Target providers"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4207",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4222",
         "text": "Test name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4246",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
         "text": "Inbox Placement"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4246",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
         "text": "Inbox rate over time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4246",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
         "text": "Per-provider breakdown and score render from the recorded test results."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4246",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
         "text": "Placement test"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4246",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
         "text": "Test detail"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4246",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
         "text": "← Back to tests"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4261",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4276",
         "text": "Results appear once the test completes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4262",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4277",
         "text": "Seed accounts report as they receive the probe message — reload this page to check for new results."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4264",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4279",
         "text": "Back to tests"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4268",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4283",
         "text": "Awaiting results"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4275",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4290",
         "text": "Engagement Over Time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4283",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4298",
         "text": "All time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4283",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4298",
         "text": "Total Sent"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4284",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4299",
         "text": "All time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4284",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4299",
         "text": "Unique Opens"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4285",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4300",
         "text": "All time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4285",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4300",
         "text": "Unique Clicks"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4286",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4301",
         "text": "All time"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4287",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4302",
         "text": "No data"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4295",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4310",
         "text": "Email events"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4317",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4332",
         "text": "Filter events"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4334",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4349",
         "text": "Add Domain"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4339",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4354",
         "text": "No domains configured"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4340",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4355",
         "text": "Add a sending domain to start delivering emails"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4342",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4357",
         "text": "Add Domain"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4378",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4393",
         "text": "The draft store could not be read just now. This is a service problem, not an empty queue."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4378",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4393",
         "text": "The review queue is unavailable"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4384",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4399",
         "text": "Drafts appear here when the assistant answers an inbound message and a human must approve the reply."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4384",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4399",
         "text": "No drafts need review"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4397",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4412",
         "text": "not classified"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4399",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4414",
         "text": "first response"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4404",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4419",
         "text": "Approval note"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4404",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4419",
         "text": "Approve and queue"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4404",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4419",
         "text": "Draft reply"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4404",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4419",
         "text": "From {from} · Workspace {tenant} · {classification}{first_response}"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4404",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4419",
         "text": "Rejection reason"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4427",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4442",
         "text": "(unknown sender)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4438",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4443",
+        "text": "(unknown workspace)"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4453",
         "text": "AI drafts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4438",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4453",
         "text": "Every drafted reply is written by the assistant, verified against the published documentation, and held here until a human approves or rejects it. Nothing sends itself."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4464",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4479",
         "text": "ApexMail platform tour"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4471",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4486",
         "text": "Share this with the prospect. It is not stored in plaintext, so copy it now."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4471",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4486",
         "text": "Viewer link — shown once"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4484",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4499",
         "text": "The demo list is unavailable right now — this is a service problem, not an empty list."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4488",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4503",
         "text": "No demo sessions yet. Create one above."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4500",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4515",
         "text": "Run next step"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4507",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4522",
         "text": "{done}/{total} steps"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4525",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4540",
         "text": "Create demo session"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4525",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4540",
         "text": "Scripted, server-driven walkthroughs that execute the real product — the same console, the same API sandbox, the same grader and the same pricing source a customer would use."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4560",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4575",
         "text": "This demo has finished"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4560",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4575",
         "text": "You are viewing a replay of every step and its result."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4567",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4582",
         "text": "The demo store did not answer just now. This is a service problem, not an empty walkthrough — reload in a moment."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4567",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4582",
         "text": "The walkthrough could not be loaded"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4572",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4587",
         "text": "Ask the ApexMail team for a fresh link to see the walkthrough."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4572",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4587",
         "text": "This demo link has expired"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4576",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4591",
         "text": "Check the link, or ask the ApexMail team for a new one."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4576",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4591",
         "text": "This demo link is not valid"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4586",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4601",
         "text": "Nothing has been shown yet — the presenter has not started the walkthrough."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4593",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4608",
         "text": "HTTP {s}"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4599",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4614",
         "text": "Result detail"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4614",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4629",
         "text": "{idx}. {title}{status}"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4633",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4648",
         "text": "ApexMail walkthrough"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4633",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4648",
         "text": "Every step above executed the real product. This link is valid until {expires}."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4641",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4656",
         "text": "ApexMail demo"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4668",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4691",
+        "text": "An administrator switched the AI assistant off for this workspace. It is not broken — the capability is disabled, and nothing was sent to the model. Contact support@apexmail.ee if you believe it should be on."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4691",
+        "text": "The assistant is not enabled for this workspace"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4703",
         "text": "Conversation unavailable"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4668",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4703",
         "text": "The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation — reload to try again."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4674",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4709",
         "text": "Ask about your workspace"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4674",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4709",
         "text": "Pricing, deliverability, domains, compliance or the API — answers come from the published ApexMail documentation, and anything the assistant cannot verify is escalated to a human."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4688",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4725",
         "text": "(up to 4,000 characters)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4688",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4725",
         "text": "AI-generated answers; cited when grounded."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4688",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4725",
         "text": "Ask a question"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4688",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4725",
+        "text": "Questions that ask us to contact you are shared with our sales team as a contact request."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4741",
         "text": "Grounded in the published ApexMail documentation. The assistant never guesses: unverifiable questions are escalated to a human."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4716",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4759",
         "text": "rounded-sm border border-surface-200 bg-surface-50 p-5"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4720",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4763",
         "text": "ApexMail Assistant"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4721",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4764",
         "text": "rounded-sm border border-surface-200 p-5"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4731",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4774",
         "text": "ApexMail documentation"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4744",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4794",
         "text": "A human will follow up on this question — contact support@apexmail.ee for anything urgent."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4767",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4817",
         "text": "Add Domain"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4801",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4851",
         "text": "Add Domain"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "API Keys"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Addresses withheld from sending"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Configure event webhooks"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Dedicated IPs"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Manage dedicated sending IPs"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Manage team members and roles"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Manage your API keys"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Manage your subscription and payments"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4814",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4864",
         "text": "Your account settings"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4854",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4904",
         "text": "Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4854",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4904",
         "text": "Compliance flows own suppression writes; this page reports what is withheld and why. Suppressed addresses are excluded from every send."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4854",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4904",
         "text": "Read-only by design"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4865",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4915",
         "text": "API keys"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4872",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4922",
         "text": "Key Prefix"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4880",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4930",
         "text": "Last Used"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "180 days"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "30 days"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "365 days"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "90 days (default)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "API Keys"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "Create API Key"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "Expires in"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "Key name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4887",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4937",
         "text": "Only scopes your account already holds can be issued; the request is refused otherwise."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4946",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4996",
         "text": "Team members"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4968",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5018",
         "text": "Invite Member"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Billing information will appear once you start sending emails."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Business — €699/mo"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Current Plan"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Developer — €29/mo"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Growth — €229/mo"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "No billing data available"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Payment Method"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Payment methods are managed with the billing team"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Plan changes are arranged with the billing team. Submitting the request below records a change request for them — nothing is charged from this page and no checkout session opens here."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Pro — €89/mo"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Request plan change"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Request portal access"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "The request below asks the billing team to open the secure portal for you — card details are never entered on this page"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Usage This Month"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "Usage for this month is unavailable here — not zero. The live figure loads with your account data."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:4991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5041",
         "text": "— live figures load with your account data"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5057",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5107",
         "text": "Add Webhook"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5057",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5107",
         "text": "Endpoint URL"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5075",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5125",
         "text": "Change Password"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5103",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5153",
         "text": "Jane Doe"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5142",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5192",
         "text": "Save Changes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5152",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5202",
         "text": "Current Password"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5177",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5227",
         "text": "New Password"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5203",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5253",
         "text": "Update Password"
       },
       {
@@ -1663,160 +1699,96 @@
         "text": "Wire recipients"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6268",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6496",
         "text": "This confirmation link is signed and expires 15 minutes after it was rendered."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6268",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6496",
         "text": "Yes, {verb}"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6295",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6523",
         "text": "Confirmation link unavailable"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6295",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6523",
         "text": "Go back"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6295",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6523",
         "text": "This confirmation link is invalid, expired, or was tampered with. Nothing was changed. Return to the list and open a fresh link."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6311",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6539",
         "text": "Delete campaign?"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6312",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6540",
         "text": "This permanently removes the draft, schedule, and associated analytics snapshots for"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6315",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6543",
         "text": "Delete list?"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6318",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6546",
         "text": "Delete domain?"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6318",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6546",
         "text": "This stops sending and verification for"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6319",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6547",
         "text": "Delete contact?"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6319",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6547",
         "text": "This removes the contact record"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6321",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6549",
         "text": "Confirm action"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6322",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6550",
         "text": "You are about to perform a destructive action on"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6329",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6557",
         "text": "delete it"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6362",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6590",
         "text": "Forgot password?"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6362",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6590",
         "text": "Keep me signed in"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6362",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6590",
         "text": "No account?"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6362",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6590",
         "text": "Sign In"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6362",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6590",
         "text": "Sign up"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6394",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6622",
         "text": "Welcome back"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6395",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6623",
         "text": "Sign in to your ApexMail account"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6397",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6625",
         "text": "By signing in, you agree to our"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6436",
-        "text": "Each code from your enrollment sheet works once and then stops working."
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6436",
-        "text": "Recovery code"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6436",
-        "text": "Use a recovery code instead"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6436",
-        "text": "Verify recovery code"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6452",
-        "text": "Authenticator code"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6452",
-        "text": "The code refreshes every 30 seconds in your app. Lost your device? Use a recovery code below."
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6452",
-        "text": "Use a different account"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6452",
-        "text": "Verify and sign in"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6473",
-        "text": "Two-factor verification required"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6475",
-        "text": ". Enter the 6-digit code from your authenticator app to finish signing in."
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6475",
-        "text": "Password accepted for"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6482",
-        "text": "Two-factor verification"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6483",
-        "text": "Enter the code from your authenticator app"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6485",
-        "text": "Contact support"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6485",
-        "text": "Lost your device and your codes?"
-      },
-      {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6485",
-        "text": "for account recovery."
       },
       {
         "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:665",
@@ -1825,6 +1797,70 @@
       {
         "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:665",
         "text": "While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data. A stored scheduled time never fires on its own: scheduled campaigns wait for a manual Start."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6664",
+        "text": "Each code from your enrollment sheet works once and then stops working."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6664",
+        "text": "Recovery code"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6664",
+        "text": "Use a recovery code instead"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6664",
+        "text": "Verify recovery code"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6680",
+        "text": "Authenticator code"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6680",
+        "text": "The code refreshes every 30 seconds in your app. Lost your device? Use a recovery code below."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6680",
+        "text": "Use a different account"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6680",
+        "text": "Verify and sign in"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6701",
+        "text": "Two-factor verification required"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6703",
+        "text": ". Enter the 6-digit code from your authenticator app to finish signing in."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6703",
+        "text": "Password accepted for"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6710",
+        "text": "Two-factor verification"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6711",
+        "text": "Enter the code from your authenticator app"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6713",
+        "text": "Contact support"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6713",
+        "text": "Lost your device and your codes?"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6713",
+        "text": "for account recovery."
       },
       {
         "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:674",
@@ -2717,515 +2753,603 @@
         "text": "waiting for a draft"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Active Tenants"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "All nodes healthy"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Detailed system metrics and infrastructure telemetry will be available in the next deployment."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Fleet Health"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Last 24h"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Live count renders when the database is connected"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "MTD Volume"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Monitor fleet health, tenant activity, and system performance."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "No threats detected."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "Security posture"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "System Overview"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "System Status"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "all nominal"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "challenge · config verified"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "proof · delivery health"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5218",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5268",
         "text": "work · migrations applied"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5413",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5463",
         "text": "Provision and review customer workspaces before enterprise launch."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5414",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5464",
         "text": "Add Tenant"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5416",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5466",
         "text": "No tenants yet"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5417",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5467",
         "text": "Create the first tenant to connect operators, domains, billing plans, and launch checks."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5419",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5469",
         "text": "Customer workspaces online."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5420",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5470",
         "text": "Launches awaiting setup."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5421",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5471",
         "text": "Tenants needing review."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5429",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5479",
         "text": "Add Tenant"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5438",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5488",
         "text": "Tenant Name"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5450",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5500",
         "text": "Acme Corp"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5463",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5513",
         "text": "Primary Domain"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5489",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5539",
         "text": "Create Tenant"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5518",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5568",
         "text": "Last Active"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5526",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5576",
         "text": "Manage administrator access, roles, and recent activity for the control plane."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5527",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5577",
         "text": "Add Operator"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5529",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5579",
         "text": "No operators invited"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5530",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5580",
         "text": "Invite trusted administrators, assign least-privilege roles, and require MFA before handoff."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5532",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5582",
         "text": "Operators active now."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5533",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5583",
         "text": "Pending acceptances."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5534",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5584",
         "text": "Admin-level assignments."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5542",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5592",
         "text": "Add Operator"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5563",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5613",
         "text": "Jane Doe"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5602",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5652",
         "text": "Add Operator"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5616",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5666",
         "text": "System Volume"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5624",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5674",
         "text": "Last hour"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5624",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5674",
         "text": "P99 Latency"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5625",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5675",
         "text": "Error Rate"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5625",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5675",
         "text": "Last hour"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5626",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5676",
         "text": "30 days"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5627",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5677",
         "text": "No data"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5635",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5685",
         "text": "Discovery intake"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5635",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5685",
         "text": "Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet — run a discovery cycle from the Sales Console to populate this page."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5635",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5685",
         "text": "Lead Sources"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5646",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5696",
         "text": "Background jobs"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5649",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5699",
         "text": "Job ID"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5673",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5723",
         "text": "Track provisioning, remediation, billing sync, and background maintenance work."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5676",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5726",
         "text": "No background jobs running"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5677",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5727",
         "text": "The worker queues are idle. New jobs will appear here as tenant launches and maintenance tasks start."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5679",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5729",
         "text": "Jobs currently active."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5680",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5730",
         "text": "Jobs waiting to start."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5681",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5731",
         "text": "Jobs needing review."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5688",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5738",
         "text": "Monitor message queues"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5688",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5738",
         "text": "View cluster nodes and health"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5699",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5749",
         "text": "Cluster nodes"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5726",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5776",
         "text": "Review cluster capacity, node roles, and health before customer traffic moves."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5729",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5779",
         "text": "No nodes registered"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5730",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5780",
         "text": "Cluster nodes will appear after infrastructure enrollment and health reporting start."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5732",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5782",
         "text": "Nodes passing health checks."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5733",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5783",
         "text": "Nodes being removed."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5734",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5784",
         "text": "Provisioning lane available."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5742",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5792",
         "text": "Message queues"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5765",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5815",
         "text": "Monitor pending, processing, and failed mail jobs across infrastructure queues."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5768",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5818",
         "text": "No queues reporting traffic"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5769",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5819",
         "text": "Message queues will populate when workers connect and delivery workloads begin."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5771",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5821",
         "text": "Messages waiting."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5772",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5822",
         "text": "Messages in flight."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5773",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5823",
         "text": "Messages needing replay."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5781",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5831",
         "text": "All domains"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5804",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5854",
         "text": "Track tenant sending domains, verification state, and authentication readiness."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5807",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5857",
         "text": "No domains registered"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5808",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5858",
         "text": "Domains will appear after tenant onboarding begins and DNS verification records are submitted."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5810",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5860",
         "text": "Domains ready to send."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5811",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5861",
         "text": "DNS checks awaiting pass."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5812",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5862",
         "text": "Domains under review."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5819",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5869",
         "text": "Manage subscription plans"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5852",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5902",
         "text": "Review subscription plan packaging, quota posture, and enterprise subscriber coverage."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5855",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5905",
         "text": "No plan rows loaded"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5856",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5906",
         "text": "Plan records appear after the billing service syncs seeded Free, Pro, Growth, and Enterprise definitions."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5858",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5908",
         "text": "Monthly base contract."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5859",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5909",
         "text": "Free quota"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5859",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5909",
         "text": "Monthly email allowance."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5860",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5910",
         "text": "API calls"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5860",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5910",
         "text": "Free tier monthly cap."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5867",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5917",
         "text": "Data protection compliance"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5876",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5926",
         "text": "Data Subject Requests"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5876",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5926",
         "text": "GDPR Compliance"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5876",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5926",
         "text": "Process data access, export, and deletion requests."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5888",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5938",
         "text": "Active alerts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5911",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5961",
         "text": "Triage active incidents, risk signals, and infrastructure events across the fleet."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5912",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5962",
         "text": "Manage Rules"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5914",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5964",
         "text": "No active alerts"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5915",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5965",
         "text": "Alert rules are armed, but there are no incidents requiring operator action right now."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5917",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5967",
         "text": "Immediate escalation."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5918",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5968",
         "text": "Needs operator review."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5919",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5969",
         "text": "Suppressed by policy."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5927",
-        "text": "Alert rules"
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5988",
+        "text": "Select a tenant"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5949",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6002",
+        "text": "Email + webhook"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6034",
+        "text": "(fixed — delete and recreate the rule to change them)."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6034",
+        "text": "Edit rule"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6034",
+        "text": "Notify via"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6034",
+        "text": "Save changes"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6034",
+        "text": "Threshold (% of plan limit)"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6034",
+        "text": "· metric"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "API calls"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "Create a rule"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "Create rule"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "Email + webhook"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "Emails sent"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "Notify via"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6060",
+        "text": "Threshold (% of plan limit)"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6079",
+        "text": "The rule list is unavailable right now — this is a service problem, not an empty list."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6083",
+        "text": "No alert rules yet — create one above. Every rule here is evaluated against live usage and fires onto the Alerts page."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6096",
+        "text": "text-error font-semibold"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6097",
+        "text": "text-warning-700 font-semibold"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6104",
+        "text": "{metric} ≥ {threshold}% of the plan limit"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6139",
+        "text": "Alert rules could not be loaded"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6147",
         "text": "Alert Rules"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5950",
-        "text": "Govern which operational signals page operators and which remain informational."
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6147",
+        "text": "Last fired"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5953",
-        "text": "No alert rules configured"
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6147",
+        "text": "Tenant usage thresholds evaluated by the billing maintenance sweep. When a threshold holds, the incident lands on"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5954",
-        "text": "Create your first alert rule to get notified of important events."
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6147",
+        "text": "for triage."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5956",
-        "text": "Rules actively paging."
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6175",
+        "text": "Emails sent"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5957",
-        "text": "Rules not yet armed."
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6176",
+        "text": "API calls"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5958",
-        "text": "Rules with top severity."
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6177",
+        "text": "Unknown metric"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5965",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6186",
+        "text": "Email + webhook"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6187",
+        "text": "Unknown channel"
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6193",
         "text": "Authentication and access control"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5984",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6212",
         "text": "MFA Configuration"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5984",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6212",
         "text": "Multi-factor authentication protects operator accounts. Status is checked server-side on every page load."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5984",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6212",
         "text": "Set up MFA"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "Enter the 6-digit code from your authenticator app"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "MFA Configuration — step 2 of 2"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "No camera? Enter this manually"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server — the secret never leaves this origin."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "Secret key (selectable)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "Verify & Enable"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:5991",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6219",
         "text": "otpauth URI (selectable)"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6016",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6244",
         "text": "Operator sessions are cookie-based, CSRF-protected on every state-changing POST, and rate-limited server-side."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6016",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6244",
         "text": "Security Settings"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6016",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6244",
         "text": "Session policy"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6039",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6267",
         "text": "QR unavailable — use the manual secret below."
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6500",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6728",
         "text": "Sign in"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6522",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6750",
         "text": "Operator access"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6523",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6751",
         "text": "Sign in to the ApexMail control plane"
       },
       {
-        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6525",
+        "id": "services/mail-server/crates/ui-foundation/src/leptos_views.rs:6753",
         "text": "Operator console restricted to authorized administrators."
       }
     ],
@@ -3235,782 +3359,886 @@
         "text": "Control-plane access is restricted to ApexMail operators."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2168",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2223",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2172",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2227",
         "text": "This account is not active yet. Check your verification email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2178",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2233",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2185",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2240",
         "text": "Verify your email address before signing in — check your inbox for the verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2204",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2259",
         "text": "Control-plane access is restricted to ApexMail operators."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2214",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2269",
         "text": "Enter the 6-digit code from your authenticator app."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2251",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2306",
         "text": "Signed in to the control plane."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2262",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2317",
         "text": "Sign-in is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2394",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2449",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2405",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2460",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2466",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2521",
         "text": "Sign-in is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2492",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2547",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2496",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2551",
         "text": "This account is not active yet. Check your verification email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2503",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2558",
         "text": "SSO_REQUIRED: this organization requires single sign-on; password login is disabled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2510",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2565",
         "text": "Verify your email address before signing in — check your inbox for the verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2541",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2596",
         "text": "Multi-factor authentication enrollment is required before you can sign in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2576",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2631",
         "text": "Signed in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2580",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2635",
         "text": "Sign-in is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2628",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2683",
         "text": "Invalid email or password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2632",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2687",
         "text": "Your verification window expired. Sign in again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2641",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2696",
         "text": "Verify your email address before signing in — check your inbox for the verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2649",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2704",
         "text": "Too many verification attempts. Try again in a few minutes."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2659",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2714",
         "text": "Enter the 6-digit code from your authenticator app."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2747",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2802",
         "text": "That code did not match. Check your authenticator and try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2759",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2814",
         "text": "Signed in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2796",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2851",
         "text": "Sign-in is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2894",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:2949",
         "text": "Check your email to finish creating your account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3011",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3066",
         "text": "An account with this email already exists. Try signing in instead."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3018",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3073",
         "text": "Registration is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3026",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3081",
         "text": "Account created. Check your email for a verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3157",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3212",
         "text": "If that account exists, a reset link is on the way."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3263",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3318",
         "text": "Too many verification emails requested. Try again in a few minutes."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3398",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3453",
         "text": "Open the reset link from your email first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3404",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3459",
         "text": "The passwords do not match."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3438",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3493",
         "text": "That reset link is invalid or has expired."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3445",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3500",
         "text": "This account is not active."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3470",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3525",
         "text": "That reset link has expired. Request a fresh one."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3522",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3577",
         "text": "Your password has been reset. Sign in with your new password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3527",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3582",
         "text": "That reset link is invalid or has expired."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3539",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3594",
         "text": "Could not reset the password. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3556",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3611",
         "text": "Signed out."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3592",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3647",
         "text": "Name is required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3602",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3657",
         "text": "Profile updated."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3607",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3662",
         "text": "Could not save your profile. Sign in again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3646",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3701",
         "text": "Your current password is incorrect."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3715",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3770",
         "text": "Password updated. Please sign in again with your new password."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3720",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3775",
         "text": "Could not update the password for this account. Sign in again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3733",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3788",
         "text": "Could not update the password. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3756",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3811",
         "text": "Sign in again to manage MFA."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3782",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3837",
         "text": "MFA is already enabled for this account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3789",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3844",
         "text": "MFA is already enabled for this account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3800",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3855",
         "text": "Scan the QR code with your authenticator, then enter a code to confirm."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3831",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3886",
         "text": "Sign in again to manage MFA."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3835",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3890",
         "text": "The setup window expired. Start the MFA setup again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3842",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3897",
         "text": "Enter the 6-digit code from your authenticator app."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3852",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3907",
         "text": "That code did not match. Check your authenticator and try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3905",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3960",
         "text": "Could not enable MFA. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3919",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:3974",
         "text": "MFA is already enabled for this account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4026",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4081",
         "text": "Only ApexMail operators can end impersonation sessions."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4087",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4142",
         "text": "Impersonation session ended."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4139",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4194",
         "text": "API access is not part of the current plan. Upgrade the plan or contact support to create API keys."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4153",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4208",
         "text": "Give the key a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4168",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4223",
         "text": "Expiry must be a number of days (1-365)."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4271",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4326",
         "text": "Webhooks are not part of the current plan. Upgrade the plan or contact support to add webhooks."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4408",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4463",
         "text": "A webhook with this URL already exists for this organization."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4449",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4504",
         "text": "Only workspace owners and admins can send invitations."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4474",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4529",
         "text": "Only workspace owners and admins can send invitations."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4481",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4536",
         "text": "Only workspace owners and admins can send invitations."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4496",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4551",
         "text": "You cannot invite someone to a role above your own."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4507",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4562",
         "text": "Choose a valid role (member or admin)."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4515",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4570",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4617",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4672",
         "text": "Invitation created."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4628",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4683",
         "text": "This plan does not include more team seats. Upgrade the plan to invite more teammates."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4638",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4693",
         "text": "Invitation limit reached: clear outstanding invitations before sending more."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4668",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4723",
         "text": "Choose a plan to upgrade to."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4686",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4741",
         "text": "Your plan change request was noted for the billing team. Nothing has been charged."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4710",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4765",
         "text": "Your request for billing portal access was noted for the billing team. Nothing was changed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4731",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4786",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4748",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4803",
         "text": "Contact added."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4752",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4807",
         "text": "Could not add the contact. It may already exist."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4810",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4865",
         "text": "That contact could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4848",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4903",
         "text": "Pick a contact to save."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4854",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4909",
         "text": "Choose a valid status for the contact."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4876",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4931",
         "text": "Contact saved."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4879",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4934",
         "text": "That contact could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4904",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4959",
         "text": "Give the list a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4917",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4972",
         "text": "List created."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4941",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4996",
         "text": "Pick a list and give it a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4957",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5012",
         "text": "List saved."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:4960",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5015",
         "text": "That list could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:500",
-        "text": "The form could not be read. Reload the page and try again."
-      },
-      {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5044",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5099",
         "text": "This plan's sending-domain limit is reached. Remove a domain or upgrade the plan to add another."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5065",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5120",
         "text": "Domain added — review its DNS records and run verification when they are published."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5127",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5182",
         "text": "Custom templates are not part of the current plan. Upgrade the plan or contact support."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5142",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5197",
         "text": "Give the template a name."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5145",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5200",
         "text": "Add some HTML content."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5166",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5221",
         "text": "Template saved."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5499",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:548",
+        "text": "The form could not be read. Reload the page and try again."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5554",
         "text": "Missing campaign id."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5503",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5558",
         "text": "Campaign name and subject are required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5563",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5618",
         "text": "Campaign saved."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5566",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5621",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5595",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5650",
         "text": "Draft approved — the reply is queued."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5600",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5655",
         "text": "That draft was already handled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5607",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5674",
         "text": "The draft could not be approved. It is still pending."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5628",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5695",
         "text": "Draft rejected."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5630",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5697",
         "text": "That draft was already handled."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5637",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5704",
         "text": "The draft could not be rejected. It is still pending."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5659",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5726",
         "text": "Choose a demo script."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5675",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5742",
         "text": "The demo could not be created. No session was started."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5759",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5826",
         "text": "That demo link has expired. Create a new session."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5775",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5842",
         "text": "No such demo session."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5786",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5853",
         "text": "Step executed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5807",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5880",
+        "text": "Your role does not include the AI assistant. Ask a workspace owner for access."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5900",
         "text": "Enter a question for the assistant."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5814",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5907",
         "text": "Messages are limited to 4,000 characters."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5873",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5966",
         "text": "The assistant answered."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5875",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5968",
         "text": "The assistant is receiving too many questions right now. Please retry in a minute."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5880",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5980",
         "text": "Enter a question up to 4,000 characters."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5887",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5987",
         "text": "The assistant is temporarily unavailable. Please try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5910",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6010",
         "text": "Test name, subject, and HTML body are required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5917",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6017",
         "text": "Enter a valid from email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5936",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6036",
         "text": "Placement test started — results poll as seeds report in."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5982",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6082",
         "text": "Provisioning request recorded — the allocator picks it up shortly."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5989",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6089",
         "text": "A provisioning request is already pending — the allocator will pick it up."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6081",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6189",
         "text": "That domain could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6107",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6237",
+        "text": "That domain could not be found in this workspace."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6366",
+        "text": "That domain could not be found in this workspace."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6373",
+        "text": "Verify the domain itself before configuring a tracking subdomain for it."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6424",
+        "text": "That domain could not be found in this workspace."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6433",
+        "text": "No tracking domain is configured for this domain yet."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6484",
+        "text": "That domain could not be found in this workspace."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6493",
+        "text": "No tracking domain is configured for this domain."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6554",
+        "text": "That message could not be found in this workspace."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6561",
+        "text": "That message could not be found in this workspace."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6569",
+        "text": "The message timeline is temporarily unavailable. Please retry."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6600",
+        "text": "The `at` timestamp must be RFC 3339, e.g. 2026-10-07T12:00:00Z."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6617",
+        "text": "The message timeline is temporarily unavailable. Please retry."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6748",
         "text": "Unknown domain."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6202",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6843",
         "text": "That list could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6264",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6905",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6309",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6950",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6349",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6990",
         "text": "The campaign changed state just now. Reload and retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6377",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7018",
         "text": "Unknown campaign."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6406",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7047",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6420",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7061",
         "text": "This campaign has no recipients yet — wire an audience list first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6446",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7087",
         "text": "The selected audience list has no subscribed contacts — add contacts before starting."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6467",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7108",
         "text": "The campaign changed state just now. Reload and retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6572",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7213",
         "text": "Unknown campaign."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6613",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7254",
         "text": "That campaign could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6861",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7502",
         "text": "The import could not be saved. Nothing was committed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6917",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7558",
         "text": "Custom templates are not part of the current plan. Upgrade the plan or contact support."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6933",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7574",
         "text": "Missing template id."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6963",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7604",
         "text": "That template could not be found in this workspace."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7060",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7701",
         "text": "Add some HTML content to preview."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7213",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7854",
         "text": "That confirmation link expired. Nothing was changed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7299",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7940",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7329",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7970",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7361",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8002",
         "text": "The typed name does not match the tenant — nothing was deleted."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7368",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8009",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7376",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8017",
         "text": "Unknown action."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7390",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8031",
         "text": "It may have been deleted already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7429",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8070",
         "text": "Select at least one row first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7502",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8143",
         "text": "CSV export is not part of the current plan. Upgrade the plan or contact support to enable it."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7567",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8208",
         "text": "Operator access required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7798",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8439",
         "text": "Enter a valid operator email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7821",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8462",
         "text": "Provisioning is unavailable. Try again shortly."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7842",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8483",
         "text": "Operator invited."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7904",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8545",
         "text": "Only ApexMail owners can start impersonation."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7934",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8575",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7938",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8579",
         "text": "Deleted tenants cannot be impersonated."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7978",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8619",
         "text": "Impersonation is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:7989",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8630",
         "text": "Impersonation is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8018",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8659",
         "text": "Impersonation is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8204",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8845",
         "text": "Pick at least one lead in the queue first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8239",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8880",
         "text": "The stage change failed. Refresh and retry."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8266",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8907",
         "text": "That lead's account record is missing — the stage cannot be changed. Re-enrich the lead first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8291",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8932",
         "text": "Unknown alert."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8304",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8945",
         "text": "Alert acknowledged."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8309",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8950",
         "text": "It may have been acknowledged already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8337",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8978",
         "text": "Select at least one alert first."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8341",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8982",
         "text": "No valid alert ids were posted."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8357",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8998",
         "text": "They may have been acknowledged already."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8417",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9178",
+        "text": "A rule for that tenant, metric and threshold already exists."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9205",
+        "text": "Unknown alert rule."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9273",
+        "text": "Alert rule updated."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9276",
+        "text": "That alert rule no longer exists."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9281",
+        "text": "Another rule for this tenant and metric already uses that threshold."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9308",
+        "text": "Unknown alert rule."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9315",
+        "text": "Invalid enable or disable request."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9362",
+        "text": "That alert rule no longer exists."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9389",
+        "text": "Unknown alert rule."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9418",
+        "text": "That alert rule no longer exists."
+      },
+      {
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9468",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8447",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9498",
         "text": "Tenant resumed — status is now active."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8452",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9503",
         "text": "Only suspended tenants can be resumed."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8497",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9548",
         "text": "That tenant could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8646",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9697",
         "text": "Add at least one comma-separated source."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8653",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9704",
         "text": "Sales engine not configured — set SALES_AUTOPILOT_BASE_URL to run discovery."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8735",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9786",
         "text": "An enrollment command needs a sequence id and an autonomy policy id."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8753",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9804",
         "text": "Provide 1-100 comma-separated contact ids."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8760",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9811",
         "text": "Sales engine not configured — set SALES_AUTOPILOT_BASE_URL to launch outreach."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8877",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9928",
         "text": "That GDPR request could not be found."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:8926",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:9977",
         "text": "The request changed state just now. Reload and retry."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/fixture_states.rs:579",
+        "text": "The assistant is receiving too many questions right now. Please retry in a minute."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/fixture_states.rs:582",
+        "text": "The assistant is temporarily unavailable. Please try again."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/fixture_states.rs:599",
+        "text": "Draft approved — the reply is queued."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/fixture_states.rs:604",
+        "text": "Draft rejected."
+      },
+      {
+        "id": "services/mail-server/crates/ui-foundation/src/fixture_states.rs:608",
+        "text": "That draft was already handled."
       }
     ],
     "tracking": [
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:102",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:108",
+        "text": ". {msg}"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:108",
+        "text": "The request arrived on"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:108",
+        "text": "This tracking domain is not configured"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:108",
+        "text": "Tracking domain not configured - ApexMail"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:143",
         "text": "Unsubscribed - ApexMail"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:102",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:143",
         "text": "You've been unsubscribed"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:102",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:143",
         "text": "has been removed from our mailing list."
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:140",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:181",
         "text": "Are you sure you want to unsubscribe?"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:140",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:181",
         "text": "Confirm Unsubscribe"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:140",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:181",
         "text": "Confirm Unsubscribe - ApexMail"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:140",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:181",
         "text": "Yes, Unsubscribe Me"
       },
       {
         "id": "services/mail-server/crates/tracking-service/src/templates.rs:23",
         "text": "Return to ApexMail"
-      },
-      {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:249",
-        "text": "Resubscribe to All"
-      },
-      {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:249",
-        "text": "You are currently unsubscribed from all emails. Click \"Resubscribe\" to start receiving emails again."
-      },
-      {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:258",
-        "text": "Email Categories"
-      },
-      {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:258",
-        "text": "Save Preferences"
-      },
-      {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:265",
-        "text": "Stop receiving all emails from this sender."
-      },
-      {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:265",
-        "text": "Unsubscribe from All"
       },
       {
         "id": "services/mail-server/crates/tracking-service/src/templates.rs:28",
@@ -4021,23 +4249,47 @@
         "text": "Something went wrong"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:284",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:290",
+        "text": "Resubscribe to All"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:290",
+        "text": "You are currently unsubscribed from all emails. Click \"Resubscribe\" to start receiving emails again."
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:299",
+        "text": "Email Categories"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:299",
+        "text": "Save Preferences"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:306",
+        "text": "Stop receiving all emails from this sender."
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:306",
+        "text": "Unsubscribe from All"
+      },
+      {
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:325",
         "text": "Your preferences have been saved."
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:290",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:331",
         "text": "Email Preferences"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:290",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:331",
         "text": "Email Preferences - ApexMail"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:290",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:331",
         "text": "Manage your subscriptions for"
       },
       {
-        "id": "services/mail-server/crates/tracking-service/src/templates.rs:290",
+        "id": "services/mail-server/crates/tracking-service/src/templates.rs:331",
         "text": "{saved_banner} {body}"
       },
       {
@@ -4051,39 +4303,39 @@
     ],
     "email": [
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "Finish setting up"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "This link expires in 24 hours."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "Verify Your ApexMail Account"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "Verify email"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "Verify your email — ApexMail"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "by confirming this email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3598",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3618",
         "text": "© 2026 ApexMail ·"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3609",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3629",
         "text": "Verify Your ApexMail Account Confirm {email} by visiting: {verification_link} This link expires in 24 hours. © 2026 ApexMail — https://apexmail.ee"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3615",
+        "id": "services/mail-server/crates/api-server/src/routes/auth.rs:3635",
         "text": "Verify your ApexMail account"
       },
       {
@@ -4171,155 +4423,155 @@
         "text": "Invalid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5633",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5743",
         "text": "Full name is required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5636",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5746",
         "text": "Company is required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5640",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5750",
         "text": "Full name and company are required."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5650",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5760",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5653",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5763",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5679",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5789",
         "text": "SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5696",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5806",
         "text": "Check your email to finish creating your account."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5732",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5842",
         "text": "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) VALUES ($1, $2, $3, 'free', 'pending', $4, $5, $6, $6)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5746",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5856",
         "text": "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'owner', 'active', false, false, $6, $7, $7)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5770",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5880",
         "text": "web signup users insert failed"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5775",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5885",
         "text": "{}/verify-email?token={}&email={}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5785",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5895",
         "text": "Finish setting up"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5785",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5895",
         "text": "This link expires in 24 hours."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5785",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5895",
         "text": "Verify Your ApexMail Account"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5785",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5895",
         "text": "Verify email"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5785",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5895",
         "text": "by confirming this email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5788",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5898",
         "text": "Verify Your ApexMail Account Confirm {email} by visiting: {verification_link} This link expires in 24 hours."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5793",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5903",
         "text": "Verify your ApexMail account"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5801",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5911",
         "text": "web signup verification email queue failed"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5813",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5923",
         "text": "An account with this email already exists. Try signing in instead."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5820",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5930",
         "text": "Registration is temporarily unavailable. Try again."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5828",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5938",
         "text": "Account created. Check your email for a verification link."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5829",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:5939",
         "text": "/verify-email?email={}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6082",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6192",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6085",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6195",
         "text": "Enter a valid email address."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6105",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6215",
         "text": "SELECT id::text, tenant_id::text FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6115",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6225",
         "text": "web forgot-password lookup failed; answering neutrally (anti-enumeration)"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6130",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6240",
         "text": "UPDATE users SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid AND status = 'active'"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6148",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6258",
         "text": "{}/reset-password?token={}&email={}"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6157",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6267",
         "text": "Reset Password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6157",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6267",
         "text": "Reset Your Password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6157",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6267",
         "text": "This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6157",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6267",
         "text": "We received a request to reset the password for"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6160",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6270",
         "text": "Reset Your Password We received a request to reset the password for {email}. Reset your password by visiting: {reset_link} This link expires in 1 hour."
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6165",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6275",
         "text": "Reset your ApexMail password"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6179",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6289",
         "text": "web password reset email enqueued"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6182",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6292",
         "text": "web forgot-password issuance failed"
       },
       {
-        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6188",
+        "id": "services/mail-server/crates/api-server/src/routes/web.rs:6298",
         "text": "If that account exists, a reset link is on the way."
       }
     ]
