@@ -1,0 +1,32 @@
+{
+ "probes": {
+  "6_create_status": 201,
+  "6_hook": "p90awnjr559nbmfbx70s5hpzbq http://127.0.0.1:9099/hook events=['message.accepted', 'message.opened', 'message.clicked', 'recipient.unsubscribed']",
+  "6_deliveries_observed": 1,
+  "6_signature_checks": "[{\"event\": null, \"sig_ok\": false, \"delivery_id\": null, \"mode\": \"200\"}]",
+  "6_queue_after_success": "",
+  "6_ladder_rows": "attempt_row=2|pending|||HTTP 500 sink_requests=2",
+  "6_queue_500_state": "whj_5c3c2ce351645ee7b4a9aa04821a72a7|message.accepted|pending|2|10||HTTP 500",
+  "6_recovered_after_fix": false,
+  "6_queue_final": "",
+  "6_sink_total": 3,
+  "6_disable_status": "200 {\"id\":\"p90awnjr559nbmfbx70s5hpzbq\",\"url\":\"http://127.0.0.1:9099/hook\",\"events\":[\"message.accepted\",\"message.opened\",\"message.clicked\",\"recipient.unsubscribed\"],",
+  "6_disable_deliveries_delta": "before=3 after=3",
+  "6_disable_queue_delta": "before=0 after=1"
+ },
+ "transcripts": [
+  {
+   "name": "RUN 6.1 real event + delivery + signature",
+   "lines": [
+    "",
+    "{\"event\": null, \"sig_ok\": false, \"delivery_id\": null, \"mode\": \"200\"}"
+   ]
+  },
+  {
+   "name": "RUN 6.2 sink 500 \u2192 retry ladder",
+   "lines": [
+    "attempt_row=2|pending|||HTTP 500 sink_requests=2"
+   ]
+  }
+ ]
+}

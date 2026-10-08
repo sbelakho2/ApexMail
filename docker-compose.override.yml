@@ -71,6 +71,13 @@ services:
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-dev-api-key-hash-secret}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-local-dev-session-secret-32chars-min}
+      # CP session HMAC key. Without an explicit value the api-server derives
+      # a fresh random dev secret per process (`generated_dev_secret`), so
+      # every container restart invalidated every live `apexmail_cp_session`
+      # cookie — operators were logged out mid-run with a hard 401 "invalid
+      # CP session signature" (dogfood 2026-10-08). The dev stack pins it
+      # like SESSION_SECRET; production validation still rejects dev-* values.
+      CP_SESSION_SECRET: ${CP_SESSION_SECRET:-local-dev-cp-session-secret-32chars-min}
       WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-dev-webhook-secret-not-for-production}
       CSRF_SECRET: ${CSRF_SECRET:-local-dev-csrf-secret-32chars-min}
       IMPERSONATION_SECRET: ${IMPERSONATION_SECRET:-local-dev-impersonation-secret-32chars}

@@ -397,12 +397,56 @@ async fn entitle_tenant(app: &TestApp, tenant: &str) {
     billing_service::plans::upsert_plan(&app.db, &seed)
         .await
         .expect("seed entitled plan");
+    // The fixture plan is a TEST artifact, not a sellable plan. `upsert_plan`
+    // inserts it `is_active = true`, so a run against a shared database left
+    // it on the PUBLIC `GET /v1/billing/plans` catalog — the live stack
+    // served "Security Regression Entitled" (emailLimit 1,000,000) to
+    // customers (dogfood 2026-10-08). Deactivate it; entitlement resolution
+    // joins `plans` by name WITHOUT an is_active filter, so the fixture
+    // keeps working while the active-plans catalog stays clean.
+    sqlx::query("UPDATE plans SET is_active = false WHERE name = $1")
+        .bind(ENTITLED_PLAN)
+        .execute(&app.db)
+        .await
+        .expect("deactivate the fixture plan");
     sqlx::query("UPDATE tenants SET plan = $2 WHERE id = $1")
         .bind(tenant)
         .bind(ENTITLED_PLAN)
         .execute(&app.db)
         .await
         .expect("point fixture tenant at the entitled plan");
+}
+
+/// The fixture plan must never be servable to customers: every run pins it
+/// inactive in the shared database (fail-before: `upsert_plan` leaves it
+/// active, which is exactly how it leaked into the live catalog).
+#[tokio::test]
+async fn entitled_fixture_plan_is_not_publicly_listed() {
+    let Some(app) = setup().await else {
+        skip_notice("test");
+        return;
+    };
+    entitle_tenant(&app, &app.tenant_a).await;
+
+    let active: Option<bool> = sqlx::query_scalar("SELECT is_active FROM plans WHERE name = $1")
+        .bind(ENTITLED_PLAN)
+        .fetch_optional(&app.db)
+        .await
+        .expect("read the fixture plan row");
+    assert_eq!(
+        active,
+        Some(false),
+        "the wave-1 entitlement fixture must not be is_active (it is served by \
+         GET /v1/billing/plans otherwise)"
+    );
+
+    // And the fixture tenant still resolves its entitlements from the
+    // (inactive) plan row.
+    let snapshot = billing_service::plans::get_entitlement_snapshot(&app.db, &app.tenant_a)
+        .await
+        .expect("entitlement lookup must not fail")
+        .expect("fixture tenant exists");
+    assert!(snapshot.has_feature(billing_entitlements::FeatureKey::TemplateApprovalWorkflow));
 }
 
 /// Skip gracefully when the optional test database is not reachable.

@@ -1,0 +1,32 @@
+{
+ "transcripts": [
+  {
+   "name": "RUN 3.9 real EXPUNGE of UID 2 + UIDNEXT monotonicity",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: SELECT -> 2",
+    "C: STATUS before -> \"INBOX\" (MESSAGES 2 UIDNEXT 3 UIDVALIDITY 1791459167476916000)",
+    "C: UID STORE 2 +FLAGS (\\Deleted) -> OK 2 (FLAGS (\\Deleted \\Recent))",
+    "C: EXPUNGE -> OK [b'2']",
+    "C: STATUS after -> \"INBOX\" (MESSAGES 1 UIDNEXT 3 UIDVALIDITY 1791459167476916000)",
+    "C: SEARCH ALL -> 1"
+   ]
+  },
+  {
+   "name": "RUN 3.10 oversized literal \u2014 exact response bytes",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a1 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test {35651584}",
+    "S: b'<EOF: server closed>'"
+   ]
+  },
+  {
+   "name": "RUN 3.11 literal exactly at the 32 MiB cap",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a2 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test {33554432} (exactly 32 MiB)",
+    "S: b'+ Ready for literal data\\r\\n'"
+   ]
+  }
+ ]
+}

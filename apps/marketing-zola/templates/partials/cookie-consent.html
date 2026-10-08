@@ -119,7 +119,12 @@
           {{- consent_accept_all -}}
         </a>
       {% endif %}
-      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" class="cookie-consent-policy text-xs text-surface-500 underline hover:text-brand-600 transition-colors">
+      {# Locale-prefixed like every other internal link ({{ lp }} is the
+         global set by base.html): the banner is translated per locale, so
+         its policy link must stay in-language. Without the prefix the
+         German/French/Spanish banner linked the English /cookies/ page
+         even though /de|/fr|/es/cookies/ exist (dogfood 2026-10-08). #}
+      <a href="{{ lp }}{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" class="cookie-consent-policy text-xs text-surface-500 underline hover:text-brand-600 transition-colors">
         {{- consent_policy_link -}}
       </a>
     </div>

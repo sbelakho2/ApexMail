@@ -1,0 +1,45 @@
+{
+  "run": "wg3",
+  "results": [
+    {
+      "probe": "P10.1 trust score returns real scores",
+      "ok": {
+        "credibility": 0,
+        "reliability": 100,
+        "intimacy": 55,
+        "selfOrientation": 0.0
+      },
+      "detail": "overall=51 grade=D"
+    },
+    {
+      "probe": "P10.2 trust score tenant-scoped (cross-tenant 404)",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P10.2 twin tenant's score does not see the other tenant's events",
+      "ok": true,
+      "detail": "owner=51 twin=40"
+    },
+    {
+      "probe": "P10.3 placement report carries the analytics block with the real measured numbers",
+      "ok": true,
+      "detail": "status=200 measured={\"inbox\": 2, \"measured_total\": 4, \"other_folders\": 1, \"spam\": 1, \"unknown\": 0} delivery={\"bounced\": 0, \"complained\": 0, \"delivered\": 1}"
+    },
+    {
+      "probe": "P10.4 STO cold-start recipient lands on the next documented window (Tue 10:00 UTC anchor)",
+      "ok": true,
+      "detail": "scheduled='2026-10-14T10:00:00Z' expected~2026-10-14T10:00:00+00:00"
+    },
+    {
+      "probe": "P10.5 STO scheduled_at differs from immediate",
+      "ok": true,
+      "detail": "delta_vs_now=8476.9min"
+    },
+    {
+      "probe": "P10.6 STO applies the campaign timezone to a data-driven window",
+      "ok": true,
+      "detail": "scheduled='2026-10-13T08:00:00Z' expected~2026-10-13T08:00:00+00:00"
+    }
+  ]
+}

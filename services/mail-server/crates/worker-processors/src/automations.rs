@@ -2052,7 +2052,11 @@ impl AutomationExecutor {
         };
 
         let webhook_id: Option<String> = match sqlx::query_scalar(
-            "SELECT id FROM webhooks WHERE tenant_id = $1 AND enabled = true \
+            // Dogfood-2: mirror the webhook processor's claim contract
+            // (`enabled AND status = 'active'`) — a disabled/paused webhook
+            // must not receive queued automation deliveries it can never
+            // claim.
+            "SELECT id FROM webhooks WHERE tenant_id = $1 AND enabled = true AND status = 'active' \
              AND (id = $2 OR url = $2) LIMIT 1",
         )
         .bind(&event.tenant_id)

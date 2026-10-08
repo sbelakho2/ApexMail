@@ -1,0 +1,38 @@
+Return-Path: <bounces+v2.eyJ2IjoidjIiLCJxIjoiNDc3NTQ5ZTctMzE4Zi00MjRjLWJiMDItY2U2NjU4MGRkYWY5IiwidCI6IjdteXAxY252OXlzY3dyM3oyaTFmZGtoaXJ5IiwiciI6ImZsb3c1LWJvdW5jZS1wajZqc3VqY0Bkb2dmb29kLnRlc3QiLCJlIjoxNzk0MDUzODQ1fQ.cNYebgTtvaxI2rrmxuvVmehJdgG0HG6Y9OScWmbMSFk@bounces.apexmail.ee>
+Received: from 6d5ebcd31137 (apexmail-worker-1.apexmail_apexmail_backend. [172.20.0.8])
+        by ecd72b55317f (Mailpit) with SMTP
+        for <flow5-bounce-pj6jsujc@dogfood.test>; Thu, 8 Oct 2026 12:17:25 +0000 (UTC)
+DKIM-Signature: v=1; a=rsa-sha256; s=am-2158b614c6d14e6b91234e1945743433; d=mp2-pj6jsujc.test; c=relaxed/relaxed;
+	h=MIME-Version:Date:Message-ID:To:Subject:From; t=1791461845; bh=Kw8eshypYK
+	rysd2eUOn8h2OxXXgSIpBjtvTt8I5WzzA=; b=NuhIE70KCeoZ8rFFs84Y8bhGqpCp2R68Osbg1
+	NDOiE4DrEjZPDM5OZF1u8V0gELFmjJLZ3R9ipabD27a16JRPnpdNnlAQc8I07fnrUooBQ1xz6Q4
+	Bxpn/Awne9v2FAzWcOJkfE+YwB/0fRafTJM2d7Ai8aI+DuZ6OZ196lGoFjaCooY5Dfk4Q0gcjVj
+	zIJzUQtVDrkI8+F7mAHdX55Zs00smAiNafOZ/1QJtCC3n0Q6haHgH5mI+geCBVU/b83YW8Z0gSL
+	QB6j336jZG46VyOE7syjFWJsPnx21/iP3kQhVvw9OA/CpdPSwj+0G7VRgkKR5avym5R98UJe347
+	9A5bQ==;
+From: <sender-pj6jsujc@mp2-pj6jsujc.test>
+Subject: Flow5 bounce source pj6jsujc
+To: <flow5-bounce-pj6jsujc@dogfood.test>
+List-Unsubscribe: <http://127.0.0.1:3001/u/ilTbXVD71KAAQ_8mSVBHzMtJVbPPQY0WYp7irUn_jEzdzWoKzW8Jt5ZOSSZS4xDCGE3Jtko-JFHnswbR1_911oWT3FkqRFMyCKSt4aMLcRXWfnAHrWHuhlepS0sndL7bMx4d__XTvi2a3lNFkUos6aqC1OfP4IUyFQ4B0Gx71DWgpFeJ4aX_thx4tAjk8S0P4lae>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+X-ApexMail-Message-ID: 477549e7-318f-424c-bb02-ce66580ddaf9
+X-ApexMail-Tenant-ID: 7myp1cnv9yscwr3z2i1fdkhiry
+Message-ID: <477549e7-318f-424c-bb02-ce66580ddaf9@mp2-pj6jsujc.test>
+Date: Thu, 8 Oct 2026 12:17:25 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; 
+	boundary="18dc8d0ea2082a3e_a6ddfc5e44b68635_1ca46855e02ac9a1"
+
+
+--18dc8d0ea2082a3e_a6ddfc5e44b68635_1ca46855e02ac9a1
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+bounce source body pj6jsujc
+--18dc8d0ea2082a3e_a6ddfc5e44b68635_1ca46855e02ac9a1
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<html><body>bounce source body pj6jsujc<img src="http://127.0.0.1:3001/o/z9gwoEFaDRKlg7LU_Mn0bIZ89SMmCWEBKz-K9-as-QbkMnW7nk0PA_dr55Y2XpnOLxA995u0II9VqIfamS2u0ww5m0krHDAznWTEyetlvJqlU6MBMKc5GxDbO1cPuzGohqWWEiyfpyDw4JZ3xRTZ95-t3MIJ3m3KaV_7yatQ7WmTe8J9PA" width="1" height="1" style="display:none" alt="" /></body></html>
+--18dc8d0ea2082a3e_a6ddfc5e44b68635_1ca46855e02ac9a1--
+

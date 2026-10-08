@@ -214,6 +214,16 @@ pub struct CampaignEditData {
     pub scheduled_at: String,
 }
 
+/// Prefilled template editor state for `/templates/{id}/edit` (loaded
+/// server-side from the templates row).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TemplateEditData {
+    pub id: String,
+    pub name: String,
+    pub subject: String,
+    pub html_body: String,
+}
+
 /// The campaign editor's live option sources plus optional prefilled values.
 /// Lists and segments are the TENANT's own rows (id, display name) — the old
 /// placeholder select values ('vip', 'newsletter') were never persisted.

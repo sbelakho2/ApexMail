@@ -1,0 +1,118 @@
+{
+ "transcripts": [
+  {
+   "name": "RUN 2.1 plain inbound (UTF-8 subject, 8-bit body)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "S: 250-mail.apexmail.ee Hello mx.dogfood2.example",
+    "S: 250-SIZE 26214400",
+    "S: 250-STARTTLS",
+    "S: 250-8BITMIME",
+    "S: 250-PIPELINING",
+    "S: 250-ENHANCEDSTATUSCODES",
+    "S: 250 SMTPUTF8",
+    "C: MAIL FROM:<ext-pj6jsujc@external.dogfood2.example> SMTPUTF8 BODY=8BITMIME",
+    "S: 250 2.0.0 Ok",
+    "C: RCPT TO:<inbox-pj6jsujc@mp2-pj6jsujc.test>",
+    "S: 250 2.0.0 Ok",
+    "C: DATA",
+    "S: 354 Start mail input; end with <CRLF>.<CRLF>",
+    "C: <8-bit DATA body \u2026>",
+    "S: 250 2.0.0 Ok id=inb_2465a16e2dbc4df68250a5"
+   ]
+  },
+  {
+   "name": "RUN 2.2a 1000-octet DATA line (RFC minimum)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "C: DATA with one 1000-octet line",
+    "S: 250 2.0.0 Ok id=inb_4d46fbf701ad4d9ebb76e8"
+   ]
+  },
+  {
+   "name": "RUN 2.2b 2 MiB single DATA line (over the 1 MiB per-line cap)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "C: DATA with a 2 MiB single line (cap = 1 MiB)",
+    "S: 552 5.3.4 Message size exceeds fixed maximum message size",
+    "(no further line: timed out)"
+   ]
+  },
+  {
+   "name": "RUN 2.3 many recipients (documented cap 100)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "S: 250 2.0.0 Ok",
+    "C: RCPT x105 \u2192 accepted=0 first_refusal_at=1",
+    "S: 550 5.1.1 No such user here"
+   ]
+  },
+  {
+   "name": "RUN 2.4 MAIL without HELO",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "C: MAIL FROM:<ext-pj6jsujc@external.dogfood2.example> (no EHLO/HELO)",
+    "S: 503 5.5.1 Error: send HELO/EHLO first"
+   ]
+  },
+  {
+   "name": "RUN 2.5 invalid HELO (missing arg, illegal name)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "C: HELO",
+    "S: 501 5.5.4 Invalid HELO/EHLO hostname",
+    "C: HELO bad_name_with_underscore",
+    "S: 501 5.5.4 Invalid HELO/EHLO hostname"
+   ]
+  },
+  {
+   "name": "RUN 2.6 empty MAIL FROM <> (null reverse path)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "C: MAIL FROM:<>",
+    "S: 250 2.0.0 Ok",
+    "C: RCPT TO:<inbox-pj6jsujc@mp2-pj6jsujc.test>",
+    "S: 250 2.0.0 Ok",
+    "C: DATA",
+    "S: 354 Start mail input; end with <CRLF>.<CRLF>",
+    "S: 250 2.0.0 Ok id=inb_7ef9466d0cb34a489c7161"
+   ]
+  },
+  {
+   "name": "RUN 2.7 RCPT to a mailbox that does not exist",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "C: RCPT TO:<ghost-pj6jsujc@mp2-pj6jsujc.test>",
+    "S: 550 5.1.1 No such user here"
+   ]
+  }
+ ],
+ "probes": {
+  "2.1_banner": "220 mail.apexmail.ee ESMTP ApexMail MTA",
+  "2.1_ehlo_extensions": [
+   "250-mail.apexmail.ee Hello mx.dogfood2.example",
+   "250-SIZE 26214400",
+   "250-STARTTLS",
+   "250-8BITMIME",
+   "250-PIPELINING",
+   "250-ENHANCEDSTATUSCODES",
+   "250 SMTPUTF8"
+  ],
+  "2.1_subject": "Flow2 inbound 8bit \u00fcn\u00efc\u00f6d\u00e9 \u65e5\u672c\u8a9e pj6jsujc",
+  "2.2a_accept": "S: 250 2.0.0 Ok id=inb_4d46fbf701ad4d9ebb76e8",
+  "2.2b_accept": "(no further line: timed out)",
+  "2.3_accepted": 0,
+  "2.3_refusal": "550 5.1.1 No such user here",
+  "2.4_response": [
+   "503 5.5.1 Error: send HELO/EHLO first"
+  ],
+  "2.5_missing_arg": [
+   "501 5.5.4 Invalid HELO/EHLO hostname"
+  ],
+  "2.5_bad_name": [
+   "501 5.5.4 Invalid HELO/EHLO hostname"
+  ],
+  "2.6_response": "S: 250 2.0.0 Ok id=inb_7ef9466d0cb34a489c7161",
+  "2.7_response": "S: 550 5.1.1 No such user here"
+ }
+}

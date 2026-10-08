@@ -52,6 +52,57 @@ pub struct UpdateTemplateRequest {
     pub text_body: Option<String>,
 }
 
+/// Maximum template name length (templates.name is VARCHAR(255); 200 keeps
+/// parity with the lists/campaigns name caps).
+const MAX_TEMPLATE_NAME_LEN: usize = 200;
+/// Maximum template subject length (templates.subject is VARCHAR(255)).
+const MAX_TEMPLATE_SUBJECT_LEN: usize = 255;
+
+/// Reject the inputs that previously reached PostgreSQL and surfaced as a
+/// 500: a NUL byte (UTF8 encoding error) and overlong name/subject (VARCHAR
+/// overflow). Control characters are refused in `name`/`subject` because both
+/// flow into MIME headers; `html_body`/`text_body` may legitimately contain
+/// newlines/tabs but never NUL.
+fn validate_template_fields(
+    name: &str,
+    subject: &str,
+    html_body: &str,
+    text_body: Option<&str>,
+) -> Result<(), ApiError> {
+    let mut errors = Vec::new();
+    if name.is_empty() {
+        errors.push("name is required".to_string());
+    } else if name.chars().count() > MAX_TEMPLATE_NAME_LEN {
+        errors.push(format!(
+            "name must be at most {MAX_TEMPLATE_NAME_LEN} characters"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        errors.push("name must not contain control characters".to_string());
+    }
+    if subject.is_empty() {
+        errors.push("subject is required".to_string());
+    } else if subject.chars().count() > MAX_TEMPLATE_SUBJECT_LEN {
+        errors.push(format!(
+            "subject must be at most {MAX_TEMPLATE_SUBJECT_LEN} characters"
+        ));
+    }
+    if subject.chars().any(char::is_control) {
+        errors.push("subject must not contain control characters".to_string());
+    }
+    if html_body.is_empty() {
+        errors.push("html_body is required".to_string());
+    }
+    if html_body.contains('\0') || text_body.is_some_and(|t| t.contains('\0')) {
+        errors.push("template bodies must not contain NUL characters".to_string());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::Validation(errors))
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TemplateResponse {
     pub id: String,
@@ -98,6 +149,42 @@ async fn require_template_write(state: &AppState, tenant_id: &str) -> Result<(),
         .map(|_| ())
 }
 
+/// Customer-visible audit trail (docs/api/endpoints/audit.md: "account,
+/// sending, and configuration activity"): every template mutation is a
+/// configuration change and lands in the tenant audit trail. Best-effort
+/// after the mutation commits (the row is the truth; a lost audit row is
+/// logged loudly but never undoes a committed write).
+async fn audit_template(
+    state: &AppState,
+    auth: &AuthUser,
+    action: &str,
+    template_id: &str,
+    details: serde_json::Value,
+) {
+    if let Err(error) = crate::audit_log::insert_audit_log_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(&auth.tenant_id),
+        auth.user_id.as_deref(),
+        action,
+        "template",
+        Some(template_id),
+        details,
+        None,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(
+            tenant_id = %auth.tenant_id,
+            template_id,
+            action,
+            error = %error,
+            "failed to write template audit row"
+        );
+    }
+}
+
 async fn create_template(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -107,11 +194,12 @@ async fn create_template(
 
     require_template_write(&state, &auth.tenant_id).await?;
 
-    if body.name.is_empty() || body.subject.is_empty() || body.html_body.is_empty() {
-        return Err(ApiError::Validation(vec![
-            "name, subject, and html_body are required".into(),
-        ]));
-    }
+    validate_template_fields(
+        &body.name,
+        &body.subject,
+        &body.html_body,
+        body.text_body.as_deref(),
+    )?;
 
     // templates.id is VARCHAR(26) — generate a 26-char text id (not a UUID,
     // whose 36-char hyphenated form overflows the column).
@@ -146,6 +234,15 @@ async fn create_template(
     )
     .await?;
     tx.commit().await?;
+
+    audit_template(
+        &state,
+        &auth,
+        "template.created",
+        &id,
+        serde_json::json!({ "name": body.name, "version": 1 }),
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
@@ -218,6 +315,8 @@ async fn update_template(
     let text_body = body.text_body.or(existing.text_body);
     let new_version = existing.version + 1;
 
+    validate_template_fields(&name, &subject, &html_body, text_body.as_deref())?;
+
     // L-1: snapshot every saved state atomically with the templates write,
     // so POST /:id/rollback always has the history it restores from.
     let mut tx = state.db.begin().await?;
@@ -247,6 +346,15 @@ async fn update_template(
     .await?;
     tx.commit().await?;
 
+    audit_template(
+        &state,
+        &auth,
+        "template.updated",
+        &id,
+        serde_json::json!({ "version": new_version }),
+    )
+    .await;
+
     Ok(Json(TemplateResponse {
         id,
         name,
@@ -268,7 +376,7 @@ async fn delete_template(
     require_scopes(&auth, &["templates:write"])?;
 
     let result = sqlx::query("DELETE FROM templates WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
+        .bind(&id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
@@ -276,6 +384,14 @@ async fn delete_template(
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("template not found".into()));
     }
+    audit_template(
+        &state,
+        &auth,
+        "template.deleted",
+        &id,
+        serde_json::json!({}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -472,13 +588,21 @@ async fn duplicate_template(
          FROM templates WHERE id = $2 AND tenant_id = $5",
     )
     .bind(&new_id)
-    .bind(id)
+    .bind(&id)
     .bind(new_name)
     .bind(now)
     .bind(auth.tenant_id.to_string())
     .execute(&state.db)
     .await?;
 
+    audit_template(
+        &state,
+        &auth,
+        "template.duplicated",
+        &new_id,
+        serde_json::json!({ "source_template_id": id }),
+    )
+    .await;
     let row = fetch_template(&state, &auth.tenant_id, new_id).await?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
@@ -506,6 +630,14 @@ async fn rollback_template(
         return Err(ApiError::NotFound("template or version not found".into()));
     }
 
+    audit_template(
+        &state,
+        &auth,
+        "template.rolled_back",
+        &id,
+        serde_json::json!({ "restored_version": body.version }),
+    )
+    .await;
     let row = fetch_template(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
 }
@@ -544,6 +676,129 @@ async fn restore_template_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (live dogfood 2026-10-08) at the HANDLER level: a NUL byte
+    /// or an overlong name must come back as a 4xx validation error, never as
+    /// the 500 the live stack returned before the validation seam existed.
+    #[tokio::test]
+    async fn create_template_hostile_input_is_validation_not_500() {
+        let Some(pool) = crate::test_db::optional_pg_pool("templates_hostile").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant_id = format!("tst{}", &uuid::Uuid::new_v4().simple().to_string()[..23]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'Templates Hostile', $1, 'growth', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let auth = || crate::middleware::auth::AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["templates:write".into(), "templates:read".into()],
+        };
+
+        let err = create_template(
+            axum::extract::State(state.clone()),
+            auth(),
+            Json(CreateTemplateRequest {
+                name: "nul".into(),
+                subject: "s".into(),
+                html_body: format!("a{}b", '\0'),
+                text_body: None,
+            }),
+        )
+        .await
+        .expect_err("NUL body must be refused before it reaches PostgreSQL");
+        assert!(
+            matches!(err, ApiError::Validation(_)),
+            "expected 4xx validation, got {err:?}"
+        );
+
+        let err = create_template(
+            axum::extract::State(state.clone()),
+            auth(),
+            Json(CreateTemplateRequest {
+                name: "a".repeat(MAX_TEMPLATE_NAME_LEN + 1),
+                subject: "s".into(),
+                html_body: "<p>x</p>".into(),
+                text_body: None,
+            }),
+        )
+        .await
+        .expect_err("overlong name must be refused");
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        // the happy path still works
+        let ok = create_template(
+            axum::extract::State(state),
+            auth(),
+            Json(CreateTemplateRequest {
+                name: "fine".into(),
+                subject: "s".into(),
+                html_body: "<p>x</p>".into(),
+                text_body: None,
+            }),
+        )
+        .await
+        .expect("valid create still succeeds");
+        assert_eq!(ok.0, StatusCode::CREATED);
+
+        let _ = sqlx::query("DELETE FROM templates WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await;
+        pool.close().await;
+    }
+
+    /// Regression (live dogfood 2026-10-08): POST /v1/templates with a NUL
+    /// byte in a body, or an overlong name/subject, previously reached
+    /// PostgreSQL and surfaced as a 500 (`invalid byte sequence for encoding
+    /// "UTF8": 0x00` / `value too long for type character varying(255)`).
+    /// The validation seam must classify all of them as 4xx.
+    #[test]
+    fn validate_template_fields_classifies_hostile_input_as_validation() {
+        let ok_body = "<p>hi</p>";
+        assert!(validate_template_fields("welcome", "Hi", ok_body, Some("hi")).is_ok());
+
+        let nul = format!("a{}b", '\0');
+        let err = validate_template_fields("welcome", "Hi", &nul, None)
+            .expect_err("NUL in html_body must be refused");
+        assert!(matches!(err, ApiError::Validation(ref v) if v.iter().any(|m| m.contains("NUL"))));
+
+        let err = validate_template_fields("welcome", "Hi", ok_body, Some(&nul))
+            .expect_err("NUL in text_body must be refused");
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        let long_name = "a".repeat(MAX_TEMPLATE_NAME_LEN + 1);
+        let err = validate_template_fields(&long_name, "Hi", ok_body, None)
+            .expect_err("overlong name must be refused");
+        assert!(
+            matches!(err, ApiError::Validation(ref v) if v.iter().any(|m| m.contains("at most")))
+        );
+
+        let long_subject = "s".repeat(MAX_TEMPLATE_SUBJECT_LEN + 1);
+        let err = validate_template_fields("welcome", &long_subject, ok_body, None)
+            .expect_err("overlong subject must be refused");
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        let err = validate_template_fields("bad\r\nname", "Hi", ok_body, None)
+            .expect_err("control characters in name must be refused");
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        let err = validate_template_fields("welcome", "subject\r\nBcc: x@y.test", ok_body, None)
+            .expect_err("header-injection material in subject must be refused");
+        assert!(matches!(err, ApiError::Validation(_)));
+    }
 
     #[test]
     fn test_substitute_simple() {
@@ -868,6 +1123,57 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(tpl.version, 1);
         tpl
+    }
+
+    /// docs/api/endpoints/audit.md sells the tenant trail as "the
+    /// tamper-evident rows the platform writes for account, SENDING, and
+    /// configuration activity": a template create is a configuration change
+    /// and must land in it.
+    ///
+    /// Fail-before: templates.rs wrote no audit rows, so the trail (the
+    /// `/v1/audit` surface) held no `template.created` row for the tenant.
+    #[tokio::test]
+    async fn template_create_writes_the_tenant_audit_trail() {
+        let Some((state, pool)) = state_and_pool("tpl_audit_trail").await else {
+            return;
+        };
+        let tenant = "tpl-audit-tenant";
+        seed_tenant(&pool, tenant, "growth").await;
+
+        let tpl = create_ok(&state, tenant, "audit-probe").await;
+
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'template.created' AND resource_id = $2",
+        )
+        .bind(tenant)
+        .bind(&tpl.id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit probe");
+        assert_eq!(audited, 1, "template.created must be audited");
+
+        // Delete is audited too (the same surface covers config removal).
+        let status = delete_template(
+            State(state.clone()),
+            auth_for(tenant, &["templates:write"]),
+            Path(tpl.id.clone()),
+        )
+        .await
+        .expect("delete template");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let deleted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'template.deleted' AND resource_id = $2",
+        )
+        .bind(tenant)
+        .bind(&tpl.id)
+        .fetch_one(&pool)
+        .await
+        .expect("deleted audit probe");
+        assert_eq!(deleted, 1, "template.deleted must be audited");
+
+        cleanup(&pool, &[tenant]).await;
     }
 
     #[test]

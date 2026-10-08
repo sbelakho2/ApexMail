@@ -149,6 +149,44 @@ impl TemplateApprovalService {
         Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
+    /// Map a review UPDATE that matched no row: either the submission does
+    /// not exist (404 contract) or the guard refused it.
+    ///
+    /// Maker-checker (brief-live-capabilities P7): the submission's
+    /// `submitted_by` is the MAKER; the authenticated reviewer is the
+    /// CHECKER. The same principal cannot be both — the guard lives in the
+    /// UPDATE predicate so two concurrent requests cannot slip a self-review
+    /// between a read and the write, and the refusal names why.
+    async fn review_refusal(
+        &self,
+        id: Uuid,
+        reviewed_by: &str,
+        action: &str,
+    ) -> Result<ApiResult<TemplateSubmission>, String> {
+        let existing: Option<(String,)> =
+            sqlx::query_as("SELECT submitted_by FROM ent_template_submissions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("Load submission for review: {e}"))?;
+        match existing {
+            None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
+            Some((submitted_by,)) if submitted_by == reviewed_by => Ok(ApiResult::err(
+                format!(
+                    "maker-checker refused: the submitter cannot {action} their own template \
+                     submission — a different reviewer must act on it (submitted_by == reviewed_by)"
+                ),
+                "VALIDATION",
+            )),
+            // The row exists and the reviewer is not the submitter: the UPDATE
+            // matched no row for some other reason (a concurrent transition).
+            Some(_) => Ok(ApiResult::err(
+                "Submission changed during review; retry",
+                "INVALID_STATE",
+            )),
+        }
+    }
+
     /// Approve a template
     pub async fn approve(
         &self,
@@ -158,7 +196,7 @@ impl TemplateApprovalService {
     ) -> Result<ApiResult<TemplateSubmission>, String> {
         let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "UPDATE ent_template_submissions SET status = 'approved', reviewed_by = $2, review_notes = $3, updated_at = NOW()
-             WHERE id = $1 RETURNING *"
+             WHERE id = $1 AND submitted_by <> $2 RETURNING *"
         )
         .bind(id).bind(reviewed_by).bind(notes)
         .fetch_optional(&self.db)
@@ -170,7 +208,7 @@ impl TemplateApprovalService {
                 info!(template_id = %id, "Template approved");
                 Ok(ApiResult::ok(r.into()))
             }
-            None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
+            None => self.review_refusal(id, reviewed_by, "approve").await,
         }
     }
 
@@ -183,7 +221,7 @@ impl TemplateApprovalService {
     ) -> Result<ApiResult<TemplateSubmission>, String> {
         let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "UPDATE ent_template_submissions SET status = 'rejected', reviewed_by = $2, review_notes = $3, updated_at = NOW()
-             WHERE id = $1 RETURNING *"
+             WHERE id = $1 AND submitted_by <> $2 RETURNING *"
         )
         .bind(id).bind(reviewed_by).bind(reason)
         .fetch_optional(&self.db)
@@ -195,7 +233,7 @@ impl TemplateApprovalService {
                 info!(template_id = %id, reason = reason, "Template rejected");
                 Ok(ApiResult::ok(r.into()))
             }
-            None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
+            None => self.review_refusal(id, reviewed_by, "reject").await,
         }
     }
 
@@ -208,7 +246,7 @@ impl TemplateApprovalService {
     ) -> Result<ApiResult<TemplateSubmission>, String> {
         let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "UPDATE ent_template_submissions SET status = 'changes_requested', reviewed_by = $2, review_notes = $3, updated_at = NOW()
-             WHERE id = $1 RETURNING *"
+             WHERE id = $1 AND submitted_by <> $2 RETURNING *"
         )
         .bind(id).bind(reviewed_by).bind(notes)
         .fetch_optional(&self.db)
@@ -217,7 +255,10 @@ impl TemplateApprovalService {
 
         match row {
             Some(r) => Ok(ApiResult::ok(r.into())),
-            None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
+            None => {
+                self.review_refusal(id, reviewed_by, "request changes on")
+                    .await
+            }
         }
     }
 

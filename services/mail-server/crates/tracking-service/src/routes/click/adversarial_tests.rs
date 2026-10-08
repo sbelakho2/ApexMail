@@ -7,8 +7,9 @@
 //!   patterns) — a Redis MISS falls through to the database, a DB error
 //!   refuses for one request (503) WITHOUT caching, and an authoritative
 //!   absence is cached as "0".
-//! - Hostile tokens (wrong length, garbage, tampered) redirect to the
-//!   fallback, record NOTHING, and never panic.
+//! - Hostile tokens (wrong length, garbage, tampered) are REFUSED with a
+//!   typed status and the named reason (400 malformed / 404 unknown), record
+//!   NOTHING, and never panic — never a silent bounce to the fallback.
 //! - A refused destination host is answered 400 (`click_refused` recorded)
 //!   with the named reason — never a silent bounce to the vendor homepage;
 //!   oversized / non-http redirect targets are refused the same way.
@@ -325,7 +326,7 @@ fn match_domain_pattern_is_case_insensitive_and_wildcard_scoped() {
 // ── Handler guards ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
+async fn hostile_click_tokens_are_refused_with_a_typed_status_and_record_nothing() {
     let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
@@ -334,7 +335,9 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
     let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
 
-    // Under-length id → refused before any decode.
+    // Under-length id → malformed: 400 with the named reason and NO
+    // Location header (dogfood 2026-10-08 E2: previously a silent 302 to
+    // the vendor fallback).
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -343,9 +346,10 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(body.contains("malformed"), "got: {body}");
 
-    // Over-length id → refused before any decode.
+    // Over-length id → malformed: 400, no bounce.
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -354,9 +358,9 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
 
-    // Right length, garbage content → decode fails, warn, fallback, and
+    // Right shape, garbage content → decode fails: 404 typed refusal, and
     // (dead DB proves it) nothing is consulted for a redirect target.
     let resp = handle_click(
         State(state.clone()),
@@ -366,7 +370,19 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    let body = refusal_body(resp, axum::http::StatusCode::NOT_FOUND).await;
+    assert!(body.contains("not valid"), "got: {body}");
+
+    // Malformed alphabet (`!` + multibyte) → 400, never a panic or bounce.
+    let resp = handle_click(
+        State(state.clone()),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path("!!!not-a-token-é!!!".into()),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
 }
 
 /// SM2-F4: 19 ASCII bytes + a two-byte `é` places byte 20 INSIDE the
@@ -374,9 +390,10 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
 /// `id_prefix = &id[..id.len().min(20)]` slices ("byte index 20 is not a
 /// char boundary") and killed the connection task per request. With a
 /// subscriber installed the log FIELD expressions actually evaluate; the
-/// handler must survive them and still answer the fallback redirect.
-/// Hermetic: the invalid-shape id fails `decode` before any Redis/DB call,
-/// so the dead pools are never contacted.
+/// handler must survive them and answer the typed malformed-token refusal
+/// (dogfood 2026-10-08 E2 — it used to silently redirect to the fallback).
+/// Hermetic: the invalid-shape id is refused before any Redis/DB call, so
+/// the dead pools are never contacted.
 #[tokio::test]
 async fn multibyte_click_id_at_slice_boundary_never_panics() {
     use tracing_subscriber::EnvFilter;
@@ -387,11 +404,12 @@ async fn multibyte_click_id_at_slice_boundary_never_panics() {
 
     let state = state(lazy_dead_db(), dead_redis(), "redis://127.0.0.1:1");
 
-    // 51 bytes: passes the 10..=4096 length gate, splits `é` at byte 20.
+    // 51 bytes: passes nothing — the multibyte content fails the shape
+    // guard; byte 20 splits `é`, the exact input the old prefix slices
+    // panicked on.
     let hostile = format!("{}é{}", "a".repeat(19), "x".repeat(30));
     assert_eq!(hostile.len(), 51);
 
-    // The debug! field evaluates on EVERY in-bounds request…
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -400,9 +418,8 @@ async fn multibyte_click_id_at_slice_boundary_never_panics() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
 
-    // …and the invalid-token warn! field on the decode-failure arm.
     let resp = handle_click(
         State(state),
         addr(),
@@ -411,7 +428,7 @@ async fn multibyte_click_id_at_slice_boundary_never_panics() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
 }
 
 #[tokio::test]

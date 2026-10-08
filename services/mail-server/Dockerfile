@@ -156,6 +156,13 @@ FROM runtime-base AS api-server
 
 COPY --from=api-server-builder /app/target/release/api-server /usr/local/bin/
 COPY --from=api-server-builder /app/apps/marketing-zola/public /app/apps/marketing-zola/public
+# COPY preserves host modes, and a tailwind/zola build under a umask-077
+# shell produces root-owned 0600 artifacts (styles.css was 0600 on
+# 2026-10-08). The runtime user is uid 10001, so /css/styles.css 404'd and
+# EVERY marketing page rendered unstyled. Normalize read bits at image
+# build time so a bad local umask can never ship a partially unreadable
+# static export.
+RUN chmod -R a+rX /app/apps/marketing-zola/public
 
 ENV MARKETING_PUBLIC_DIR=/app/apps/marketing-zola/public
 WORKDIR /app

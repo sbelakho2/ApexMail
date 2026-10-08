@@ -2277,7 +2277,54 @@ async fn send_message(
 
     record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
 
+    audit_message_accepted(
+        &state,
+        &auth,
+        &response.id.to_string(),
+        delivery_recipients(&body).len(),
+        body.template_id.as_deref(),
+    )
+    .await;
+
     Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(response))).into_response())
+}
+
+/// Customer-visible audit trail (docs/api/endpoints/audit.md: "account,
+/// sending, and configuration activity"): record each ACCEPTED message in
+/// the tenant audit trail. Best-effort and post-commit — the acceptance
+/// already happened, and a failed audit insert must never fail a send; the
+/// miss is logged loudly instead.
+async fn audit_message_accepted(
+    state: &AppState,
+    auth: &AuthUser,
+    message_id: &str,
+    recipients: usize,
+    template_id: Option<&str>,
+) {
+    if let Err(error) = crate::audit_log::insert_audit_log_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(&auth.tenant_id),
+        auth.user_id.as_deref(),
+        "message.accepted",
+        "message",
+        Some(message_id),
+        serde_json::json!({
+            "recipients": recipients,
+            "template_id": template_id,
+        }),
+        None,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(
+            tenant_id = %auth.tenant_id,
+            message_id,
+            error = %error,
+            "failed to write message.accepted audit row"
+        );
+    }
 }
 
 /// F20: replay a durably stored ledger response.
@@ -2764,6 +2811,16 @@ async fn send_batch(
         // Mirror the single-send path: a committed delivery resets the
         // tenant's circuit failure counter.
         record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
+
+        // Audit every accepted item (the response's queued rows carry the
+        // persisted message ids).
+        for result in &response.results {
+            if result.status == "queued" {
+                if let Some(id) = result.id.as_deref() {
+                    audit_message_accepted(&state, &auth, id, 1, None).await;
+                }
+            }
+        }
     } else {
         // Nothing accepted: drop the transaction (and with it the in-flight
         // ledger record) so a retry can execute cleanly.

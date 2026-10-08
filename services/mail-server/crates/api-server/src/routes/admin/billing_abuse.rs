@@ -597,6 +597,71 @@ mod adversarial_tests {
         assert!(audited >= 4, "record/review/resolve entries: {audited}");
     }
 
+    /// A REAL control-plane operator reviews/resolves with their user UUID
+    /// as the reviewer (`reviewer(&auth)`). `abuse_reports.reviewed_by` was
+    /// VARCHAR(26) (slug-sized), so every human-operator review and resolve
+    /// failed with "value too long for type character varying(26)" and
+    /// surfaced as a 500 while the report stayed open (live dogfood
+    /// 2026-10-08). The actor column is now VARCHAR(64) like its siblings;
+    /// this test pins the 36-char reviewer end-to-end so the narrow column
+    /// cannot come back.
+    #[tokio::test]
+    async fn review_and_resolve_accept_a_uuid_reviewer() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_abuse_uuid_reviewer").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = apexmail_lib::id::generate_id("abu", 20);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+             VALUES ($1, 'Abuse UUID Target', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let (status, body) = env
+            .post(
+                "/v1/admin/billing/abuse/reports",
+                &json!({ "tenantId": tenant, "reportType": "spam_complaint" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let report_id = uuid::Uuid::parse_str(body["id"].as_str().expect("id"))
+            .expect("report id is a UUID");
+
+        // The exact 36-char actor a browser CP session carries (never the
+        // short "system" fallback an API-key test env uses).
+        let reviewer = "dca0a487-06ee-411c-bb95-068e5f39bef1";
+        billing_service::maintenance::review_abuse_report(
+            &pool,
+            report_id,
+            "investigating",
+            reviewer,
+            "uuid reviewer",
+        )
+        .await
+        .expect("review with a UUID reviewer must not overflow reviewed_by");
+        billing_service::maintenance::resolve_abuse_report(
+            &pool,
+            report_id,
+            reviewer,
+            "resolved by a UUID reviewer",
+        )
+        .await
+        .expect("resolve with a UUID reviewer must not overflow reviewed_by");
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT reviewed_by FROM abuse_reports WHERE id = $1")
+                .bind(report_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back reviewed_by");
+        assert_eq!(stored.as_deref(), Some(reviewer));
+    }
+
     /// Manual restriction impose + clear is the operator's independent lever.
     #[tokio::test]
     async fn manual_restriction_impose_and_clear() {

@@ -1,0 +1,25 @@
+{
+ "probes": {
+  "4b_fixture_ip": "ded2dogfood0000000000000|203.0.113.77|active",
+  "4b_send": "202 {\"data\":{\"id\":\"06049097-1357-40c7-93b8-7b88fe2fe265\",\"status\":\"queued\",\"created_at\":\"2026-10-08T12:28:52.915838548+00:00\"},\"error\":null}",
+  "4b_queue_id": "06049097-1357-40c7-93b8-7b88fe2fe265",
+  "4b_final_queue": "a0c42345-4cbc-488b-b1ec-d565b257ab4b|pending|0|0|relay_delivery_pending|",
+  "4b_final_ledger": "",
+  "4b_pending_since": "",
+  "4b_readyz": "{\"counters\":{\"accepted\":0,\"claimed\":1,\"errors\":35,\"permanently_failed\":1,\"reconciled\":0,\"retry_scheduled\":0,\"sweeps\":11165},\"queue\":{\"accepted\":0,\"delivering\":0,\"failed\":4,\"oldest_pending_age_secs\":-298,\"pending\":1},\"service\":\"outbound-mta\",\"status\":\"ok\",\"uptime_secs\":56323}",
+  "4b_worker_relay_lines": "{\"timestamp\":\"2026-10-08T12:24:45.390326Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"outbound delivery deferred; retry scheduled\",\"send_unit\":\"email_queue:d539c68d-1b36-4382-81e6-8bb8761be1a1:flow4ledger-pj6jsujc@discard.email\",\"attempt\":1,\"next_attempt_at\":\"2026-10-08 12:29:45.387813235 UTC\",\"reason\":\"source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)\"},\"target\":\"outbound_mta::relay\"}\n{\"timestamp\":\"2026-10-08T12:24:45.413098Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"outbound MTA holds the send \u2014 deferring until the relay terminalizes\",\"job_id\":\"d539c68d-1b36-4382-81e6-8bb8761be1a1\",\"recipient\":\"flow4ledger-pj6jsujc@discard.email\",\"route\":\"dedicated(ded2dogfood0000000000000 @ 203.0.113.77)\",\"reason\":\"relay delivery pending: submission 'email_queue:d539c68d-1b36-4382-81e6-8bb8761be1a1:flow4ledger-pj6jsujc@discard.email' failed transiently at attempt 1; next attempt at 2026-10-08 12:29:45.387813235 UTC: source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)\"},\"target\":\"worker_processors::email::processor\"}\n{\"timestamp\":\"2026-10-08T12:28:57.030101Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"outbound delivery deferred; retry scheduled\",\"send_unit\":\"email_queue:a0c42345-4cbc-488b-b1ec-d565b257ab4b:flow4ledger2-pj6jsujc@discard.email\",\"attempt\":1,\"next_attempt_at\":\"2026-10-08 12:33:57.023424062 UTC\",\"reason\":\"source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)\"},\"target\":\"outbound_mta::relay\"}\n{\"timestamp\":\"2026-10-08T12:28:57.054101Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"outbound MTA holds the send \u2014 deferring until the relay terminalizes\",\"job_id\":\"a0c42345-4cbc-488b-b1ec-d565b257ab4b\",\"recipient\":\"flow4ledger2-pj6jsujc@discard.email\",\"route\":\"dedicated(ded2dogfood0000000000000 @ 203.0.113.77)\",\"reason\":\"relay delivery pending: submission 'email_queue:a0c42345-4cbc-488b-b1ec-d565b257ab4b:flow4ledger2-pj6jsujc@discard.email' failed transiently at attempt 1; next attempt at 2026-10-08 12:33:57.023424062 UTC: source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)\"},\"target\":\"worker_processors::email::processor\"}",
+  "4b_relay_lines": "(no lines for this queue id)",
+  "4b_cleanup_ledger": "DELETE 1",
+  "4b_cleanup_ip": "0",
+  "4b_cleanup_note": "queue row kept (terminal/requeued state is the evidence); ledger rows removed"
+ },
+ "transcripts": [
+  {
+   "name": "RUN 4b.1 queue + relay ledger across the retry boundary",
+   "lines": [
+    "queue=[a0c42345-4cbc-488b-b1ec-d565b257ab4b|pending|0|0||] ledger=[]",
+    "queue=[a0c42345-4cbc-488b-b1ec-d565b257ab4b|pending|0|0|relay_delivery_pending|] ledger=[email_queue:a0c42345-4cbc-488b-b1ec-d565b257ab4b:flow4ledger2-pj6jsujc@discard.email|pending|1|12|source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind |299]"
+   ]
+  }
+ ]
+}

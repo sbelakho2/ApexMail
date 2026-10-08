@@ -995,16 +995,28 @@ a {
    (class_integrity_tests.rs) fails on any future class that has no rule. */
 
 /* The responsive drawer shell (`<details class="apex-mobile-nav md:hidden …">`)
-   and its inner panel: off-canvas nav for narrow viewports. */
-.apex-mobile-nav {
+   and its inner panel: off-canvas nav for narrow viewports. Closed state
+   occupies only the summary control — no full-height hit area. */
+.apex-mobile-nav[open] {
+  box-shadow: 0 24px 48px rgb(9 9 11 / 0.28);
+}
+
+.apex-mobile-nav[open] .apex-mobile-nav-panel {
+  position: fixed;
+  inset-y: 0;
+  left: 0;
+  z-index: 50;
+  display: block;
   background: rgb(var(--card));
   border-right: 1px solid rgb(var(--border));
   width: min(20rem, calc(100vw - 2rem));
   overflow-y: auto;
+  height: 100vh;
+  padding-top: 4rem;
 }
 
-.apex-mobile-nav[open] {
-  box-shadow: 0 24px 48px rgb(9 9 11 / 0.28);
+.apex-mobile-nav:not([open]) .apex-mobile-nav-panel {
+  display: none;
 }
 
 /* A flex-1 scroll region must be allowed to shrink, or it never scrolls. */

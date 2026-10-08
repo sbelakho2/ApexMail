@@ -1,0 +1,60 @@
+{
+  "run": "ret4",
+  "results": [
+    {
+      "probe": "P5.1 growth read shows the plan ceiling and the grant",
+      "ok": true,
+      "detail": "plan=growth ceiling=90"
+    },
+    {
+      "probe": "P5.2 within-ceiling write stored (+audit)",
+      "ok": true,
+      "detail": "stored=30"
+    },
+    {
+      "probe": "P5.3 over-ceiling -> named 403",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P5.4 below legal minimum -> 400",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P5.5 non-entitled write -> 403 naming custom_retention",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P5.6 sweep deletes rows older than the tenant value, keeps newer",
+      "ok": true,
+      "detail": "old=0 new=1"
+    },
+    {
+      "probe": "P5.7 sweep deletes the old message content",
+      "ok": true,
+      "detail": "old_message=0"
+    },
+    {
+      "probe": "P5.8 the override write is audited",
+      "ok": true,
+      "detail": "audit_rows=1"
+    },
+    {
+      "probe": "P5.9 legal hold wins (held tenant's old rows survive)",
+      "ok": true,
+      "detail": "hold_row=1"
+    },
+    {
+      "probe": "P5.10 lowering the plan ceiling clamps the stored override (40d row deleted at 30d ceiling)",
+      "ok": true,
+      "detail": "clamp_row=0 stored_override_kept=30"
+    },
+    {
+      "probe": "P5.11 reset clears the override",
+      "ok": true,
+      "detail": "stored=NULL"
+    }
+  ]
+}

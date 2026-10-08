@@ -551,7 +551,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .map(|table| table.rows.as_slice())
         .unwrap_or(&[]);
     let verify_form = format!(
-        "<form method=\"post\" action=\"{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Verify DNS now</button><p class=\"mt-2 text-xs text-muted-foreground max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
+        "<form method=\"post\" action=\"/web{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Verify DNS now</button><p class=\"mt-2 text-xs text-muted-foreground max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
         base = html_escape(&data.base_path),
     );
     if records.is_empty() {
@@ -671,7 +671,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
         "<section class=\"space-y-4\" data-page=\"campaign-detail\">\
         <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Actions validate the campaign's current status server-side and flash the honest outcome.</p></div>\
         {recipients}\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data. A stored scheduled time never fires on its own: scheduled campaigns wait for a manual Start.</p></div>\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data. Scheduled campaigns start automatically when their time arrives.</p></div>\
         </section>",
         actions = actions,
         recipients = recipients_form.map(|form| format!(
@@ -1001,6 +1001,10 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
 
                 let mut columns: Vec<TableColumn> = Vec::with_capacity(table.columns.len() + 3);
                 let mut owned_rows: Vec<Vec<String>> = Vec::with_capacity(table.rows.len());
+                // Row-delete forms are SIBLINGS of the bulk form, never
+                // nested inside it (HTML forbids nested forms; browsers drop
+                // the inner form). Buttons wire back via the `form` attribute.
+                let mut row_forms: Vec<String> = Vec::new();
                 if has_bulk {
                     columns.push(TableColumn {
                         label: "",
@@ -1055,15 +1059,22 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                             }
                         }
                         if let Some(intent) = &data.delete_intent {
-                            // Destructive actions render as a button inside a
-                            // form (correct affordance), GETting the signed
-                            // confirmation page — never as a plain
-                            // navigation-styled link.
-                            actions.push(format!(
-                            "<form method=\"get\" action=\"/confirm\" class=\"inline-flex\"><input type=\"hidden\" name=\"intent\" value=\"{intent}\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"{return_to}\"><button type=\"submit\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button></form>",
+                            // Destructive actions render as a button bound to
+                            // a sibling form (via the `form` attribute),
+                            // GETting the signed confirmation page — never as
+                            // a plain navigation-styled link, and never as a
+                            // form nested inside the bulk form.
+                            let form_id = format!("row-delete-{}", html_escape(&row.id));
+                            row_forms.push(format!(
+                            "<form method=\"get\" action=\"/confirm\" id=\"{form_id}\"><input type=\"hidden\" name=\"intent\" value=\"{intent}\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"{return_to}\"></form>",
+                            form_id = form_id,
                             intent = html_escape(intent),
                             id = html_escape(&row.id),
                             return_to = urlencode_path(&data.base_path),
+                        ));
+                            actions.push(format!(
+                            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button>",
+                            form_id = form_id,
                         ));
                         }
                         // Deferred-feature 3: an edit-only affordance for
@@ -1123,10 +1134,16 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 );
                 let summary = data.summary(noun);
 
+                // Sibling row-delete forms sit OUTSIDE the bulk form so the
+                // document never nests forms; their buttons bind back via
+                // the `form` attribute.
+                let row_forms_html = row_forms.join("");
+
                 if has_bulk {
                     let bulk = data.bulk_action.as_ref().expect("checked above");
                     format!(
-                    "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    row_forms = row_forms_html,
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
                     label = html_escape(&bulk.button_label),
@@ -1136,7 +1153,8 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 )
                 } else {
                     format!(
-                    "<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section>",
+                    "{row_forms}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section>",
+                    row_forms = row_forms_html,
                     table = rendered_table,
                     summary = html_escape(&summary),
                     pagination = pagination,
@@ -1323,18 +1341,25 @@ fn render_campaign_editor_page_with_data(
     let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{}</button>", primary_action_label);
 
     let hidden_id = campaign_id
-        .map(|id| format!("<input type=\"hidden\" name=\"id\" value=\"{}\" />", id))
+        .map(|id| format!("<input type=\"hidden\" name=\"id\" value=\"{}\" />", html_escape(id)))
         .unwrap_or_default();
+    // Identity-preserving saves: edit mode POSTs to the update handler so the
+    // existing row is updated instead of silently creating a duplicate.
+    let form_action = if campaign_id.is_some() {
+        "/web/campaigns/update"
+    } else {
+        "/web/campaigns"
+    };
 
     format!(
         "{breadcrumbs}{outage_notice}\
 <div class=\"w-full max-w-3xl space-y-6\">\
-<section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section>\
-<form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\">{hidden_id}\
+<section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to see a sanitized structural view of the HTML.</p></div></div></section>\
+<form class=\"space-y-6\" method=\"post\" action=\"{form_action}\" enctype=\"application/x-www-form-urlencoded\">{hidden_id}\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{preview_label}{preview_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{from_label}{from_input}</div><div class=\"space-y-2\">{from_name_label}{from_name_input}</div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft. Scheduling stores the time only — nothing sends automatically, and the campaign still waits for you to press Start.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign. Scheduled campaigns start automatically when their time arrives — saving a schedule authorizes that automatic send. Leave blank to save as a draft.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"text-xs text-muted-foreground\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"text-xs text-muted-foreground\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
 <div class=\"space-y-2\">{content_label}{content_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"text-xs text-muted-foreground\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"text-xs text-muted-foreground\">The unsubscribe link is always included.</p></div></div>\
@@ -1349,6 +1374,7 @@ fn render_campaign_editor_page_with_data(
         outage_notice = outage_notice,
         primary_action_label = primary_action_label,
         hidden_id = hidden_id,
+        form_action = form_action,
         scheduled_value = editor.edit.as_ref().map(|e| e.scheduled_at.clone()).unwrap_or_default(),
         name_label = Label { html_for: Some("campaign-name"), text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
         name_input = Input { id: Some("campaign-name"), input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: editor.edit.as_ref().map(|e| e.name.as_str()).unwrap_or(""), left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
@@ -3535,7 +3561,7 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{html_body}</textarea></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft. A scheduled time is stored with the campaign but nothing sends automatically — the campaign waits for you to press Start.</p></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
@@ -4102,21 +4128,36 @@ pub fn web_templates_new_page() -> String {
 /// or edited body server-side in a new tab. Failed posts re-populate via
 /// the signed field-map cookie.
 pub fn web_template_edit_page(template_id: &str) -> String {
+    web_template_edit_page_with_values(&crate::view_data::TemplateEditData {
+        id: template_id.to_string(),
+        name: String::new(),
+        subject: String::new(),
+        html_body: String::new(),
+    })
+}
+
+/// Template edit page with server-loaded values: the form carries the
+/// template's id (hidden) and prefilled name/subject/html_body so Save
+/// updates the row and blank body keeps the stored content.
+pub fn web_template_edit_page_with_values(edit: &crate::view_data::TemplateEditData) -> String {
     let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Template</h1><p class=\"text-sm text-muted-foreground\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to templates</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates/update\" data-form-id=\"template-update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"></textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body — Preview with an empty field renders the stored version.</p></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{html_body}</textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body. Preview with an empty field renders the stored version.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
 <button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
 </div></div>\
 </form></div>",
-        id = html_escape(template_id),
+        id = html_escape(&edit.id),
+        name = html_escape(&edit.name),
+        subject = html_escape(&edit.subject),
+        html_body = html_escape(&edit.html_body),
     )
 }
 
@@ -8976,15 +9017,21 @@ mod deferred_feature_view_tests {
         assert!(hub.contains("href=\"/settings/suppressions\""));
     }
 
-    // ── Feature 7: scheduled-campaign manual-start truth ───────────
+    // ── Feature 7: scheduled-campaign auto-start truth ─────────────
 
     #[test]
-    fn campaign_editors_state_the_manual_start_truth() {
+    fn campaign_editors_state_the_auto_start_truth() {
         let with_values =
             web_campaign_edit_page_with_values(&crate::view_data::CampaignEditData::default());
-        assert!(with_values.contains("the campaign waits for you to press Start"));
+        assert!(
+            with_values.contains("starts the send automatically"),
+            "the editor must state that scheduled campaigns start automatically"
+        );
         let new_page = web_campaigns_new_page();
-        assert!(new_page.contains("still waits for you to press Start"));
+        assert!(
+            new_page.contains("start automatically"),
+            "the new-campaign editor must state that scheduled campaigns start automatically"
+        );
     }
 
     // ── Dogfood P1: the assistant's disabled capability state ──────

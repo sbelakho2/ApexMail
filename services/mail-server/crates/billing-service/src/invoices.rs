@@ -1266,7 +1266,12 @@ struct StoredInvoiceLineItems {
     items: Vec<InvoiceLineItem>,
 }
 
-fn encode_invoice_line_items(
+/// Encode line items in the CANONICAL persisted shape (versioned,
+/// snake_case). Public so every writer — including the api-server admin
+/// invoice path — stores rows this module can decode back; the legacy
+/// bare-array camelCase shape some admin-written rows carry still decodes
+/// through [`InvoiceLineItem`]'s aliases, but no writer may emit it again.
+pub fn encode_invoice_line_items(
     line_items: &[InvoiceLineItem],
 ) -> Result<serde_json::Value, InvoiceError> {
     serde_json::to_value(StoredInvoiceLineItems {
@@ -1284,7 +1289,12 @@ fn encode_invoice_line_items(
 /// invoice with its totals but silently EMPTY items would drift the
 /// customer-facing money state, so it fails with
 /// [`InvoiceError::CorruptLineItems`] naming the invoice.
-fn decode_invoice_line_items(
+///
+/// Both historical persisted shapes are accepted: the canonical versioned
+/// `{schemaVersion, items}` object, and the legacy bare camelCase array the
+/// api-server admin writer produced before 2026-10-08 (decoded through
+/// [`InvoiceLineItem`]'s field aliases).
+pub fn decode_invoice_line_items(
     invoice_id: Uuid,
     value: serde_json::Value,
 ) -> Result<Vec<InvoiceLineItem>, InvoiceError> {
@@ -1643,6 +1653,41 @@ mod tests {
         let error = decode_invoice_line_items(invoice_id, serde_json::Value::Null)
             .expect_err("literal JSON null is not a valid line-items payload");
         assert!(matches!(error, InvoiceError::CorruptLineItems { .. }));
+    }
+
+    /// The api-server admin invoice writer persisted its camelCase response
+    /// DTO (`{unitPrice, vatRate, vatAmount}` in a bare array) into
+    /// `invoices.line_items`. Every later decode of those rows failed with
+    /// "missing field `unit_price`", so void/credit-note readback 500'd while
+    /// the state change committed (live dogfood 2026-10-08). The legacy shape
+    /// must keep decoding; the canonical encoder is what writers emit now.
+    #[test]
+    fn legacy_camel_case_line_items_decode() {
+        let invoice_id = Uuid::new_v4();
+        let legacy = serde_json::json!([
+            {
+                "amount": 5000,
+                "vatRate": 24.0,
+                "quantity": 1,
+                "unitPrice": 5000,
+                "vatAmount": 1200,
+                "description": "CP dogfood line"
+            }
+        ]);
+        let items = decode_invoice_line_items(invoice_id, legacy)
+            .expect("the admin writer's legacy camelCase array must decode");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].unit_price, 5000);
+        assert_eq!(items[0].vat_rate, 24.0);
+        assert_eq!(items[0].vat_amount, 1200);
+        assert_eq!(items[0].amount, 5000);
+
+        // Round trip through the canonical writer: encode -> decode.
+        let encoded = encode_invoice_line_items(&items).expect("encode canonical shape");
+        let decoded = decode_invoice_line_items(invoice_id, encoded).expect("decode canonical shape");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].unit_price, 5000);
+        assert_eq!(decoded[0].vat_amount, 1200);
     }
 
     #[test]

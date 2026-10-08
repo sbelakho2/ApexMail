@@ -4617,16 +4617,39 @@ async fn logout(
         }
     }
 
+    // Logout revokes THE CURRENT SESSION ONLY (docs/api/endpoints/auth.md:
+    // "Invalidate current session (cookie revocation + JWT blacklist)").
+    // This previously called `revoke_user_sessions`, which writes the
+    // tenant+user-wide cutoff marker and therefore signed the user out of
+    // EVERY device — a live dogfood probe (2026-10-08) caught the sibling
+    // session dying on a single logout, contradicting the documented and
+    // console ("Sign Out") contract. Siblings stay valid; `revoke_all` is
+    // the endpoint that intentionally kills every session.
     if let Some(auth_user) = auth.as_ref() {
-        if let Some(user_id) = auth_user.user_id.as_deref() {
-            revoke_user_sessions(
-                &state.redis,
-                &auth_user.tenant_id,
-                user_id,
-                state.config.jwt_expiry.as_secs(),
-            )
-            .await?;
+        let ttl = state.config.jwt_expiry.as_secs();
+        if let Some(session_id) = auth_user.session_id.as_deref() {
+            crate::middleware::auth::revoke_session_marker(&state, session_id, ttl).await?;
+            if let Some(user_id) = auth_user.user_id.as_deref() {
+                // Accountability trail: the session row goes with the marker.
+                if let Err(error) = sqlx::query(
+                    "DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid",
+                )
+                .bind(session_id)
+                .bind(user_id)
+                .execute(&state.db)
+                .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        session_id,
+                        "could not delete the logged-out session row"
+                    );
+                }
+            }
         }
+        // A bearer/API-key caller has no session id: the blacklist above is
+        // the complete revocation for that credential, so no user-wide marker
+        // is written either.
     }
 
     let mut headers = HeaderMap::new();

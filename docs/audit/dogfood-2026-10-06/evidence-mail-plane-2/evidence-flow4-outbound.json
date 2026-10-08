@@ -1,0 +1,79 @@
+{
+ "probes": {
+  "4_send_status": 202,
+  "4_send_response": "{\"data\":{\"id\":\"9e8a62b5-c385-4142-a99d-b6f9e06759d8\",\"status\":\"queued\",\"created_at\":\"2026-10-08T11:47:32.704987947+00:00\"},\"error\":null}",
+  "4_queue_id": "9e8a62b5-c385-4142-a99d-b6f9e06759d8",
+  "4_queue_row_terminal": "95cda82f-5248-40b8-bd47-06f59ffdd9e2|sent|0|0|t|a275e000-7e0f-4886-99ac-2e55fcb8e640|",
+  "4_mailpit_id": "MimQPvRbVzCh8LkUDitxVp",
+  "4_raw_headers": "Return-Path: <sender-pj6jsujc@mp2-pj6jsujc.test>\r\nReceived: from edd79d8c2650 (apexmail-worker-1.apexmail_apexmail_backend. [172.20.0.9])\r\n        by ecd72b55317f (Mailpit) with SMTP\r\n        for <flow4-sink-pj6jsujc@dogfood.test>; Thu, 8 Oct 2026 11:47:34 +0000 (UTC)\r\nDKIM-Signature: v=1; a=rsa-sha256; s=am-2158b614c6d14e6b91234e1945743433; d=mp2-pj6jsujc.test; c=relaxed/relaxed;\r\n\th=MIME-Version:Date:Message-ID:To:Subject:From; t=1791460054; bh=Lzj30MjnlS\r\n\tPbDAlKN5PZ8sRTUyrw0CSNSau9wESI7A4=; b=b9D21Nj4Vnz03uuecrijgY+cYmmTq3XnYaIFp\r\n\tfTzGAJC4cVT5ktEY3slmSvbOLoraUuivOCOyh9NtEvx4UuCeL2g1prZilEEzaZdWmMi5dkhZtqI\r\n\tQ6gZg114lJKc7Hg7ZTR1vQFuyThkD+endDmAWd9dKKUWHcbRowAPX1UfO/zWM6pwzBDkLUVTi4q\r\n\tiEawy/TC6KZqqnPEvWYBkx+opg4rgHpxYUt9LY3x8wlBumLKW3HPgzrAHhRibj3ufU2LcUp6qSH\r\n\t9RSxzdW16yMoh6tgTfieDFMPrKwvfoI4jN4TTt2jX1ATGOKJwNfh6hlrxTywggpqD9DtSgjioMy\r\n\tBQGkg==;\r\nFrom: <sender-pj6jsujc@mp2-pj6jsujc.test>\r\nSubject: Dogfood2 outbound pj6jsujc\r\nTo: <flow4-sink-pj6jsujc@dogfood.test>\r\nReply-To: <helpdesk-pj6jsujc@mp2-pj6jsujc.test>\r\nList-Unsubscribe: <http://127.0.0.1:3001/u/f2PbavyTgMRV0iYfjBZq0PSKoFu4Lqc7C804gdtmw4-IVU2QmtTmb9qFG3Yxcvn0ElxSVV45A6HUOEEZH_bSP12iyNV_4H5h49L1jz6BXI3Fc-qtU-foMocyCgdnNdetOwZZsgqgxU4PGxsYUOBmJOARg1JckgRtJ7Qdu96B5cXqfqSDFiwVm_LKd-18wOvpKQ>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nX-ApexMail-Message-ID: 9e8a62b5-c385-4142-a99d-b6f9e06759d8\r\nX-ApexMail-Tenant-ID: 7myp1cnv9yscwr3z2i1fdkhiry\r\nMessage-ID: <9e8a62b5-c385-4142-a99d-b6f9e06759d8@mp2-pj6jsujc.test>\r\nX-Campaign: dogfood2-pj6jsujc\r\nDate: Thu, 8 Oct 2026 11:47:34 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; \r\n\tboundary=\"18dc8b6dabc52658_b000ac3b3c98f508_323b89ac933cfad7\"",
+  "4_dkim_signature_present": true,
+  "4_list_unsubscribe_present": true,
+  "4_list_unsubscribe_post": true,
+  "4_return_path": true,
+  "4_reply_to": true,
+  "4_x_apexmail_message_id": true,
+  "4_tracking_rewritten": true,
+  "4_received": true,
+  "4_list_unsubscribe_value": "<http://127.0.0.1:3001/u/f2PbavyTgMRV0iYfjBZq0PSKoFu4Lqc7C804gdtmw4-IVU2QmtTmb9qFG3Yxcvn0ElxSVV45A6HUOEEZH_bSP12iyNV_4H5h49L1jz6BXI3Fc-qtU-foMocyCgdnNdetOwZZsgqgxU4PGxsYUOBmJOARg1JckgRtJ7Qdu96B5cXqfqSDFiwVm_LKd-18wOvpKQ>",
+  "4_return_path_value": "<sender-pj6jsujc@mp2-pj6jsujc.test>",
+  "4_reply_to_value": "<helpdesk-pj6jsujc@mp2-pj6jsujc.test>",
+  "4_dkim_header": "v=1; a=rsa-sha256; s=am-2158b614c6d14e6b91234e1945743433; d=mp2-pj6jsujc.test; c=relaxed/relaxed;\r\n\th=MIME-Version:Date:Message-ID:To:Subject:From; t=1791460054; bh=Lzj30MjnlS\r\n\tPbDAlKN5PZ8sRTUyrw0CSNSau9wESI7A4=; b=b9D21Nj4Vnz03uuecrijgY+cYmmTq3XnYaIFp\r\n\tfTzGAJC4cVT5ktEY3slmSvbOLoraUuivOCOyh9NtEvx4UuCeL2g1prZilEEzaZdWmMi5dkhZtqI\r\n\tQ6gZg114lJKc7Hg7ZTR1vQFuyThkD+endDmAWd9dKKUWHcbRowAPX1UfO/zWM6pwzBDkLUVTi4q\r\n\tiEawy/TC6KZqqnPEvWYBkx+opg4rgHpxYUt9LY3x8wlBumLKW3HPgzrAHhRibj3ufU2LcUp6qSH\r\n\t9RSxzdW16yMoh6tgTfieDFMPrKwvfoI4jN4TTt2jX1ATGOKJwNfh6hlrxTywggpqD9DtSgjioMy\r\n\tBQGkg==;",
+  "4_tracking_clicks": [
+   "http://127.0.0.1:3001/c/fPJwPcQ691QiaxZUv4u8ngwoP78LpjIKdNwqSdUo3VLVwFdnO7nmVGb7svDYxacoWflb1pKdU61E_DnuPABX-q--nQXjk8ivp02tcxylLxmzlVWfkOH_bys8FN5qCPQaXAVd3iNus9_YUsOKNkcCujEXEpaCyUUo0HWXDFwPXsIdC3Yzf-RbltZB-el2Rgu2eLJdVaWK3GBxN7bFn2fH1q218HTGm_E8g25St74tfjn_3FQz5HRqkgoIuhpu_g",
+   "http://127.0.0.1:3001/c/elFKjxudZS9_5yvq-uaGVKPd__3s50tanfR_3CLqAuIrYzjLGUQJW_0LbSdVrZxYuCx9_w5hWNI6qIIUziCYjxgsCQgBVY40ZXr7HHthImNbO6PWNHP17-GqlEeMTDaIRiye4Y_hz5D1xYsu3sW8BABY3BdyY_tweTV4aQtNMxeSRrzN--QPjbW6GujgCFD5SSlYdJvIzpWaF83XKV9kZsEfOH-Z40IIcF-Mr52wBGbEVhMA6gsZ7iHUqyM3gkE"
+  ],
+  "4_tracking_pixels": [
+   "http://127.0.0.1:3001/o/LwjO4O_TY95zyYy1ZkMaIbCVfX9tAH03Uhmr2mNcSZJMAoxTus_m8ha0bFXNND7WW5DI2S037Zxx1Ln9kdqzwsjC-gOfAOGsjPQK7tPMAM2y3YG0dGy_f3u8160l9G39TMqavnYw7W0CGHow0kyNj9296zhbkiUJTH3GXHK3jcVHfW8"
+  ],
+  "4_dkim_domain": "mp2-pj6jsujc.test",
+  "4_dkim_selector": "am-2158b614c6d14e6b91234e1945743433",
+  "4_dkim_signed_headers": "MIME-Version:Date:Message-ID:To:Subject:From",
+  "4_dkim_canonicalization": "relaxed/relaxed",
+  "4_dkim_signature_valid": true,
+  "4_worker_logs_for_send": [],
+  "4_relay_ledger": "SQLERR: ERROR:  column \"status\" does not exist\nLINE 1: select send_unit,status,attempt,next_attempt_at from outboun...\n                         ^\nHINT:  Perhaps you meant to reference the column \"outbound_relay_ledger.state\"."
+ },
+ "transcripts": [
+  {
+   "name": "RUN 4.1 queue row after send",
+   "lines": [
+    "95cda82f-5248-40b8-bd47-06f59ffdd9e2|sent|0|0|t|a275e000-7e0f-4886-99ac-2e55fcb8e640|"
+   ]
+  },
+  {
+   "name": "RUN 4.2 delivered raw headers",
+   "lines": [
+    "Return-Path: <sender-pj6jsujc@mp2-pj6jsujc.test>",
+    "Received: from edd79d8c2650 (apexmail-worker-1.apexmail_apexmail_backend. [172.20.0.9])",
+    "        by ecd72b55317f (Mailpit) with SMTP",
+    "        for <flow4-sink-pj6jsujc@dogfood.test>; Thu, 8 Oct 2026 11:47:34 +0000 (UTC)",
+    "DKIM-Signature: v=1; a=rsa-sha256; s=am-2158b614c6d14e6b91234e1945743433; d=mp2-pj6jsujc.test; c=relaxed/relaxed;",
+    "\th=MIME-Version:Date:Message-ID:To:Subject:From; t=1791460054; bh=Lzj30MjnlS",
+    "\tPbDAlKN5PZ8sRTUyrw0CSNSau9wESI7A4=; b=b9D21Nj4Vnz03uuecrijgY+cYmmTq3XnYaIFp",
+    "\tfTzGAJC4cVT5ktEY3slmSvbOLoraUuivOCOyh9NtEvx4UuCeL2g1prZilEEzaZdWmMi5dkhZtqI",
+    "\tQ6gZg114lJKc7Hg7ZTR1vQFuyThkD+endDmAWd9dKKUWHcbRowAPX1UfO/zWM6pwzBDkLUVTi4q",
+    "\tiEawy/TC6KZqqnPEvWYBkx+opg4rgHpxYUt9LY3x8wlBumLKW3HPgzrAHhRibj3ufU2LcUp6qSH",
+    "\t9RSxzdW16yMoh6tgTfieDFMPrKwvfoI4jN4TTt2jX1ATGOKJwNfh6hlrxTywggpqD9DtSgjioMy",
+    "\tBQGkg==;",
+    "From: <sender-pj6jsujc@mp2-pj6jsujc.test>",
+    "Subject: Dogfood2 outbound pj6jsujc",
+    "To: <flow4-sink-pj6jsujc@dogfood.test>",
+    "Reply-To: <helpdesk-pj6jsujc@mp2-pj6jsujc.test>",
+    "List-Unsubscribe: <http://127.0.0.1:3001/u/f2PbavyTgMRV0iYfjBZq0PSKoFu4Lqc7C804gdtmw4-IVU2QmtTmb9qFG3Yxcvn0ElxSVV45A6HUOEEZH_bSP12iyNV_4H5h49L1jz6BXI3Fc-qtU-foMocyCgdnNdetOwZZsgqgxU4PGxsYUOBmJOARg1JckgRtJ7Qdu96B5cXqfqSDFiwVm_LKd-18wOvpKQ>",
+    "List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+    "X-ApexMail-Message-ID: 9e8a62b5-c385-4142-a99d-b6f9e06759d8",
+    "X-ApexMail-Tenant-ID: 7myp1cnv9yscwr3z2i1fdkhiry",
+    "Message-ID: <9e8a62b5-c385-4142-a99d-b6f9e06759d8@mp2-pj6jsujc.test>",
+    "X-Campaign: dogfood2-pj6jsujc",
+    "Date: Thu, 8 Oct 2026 11:47:34 +0000",
+    "MIME-Version: 1.0",
+    "Content-Type: multipart/alternative; ",
+    "\tboundary=\"18dc8b6dabc52658_b000ac3b3c98f508_323b89ac933cfad7\""
+   ]
+  },
+  {
+   "name": "RUN 4.3 worker logs for this send",
+   "lines": []
+  }
+ ]
+}

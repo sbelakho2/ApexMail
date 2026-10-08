@@ -4485,6 +4485,29 @@ async fn admin_create_invoice(
             },
         )
         .collect();
+    // Persist the CANONICAL billing-service shape, never the response DTO:
+    // the legacy camelCase bare array stored here made every later decode
+    // fail ("missing field `unit_price`"), so void/credit-note readback
+    // 500'd on the admin's own invoices (live dogfood 2026-10-08).
+    let storage_line_items: Vec<billing_service::types::InvoiceLineItem> = base_line_items
+        .iter()
+        .zip(vat_per_line.iter())
+        .map(
+            |((description, quantity, unit_price, amount), vat_amount)| {
+                billing_service::types::InvoiceLineItem {
+                    description: description.clone(),
+                    quantity: *quantity,
+                    unit_price: *unit_price,
+                    amount: *amount,
+                    vat_rate,
+                    vat_amount: *vat_amount,
+                }
+            },
+        )
+        .collect();
+    let stored_line_items_json =
+        billing_service::invoices::encode_invoice_line_items(&storage_line_items)
+            .map_err(|error| ApiError::Internal(format!("invoice line encoding failed: {error}")))?;
 
     let total = subtotal + vat_total;
     let now = Utc::now();
@@ -4515,7 +4538,7 @@ async fn admin_create_invoice(
     .bind(subtotal)
     .bind(vat_total)
     .bind(total)
-    .bind(serde_json::to_value(&line_items)?)
+    .bind(stored_line_items_json)
     .bind(&address_snapshot)
     .bind(now)
     .bind(due_at)

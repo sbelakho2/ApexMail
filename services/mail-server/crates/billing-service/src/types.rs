@@ -320,10 +320,21 @@ pub struct InvoiceLineItem {
     pub description: String,
     pub quantity: i64,
     /// Unit price in cents.
+    ///
+    /// The `camelCase` aliases keep the LEGACY shape decodable: the
+    /// api-server admin invoice writer persisted `LegacyInvoiceLineItemDto`
+    /// (camelCase, bare array) into `invoices.line_items`, so every
+    /// decode of such a row failed with "missing field `unit_price`" and
+    /// void/readback 500'd (live dogfood 2026-10-08). The canonical writer
+    /// now stores the versioned snake_case shape; historic rows still
+    /// decode through these aliases.
+    #[serde(alias = "unitPrice")]
     pub unit_price: i64,
     /// Line total in cents.
     pub amount: i64,
+    #[serde(alias = "vatRate")]
     pub vat_rate: f64,
+    #[serde(alias = "vatAmount")]
     pub vat_amount: i64,
 }
 

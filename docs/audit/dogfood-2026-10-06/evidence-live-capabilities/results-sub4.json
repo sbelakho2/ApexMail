@@ -1,0 +1,45 @@
+{
+  "run": "sub4",
+  "results": [
+    {
+      "probe": "P6.1 Business can create a subaccount",
+      "ok": true,
+      "detail": "status=200 live_plan_max_subaccounts=10"
+    },
+    {
+      "probe": "P6.2 ten subaccounts created (Business cap)",
+      "ok": true,
+      "detail": "total=10"
+    },
+    {
+      "probe": "P6.3 11th refused naming max_subaccounts (403)",
+      "ok": true,
+      "detail": "status=403 msg='{\"code\": \"QUOTA_EXCEEDED\", \"error\": \"Maximum sub-accounts (10) reached for this plan (max_subaccounts)\", \"success\": false}'"
+    },
+    {
+      "probe": "P6.4 per-key revoke works",
+      "ok": true,
+      "detail": "key=ed47543e-d1ef-4d95-a95c-16b80b1a3db9 revoked_after=True"
+    },
+    {
+      "probe": "P6.5 concurrent creates at the cap -> exactly 10 rows",
+      "ok": true,
+      "detail": "total=10 statuses=[200, 403]"
+    },
+    {
+      "probe": "P6.6 non-entitled tenant -> 403 naming subaccounts",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P6.7 cross-tenant list refused (403)",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P6.7 cross-tenant get refused",
+      "ok": true,
+      "detail": "status=403"
+    }
+  ]
+}

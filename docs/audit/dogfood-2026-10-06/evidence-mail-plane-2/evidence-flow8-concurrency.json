@@ -1,0 +1,63 @@
+{
+ "probes": {
+  "8.1_accepted": "20/20",
+  "8.1_responses": "[[0, \"250 2.0.0 Ok id=inb_383080807411403fbc11c5\"], [3, \"250 2.0.0 Ok id=inb_abfef692b8c744bebf81c6\"], [5, \"250 2.0.0 Ok id=inb_a546b641332540cba6d760\"], [1, \"250 2.0.0 Ok id=inb_5744c0d4b45543cfa60a3f\"], [2, \"250 2.0.0 Ok id=inb_5ded70a8d1fc47dd844d35\"], [6, \"250 2.0.0 Ok id=inb_21e1c9e43ff142d0acc324\"], [4, \"250 2.0.0 Ok id=inb_ceb9972e5d534738991061\"], [7, \"250 2.0.0 Ok id=inb_7c8fb3aff647483083e633\"], [8, \"250 2.0.0 Ok id=inb_db4ba74598294d9fb0bf44\"], [10, \"250 2.0.0 Ok id=inb_c3ebc058f41d474a9af714\"], [9, \"250 2.0.0 Ok id=inb_63237512c37c499cbc1b72\"], [11, \"250 2.0.0 Ok id=inb_8cce7a581ef449f396f714\"], [12, \"250 2.0.0 Ok id=inb_48ba9ab07d394215a2e593\"], [13, \"250 2.0.0 Ok id=inb_f363241fc88a45a18e9ade\"], [15, \"250 2.0.0 Ok id=inb_b7ed00d9b32b4ad1b650f8\"], [14, \"250 2.0.0 Ok id=inb_4f4f42413ada45f4b141dc\"], [16, \"250 2.0.0 Ok id=inb_ee5ee67518c340dd8f6c37\"], [18, \"250 2.0.0 Ok id=inb_7fde7e2622e143dd972fda\"], [17, \"250 2.0.0 Ok id=inb_1124678e1df94f12a14860\"], [19, \"250 2.0.0 Ok id=inb_df4f1475451d48648a7fed\"]]",
+  "8.1_db_rows": "20",
+  "8.1_inbound_rows": "20",
+  "8.1_mta_panics": 0,
+  "8.1_uidnext": "23",
+  "8.2_attempt1_response": "250 2.0.0 Ok id=inb_6fb6e690f2db42ea9cad81",
+  "8.2_attempt2_response": "250 2.0.0 Ok id=inb_aa12134910b942558d5e48",
+  "8.2_rows_for_message_id": "1",
+  "8.2_dedup_exempt_rows": "0",
+  "8.2_inbound_disposition": "2|accept",
+  "8.2_uid_moves": "23|dup probe pj6jsujc",
+  "8.3_response": "S: 552 5.3.4 Message size exceeds fixed maximum message size",
+  "8.3_db_rows": "0"
+ },
+ "transcripts": [
+  {
+   "name": "RUN 8.1 20 paced simultaneous inbounds",
+   "lines": [
+    "0: 250 2.0.0 Ok id=inb_383080807411403fbc11c5",
+    "1: 250 2.0.0 Ok id=inb_5744c0d4b45543cfa60a3f",
+    "2: 250 2.0.0 Ok id=inb_5ded70a8d1fc47dd844d35",
+    "3: 250 2.0.0 Ok id=inb_abfef692b8c744bebf81c6",
+    "4: 250 2.0.0 Ok id=inb_ceb9972e5d534738991061",
+    "5: 250 2.0.0 Ok id=inb_a546b641332540cba6d760",
+    "6: 250 2.0.0 Ok id=inb_21e1c9e43ff142d0acc324",
+    "7: 250 2.0.0 Ok id=inb_7c8fb3aff647483083e633",
+    "8: 250 2.0.0 Ok id=inb_db4ba74598294d9fb0bf44",
+    "9: 250 2.0.0 Ok id=inb_63237512c37c499cbc1b72",
+    "10: 250 2.0.0 Ok id=inb_c3ebc058f41d474a9af714",
+    "11: 250 2.0.0 Ok id=inb_8cce7a581ef449f396f714",
+    "12: 250 2.0.0 Ok id=inb_48ba9ab07d394215a2e593",
+    "13: 250 2.0.0 Ok id=inb_f363241fc88a45a18e9ade",
+    "14: 250 2.0.0 Ok id=inb_4f4f42413ada45f4b141dc",
+    "15: 250 2.0.0 Ok id=inb_b7ed00d9b32b4ad1b650f8",
+    "16: 250 2.0.0 Ok id=inb_ee5ee67518c340dd8f6c37",
+    "17: 250 2.0.0 Ok id=inb_1124678e1df94f12a14860",
+    "18: 250 2.0.0 Ok id=inb_7fde7e2622e143dd972fda",
+    "19: 250 2.0.0 Ok id=inb_df4f1475451d48648a7fed"
+   ]
+  },
+  {
+   "name": "RUN 8.3 oversized body (26 MiB)",
+   "lines": [
+    "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+    "S: 250-mail.apexmail.ee Hello big.dogfood2.test",
+    "S: 250-SIZE 26214400",
+    "S: 250-STARTTLS",
+    "S: 250-8BITMIME",
+    "S: 250-PIPELINING",
+    "S: 250-ENHANCEDSTATUSCODES",
+    "S: 250 SMTPUTF8",
+    "S: 250 2.0.0 Ok",
+    "S: 250 2.0.0 Ok",
+    "S: 354 Start mail input; end with <CRLF>.<CRLF>",
+    "C: DATA with 26 MiB body sent",
+    "S: 552 5.3.4 Message size exceeds fixed maximum message size"
+   ]
+  }
+ ]
+}

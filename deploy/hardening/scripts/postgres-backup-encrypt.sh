@@ -200,7 +200,50 @@ perform_backup() {
     offsite_copy
 }
 
+# ── Dry run (--dry-run|-n) ────────────────────────────────────────────────────
+# Proves the postgres target is reachable and summarizes the plan, writing
+# NOTHING: no dump, no ciphertext, no retention cleanup. An unreachable
+# target fails LOUDLY (exit 1, pg_dump/psql stderr printed) — the U-1/U-9
+# class this script must never hide behind a silent empty backup.
+dry_run_check() {
+    timestamp="$(date -u +%Y%m%d-%H%M%S)"
+    log "DRY RUN: postgres backup of ${POSTGRES_DB}@${POSTGRES_HOST} would write ${BACKUP_DIR}/apexmail-backup-${timestamp}.sql.gz.enc"
+    if [ -f "$POSTGRES_PASSWORD_FILE" ]; then
+        PGPASSWORD="$(tr -d '\r\n' < "$POSTGRES_PASSWORD_FILE")"
+        export PGPASSWORD
+    fi
+    # Small temp target (removed below): `-f /dev/null` cannot be fsynced by
+    # pg_dump on every platform ("could not fsync file /dev/null"), and the
+    # point of the dry run is that nothing remains afterwards.
+    tmpcheck="$(mktemp "${TMPDIR:-/tmp}/apexmail-backup-dryrun.XXXXXX")"
+    # NB: capture the status inside the else branch — after an `if` with a
+    # false condition and no else, `$?` is the if-statement's own 0.
+    if pg_dump -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -Fc --no-owner --no-acl --schema-only -f "$tmpcheck" 2>/tmp/apexmail-backup-pgdump.err; then
+        rm -f "$tmpcheck" /tmp/apexmail-backup-pgdump.err
+        unset PGPASSWORD || true
+        if [ -n "$ENCRYPTION_KEY" ]; then
+            log "DRY RUN: encryption key present; ciphertext would be AES-256-CBC/PBKDF2 with verified restore listing"
+        else
+            warn "DRY RUN: no BACKUP_ENCRYPTION_KEY(_FILE) — a real run would store UNENCRYPTED backups"
+        fi
+        log "Dry run complete: ${POSTGRES_DB}@${POSTGRES_HOST} reachable; nothing was written."
+        exit 0
+    else
+        rc=$?
+    fi
+    err "DRY RUN failed: pg_dump could not read ${POSTGRES_DB}@${POSTGRES_HOST} (exit ${rc}); stderr follows:"
+    sed 's/^/  /' /tmp/apexmail-backup-pgdump.err >&2 || true
+    rm -f "$tmpcheck" /tmp/apexmail-backup-pgdump.err
+    unset PGPASSWORD || true
+    exit 1
+}
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
+if [ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "-n" ]; then
+    dry_run_check
+fi
+
 log "starting backup scheduler (schedule: ${SCHEDULE}, keep: ${BACKUP_KEEP_DAYS}d / ${BACKUP_KEEP_COUNT} backups)"
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"

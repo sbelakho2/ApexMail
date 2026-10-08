@@ -254,11 +254,40 @@ struct ParsedMessageMetadata {
     headers: serde_json::Value,
 }
 
+/// Stored `from_address` when the message carries no usable From addr-spec
+/// (e.g. an RFC 3464 DSN's `From: <>`, an unparseable header, or a
+/// malformed body). RFC 2606 reserves `.invalid`, so the sentinel can never
+/// collide with a real mailbox — while still satisfying
+/// `chk_mail_messages_from_address`
+/// (`^[^@\s]+@[^@\s]+\.[^@\s]+$`), which the previous `unknown@localhost`
+/// default violated (no dot in the domain), making every such message fail
+/// storage with a database CHECK violation after the MTA had already
+/// accepted it.
+const UNPARSEABLE_FROM_ADDRESS: &str = "unknown@unknown.invalid";
+
+/// Mirror of the `mail_messages.from_address` CHECK constraint. Addresses
+/// that do not satisfy it (empty, `<>`, a domain without a dot, …) must be
+/// replaced by [`UNPARSEABLE_FROM_ADDRESS`] before the INSERT — otherwise
+/// the whole delivery fails permanently.
+fn is_storable_from_address(address: &str) -> bool {
+    if address.is_empty() || address.len() > 320 || address.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = address.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.contains('@')
+        && domain.split('.').count() >= 2
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+}
+
 fn parse_message_metadata(raw_message: &[u8]) -> ParsedMessageMetadata {
     let Some(message) = MessageParser::new().parse(raw_message) else {
         return ParsedMessageMetadata {
             message_id: Uuid::new_v4().to_string(),
-            from_address: "unknown@localhost".to_string(),
+            from_address: UNPARSEABLE_FROM_ADDRESS.to_string(),
             from_name: None,
             to_addresses: vec![],
             cc_addresses: vec![],
@@ -276,7 +305,7 @@ fn parse_message_metadata(raw_message: &[u8]) -> ParsedMessageMetadata {
         message_id: header_value(&headers, "Message-ID")
             .or_else(|| message.message_id().map(str::to_string))
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        from_address: "unknown@localhost".to_string(),
+        from_address: UNPARSEABLE_FROM_ADDRESS.to_string(),
         from_name: None,
         to_addresses: vec![],
         cc_addresses: vec![],
@@ -324,8 +353,14 @@ fn parse_message_metadata(raw_message: &[u8]) -> ParsedMessageMetadata {
 
     let from_addresses = collect_addresses(message.from().cloned());
     if let Some(from) = from_addresses.first() {
-        metadata.from_address = from.address.clone();
-        metadata.from_name = from.name.clone();
+        // The DB CHECK requires an addr-spec with a dotted domain; a
+        // malformed From (e.g. `<>`, a bare local part, a dotless domain)
+        // must not make the whole message unstorable. Keep the display name
+        // only when the address itself is storable.
+        if is_storable_from_address(&from.address) {
+            metadata.from_address = from.address.clone();
+            metadata.from_name = from.name.clone();
+        }
     }
 
     metadata.to_addresses = collect_addresses(message.to().cloned());
@@ -1717,9 +1752,62 @@ mod tests {
     fn parse_message_metadata_falls_back_when_message_is_unparseable() {
         let metadata = parse_message_metadata(&[0xff, 0xfe, 0xfd]);
 
-        assert_eq!(metadata.from_address, "unknown@localhost");
+        // The sentinel must satisfy chk_mail_messages_from_address (a dotted
+        // domain) — `unknown@localhost` did not, so the INSERT failed and
+        // the whole delivery was lost after SMTP acceptance (dogfood-2).
+        assert_eq!(metadata.from_address, UNPARSEABLE_FROM_ADDRESS);
+        assert!(is_storable_from_address(UNPARSEABLE_FROM_ADDRESS));
         assert!(metadata.to_addresses.is_empty());
         assert!(metadata.subject.is_empty());
+    }
+
+    /// Dogfood-2 live finding (accepted-then-lost mail): an RFC 3464 DSN
+    /// (`From: <>` / a bare `Mailer Daemon <>`) or any message whose From
+    /// addr-spec is missing/unparseable was accepted by the MTA and then
+    /// failed mailstore storage with
+    /// `new row for relation "mail_messages_2026_q4" violates check
+    /// constraint "chk_mail_messages_from_address"` — retried until the
+    /// inbound ladder gave up, with a null reverse-path so no DSN could ever
+    /// report it. The parsed metadata must always carry a storable address.
+    #[test]
+    fn unparseable_from_headers_yield_a_storable_placeholder() {
+        for (label, raw) in [
+            (
+                "dsn-style empty From",
+                b"From: Mailer Daemon <>\r\nTo: <inbox@example.test>\r\nSubject: bounce\r\n\r\nbody\r\n".to_vec(),
+            ),
+            (
+                "no From header at all",
+                b"Message-ID: <m1@example.test>\r\nTo: <inbox@example.test>\r\nSubject: s\r\n\r\nbody\r\n".to_vec(),
+            ),
+            (
+                "dotless From domain",
+                b"From: daemon@localhost\r\nTo: <inbox@example.test>\r\n\r\nbody\r\n".to_vec(),
+            ),
+        ] {
+            let metadata = parse_message_metadata(&raw);
+            assert!(
+                is_storable_from_address(&metadata.from_address),
+                "{label}: from_address {:?} must satisfy the DB CHECK",
+                metadata.from_address
+            );
+        }
+    }
+
+    /// The storable-address predicate must mirror the constraint exactly:
+    /// the values the constraint rejects are exactly the values the
+    /// placeholder path must intercept.
+    #[test]
+    fn storable_from_address_mirrors_the_db_check() {
+        assert!(!is_storable_from_address(""));
+        assert!(!is_storable_from_address("unknown@localhost"));
+        assert!(!is_storable_from_address("no-at-sign"));
+        assert!(!is_storable_from_address("a b@example.com"));
+        assert!(!is_storable_from_address("user@example"));
+        assert!(!is_storable_from_address("user@@example.com"));
+        assert!(is_storable_from_address("user@example.com"));
+        assert!(is_storable_from_address("user@sub.example.co.uk"));
+        assert!(is_storable_from_address("unknown@unknown.invalid"));
     }
 
     // ── M: per-account rate limiter isolation ──────────────────────────────
@@ -2083,6 +2171,90 @@ mod tests {
             "original and exempt copy must coexist, got {:?}",
             list.messages.iter().map(|m| m.uid).collect::<Vec<_>>()
         );
+
+        for table in ["mail_messages", "mail_mailboxes"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                .bind(account.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Dogfood-2 P1 (accepted-then-lost mail), DB-backed: a message whose
+    /// From addr-spec is missing or unparseable (the DSN shape
+    /// `From: Mailer Daemon <>` — and any message with no From at all) was
+    /// accepted by the MTA with `250` and then failed EVERY delivery attempt
+    /// with
+    /// `new row for relation "mail_messages_2026_q4" violates check
+    /// constraint "chk_mail_messages_from_address"`, because the fallback
+    /// sentinel was `unknown@localhost` (no dot in the domain). The message
+    /// could never be stored, and the null reverse-path meant no DSN could
+    /// ever report the loss. Storage must succeed with the reserved
+    /// `.invalid` placeholder instead.
+    #[tokio::test]
+    async fn store_message_with_unparseable_from_is_not_lost_to_the_check_constraint() {
+        let Some(pool) =
+            crate::test_db::canonical_pool("store_message_with_unparseable_from_is_not_lost")
+                .await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        let email = format!("dsn-{}@example.com", Uuid::new_v4());
+        let account = svc
+            .storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let inbox = svc
+            .storage
+            .list_mailboxes(&account.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap();
+
+        let raw = "From: Mailer Daemon <>\r\nTo: <inbox@example.com>\r\nSubject: bounce\r\n\
+                   Message-ID: <dsn-1@example.com>\r\n\r\nbody\r\n";
+        let stored = svc
+            .store_message(Request::new(StoreMessageRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                raw_message: raw.as_bytes().to_vec().into(),
+                flags: None,
+                internal_date: 0,
+                dedup_exempt: false,
+            }))
+            .await
+            .expect("a DSN-style message must store, not fail the from_address CHECK")
+            .into_inner();
+        assert!(stored.uid > 0);
+
+        // The persisted column — the one the CHECK guards — must carry the
+        // placeholder (this is the exact INSERT that used to fail).
+        let stored_from: String = sqlx::query_scalar(
+            "SELECT from_address FROM mail_messages WHERE account_id = $1 AND uid = $2",
+        )
+        .bind(account.id)
+        .bind(stored.uid as i64)
+        .fetch_one(&pool)
+        .await
+        .expect("the stored row must be readable");
+        assert_eq!(stored_from, UNPARSEABLE_FROM_ADDRESS);
 
         for table in ["mail_messages", "mail_mailboxes"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))

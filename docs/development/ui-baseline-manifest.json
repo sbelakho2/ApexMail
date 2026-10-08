@@ -250,13 +250,19 @@
     },
     {
       "id": "control-plane",
-      "routeCount": 32,
+      "routeCount": 33,
       "routes": [
         {
           "path": "/login",
           "name": "Login",
           "category": "auth",
           "authRequired": false
+        },
+        {
+          "path": "/confirm",
+          "name": "Confirm Action",
+          "category": "admin",
+          "authRequired": true
         },
         {
           "path": "/",

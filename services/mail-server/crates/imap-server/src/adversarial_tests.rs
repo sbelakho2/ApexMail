@@ -2752,22 +2752,29 @@ async fn oversized_literal_is_refused_without_reading_the_payload() {
     // 33 MiB > MAX_LITERAL_SIZE (32 MiB): the server must refuse to read it
     // and close, never allocating or consuming the declared size.
     h.send_line("A900 APPEND INBOX {34603009}").await;
-    // The connection must be closed without a continuation request.
+    // Dogfood-2: the refusal is TYPED — `* BYE` (never a continuation, never
+    // a bare EOF) — and the connection is then closed.
     let mut buf = Vec::new();
     let n = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut buf))
         .await
-        .expect("server must close, not hang")
+        .expect("server must answer, not hang")
         .expect("read");
-    assert_eq!(
-        n,
-        0,
-        "expected EOF, got {:?}",
-        String::from_utf8_lossy(&buf)
+    assert!(n > 0, "expected a BYE line, got EOF");
+    let line = String::from_utf8_lossy(&buf).to_string();
+    assert!(
+        line.starts_with("* BYE"),
+        "over-budget literal must be refused with a BYE, got {line:?}"
     );
     assert!(
         !buf.starts_with(b"+"),
         "no continuation for over-budget literal"
     );
+    let mut tail = Vec::new();
+    let n = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut tail))
+        .await
+        .expect("stream settles")
+        .expect("read");
+    assert_eq!(n, 0, "the connection must close after the BYE: {tail:?}");
     assert!(h.mock.message_uids("acct-1", "INBOX").is_empty());
 }
 

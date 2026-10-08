@@ -1,0 +1,50 @@
+{
+  "run": "al5",
+  "results": [
+    {
+      "probe": "P9.1 rule created on the evaluated store",
+      "ok": true,
+      "detail": "id=70f02ef3-baaa-402d-ab41-fc0f4db388d6 status=201"
+    },
+    {
+      "probe": "P9.2 storage metric refused with the reason",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P9.3 the sweep fired an incident into system_alerts",
+      "ok": true,
+      "detail": "incident=c62459de-40e3-494e-bd15-df8c30bd4d38|warning|Alert rule \"dogfood-emails-al5\" fired: emails at 67% of the plan limit (20000 / 30000)."
+    },
+    {
+      "probe": "P9.4 CP page (Control Plane shell) and the JSON API agree on the rule store",
+      "ok": true,
+      "detail": "json_mine=1 page_status=200 cp_shell=True"
+    },
+    {
+      "probe": "P9.5 disable persists",
+      "ok": true,
+      "detail": "enabled=f"
+    },
+    {
+      "probe": "P9.6 disabled rule fires no new incident",
+      "ok": true,
+      "detail": "before=2026-10-08T13:18:05 after=2026-10-08T13:18:05"
+    },
+    {
+      "probe": "P9.7 update persists",
+      "ok": true,
+      "detail": "row=90|critical"
+    },
+    {
+      "probe": "P9.8 delete removes the rule",
+      "ok": true,
+      "detail": "status=200 rows=0"
+    },
+    {
+      "probe": "P9.9 non-system tenant refused",
+      "ok": true,
+      "detail": "status=403"
+    }
+  ]
+}

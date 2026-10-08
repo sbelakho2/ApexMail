@@ -21,12 +21,19 @@
 #
 # Usage:
 #   ./scripts/clickhouse-backup.sh                    # Full backup
+#   ./scripts/clickhouse-backup.sh --dry-run          # Connectivity + table
+#                                                     # listing only; writes
+#                                                     # NOTHING (safe mode)
 #   ./scripts/clickhouse-backup.sh --list             # List available backups
 #   ./scripts/clickhouse-backup.sh --restore <dir>    # Restore from backup dir
 #
 # Environment (set before running):
 #   CLICKHOUSE_HOST     (default: localhost)
-#   CLICKHOUSE_PORT     (default: 8123)
+#   CLICKHOUSE_PORT     (default: 9000 — the NATIVE protocol port
+#                        clickhouse-client speaks. 8123 is the HTTP port and
+#                        every client connection to it dies with
+#                        "Connection reset by peer"; the old 8123 default
+#                        made a default-env backup impossible.)
 #   CLICKHOUSE_USER     (default: apexmail)
 #   CLICKHOUSE_PASSWORD (required; may also live in CLICKHOUSE_PASSWORD_FILE)
 #   BACKUP_DIR          (default: ./backups/clickhouse)
@@ -35,10 +42,12 @@
 set -eu
 
 CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-localhost}"
-CLICKHOUSE_PORT="${CLICKHOUSE_PORT:-8123}"
+# 9000 = native protocol (clickhouse-client). 8123 is HTTP-only.
+CLICKHOUSE_PORT="${CLICKHOUSE_PORT:-9000}"
 CLICKHOUSE_USER="${CLICKHOUSE_USER:-apexmail}"
 BACKUP_DIR="${BACKUP_DIR:-./backups/clickhouse}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
+DRY_RUN=0
 
 # Load the password from a file (e.g. /run/secrets/clickhouse_password)
 # without echoing it.
@@ -68,9 +77,13 @@ full_backup() {
     timestamp="$(date -u +%Y%m%d_%H%M%S)"
     backup_root="${BACKUP_DIR}/${timestamp}"
 
-    echo "Starting ClickHouse full backup to ${backup_root}..."
-    ensure_backup_dir
-    mkdir -p "${backup_root}"
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        echo "DRY RUN: would back up ClickHouse to ${backup_root} (nothing is written)"
+    else
+        echo "Starting ClickHouse full backup to ${backup_root}..."
+        ensure_backup_dir
+        mkdir -p "${backup_root}"
+    fi
 
     # Audit P2: the table listing used to run as the LEFT side of a pipeline
     # into `while`, so its exit status was invisible and the loop ran in a
@@ -88,6 +101,27 @@ full_backup() {
         rm -f "${_tables_tmp}"
         rm -rf "${backup_root}"
         exit 1
+    fi
+
+    # Safe mode: prove connectivity + the table listing, print the plan, and
+    # write NOTHING (no backup dir, no dumps, no retention cleanup). Failure
+    # to reach the server already exited above with the query error.
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        _n=0
+        while IFS="$(printf '\t')" read -r db table; do
+            [ -n "${db}" ] || continue
+            [ -n "${table}" ] || continue
+            _n=$((_n + 1))
+            echo "  would back up: ${db}.${table}"
+        done <"${_tables_tmp}"
+        rm -f "${_tables_tmp}"
+        if [ "${_n}" -eq 0 ]; then
+            echo "ERROR: no non-system tables found — refusing to report a backup." >&2
+            rm -rf "${backup_root}"
+            exit 1
+        fi
+        echo "Dry run complete: ${_n} tables would be backed up; nothing was written."
+        return 0
     fi
 
     n=0
@@ -194,6 +228,10 @@ case "${1:-backup}" in
         full_backup
         cleanup_old_backups
         ;;
+    --dry-run|-n)
+        DRY_RUN=1
+        full_backup
+        ;;
     --list|-l)
         list_backups
         ;;
@@ -203,10 +241,11 @@ case "${1:-backup}" in
         restore_backup "$1"
         ;;
     *)
-        echo "Usage: $0 [backup|--list|--restore <dir>]"
+        echo "Usage: $0 [backup|--dry-run|--list|--restore <dir>]"
         echo ""
         echo "Commands:"
         echo "  backup                    Perform full backup (default)"
+        echo "  --dry-run, -n             Connectivity + table listing only; writes nothing"
         echo "  --list, -l                List available backups"
         echo "  --restore, -r <dir>       Restore from a backup directory"
         exit 1

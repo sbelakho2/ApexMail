@@ -65,6 +65,11 @@ build_marketing_static_site() {
         [[ -x "$tailwind_cli" ]] || error "Tailwind CLI not found at $tailwind_cli"
         log "Building marketing stylesheet..."
         "$tailwind_cli" -c apps/marketing-zola/tailwind.config.js -i "$css_input" -o "$css_output" --minify
+        # A umask-077 shell produced a 0600 styles.css (dogfood 2026-10-08);
+        # zola then copied it 0600 into public/, the image preserved the mode,
+        # and the api-server (uid 10001) 404'd /css/styles.css — every
+        # marketing page rendered unstyled. The artifact must stay readable.
+        chmod 644 "$css_output"
     fi
 
     if needs_rebuild "apps/marketing-zola/public/index.html" \

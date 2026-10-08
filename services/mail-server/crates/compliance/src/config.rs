@@ -340,8 +340,10 @@ impl ComplianceConfig {
                 // G: default to the compliance service's own host (same as
                 // verify_base_url) — exports are served by this crate's
                 // GET /gdpr/exports/{id} route, not a third-party bucket.
-                export_base_url: env_or("GDPR_EXPORT_BASE_URL", "https://gdpr.apexmail.ee"),
-                verify_base_url: env_or("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
+                // Both URLs must ALWAYS be absolute: an empty env value
+                // (compose default) falls back to the documented default.
+                export_base_url: env_or_nonempty("GDPR_EXPORT_BASE_URL", "https://gdpr.apexmail.ee"),
+                verify_base_url: env_or_nonempty("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
                 consent_signing_key: env_or("CONSENT_SIGNING_KEY", ""),
                 access_request_max_messages: env_i64("GDPR_ACCESS_MAX_MESSAGES", 10_000),
                 system_from_address: env_or("COMPLIANCE_SYSTEM_FROM", "noreply@apexmail.ee"),
@@ -391,6 +393,24 @@ impl ComplianceConfig {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Like [`env_or`], but a variable that is SET-BUT-EMPTY (or whitespace-only)
+/// counts as unset.
+///
+/// The shipped compose passes `GDPR_VERIFY_BASE_URL=` / `GDPR_EXPORT_BASE_URL=`
+/// through as empty strings. `env_or` returned them verbatim, so every DSR
+/// verification email carried a RELATIVE `/gdpr/verify/{id}` link and
+/// `gdpr_exports.export_url` a relative `/gdpr/exports/{id}` path — links the
+/// tracking service (correctly) refuses as an invalid redirect target, so the
+/// printed link in the delivered mail is unclickable (dogfood 2026-10-08). An
+/// empty value must fall back to the documented default, never produce a
+/// relative link.
+fn env_or_nonempty(key: &str, default: &str) -> String {
+    match std::env::var(key) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => default.to_string(),
+    }
 }
 
 /// I-4: resolve the audit signing key when `AUDIT_SIGNING_KEY` is unset in
@@ -641,6 +661,39 @@ mod tests {
         assert_eq!(cfg.auth_token, "explicit-prod-token");
         assert_eq!(cfg.secrets.encryption_key, "explicit-prod-encryption-key");
         assert_eq!(cfg.audit.signing_key, "explicit-prod-audit-key");
+    }
+
+    /// Dogfood 2026-10-08: the shipped compose sets `GDPR_VERIFY_BASE_URL=`
+    /// and `GDPR_EXPORT_BASE_URL=` (SET but EMPTY). `env_or` returned the
+    /// empty string verbatim, so the DSR verification email carried a
+    /// RELATIVE `/gdpr/verify/{id}` link (and exports a relative
+    /// `/gdpr/exports/{id}` path) — the tracking service (correctly) refuses
+    /// those as invalid targets, making the printed link unclickable. Empty
+    /// or whitespace-only must mean "unset": the documented absolute default
+    /// applies, never a relative link.
+    #[test]
+    fn empty_gdpr_base_urls_fall_back_to_the_absolute_defaults() {
+        set_env("NODE_ENV", "development");
+        set_env("GDPR_VERIFY_BASE_URL", "");
+        set_env("GDPR_EXPORT_BASE_URL", "   ");
+
+        let cfg = ComplianceConfig::from_env().expect("development config must load");
+        assert_eq!(
+            cfg.gdpr.verify_base_url, "https://gdpr.apexmail.ee",
+            "empty GDPR_VERIFY_BASE_URL must fall back to the absolute default"
+        );
+        assert_eq!(
+            cfg.gdpr.export_base_url, "https://gdpr.apexmail.ee",
+            "whitespace GDPR_EXPORT_BASE_URL must fall back to the absolute default"
+        );
+        let verify_url = format!(
+            "{}/gdpr/verify/{}",
+            cfg.gdpr.verify_base_url, "11111111-2222-3333-4444-555566667777"
+        );
+        assert!(
+            verify_url.starts_with("https://"),
+            "the emitted verification link must be absolute, got: {verify_url}"
+        );
     }
 
     /// Development + missing values → ephemeral generation works AND is

@@ -1369,6 +1369,45 @@ mod tests {
         }
     }
 
+    /// Dogfood-2 (2026-10-08) live finding: the DEV compose never passed
+    /// `VERP_HMAC_SECRET` into the mta-server or the worker, so the worker's
+    /// startup gate (correctly) emitted NO VERP Return-Path and every
+    /// self-hosted DSN was recorded as a non-authoritative observation — the
+    /// authoritative bounce → suppression path was unreachable on the local
+    /// stack even though the code supports it. `docker-compose.prod.yml` has
+    /// always required the secret; the dev file must exercise the same path.
+    /// This pins the wire-through: the dev compose declares
+    /// `VERP_HMAC_SECRET` (default satisfying the >= 32 byte gate) in BOTH
+    /// services, with the same VERP domain as the MTA's bounce parser.
+    #[test]
+    fn dev_deploy_artifacts_carry_the_verp_hmac_secret() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let compose = std::fs::read_to_string(root.join("docker-compose.yml"))
+            .expect("docker-compose.yml must be readable");
+        let dev_secret = "dev-verp-hmac-secret-minimum-32-bytes-long";
+        assert!(
+            dev_secret.len() >= apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN,
+            "the dev default must satisfy the >= {} byte gate",
+            apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN
+        );
+        assert_eq!(
+            compose
+                .matches(&format!(
+                    "VERP_HMAC_SECRET: ${{VERP_HMAC_SECRET:-{dev_secret}}}"
+                ))
+                .count(),
+            2,
+            "BOTH the mta-server and the worker must receive VERP_HMAC_SECRET in the dev compose"
+        );
+        assert_eq!(
+            compose
+                .matches("VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}")
+                .count(),
+            2,
+            "both services must agree on the VERP domain"
+        );
+    }
+
     #[test]
     fn short_verp_secret_is_rejected_everywhere() {
         let mut config = MtaConfig::default();

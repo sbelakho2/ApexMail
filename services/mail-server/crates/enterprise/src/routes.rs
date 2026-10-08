@@ -1262,6 +1262,14 @@ fn api_result_error_status(code: Option<&str>) -> Option<StatusCode> {
         Some("NOT_FOUND") => Some(StatusCode::NOT_FOUND),
         Some("VALIDATION") | Some("INVALID_IP") => Some(StatusCode::BAD_REQUEST),
         Some("INVALID_TRANSITION") | Some("ALREADY_SUBMITTED") => Some(StatusCode::CONFLICT),
+        // An exhausted plan capacity is the same customer-visible refusal the
+        // api-server's entitlement gate returns: 403 Forbidden naming the
+        // limit (`max_subaccounts`, `volume_limit`, ...). It was surfacing as
+        // HTTP 200 with `{"success":false}` — a lie to any client checking
+        // `response.ok`, and inconsistent with the capacity refusals on the
+        // tenant API (dogfood 2026-10-08, capability P6: the 11th subaccount
+        // create answered 200).
+        Some("QUOTA_EXCEEDED") => Some(StatusCode::FORBIDDEN),
         // A provisioning/retry attempted from the wrong state is a CONFLICT
         // (the request is well-formed; the resource is not in a state that
         // permits it) — it was reported as HTTP 200 with success:false.
@@ -3928,6 +3936,8 @@ async fn template_list(
 async fn template_approve(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<TemplateReviewBody>,
 ) -> impl IntoResponse {
@@ -3943,17 +3953,47 @@ async fn template_approve(
     {
         return e;
     }
-    service_result(
-        state
-            .templates
-            .approve(id, &auth.user_id, body.notes.as_deref())
-            .await,
-    )
+    let submitted_by = existing
+        .as_ref()
+        .ok()
+        .and_then(|r| r.data.as_ref())
+        .map(|row| row.submitted_by.clone());
+    let result = state
+        .templates
+        .approve(id, &auth.user_id, body.notes.as_deref())
+        .await;
+    // The review is a configuration decision on a Business capability — it
+    // belongs in the tenant audit trail (docs/api/endpoints/audit.md
+    // "configuration activity"). Best-effort: a committed review stands.
+    if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
+        if let Err(error) = audit_server_action(
+            &state,
+            &auth.tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "template.approved",
+            "template_submission",
+            Some(&id.to_string()),
+            serde_json::json!({
+                "submitted_by": submitted_by,
+                "reviewed_by": auth.user_id,
+                "notes": body.notes,
+            }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, template_id = %id, "failed to audit template approval");
+        }
+    }
+    service_result(result)
 }
 
 async fn template_reject(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<TemplateRejectBody>,
 ) -> impl IntoResponse {
@@ -3969,17 +4009,44 @@ async fn template_reject(
     {
         return e;
     }
-    service_result(
-        state
-            .templates
-            .reject(id, &auth.user_id, &body.reason)
-            .await,
-    )
+    let submitted_by = existing
+        .as_ref()
+        .ok()
+        .and_then(|r| r.data.as_ref())
+        .map(|row| row.submitted_by.clone());
+    let result = state
+        .templates
+        .reject(id, &auth.user_id, &body.reason)
+        .await;
+    if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
+        if let Err(error) = audit_server_action(
+            &state,
+            &auth.tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "template.rejected",
+            "template_submission",
+            Some(&id.to_string()),
+            serde_json::json!({
+                "submitted_by": submitted_by,
+                "reviewed_by": auth.user_id,
+                "reason": body.reason,
+            }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, template_id = %id, "failed to audit template rejection");
+        }
+    }
+    service_result(result)
 }
 
 async fn template_request_changes(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<TemplateReviewBody>,
 ) -> impl IntoResponse {
@@ -3996,12 +4063,33 @@ async fn template_request_changes(
         return e;
     }
     match &body.notes {
-        Some(notes) => service_result(
-            state
+        Some(notes) => {
+            let result = state
                 .templates
                 .request_changes(id, &auth.user_id, notes)
-                .await,
-        ),
+                .await;
+            if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
+                if let Err(error) = audit_server_action(
+                    &state,
+                    &auth.tenant_id,
+                    &auth,
+                    connect_info,
+                    &headers,
+                    "template.changes_requested",
+                    "template_submission",
+                    Some(&id.to_string()),
+                    serde_json::json!({
+                        "reviewed_by": auth.user_id,
+                        "notes": notes,
+                    }),
+                )
+                .await
+                {
+                    tracing::error!(error = %error, template_id = %id, "failed to audit change request");
+                }
+            }
+            service_result(result)
+        }
         None => err_json(
             StatusCode::BAD_REQUEST,
             "Notes are required for change requests",
@@ -4733,6 +4821,122 @@ mod tests {
         assert_eq!(body["data"]["status"], "approved", "{body}");
     }
 
+    /// Maker-checker (brief-live-capabilities P7): the submitter is the
+    /// maker and cannot be the checker. A self-approval is refused with the
+    /// named reason and the row stays pending; a different reviewer then
+    /// approves it.
+    ///
+    /// Fail-before: before the guard, `approve`/`reject`/
+    /// `request_changes` updated the row for ANY `reviewed_by`, so the
+    /// submitter's own token approved their submission (status flipped to
+    /// `approved` with reviewed_by == submitted_by).
+    #[tokio::test]
+    async fn submitter_cannot_review_their_own_template() {
+        let Some((app, state)) = provision_capability_router("cap-tpl-maker").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        seed_canonical_business_plan(&state).await;
+        let tenant = "cap-maker-tenant";
+        seed_capability_tenant(&state, tenant, "scale").await;
+        let maker_token = mint_sso_owner_token(tenant, "maker-1");
+        let checker_token = mint_sso_owner_token(tenant, "checker-2");
+
+        let response = post_json(
+            &app,
+            "/templates/submit",
+            &maker_token,
+            &template_submit_body(tenant, "maker-checker"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response_json(response).await["data"]["id"]
+            .as_str()
+            .expect("submission id")
+            .to_string();
+
+        // Self-approval: refused by name, row unchanged.
+        let response = post_json(
+            &app,
+            &format!("/templates/{id}/approve"),
+            &maker_token,
+            &serde_json::json!({"reviewed_by": "maker-1", "notes": "self"}),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the submitter must not approve their own submission"
+        );
+        let body = response_json(response).await;
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("maker-checker"),
+            "the refusal must name maker-checker: {body}"
+        );
+        let (status, reviewed_by): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, reviewed_by FROM ent_template_submissions WHERE id = $1::uuid",
+        )
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .expect("submission row");
+        assert_eq!(status, "pending", "a refused self-review changes nothing");
+        assert_eq!(reviewed_by, None, "no reviewer recorded");
+        // Self-reject and self-request-changes are refused the same way.
+        for (action, body) in [
+            (
+                "reject",
+                serde_json::json!({"reviewed_by": "maker-1", "reason": "self"}),
+            ),
+            (
+                "request-changes",
+                serde_json::json!({"reviewed_by": "maker-1", "notes": "self"}),
+            ),
+        ] {
+            let response = post_json(
+                &app,
+                &format!("/templates/{id}/{action}"),
+                &maker_token,
+                &body,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "self-{action} must be refused"
+            );
+            let body = response_json(response).await;
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("maker-checker"),
+                "{body}"
+            );
+        }
+
+        // A different reviewer concludes the cycle.
+        let response = post_json(
+            &app,
+            &format!("/templates/{id}/approve"),
+            &checker_token,
+            &serde_json::json!({"reviewed_by": "checker-2", "notes": "checked"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["status"], "approved", "{body}");
+        let reviewed_by: Option<String> = sqlx::query_scalar(
+            "SELECT reviewed_by FROM ent_template_submissions WHERE id = $1::uuid",
+        )
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .expect("reviewed_by");
+        assert_eq!(reviewed_by.as_deref(), Some("checker-2"));
+    }
+
     /// A plan that does not sell the workflow is refused 403 naming the
     /// capability, and nothing is persisted.
     #[tokio::test]
@@ -4809,6 +5013,11 @@ mod tests {
             &serde_json::json!({"parent_id": tenant, "name": "sub-11"}),
         )
         .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "cap+1 must be a 403 refusal, not a 200 envelope (dogfood 2026-10-08 P6)"
+        );
         let body = response_json(response).await;
         assert_eq!(
             body["success"],

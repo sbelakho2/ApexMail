@@ -1,0 +1,90 @@
+{
+  "run": "td4",
+  "results": [
+    {
+      "probe": "P4.1 tracking domain created (pending, named reason)",
+      "ok": "publish the CNAME record to track.apexmail.ee, then verify",
+      "detail": "id=2fcb859d-54e9-4866-be28-192357159966 status=pending"
+    },
+    {
+      "probe": "P4.2 exact CNAME shown",
+      "ok": true,
+      "detail": "cname={\"record_type\": \"CNAME\", \"hostname\": \"track.captd-td4-a.dogfood.test\", \"value\": \"track.apexmail.ee\"}"
+    },
+    {
+      "probe": "P4.3 verify before DNS -> named 503, state stays pending",
+      "ok": true,
+      "detail": "status=503 db=pending"
+    },
+    {
+      "probe": "P4.4 verify with the CNAME live -> verified",
+      "ok": "2026-10-08T13:00:11.312961+00:00",
+      "detail": "status=verified"
+    },
+    {
+      "probe": "P4.5 mismatching CNAME -> failed with the named reason",
+      "ok": true,
+      "detail": "status=failed"
+    },
+    {
+      "probe": "P4.6 tracking link serves on the custom host for the owner",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "probe": "P4.7 foreign token refused on the custom host",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P4.8 unverified host is refused (never silently served)",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P4.9 one-per-parent refusal named",
+      "ok": true,
+      "detail": "status=409"
+    },
+    {
+      "probe": "P4.10 reserved-label refusal named",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P4.11 unverified parent refused (verified parent required)",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P4.12 delete stops serving on the custom host",
+      "ok": true,
+      "detail": "delete=204 serve_after=400"
+    },
+    {
+      "probe": "P4.13 cross-tenant GET -> 404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P4.13 cross-tenant DELETE -> 404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P4.13 cross-tenant DELETE left the row intact",
+      "ok": true,
+      "detail": "row_status=failed"
+    },
+    {
+      "probe": "P4.14 non-entitled create -> 403 naming custom_tracking_domain",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P4.15 concurrent identical creates -> one row",
+      "ok": true,
+      "detail": "rows=1 statuses=[409, 201]"
+    }
+  ]
+}

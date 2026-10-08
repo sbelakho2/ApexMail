@@ -438,8 +438,10 @@ pub fn is_builtin_plan_name(plan_name: &str) -> bool {
 /// the existing `features` object (`$11` names exactly those keys), so an
 /// environment whose rows predate a capability wave gains the new grants on
 /// re-seed instead of keeping them false forever (which made the new
-/// capabilities ungrantable by plan). A NULL/legacy features column takes
-/// the whole seed.
+/// capabilities ungrantable by plan). `max_subaccounts` rides the same
+/// overlay: it is the numeric capacity that makes the `subaccounts` grant
+/// usable, and a stale zero cannot be distinguished from an operator choice
+/// by the COALESCE rule. A NULL/legacy features column takes the whole seed.
 const SEED_PLAN_UPSERT_SQL: &str = r#"
         INSERT INTO plans (
             id, name, display_name, description,
@@ -478,15 +480,27 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
             is_active, sort_order, created_at, updated_at
         "#;
 
-/// The `PlanFeatures` boolean keys whose value is a catalog-owned capability
-/// fact: every [`billing_entitlements::FeatureKey`] field name. Bound as
-/// `$11` of [`SEED_PLAN_UPSERT_SQL`] so the seed overlays exactly the
-/// capability flags (and nothing else) onto an existing row's features.
+/// The catalog-owned keys overlaid onto an existing row's `features` by
+/// [`SEED_PLAN_UPSERT_SQL`] (`$11`): every [`billing_entitlements::FeatureKey`]
+/// boolean field plus `max_subaccounts`.
+///
+/// `max_subaccounts` is a capability fact, not an operator preference: the
+/// canonical catalog (and the pricing/AI tables pinned to it) sell Business
+/// 10 / Enterprise unlimited, and `billing_entitlements` reads the numeric
+/// capacity from this very column. A stale numeric therefore makes a sold
+/// capability ungrantable by plan — the live 2026-10-08 dogfood found the
+/// `scale` row still carrying `max_subaccounts: 0` from a pre-capability
+/// seed, so no Business tenant could create even one subaccount. Numeric
+/// FEATURE limits that are genuinely operator-tunable (`max_team_members`,
+/// `max_retention_days`, `max_sending_domains`, `dedicated_ip_count`) keep
+/// their COALESCE-toward-the-existing-row semantics below.
 fn capability_flag_keys() -> Vec<String> {
-    billing_entitlements::FeatureKey::ALL
+    let mut keys: Vec<String> = billing_entitlements::FeatureKey::ALL
         .iter()
         .map(|key| key.field_name().to_string())
-        .collect()
+        .collect();
+    keys.push("max_subaccounts".to_string());
+    keys
 }
 
 /// Upsert a plan seed into the database.
@@ -2030,6 +2044,55 @@ mod coverage_adversarial {
             assert_eq!(stored_json["max_team_members"], serde_json::json!(77));
         }
     );
+
+    // Live dogfood 2026-10-08 (P6): the Business (`scale`) row in the live
+    // environment still carried `max_subaccounts: 0` from a pre-capability
+    // seed, while the catalog (and every pricing/AI table pinned to it) sells
+    // Business 10. Because the numeric rode the COALESCE-toward-existing rule,
+    // a re-seed could never heal it and the sold `subaccounts` grant stayed
+    // unusable (the first create was refused with "Maximum sub-accounts (0)").
+    // The seed now overlays `max_subaccounts` like the capability booleans.
+    env_test!(seed_upsert_heals_a_stale_max_subaccounts_cap, |env| {
+        let mut stale_features =
+            serde_json::to_value(PlanFeatures::default()).expect("PlanFeatures serializes");
+        // The stale row also carries an operator-tuned seat cap that MUST
+        // survive (Fix I1 covers genuinely operator-tunable numerics).
+        stale_features["max_team_members"] = serde_json::json!(77);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly,
+                                price_yearly, email_limit, api_call_limit, features,
+                                is_active, sort_order, created_at, updated_at)
+             VALUES ('pln_scale_stale', 'scale', 'Business', 'pre-capability row',
+                     69900, 699000, 2000000, 20000000, $1, true, 5, NOW(), NOW())",
+        )
+        .bind(&stale_features)
+        .execute(&env.pool)
+        .await
+        .expect("seed stale pre-capability business row");
+
+        let seed = builtin_plan_seed(Some("scale"));
+        assert_eq!(
+            seed.features.max_subaccounts, 10,
+            "the canonical Business seed sells a cap of 10"
+        );
+        let plan = upsert_plan(&env.pool, &seed).await.expect("seed upsert");
+        assert_eq!(plan.features.max_subaccounts, 10);
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT (features->>'max_subaccounts')::bigint FROM plans WHERE name = 'scale'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("read stored cap");
+        assert_eq!(stored, 10, "re-seed must heal the stale Business cap");
+        // The genuinely operator-tunable numeric still survives.
+        let seats: i64 = sqlx::query_scalar(
+            "SELECT (features->>'max_team_members')::bigint FROM plans WHERE name = 'scale'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("read stored seats");
+        assert_eq!(seats, 77, "operator-tuned seats survive the overlay");
+    });
 
     env_test!(
         quota_resolution_honours_override_and_builtin_fallback,

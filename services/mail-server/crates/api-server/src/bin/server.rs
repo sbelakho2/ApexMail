@@ -283,7 +283,13 @@ async fn run(config: Config) -> anyhow::Result<()> {
     if config.metrics_port > 0 {
         let metrics_addr: std::net::SocketAddr =
             format!("0.0.0.0:{}", config.metrics_port).parse()?;
-        metrics_exporter_prometheus::PrometheusBuilder::new()
+        // Request-duration buckets: without an explicit distribution the
+        // exporter renders histograms as summaries (no `_bucket` samples),
+        // and every `histogram_quantile` alert/panel in deploy/ is dead.
+        let builder = api_server::middleware::metrics::configure_request_duration_buckets(
+            metrics_exporter_prometheus::PrometheusBuilder::new(),
+        );
+        builder
             .with_http_listener(metrics_addr)
             // install(), NOT install_recorder(): in
             // metrics-exporter-prometheus 0.16 install_recorder builds the

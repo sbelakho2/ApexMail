@@ -1,0 +1,40 @@
+Return-Path: <sender-pj6jsujc@mp2-pj6jsujc.test>
+Received: from edd79d8c2650 (apexmail-worker-1.apexmail_apexmail_backend. [172.20.0.9])
+        by ecd72b55317f (Mailpit) with SMTP
+        for <flow4-sink-pj6jsujc@dogfood.test>; Thu, 8 Oct 2026 11:47:24 +0000 (UTC)
+DKIM-Signature: v=1; a=rsa-sha256; s=am-2158b614c6d14e6b91234e1945743433; d=mp2-pj6jsujc.test; c=relaxed/relaxed;
+	h=MIME-Version:Date:Message-ID:To:Subject:From; t=1791460044; bh=m75jRpNb1q
+	McbPbxn9lZNPGtiWHKzK95UrpbApUJRoU=; b=2KtC94Ugm59Sk+8weH/ECNYJXzmWZBBI3JXC3
+	sVNYwpPoxC9RjVN6nkbryiPv+8SlnTXGipWnYuA6zDf5Dp3mg3gUrW92+XY6s+rrFhj26zrbLvM
+	uXuIjbrdKcBhE44yBzamrnQSaX4rd9P98V7CO0uD4ivXFiVMx+j3wGK8N7V0EjJSgbArqyQjAsQ
+	WFC2iU88g8l61SXGePEVWCihr5+aYS/8eEXxshAfhOBtBv0vy+9HMGpZsNa1ibS6RK2rRsOJjh2
+	xphEWz11Sti7mu3wZMx0xtnMSAq4yxpDNHOZIbK62ZAHiDtFvCakdQVcihcnqO8gkiLplYwLvYY
+	bthPQ==;
+From: <sender-pj6jsujc@mp2-pj6jsujc.test>
+Subject: Dogfood2 outbound pj6jsujc
+To: <flow4-sink-pj6jsujc@dogfood.test>
+Reply-To: <helpdesk-pj6jsujc@mp2-pj6jsujc.test>
+List-Unsubscribe: <http://127.0.0.1:3001/u/pWG2GRprGSgQ9z7Jzyhf3OljRGgC5B3dEEo7Hg43ouE-APzPH6QLbyYzKjzTUX9E03SzRD35O5x8hIhgYdgEp54_cPc9rjdwKsMREva8tbjL4KBWs_-NdLwxivbKwDVY0Vk8bOUBmm9W2a8kpi0fQAHJCkuZyUnbMhajjRVuqmvZ1pifkPfuMPSmkexPbSJJgw>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+X-ApexMail-Message-ID: 501ecdd6-46de-42ab-ac8c-04fef38cb44f
+X-ApexMail-Tenant-ID: 7myp1cnv9yscwr3z2i1fdkhiry
+Message-ID: <501ecdd6-46de-42ab-ac8c-04fef38cb44f@mp2-pj6jsujc.test>
+X-Campaign: dogfood2-pj6jsujc
+Date: Thu, 8 Oct 2026 11:47:24 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; 
+	boundary="18dc8b6b4e54ef33_11c93281bd4e78f3_323b89ac933cfad7"
+
+
+--18dc8b6b4e54ef33_11c93281bd4e78f3_323b89ac933cfad7
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hello flow4 pj6jsujc plain text
+--18dc8b6b4e54ef33_11c93281bd4e78f3_323b89ac933cfad7
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<html><body><p>Hello flow4 pj6jsujc</p><p><a href="http://127.0.0.1:3001/c/nG990qaBcRmOCs77s3WgLLlsOBswcpoY7cc8MHBKF63pWfIr9XpppM5bDjF6z97a1KgcD7hyuRW9q7EnFQUqapZHdNrXV0pXYzD8vMc4hq6GsTk0_NHyy9hFVul6Q6n-XlOCfEuOKhnBXlQd6GfVar35XHS1gY9NAavyr2qUDUuZAqVwl-KZrS3AXuzIWOZnjSGXuy-ESfWfKowZ3ZhkF8ileKC_UVDVWbEVTM5j8FblM6yAuaVgNNPlWsHfkw"">Own-domain CTA</a></p><p><a href="http://127.0.0.1:3001/c/WciI_V5-XxBaxJPFGcXkPczH3ZAn3ZjFW3oJuEarevUhndxx1pq3LqQMtVd-vbfitdQILsHgNLddaOmmGNrtLvgtFPshKqNvBTITU0M1FqyQYkPR_35mg4DRG_Kw7ZFK680IQbS1UOoXug-ZPXMQXtM2KoHz5n71u4yBoNALhpwSnd8_1148jYY4lnRd8yVdavQQTH084EmT8ZxvQFwVv1swwBeE1v8MaJBkhed0fT6HHQ1BN58jqxKthYKEqkE"">Subdomain CTA</a></p><img src="http://127.0.0.1:3001/o/mw7eniYp3TrmEpE9BoD0IdeIa7e7H4ACSClK_HhSr--l5WjG-6mSfsCe_vz5Lv4nmK1Xp4JjLbIS-slFSVGxqTATP8Q_Z5Pl_dQVxHGSs8hozH7KnoPstvJEAPOUwjQ3XvhF9ydVuOnC6g6v51W6eBIkCQY7Onhq6YFJVj29YjDkkjU" width="1" height="1" style="display:none" alt="" /></body></html>
+--18dc8b6b4e54ef33_11c93281bd4e78f3_323b89ac933cfad7--
+

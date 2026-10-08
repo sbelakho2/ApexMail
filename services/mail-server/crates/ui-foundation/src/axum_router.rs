@@ -31,6 +31,8 @@ pub struct RouteData {
     pub campaign_editor: Option<crate::view_data::CampaignEditorData>,
     /// List edit form values (server-filled from the lists row).
     pub list_edit: Option<ListEditData>,
+    /// Template edit form values (server-filled from the templates row).
+    pub template_edit: Option<crate::view_data::TemplateEditData>,
     /// Pending TOTP setup (QR + secret) for the CP security page.
     pub mfa_setup: Option<MfaSetupData>,
     /// Sales-autopilot control data for `/sales`.
@@ -348,9 +350,37 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/acceptable-use/index.html"
         ),)),
+        "/de/anti-spam" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/anti-spam/index.html"
+        ),)),
         "/de/compare" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/compare/index.html"
+        ),)),
+        "/de/compare/amazon-ses" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/amazon-ses/index.html"
+        ),)),
+        "/de/compare/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/mailgun/index.html"
+        ),)),
+        "/de/compare/methodology" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/methodology/index.html"
+        ),)),
+        "/de/compare/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/postmark/index.html"
+        ),)),
+        "/de/compare/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/resend/index.html"
+        ),)),
+        "/de/compare/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/sendgrid/index.html"
         ),)),
         "/de/compliance" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -359,6 +389,18 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         "/de/contact" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/contact/index.html"
+        ),)),
+        "/de/contact/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/contact/enterprise/index.html"
+        ),)),
+        "/de/contact/sales" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/contact/sales/index.html"
+        ),)),
+        "/de/contact/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/contact/security/index.html"
         ),)),
         "/de/cookies" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -372,9 +414,25 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/dpa/index.html"
         ),)),
+        "/de/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/enterprise/index.html"
+        ),)),
         "/de/features" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/features/index.html"
+        ),)),
+        "/de/inbox-placement" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/inbox-placement/index.html"
+        ),)),
+        "/de/pricing" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/pricing/index.html"
+        ),)),
+        "/de/pricing/calculator" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/pricing/calculator/index.html"
         ),)),
         "/de/privacy" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -392,6 +450,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/responsible-disclosure/index.html"
         ),)),
+        "/de/secure-email-for-regulated-saas" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/secure-email-for-regulated-saas/index.html"
+        ),)),
         "/de/security" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/security/index.html"
@@ -400,9 +462,33 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/sla/index.html"
         ),)),
+        "/de/solutions" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/index.html"
+        ),)),
         "/de/solutions/enterprise" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/solutions/enterprise/index.html"
+        ),)),
+        "/de/solutions/high-volume-sending" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/high-volume-sending/index.html"
+        ),)),
+        "/de/solutions/migration" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/migration/index.html"
+        ),)),
+        "/de/solutions/regulated-industries" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/regulated-industries/index.html"
+        ),)),
+        "/de/solutions/saas-platforms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/saas-platforms/index.html"
+        ),)),
+        "/de/solutions/transactional-email" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/transactional-email/index.html"
         ),)),
         "/de/status" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -468,9 +554,37 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/acceptable-use/index.html"
         ),)),
+        "/es/anti-spam" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/anti-spam/index.html"
+        ),)),
         "/es/compare" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/compare/index.html"
+        ),)),
+        "/es/compare/amazon-ses" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/amazon-ses/index.html"
+        ),)),
+        "/es/compare/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/mailgun/index.html"
+        ),)),
+        "/es/compare/methodology" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/methodology/index.html"
+        ),)),
+        "/es/compare/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/postmark/index.html"
+        ),)),
+        "/es/compare/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/resend/index.html"
+        ),)),
+        "/es/compare/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/sendgrid/index.html"
         ),)),
         "/es/compliance" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -479,6 +593,18 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         "/es/contact" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/contact/index.html"
+        ),)),
+        "/es/contact/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/contact/enterprise/index.html"
+        ),)),
+        "/es/contact/sales" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/contact/sales/index.html"
+        ),)),
+        "/es/contact/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/contact/security/index.html"
         ),)),
         "/es/cookies" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -492,9 +618,25 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/dpa/index.html"
         ),)),
+        "/es/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/enterprise/index.html"
+        ),)),
         "/es/features" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/features/index.html"
+        ),)),
+        "/es/inbox-placement" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/inbox-placement/index.html"
+        ),)),
+        "/es/pricing" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/pricing/index.html"
+        ),)),
+        "/es/pricing/calculator" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/pricing/calculator/index.html"
         ),)),
         "/es/privacy" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -512,6 +654,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/responsible-disclosure/index.html"
         ),)),
+        "/es/secure-email-for-regulated-saas" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/secure-email-for-regulated-saas/index.html"
+        ),)),
         "/es/security" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/security/index.html"
@@ -520,9 +666,33 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/sla/index.html"
         ),)),
+        "/es/solutions" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/index.html"
+        ),)),
         "/es/solutions/enterprise" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/solutions/enterprise/index.html"
+        ),)),
+        "/es/solutions/high-volume-sending" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/high-volume-sending/index.html"
+        ),)),
+        "/es/solutions/migration" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/migration/index.html"
+        ),)),
+        "/es/solutions/regulated-industries" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/regulated-industries/index.html"
+        ),)),
+        "/es/solutions/saas-platforms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/saas-platforms/index.html"
+        ),)),
+        "/es/solutions/transactional-email" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/transactional-email/index.html"
         ),)),
         "/es/status" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -556,9 +726,37 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/acceptable-use/index.html"
         ),)),
+        "/fr/anti-spam" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/anti-spam/index.html"
+        ),)),
         "/fr/compare" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/compare/index.html"
+        ),)),
+        "/fr/compare/amazon-ses" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/amazon-ses/index.html"
+        ),)),
+        "/fr/compare/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/mailgun/index.html"
+        ),)),
+        "/fr/compare/methodology" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/methodology/index.html"
+        ),)),
+        "/fr/compare/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/postmark/index.html"
+        ),)),
+        "/fr/compare/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/resend/index.html"
+        ),)),
+        "/fr/compare/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/sendgrid/index.html"
         ),)),
         "/fr/compliance" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -567,6 +765,18 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         "/fr/contact" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/contact/index.html"
+        ),)),
+        "/fr/contact/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/contact/enterprise/index.html"
+        ),)),
+        "/fr/contact/sales" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/contact/sales/index.html"
+        ),)),
+        "/fr/contact/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/contact/security/index.html"
         ),)),
         "/fr/cookies" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -580,9 +790,25 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/dpa/index.html"
         ),)),
+        "/fr/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/enterprise/index.html"
+        ),)),
         "/fr/features" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/features/index.html"
+        ),)),
+        "/fr/inbox-placement" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/inbox-placement/index.html"
+        ),)),
+        "/fr/pricing" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/pricing/index.html"
+        ),)),
+        "/fr/pricing/calculator" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/pricing/calculator/index.html"
         ),)),
         "/fr/privacy" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -600,6 +826,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/responsible-disclosure/index.html"
         ),)),
+        "/fr/secure-email-for-regulated-saas" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/secure-email-for-regulated-saas/index.html"
+        ),)),
         "/fr/security" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/security/index.html"
@@ -608,9 +838,33 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/sla/index.html"
         ),)),
+        "/fr/solutions" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/index.html"
+        ),)),
         "/fr/solutions/enterprise" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/solutions/enterprise/index.html"
+        ),)),
+        "/fr/solutions/high-volume-sending" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/high-volume-sending/index.html"
+        ),)),
+        "/fr/solutions/migration" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/migration/index.html"
+        ),)),
+        "/fr/solutions/regulated-industries" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/regulated-industries/index.html"
+        ),)),
+        "/fr/solutions/saas-platforms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/saas-platforms/index.html"
+        ),)),
+        "/fr/solutions/transactional-email" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/transactional-email/index.html"
         ),)),
         "/fr/status" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -997,7 +1251,17 @@ pub fn render_route_with_form_fields_and_csrf(
             let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
             let title = route_document_title(surface, path);
             let page = match path {
+                // Auth-flow pages render their own minimal chrome (no CP
+                // sidebar/header): the login page and the typed /confirm page
+                // the CP destructive actions redirect to. Both belong to the
+                // Auth chrome group the gate requires to be identical.
                 "/login" => inner,
+                // The typed /confirm page rides the same minimal auth chrome
+                // (and owns exactly one <main> landmark like the login page).
+                "/confirm" | "/confirm/" => format!(
+                    "<main id=\"app-main\" class=\"min-h-screen bg-surface-50 relative \
+                     flex items-center justify-center p-6\">{inner}</main>"
+                ),
                 _ => {
                     let (title, description) = control_plane_route_context(path);
                     leptos_views::control_plane_app_layout_with_session(
@@ -1713,6 +1977,10 @@ pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
             "Authentication and operator access controls.",
         ),
         "/cp/audit" | "/audit" => ("Audit Logs", "Operator activity and security review trail."),
+        "/confirm" => (
+            "Confirm Action",
+            "Review and confirm a destructive operator action.",
+        ),
         _ => ("Control Plane", "ApexMail administration and monitoring."),
     }
 }
@@ -1742,6 +2010,38 @@ fn render_inner(
                         ));
                     }
                 }
+            }
+            // The typed /confirm page on the CONTROL-PLANE surface. CP
+            // destructive actions redirect here with a signed intent
+            // (`redirect_to_bulk_confirm` emits a host-relative
+            // `/confirm?...`), but the route only existed on the web
+            // manifest: on the operator host the browser landed on the 404
+            // fallback and tenant suspend/resume was unreachable (dogfood
+            // 2026-10-08). Render the SAME signed-intent confirmation page
+            // here, verified with the same secret/TTL as the web arm.
+            if path == "/confirm" || path == "/confirm/" {
+                let params = parse_query_params(query);
+                return Some(leptos_views::web_confirm_page(
+                    params.intent.as_deref().unwrap_or(""),
+                    params.resource_id.as_deref().unwrap_or(""),
+                    params.return_to.as_deref().unwrap_or("/"),
+                    params.sig.as_deref().unwrap_or(""),
+                    params
+                        .sig
+                        .as_deref()
+                        .and_then(|sig| {
+                            csrf_secret.map(|secret| {
+                                crate::flash::verify_confirmation(
+                                    secret,
+                                    sig,
+                                    params.intent.as_deref().unwrap_or(""),
+                                    params.resource_id.as_deref().unwrap_or(""),
+                                    chrono::Utc::now().timestamp(),
+                                )
+                            })
+                        })
+                        .unwrap_or(false),
+                ));
             }
             render_control_plane(path, csrf_secret, data, csrf_token)
         }
@@ -1954,7 +2254,10 @@ fn render_web(
             let id = p
                 .trim_start_matches("/templates/")
                 .trim_end_matches("/edit");
-            leptos_views::web_template_edit_page(id)
+            match data.and_then(|d| d.template_edit.as_ref()) {
+                Some(edit) => leptos_views::web_template_edit_page_with_values(edit),
+                None => leptos_views::web_template_edit_page(id),
+            }
         }
         // /domains/{id}/tracking — the custom tracking-domain surface
         // (capability wave 2). Its panel lives in the shared views
@@ -3685,126 +3988,44 @@ mod tests {
     /// bearing.
     #[test]
     fn every_built_marketing_document_is_served_with_and_without_slash() {
-        const BUILT: &[&str] = &[
-            "/",
-            "/about",
-            "/acceptable-use",
-            "/anti-spam",
-            "/api-explorer",
-            "/architecture",
-            "/compare",
-            "/compare/amazon-ses",
-            "/compare/mailgun",
-            "/compare/methodology",
-            "/compare/postmark",
-            "/compare/resend",
-            "/compare/sendgrid",
-            "/compliance",
-            "/contact",
-            "/contact/enterprise",
-            "/contact/sales",
-            "/contact/security",
-            "/cookies",
-            "/data-locations",
-            "/de",
-            "/de/about",
-            "/de/acceptable-use",
-            "/de/compare",
-            "/de/compliance",
-            "/de/contact",
-            "/de/cookies",
-            "/de/data-locations",
-            "/de/dpa",
-            "/de/features",
-            "/de/privacy",
-            "/de/private-cloud",
-            "/de/quickstart",
-            "/de/responsible-disclosure",
-            "/de/security",
-            "/de/sla",
-            "/de/solutions/enterprise",
-            "/de/status",
-            "/de/subprocessors",
-            "/de/terms",
-            "/docs",
-            "/docs/alerts",
-            "/docs/analytics",
-            "/docs/api",
-            "/docs/api/grader",
-            "/docs/api/openapi",
-            "/docs/sdks",
-            "/docs/webhooks",
-            "/dpa",
-            "/enterprise",
-            "/es",
-            "/es/about",
-            "/es/acceptable-use",
-            "/es/compare",
-            "/es/compliance",
-            "/es/contact",
-            "/es/cookies",
-            "/es/data-locations",
-            "/es/dpa",
-            "/es/features",
-            "/es/privacy",
-            "/es/private-cloud",
-            "/es/quickstart",
-            "/es/responsible-disclosure",
-            "/es/security",
-            "/es/sla",
-            "/es/solutions/enterprise",
-            "/es/status",
-            "/es/subprocessors",
-            "/es/terms",
-            "/features",
-            "/email-logs",
-            "/fr",
-            "/fr/about",
-            "/fr/acceptable-use",
-            "/fr/compare",
-            "/fr/compliance",
-            "/fr/contact",
-            "/fr/cookies",
-            "/fr/data-locations",
-            "/fr/dpa",
-            "/fr/features",
-            "/fr/privacy",
-            "/fr/private-cloud",
-            "/fr/quickstart",
-            "/fr/responsible-disclosure",
-            "/fr/security",
-            "/fr/sla",
-            "/fr/solutions/enterprise",
-            "/fr/status",
-            "/fr/subprocessors",
-            "/fr/terms",
-            "/inbox-placement",
-            "/performance-methodology",
-            "/pricing",
-            "/pricing/calculator",
-            "/privacy",
-            "/privacy/do-not-sell",
-            "/private-cloud",
-            "/quickstart",
-            "/responsible-disclosure",
-            "/secure-email-for-regulated-saas",
-            "/security",
-            "/sla",
-            "/solutions",
-            "/solutions/enterprise",
-            "/solutions/high-volume-sending",
-            "/solutions/migration",
-            "/solutions/regulated-industries",
-            "/solutions/saas-platforms",
-            "/solutions/transactional-email",
-            "/status",
-            "/subprocessors",
-            "/terms",
-            "/api-console",
-            "/aup",
-        ];
+        // Derive the expected set from the ACTUAL Zola build output: a
+        // handwritten list silently drifts and shipped 63 locale pages
+        // (/de|/es|/fr pricing, compare, solutions, contact/*, enterprise,
+        // inbox-placement, anti-spam, secure-email-for-regulated-saas) as
+        // live 404s behind the SSR router (dogfood 2026-10-08). The walk
+        // makes the build output itself the contract: add a page to the
+        // site and this test fails until the router serves it.
+        fn collect_index_pages(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+                .map(|entry| entry.expect("dir entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    let name = path.file_name().unwrap().to_string_lossy().to_string();
+                    collect_index_pages(&path, &format!("{prefix}/{name}"), out);
+                }
+            }
+            if dir.join("index.html").is_file() {
+                out.push(if prefix.is_empty() {
+                    "/".to_string()
+                } else {
+                    prefix.to_string()
+                });
+            }
+        }
+        let public_dir = std::path::Path::new(env!("APX_MARKETING_PUBLIC_DIR"));
+        let mut built_pages: Vec<String> = Vec::new();
+        collect_index_pages(public_dir, "", &mut built_pages);
+        assert!(
+            built_pages.len() > 100,
+            "expected the built marketing site under {} to contain 100+ pages, found {}",
+            public_dir.display(),
+            built_pages.len()
+        );
 
-        for path in BUILT {
+        for path in &built_pages {
             let doc = marketing_static_document("marketing-zola", path)
                 .unwrap_or_else(|| panic!("built page {path} missing from the whitelist"));
             assert!(
@@ -3816,6 +4037,14 @@ mod tests {
             let doc_slash = marketing_static_document("marketing-zola", &slash)
                 .unwrap_or_else(|| panic!("trailing-slash {slash} must resolve"));
             assert_eq!(doc, doc_slash, "{slash} must serve the canonical document");
+        }
+
+        // Non-built legacy aliases the router deliberately keeps serving.
+        for alias in ["/api-console", "/aup"] {
+            assert!(
+                marketing_static_document("marketing-zola", alias).is_some(),
+                "legacy alias {alias} must resolve"
+            );
         }
 
         // Unknown paths stay None (no catch-all).
@@ -4257,6 +4486,47 @@ mod tests {
         .unwrap();
         assert!(tampered.contains("Confirmation link unavailable"));
         // A wrong id under an otherwise valid-looking signature is refused.
+        assert_ne!(html, tampered);
+    }
+
+    /// The typed `/confirm` page is a CONTROL-PLANE route too: CP destructive
+    /// actions (tenant suspend from `/tenants`) redirect host-relative to
+    /// `/confirm?...`, and before dogfood 2026-10-08 the route existed only on
+    /// the web manifest — the operator host 404'd on a freshly signed link and
+    /// suspend was unreachable. The same signed-intent page must render on the
+    /// control-plane surface, including the tampered-link refusal.
+    #[test]
+    fn control_plane_confirm_route_renders_the_signed_intent_page() {
+        let secret = "router-test-secret-0123456789";
+        let now = chrono::Utc::now().timestamp();
+        let token = crate::flash::sign_confirmation_for_ttl(
+            secret,
+            "suspend-tenant",
+            "t_confirm_1",
+            now,
+            crate::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+        );
+        let html = render_route_with_query(
+            "control-plane",
+            "/confirm",
+            Some(&format!(
+                "intent=suspend-tenant&id=t_confirm_1&sig={token}&return_to=%2Ftenants"
+            )),
+            Some(secret),
+        )
+        .expect("control-plane /confirm must render (CP destructive actions redirect here)");
+        assert!(html.contains("signed and expires"));
+        assert!(html.contains("action=\"/web/confirm\""));
+        assert!(html.contains("t_confirm_1"));
+
+        let tampered = render_route_with_query(
+            "control-plane",
+            "/confirm",
+            Some("intent=suspend-tenant&id=t_other&sig=deadbeef.deadbeef"),
+            Some(secret),
+        )
+        .unwrap();
+        assert!(tampered.contains("Confirmation link unavailable"));
         assert_ne!(html, tampered);
     }
 

@@ -194,10 +194,13 @@ mod tests {
         // demo viewer (/demo) join the baseline — control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
         // Plan §7: the AI-drafts review page joins the CP surface — 31 → 32.
-        assert_eq!(declared_route_count("control-plane"), Some(32));
+        // Dogfood 2026-10-08: the typed /confirm page (CP destructive-action
+        // confirmation; previously web-only, 404ing on the operator host) —
+        // control-plane 32 → 33, total 128 → 129.
+        assert_eq!(declared_route_count("control-plane"), Some(33));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 128);
+        assert_eq!(total_route_count(), 129);
     }
 
     #[test]

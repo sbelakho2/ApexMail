@@ -556,15 +556,18 @@ impl NativeSelect<'_> {
                 let disabled = if option.disabled { " disabled" } else { "" };
                 format!(
                     "<option value=\"{}\"{}{}>{}</option>",
-                    option.value, selected, disabled, option.label
+                    html_escape(option.value),
+                    selected,
+                    disabled,
+                    html_escape(option.label)
                 )
             })
             .collect::<Vec<_>>()
             .join("");
         format!(
             "<select id=\"{}\" name=\"{}\" class=\"flex w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary{}\"{}{}>{}</select>",
-            self.id,
-            self.name,
+            html_escape(self.id),
+            html_escape(self.name),
             if self.multiple { " min-h-12 py-2" } else { " h-12" },
             required_attr,
             multiple_attrs,

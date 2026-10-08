@@ -373,24 +373,20 @@ async fn create_domain(
         .fetch_one(&mut *tx)
         .await?;
 
-    let max_domains: Option<(i64,)> = sqlx::query_as(
-        r#"SELECT COALESCE((p.features->>'max_sending_domains')::bigint, -1)
-           FROM tenants t JOIN plans p ON t.plan = p.name
-           WHERE t.id = $1"#,
-    )
-    .bind(&auth.tenant_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if let Some((limit,)) = max_domains {
-        // -1 means unlimited
-        if limit >= 0 && domain_count >= limit {
-            return Err(ApiError::Forbidden(format!(
-                "domain limit reached: your plan allows {} sending domain{}",
-                limit,
-                if limit == 1 { "" } else { "s" }
-            )));
-        }
+    // Override-aware race guard (live dogfood 2026-10-08, D-3): this check
+    // previously read `tenants.plan JOIN plans` directly, so a tenant upgraded
+    // through the product's own `plan_overrides` mechanism was still refused
+    // by the stale base-plan cap. The limit now comes from the SAME
+    // entitlement snapshot the gate below enforces (plan_overrides and
+    // feature_flag_overrides aware), and the in-transaction count keeps the
+    // concurrent-create race covered.
+    let limit = entitlement.capacity(CapacityKey::SendingDomains);
+    if limit >= 0 && domain_count >= limit {
+        return Err(ApiError::Forbidden(format!(
+            "domain limit reached: your plan allows {} sending domain{}",
+            limit,
+            if limit == 1 { "" } else { "s" }
+        )));
     }
 
     // Runtime entitlement capacity gate (override-aware, 403 Forbidden):
@@ -3401,6 +3397,111 @@ mod adversarial_handler_tests {
             .await
             .expect_err("an absent platform sender must be reported");
         assert!(matches!(error, ApiError::ServiceUnavailable(_)));
+    }
+
+    /// Regression (live dogfood 2026-10-08, D-3): `create_domain` used to read
+    /// the base plan (`tenants.plan JOIN plans`) for its cap, so a tenant
+    /// upgraded via the product's own `plan_overrides` mechanism was refused
+    /// by the stale free-plan limit ("your plan allows 1 sending domain").
+    /// The cap must come from the override-aware entitlement snapshot.
+    #[tokio::test]
+    async fn create_domain_uses_the_override_aware_capacity() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_override_cap").await else {
+            return;
+        };
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+
+        let (tenant_id, _key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"]).await;
+        // A base plan row with the free cap (limit 1), matching production
+        // data: the OLD code read this row directly and ignored the override.
+        let base_plan = format!("dogfoodbase{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        sqlx::query("INSERT INTO plans (name, features) VALUES ($1, '{\"max_sending_domains\": 1}'::jsonb)")
+            .bind(&base_plan)
+            .execute(&pool)
+            .await
+            .expect("seed base plan");
+        sqlx::query("UPDATE tenants SET plan = $1 WHERE id = $2")
+            .bind(&base_plan)
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("pin base plan");
+        // The product's own upgrade mechanism: an active plan override.
+        sqlx::query(
+            "INSERT INTO plan_overrides (tenant_id, plan, overridden_by, reason, active)
+             VALUES ($1, 'growth', 'test', 'override-aware cap regression', true)",
+        )
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed plan override");
+        // One domain already exists — the free base plan's cap of 1 would
+        // refuse the next create if the base plan were read directly.
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let first = format!("first-{suffix}.example.test");
+        let second = format!("second-{suffix}.example.test");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, verified, dkim_enabled, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, false, false, 'pending', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .bind(&first)
+        .execute(&pool)
+        .await
+        .expect("seed existing domain");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let auth = crate::middleware::auth::AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["domains:write".into(), "domains:read".into()],
+        };
+        let result = create_domain(
+            axum::extract::State(state),
+            auth,
+            Json(CreateDomainRequest { name: second }),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "an override-upgraded tenant must be able to add a second domain; got {result:?}"
+        );
+
+        let _ = sqlx::query("DELETE FROM domains WHERE name LIKE $1")
+            .bind(format!("%-{suffix}.example.test"))
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM plan_overrides WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&base_plan)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await;
+        match previous {
+            Some(value) => std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, value),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+        pool.close().await;
     }
 }
 

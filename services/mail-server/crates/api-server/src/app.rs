@@ -477,6 +477,26 @@ pub fn build_app(state: AppState) -> Router {
             ServeFile::new(format!(
                 "{marketing_public}/.well-known/autoconfig/mail/config-v1.1.xml"
             )),
+        )
+        // RFC 9116 vulnerability-disclosure file. The Zola build ships
+        // `/.well-known/security.txt` in the marketing public dir, and the
+        // standalone nginx marketing host always served it — but the SSR
+        // router's asset list omitted the path, so `https://apexmail.ee/
+        // .well-known/security.txt` (the Canonical: value inside the file
+        // itself, and the brief's required probe) 404'd on every host routed
+        // through the api-server. The PGP keys are the RFC's `Encryption`
+        // target and 404'd the same way (dogfood 2026-10-08).
+        .route_service(
+            "/.well-known/security.txt",
+            ServeFile::new(format!("{marketing_public}/.well-known/security.txt")),
+        )
+        .route_service(
+            "/pgp-key.asc",
+            ServeFile::new(format!("{marketing_public}/pgp-key.asc")),
+        )
+        .route_service(
+            "/pgp-key.txt",
+            ServeFile::new(format!("{marketing_public}/pgp-key.txt")),
         );
 
     let public = Router::<AppState>::new()
@@ -943,7 +963,13 @@ fn static_asset_cache_control(path: &str) -> HeaderValue {
     }
     let cacheable_file = matches!(
         path,
-        "/manifest.json" | "/sitemap.xml" | "/robots.txt" | "/icon.svg" | "/favicon.ico"
+        "/manifest.json"
+            | "/sitemap.xml"
+            | "/robots.txt"
+            | "/icon.svg"
+            | "/favicon.ico"
+            | "/pgp-key.asc"
+            | "/pgp-key.txt"
     ) || path.starts_with("/.well-known/")
         || path == "/mail/config-v1.1.xml";
     if immutable {
@@ -4127,6 +4153,9 @@ mod tests {
             "/icon.svg",
             "/favicon.ico",
             "/.well-known/autoconfig/mail/config-v1.1.xml",
+            "/.well-known/security.txt",
+            "/pgp-key.asc",
+            "/pgp-key.txt",
             "/mail/config-v1.1.xml",
         ] {
             assert_eq!(
@@ -4174,6 +4203,78 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert_eq!(cache, "public, max-age=31536000, immutable");
+        // Readability is part of the contract: the image runs as uid 10001,
+        // so an artifact mode without group/other read bits (the 0600
+        // styles.css shipped 2026-10-08) 404s every page's main stylesheet
+        // while this assertion still passed on cache-control alone.
+        assert_eq!(
+            asset.status(),
+            StatusCode::OK,
+            "the marketing stylesheet must be served, not 404"
+        );
+
+        // Packaging invariant for the static export root artifacts: readable
+        // by the non-root runtime user. A root-owned 0600 file copied into
+        // the image is unreadable by uid 10001 and silently 404s.
+        // (Resolved like bin/server.rs does at runtime — the env var is
+        // ui-foundation's build-time include root, not set for this crate.)
+        let public_dir = {
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            manifest
+                .ancestors()
+                .map(|p| p.join("apps/marketing-zola/public"))
+                .find(|p| p.join("css/styles.css").is_file())
+                .expect("marketing public dir (run `zola --root apps/marketing-zola build`)")
+        };
+        let public_dir = public_dir.as_path();
+        for rel in [
+            "css/styles.css",
+            "css/no-js.css",
+            "robots.txt",
+            "sitemap.xml",
+            ".well-known/security.txt",
+            "pgp-key.asc",
+            "pgp-key.txt",
+        ] {
+            let path = public_dir.join(rel);
+            let md = std::fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = md.permissions().mode();
+                assert_ne!(
+                    mode & 0o044,
+                    0,
+                    "{} is mode {:o}; the api-server image runs as uid 10001 and cannot \
+                     read it (live /{rel} 404s). Fix the artifact mode / the build step.",
+                    path.display(),
+                    mode & 0o777
+                );
+            }
+            let _ = md;
+        }
+
+        // RFC 9116 file and the PGP keys its `Encryption:` field points at
+        // must be routable (they 404'd before 2026-10-08).
+        for uri in [
+            "/.well-known/security.txt",
+            "/pgp-key.asc",
+            "/pgp-key.txt",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(HOST, "apexmail.ee")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri} must be served");
+        }
 
         let sitemap = app
             .clone()

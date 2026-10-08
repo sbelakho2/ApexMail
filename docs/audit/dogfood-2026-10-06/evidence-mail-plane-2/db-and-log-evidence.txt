@@ -1,0 +1,69 @@
+=== DB: provisioned mailboxes + INBOX (flow 1) ===
+                  id                  |               email               | is_active |   folders   
+--------------------------------------+-----------------------------------+-----------+-------------
+ 56d257ba-2eda-4919-9701-ac4a3b639acd | inbox-pj6jsujc@mp2-pj6jsujc.test  | t         | INBOX:inbox
+ d24ad942-662a-4d44-a253-e96692809c04 | sender-pj6jsujc@mp2-pj6jsujc.test | t         | INBOX:inbox
+(2 rows)
+
+=== DB: bounce_events (authoritative v2) ===
+                  id                  |         original_message_id          |         original_recipient         | bounce_type | bounce_subtype | status_code | verp_version | authoritative 
+--------------------------------------+--------------------------------------+------------------------------------+-------------+----------------+-------------+--------------+---------------
+ 44b190b8-3539-45a5-8888-543762a1f81a | 477549e7-318f-424c-bb02-ce66580ddaf9 | flow5-bounce-pj6jsujc@dogfood.test | Hard        | no-mailbox     | 5.1.1       | v2           | t
+ e5aac274-6a3b-4d79-a9d8-f075a458a977 |                                      |                                    | Hard        | no-mailbox     | 5.1.1       | none         | f
+(2 rows)
+
+=== DB: suppression from the authoritative bounce ===
+           id           |               email                |   reason    | subtype | source 
+------------------------+------------------------------------+-------------+---------+--------
+ sup_60b461b77b4b4d8495 | flow5-bounce-pj6jsujc@dogfood.test | hard_bounce | mta     | mta
+(1 row)
+
+=== DB: events for the tracked message ===
+  event_type  |       link_id        |               link_url                |           timestamp           
+--------------+----------------------+---------------------------------------+-------------------------------
+ sent         |                      |                                       | 2026-10-08 11:47:34.945682+00
+ opened       |                      |                                       | 2026-10-08 11:48:14.535595+00
+ clicked      | lnk_8df07fc3f71c6566 | https://mp2-pj6jsujc.test/landing?x=1 | 2026-10-08 11:48:14.562319+00
+ unsubscribed |                      |                                       | 2026-10-08 11:48:18.025034+00
+(4 rows)
+
+=== DB: webhook_queue rows for the DISABLED hook (bug evidence) ===
+                  id                  |    event_type    | status  | attempt | hook_status | enabled 
+--------------------------------------+------------------+---------+---------+-------------+---------
+ whj_95b236261b5959c4b451e6cccbdcd237 | message.accepted | pending |       1 | disabled    | t
+ whj_bb8444f95f77509b99b03020adb15391 | message.accepted | pending |       1 | disabled    | t
+(2 rows)
+
+=== ClickHouse: events for the tracked message ===
+opened		h:883eecd3de88eb153bef99caac0db1ad86743c26d8a485310681af90b3e8cb08:f***@dogfood.test	2026-10-08 11:48:14.535
+clicked	lnk_8df07fc3f71c6566	h:883eecd3de88eb153bef99caac0db1ad86743c26d8a485310681af90b3e8cb08:f***@dogfood.test	2026-10-08 11:48:14.562
+unsubscribed		h:883eecd3de88eb153bef99caac0db1ad86743c26d8a485310681af90b3e8cb08:f***@dogfood.test	2026-10-08 11:48:18.025
+=== MTA logs: null-path accept + verbatim ===
+=== Worker logs: transport + VERP gate + relay defer ===
+{"timestamp":"2026-10-08T12:13:07.333784Z","level":"INFO","fields":{"message":"Email transport backend selected","transport":"Smtp"},"target":"worker"}
+{"timestamp":"2026-10-08T12:24:45.413098Z","level":"INFO","fields":{"message":"outbound MTA holds the send — deferring until the relay terminalizes","job_id":"d539c68d-1b36-4382-81e6-8bb8761be1a1","recipient":"flow4ledger-pj6jsujc@discard.email","route":"dedicated(ded2dogfood0000000000000 @ 203.0.113.77)","reason":"relay delivery pending: submission 'email_queue:d539c68d-1b36-4382-81e6-8bb8761be1a1:flow4ledger-pj6jsujc@discard.email' failed transiently at attempt 1; next attempt at 2026-10-08 12:29:45.387813235 UTC: source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)"},"target":"worker_processors::email::processor"}
+{"timestamp":"2026-10-08T12:28:57.054101Z","level":"INFO","fields":{"message":"outbound MTA holds the send — deferring until the relay terminalizes","job_id":"a0c42345-4cbc-488b-b1ec-d565b257ab4b","recipient":"flow4ledger2-pj6jsujc@discard.email","route":"dedicated(ded2dogfood0000000000000 @ 203.0.113.77)","reason":"relay delivery pending: submission 'email_queue:a0c42345-4cbc-488b-b1ec-d565b257ab4b:flow4ledger2-pj6jsujc@discard.email' failed transiently at attempt 1; next attempt at 2026-10-08 12:33:57.023424062 UTC: source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)"},"target":"worker_processors::email::processor"}
+{"timestamp":"2026-10-08T12:29:48.803328Z","level":"INFO","fields":{"message":"outbound MTA holds the send — deferring until the relay terminalizes","job_id":"d539c68d-1b36-4382-81e6-8bb8761be1a1","recipient":"flow4ledger-pj6jsujc@discard.email","route":"dedicated(ded2dogfood0000000000000 @ 203.0.113.77)","reason":"relay delivery pending: submission 'email_queue:d539c68d-1b36-4382-81e6-8bb8761be1a1:flow4ledger-pj6jsujc@discard.email' failed transiently at attempt 1; next attempt at 2026-10-08 12:34:48.787197339 UTC: source IP 203.0.113.77 could not be bound and verified (refused before DATA): cannot bind the recipient-facing socket to requested source IP 203.0.113.77: Cannot assign requested address (os error 99)"},"target":"worker_processors::email::processor"}
+
+=== DB: replay idempotency (bounce + suppression) ===
+ bounce_rows 
+-------------
+           1
+(1 row)
+
+ suppressions 
+--------------
+            1
+(1 row)
+
+=== DB: no click_refused / no analytics_queue for the live tracking events (stale tracking image) ===
+ click_refused 
+---------------
+             0
+(1 row)
+
+ analytics_queue_rows 
+----------------------
+                    0
+(1 row)
+

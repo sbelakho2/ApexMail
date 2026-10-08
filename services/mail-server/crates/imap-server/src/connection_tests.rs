@@ -563,6 +563,39 @@ async fn pre_starttls_loop_greets_with_starttls_and_logindisabled() {
     assert!(result.is_ok());
 }
 
+/// Dogfood-2 live finding: a command declaring a literal over the per-command
+/// budget (`LOGIN user {35651584}` with `MAX_LITERAL_SIZE` 32 MiB) closed the
+/// socket with ZERO response bytes — an untyped EOF, while the module contract
+/// promises "abandoned or stalling sockets die with a BYE". The refusal must
+/// carry `* BYE` before the close so a client can tell a policy refusal from a
+/// transport failure.
+#[tokio::test]
+async fn over_budget_literal_is_refused_with_a_bye_before_the_close() {
+    let server = start_starttls(test_acceptor(), MockMailstore::new(), false).await;
+    let mut client = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect");
+    let _greeting = read_line_tok(&mut client).await;
+
+    let oversized = MAX_LITERAL_SIZE + 1;
+    client
+        .write_all(format!("a1 LOGIN user {{{oversized}}}\r\n").as_bytes())
+        .await
+        .expect("oversized literal write");
+
+    let bye = read_line_tok(&mut client).await;
+    assert!(
+        bye.starts_with("* BYE"),
+        "an over-budget literal must be refused with BYE, got {bye:?}"
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(10), server.done)
+        .await
+        .expect("server finishes")
+        .expect("join ok");
+    assert!(result.is_ok());
+}
+
 #[tokio::test]
 async fn pre_starttls_loop_answers_capability_and_noop_and_rejects_others() {
     let server = start_starttls(test_acceptor(), MockMailstore::new(), false).await;

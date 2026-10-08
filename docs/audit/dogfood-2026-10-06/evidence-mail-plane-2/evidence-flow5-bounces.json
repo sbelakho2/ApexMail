@@ -1,0 +1,74 @@
+{
+ "probes": {
+  "5a_submission_ok": false,
+  "5a_queue_row": "477549e7-318f-424c-bb02-ce66580ddaf9|pending|0|477549e7-318f-424c-bb02-ce66580ddaf9",
+  "5b_mailpit_id": "aebFQd95WPQkmrgzaeN5WZ",
+  "5b_return_path": "bounces+v2.eyJ2IjoidjIiLCJxIjoiNDc3NTQ5ZTctMzE4Zi00MjRjLWJiMDItY2U2NjU4MGRkYWY5IiwidCI6IjdteXAxY252OXlzY3dyM3oyaTFmZGtoaXJ5IiwiciI6ImZsb3c1LWJvdW5jZS1wajZqc3VqY0Bkb2dmb29kLnRlc3QiLCJlIjoxNzk0MDUzODQ1fQ.cNYebgTtvaxI2rrmxuvVmehJdgG0HG6Y9OScWmbMSFk@bounces.apexmail.ee",
+  "5b_verp_v2_grammar": true,
+  "5b_verp_claims": "{\"v\": \"v2\", \"q\": \"477549e7-318f-424c-bb02-ce66580ddaf9\", \"t\": \"7myp1cnv9yscwr3z2i1fdkhiry\", \"r\": \"flow5-bounce-pj6jsujc@dogfood.test\", \"e\": 1794053845}",
+  "5b_bounce_events": "SQLERR: ERROR:  column \"bounced_at\" does not exist\nLINE 1: ...ative,original_recipient from bounce_events where bounced_at...\n                                                             ^",
+  "5b_suppression": "sup_60b461b77b4b4d8495|flow5-bounce-pj6jsujc@dogfood.test|hard_bounce|mta|mta",
+  "5b_sales_outcomes": "",
+  "5b_sales_sender_events": "SQLERR: ERROR:  column \"created_at\" does not exist\nLINE 1: ...ent_type, count(*) from sales_sender_events where created_at...\n                                                             ^",
+  "5b_events": "sent|1",
+  "5b_replay_bounce_events": "SQLERR: ERROR:  column \"recipient_claim\" does not exist\nLINE 1: ...recipient='flow5-bounce-pj6jsujc@dogfood.test' or recipient_...\n                                                             ^",
+  "5b_replay_suppressions": "1",
+  "5b_replay_sales": "0",
+  "5b_replay_events_unsub": "sent|1",
+  "5c_complaint_events": "d9591a6e-9085-4a4d-8926-6f6092407887|abuse|f|non-authoritative source 127.0.0.1; claimed message_id=\n9ef4bfec-0757-4526-aa8e-c89526c6f0cd|abuse|f|non-authoritative source 127.0.0.1; claimed message_id=\n67068da7-eea5-45f2-93e1-672940f101a1|abuse|f|non-authoritative source 127.0.0.1; claimed message_id=",
+  "5c_suppression_after_arf": "1",
+  "5d_ses_post": "503 {\"error\":{\"code\":\"SERVICE_UNAVAILABLE\",\"message\":\"SNS notifications are not configured\",\"requestId\":\"58311da4-51fd-436b-be76-90335eacb2a0\"}}",
+  "5d_ses_env": "(empty)"
+ },
+ "transcripts": [
+  {
+   "name": "RUN 5A STARTTLS submission (5587)",
+   "lines": [
+    "S: mail.apexmail.ee Hello 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
+    "C: STARTTLS (self-signed accepted)",
+    "S: 250 (ESMTP again, AUTH advertised: True)",
+    "C: AUTH PLAIN -> 235 b'2.7.0 Authentication successful'",
+    "submission error: ValueError: not enough values to unpack (expected 2, got 0)"
+   ]
+  },
+  {
+   "name": "RUN 5B.1 DSN injection to the VERP address (bounce listener 2525)",
+   "lines": [
+    "S: 220 mail.apexmail.ee Bounce Processor",
+    "S: 250-mail.apexmail.ee Hello",
+    "S: 250-SIZE 1048576",
+    "S: 250 8BITMIME",
+    "S: 250 2.0.0 Ok",
+    "S: 250 2.0.0 Ok",
+    "S: 354 Go ahead",
+    "S: 250 2.0.0 Ok id=44b190b8-3539-45a5-8888-543762a1f81a"
+   ]
+  },
+  {
+   "name": "RUN 5B.2 DSN REPLAY (must not double-apply)",
+   "lines": [
+    "S: 220 mail.apexmail.ee Bounce Processor",
+    "S: 250-mail.apexmail.ee Hello",
+    "S: 250-SIZE 1048576",
+    "S: 250 8BITMIME",
+    "S: 250 2.0.0 Ok",
+    "S: 250 2.0.0 Ok",
+    "S: 354 Go ahead",
+    "S: 250 2.0.0 Ok id=c50bf370-d4d5-4ac9-8732-f1bf6c8912bb"
+   ]
+  },
+  {
+   "name": "RUN 5C.1 ARF complaint injection (FBL listener 2526)",
+   "lines": [
+    "S: 220 mail.apexmail.ee FBL Processor",
+    "S: 250-mail.apexmail.ee",
+    "S: 250-SIZE 1048576",
+    "S: 250 8BITMIME",
+    "S: 250 2.0.0 Ok",
+    "S: 250 2.0.0 Ok",
+    "S: 354 Go ahead",
+    "S: 250 2.0.0 Ok id=d9591a6e-9085-4a4d-8926-6f6092407887"
+   ]
+  }
+ ]
+}

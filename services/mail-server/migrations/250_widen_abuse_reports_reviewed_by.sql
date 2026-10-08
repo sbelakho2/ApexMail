@@ -1,0 +1,16 @@
+-- Migration 250: widen abuse_reports.reviewed_by
+--
+-- The CP abuse lifecycle (POST /v1/admin/billing/abuse/reports/:id/review and
+-- /resolve) binds `reviewer(&auth)` — the acting operator's user UUID (36
+-- chars). `reviewed_by` was created VARCHAR(26) (069_create_missing_app_tables
+-- .sql), sized for slug ids, so EVERY operator review and resolution failed
+-- with "value too long for type character varying(26)" and surfaced as a 500
+-- while the report stayed open (live dogfood 2026-10-08: record -> 201,
+-- review/resolve -> 500). The sibling transition writes (`tenant_restrictions
+-- .cleared_by`, `plan_overrides.admin_id`) are already VARCHAR(64); this
+-- aligns the last narrow actor column.
+--
+-- VARCHAR(64) matches `tenant_restrictions.cleared_by` and
+-- `plan_overrides.admin_id`, the pre-existing actor-attribution columns for
+-- the same operator mutations.
+ALTER TABLE abuse_reports ALTER COLUMN reviewed_by TYPE VARCHAR(64);

@@ -5795,6 +5795,14 @@ async fn handle_plaintext_with_starttls(
             Ok(None) => return Ok(()),
             Err(e) => {
                 warn!("Error reading command before STARTTLS: {}", e);
+                // Dogfood-2: a read error (e.g. an over-budget literal
+                // declaration — `LOGIN user {35651584}` with a 32 MiB cap)
+                // used to close the socket with ZERO response bytes. RFC 3501
+                // requires a BYE before a server-initiated close, and the
+                // module contract already promises one; the timeout arm of
+                // `read_command_bounded` sends it, so the error arm must too.
+                let _ = writer.write_all(bye("Command read failed, closing connection").as_bytes()).await;
+                let _ = writer.flush().await;
                 return Ok(());
             }
         };
@@ -5950,6 +5958,16 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
             Ok(None) => break,
             Err(e) => {
                 warn!("Error reading command: {}", e);
+                // Dogfood-2: the literal-budget refusal (e.g. a declared
+                // literal over MAX_LITERAL_SIZE) reached this arm and closed
+                // the connection with zero response bytes, while the
+                // documented contract for this loop is "abandoned or
+                // stalling sockets die with a BYE". Say BYE before closing so
+                // the client sees a typed reason instead of a bare EOF.
+                let _ = writer
+                    .write_all(bye("Command read failed, closing connection").as_bytes())
+                    .await;
+                let _ = writer.flush().await;
                 break;
             }
         };

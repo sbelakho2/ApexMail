@@ -1,0 +1,15 @@
+{
+ "owner": {
+  "email": "dg-owner-ca1e8136@dogfood.test",
+  "user_id": "4ed3cae4-3430-4121-a83f-7da95f04a2e3",
+  "tenant_id": "2o96errulote571tv2v1i2knh3",
+  "csrf": "MTc5MTQ2Nzc0MjI2MTo1NWZmOGY5Yy05OGZhLTRlODItYjEyZi0yNGVlMjQzYzY5YTY.opLua1Wg-XJ4XrK7dbW7tpGmLwwzo6kud0f5I24zhBE",
+  "jar": {
+   "csrf_token": "MTc5MTQ2Nzc0MjI2MTo1NWZmOGY5Yy05OGZhLTRlODItYjEyZi0yNGVlMjQzYzY5YTY.opLua1Wg-XJ4XrK7dbW7tpGmLwwzo6kud0f5I24zhBE",
+   "am_session": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI0ZWQzY2FlNC0zNDMwLTQxMjEtYTgzZi03ZGE5NWYwNGEyZTMiLCJ0ZW5hbnRfaWQiOiIybzk2ZXJydWxvdGU1NzF0djJ2MWkya25oMyIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU1NDE0MiwiaWF0IjoxNzkxNDY3NzQyLCJqdGkiOiI5OGZkMDE2OS03YTIyLTQ3NDAtYjBmOS04MDJmOGYwYjZhM2IiLCJ0eXAiOiJzZXNzaW9uIn0.g2SFLmo0_PB1AM1Or29OfWLjAG6D88wzWEDMHBXOZNullloNirPYChrfG_sQ--QWu2PwQiGoA8WFbZ45a2b35az6btn-NDD-lH-t25OYEKU1AMq_WK6Gdi7QbC24ZBkZineXTgZHwVcZutRg9tfoUdWPEVlvIFxETsLSvDd2U9rm9_DDsg2NzN7YESP3sFclyfImI_OsscmfquJphIMa4c9MomjMAFjzj-ZaUwdDjnm9O0k16TFyfbPj7OY_oyb8-20tZwlUzMrXDVtQPOXxLPFZzSyB-c2sq-nJKU3v3mshws8aiFww0tvN5i6xOKePyqdUZOc84f723mRKdW_JZQ"
+  }
+ },
+ "member": null,
+ "owner_b": null,
+ "extras": {}
+}

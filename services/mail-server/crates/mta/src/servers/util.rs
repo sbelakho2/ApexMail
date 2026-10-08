@@ -475,8 +475,14 @@ pub(crate) async fn queue_tenant_webhook_event(
         return;
     }
     let subscribed: Vec<(String,)> = match sqlx::query_as(
+        // Dogfood-2 live finding: the webhook processor only ever claims
+        // rows for webhooks with `enabled = true AND status = 'active'`
+        // (see worker-processors/src/webhook/processor.rs), while every
+        // enqueue site filtered on `enabled` alone. A webhook disabled via
+        // `PATCH /v1/webhooks/:id` therefore kept receiving queued events it
+        // could never deliver. Mirror the claim contract here.
         "SELECT id FROM webhooks \
-         WHERE tenant_id = $1 AND enabled = true \
+         WHERE tenant_id = $1 AND enabled = true AND status = 'active' \
            AND (events ? $2 OR events ? '*')",
     )
     .bind(tenant_id)

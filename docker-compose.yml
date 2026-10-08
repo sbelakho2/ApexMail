@@ -357,6 +357,10 @@ services:
       SALES_AUTOPILOT_BASE_URL: ${SALES_AUTOPILOT_BASE_URL:-http://sales-autopilot:3010}
       # ── Required ──────────────────────────────────────────────────────────
       APEXMAIL_API_KEY: ${APEXMAIL_API_KEY:-dev-api-key-change-me}
+      # Every audit writer must sign with the SAME key or /audit/verify
+      # reports valid:false for rows signed by a differently-defaulted
+      # process (2026-10-08 live dogfood E-AUDIT-KEY).
+      AUDIT_SIGNING_KEY: ${AUDIT_SIGNING_KEY:-dev-audit-signing-key-change-me-32-bytes}
       # Comma-separated CIDRs of reverse proxies whose X-Forwarded-For may be
       # trusted for client-IP extraction (empty = headers never trusted, which
       # is only correct when clients connect directly; behind the nginx edge
@@ -604,6 +608,17 @@ services:
       # Matches the config default format (http:// scheme) and the prod overlay.
       MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
       SUBMISSION_PORT: ${SUBMISSION_PORT:-587}
+      # ── VERP bounce routing (prod parity) ─────────────────────────────────
+      # The worker mints `bounces+v2.<token>@<VERP_DOMAIN>` Return-Paths with
+      # this shared HMAC secret and the MTA's bounce listener (port 2525)
+      # authenticates them. The prod overlay has always required the secret
+      # (and `MtaConfig::validate` fails a production boot without it); the
+      # DEV compose silently left both unset, so locally every DSN was
+      # recorded as a non-authoritative observation and no bounce could ever
+      # suppress. Dev ships the same >=32-byte dev secret so the documented
+      # bounce path is exercisable end to end.
+      VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
+      VERP_HMAC_SECRET: ${VERP_HMAC_SECRET:-dev-verp-hmac-secret-minimum-32-bytes-long}
       # METRICS_PORT is read by the MTA's metrics listener (enabled via
       # METRICS_ENABLED). The healthcheck probes SMTP port 25 directly.
       METRICS_ENABLED: "true"
@@ -658,6 +673,9 @@ services:
         condition: service_healthy
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+      # Same audit key as api-server/compliance (E-AUDIT-KEY): the worker
+      # appends chained audit rows too.
+      AUDIT_SIGNING_KEY: ${AUDIT_SIGNING_KEY:-dev-audit-signing-key-change-me-32-bytes}
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
@@ -695,6 +713,14 @@ services:
       WORKER_REPLY_CLASSIFIER_AI_ENABLED: ${WORKER_REPLY_CLASSIFIER_AI_ENABLED:-true}
       WORKER_REPLY_CLASSIFIER_AI_URL: ${WORKER_REPLY_CLASSIFIER_AI_URL:-http://ai-service:3012}
       WORKER_REPLY_CLASSIFIER_AI_API_KEY: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # ── VERP bounce routing (dev parity with the prod overlay) ───────────
+      # Without the shared secret the worker's startup gate logs a WARN and
+      # every outbound message carries the plain sender as Return-Path, so
+      # the MTA bounce listener can never authenticate a DSN and hard
+      # bounces/suppression are unexercisable locally. See docker-compose.prod.yml
+      # (secret `verp_hmac_secret`) for the production wiring this mirrors.
+      VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
+      VERP_HMAC_SECRET: ${VERP_HMAC_SECRET:-dev-verp-hmac-secret-minimum-32-bytes-long}
     healthcheck:
       # The worker binary serves /health on HEALTH_PORT — which resolves
       # HEALTH_PORT, then METRICS_PORT (9093 above), then 9090. A stale

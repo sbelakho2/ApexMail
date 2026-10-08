@@ -66,10 +66,16 @@ pub async fn handle_click(
         Err(refusal) => return refusal,
     };
 
-    // E-148:Length guard
-    if tracking_id.len() < 10 || tracking_id.len() > 4096 {
-        warn!(len = tracking_id.len(), "Click: invalid trackingId length");
-        return csp_redirect(&fallback, redirect_status);
+    // E-148:Length guard + SM2-F4 shape guard. A malformed token (wrong
+    // length, standard-base64 `+`/`/`, `=`, control bytes, multi-byte
+    // Unicode) can never verify. Answer a TYPED refusal naming the reason
+    // instead of the old silent 302 to the vendor fallback: a recipient
+    // whose link is corrupt must not land on the marketing homepage, and
+    // malformed traffic must be visible to operators.
+    if !crate::token_shape::is_valid_token_shape(&tracking_id) {
+        warn!(len = tracking_id.len(), "Click: malformed tracking token");
+        metrics::counter!("apexmail_tracking_click_malformed_token_total").increment(1);
+        return refusal_response(&RedirectRefusal::MalformedToken);
     }
 
     let user_agent = headers
@@ -96,7 +102,18 @@ pub async fn handle_click(
         "Click tracking request"
     );
 
-    let data = state.codec.decode(&tracking_id);
+    // Unknown token (well-formed shape, but it does not decrypt: fabricated,
+    // truncated, or signed with a different key). Answer a TYPED 404 naming
+    // the reason — never the silent fallback bounce (dogfood 2026-10-06 E2).
+    let Some(decoded) = state.codec.decode(&tracking_id) else {
+        warn!(
+            id_prefix = token_log_prefix(&tracking_id, 20),
+            "Click: unknown tracking token — refused instead of bounced"
+        );
+        metrics::counter!("apexmail_tracking_click_unknown_token_total").increment(1);
+        return refusal_response(&RedirectRefusal::UnknownToken);
+    };
+    let data = Some(decoded);
 
     // Capability wave 2: the token must belong to the custom host's
     // workspace — a link for tenant B served on tenant A's tracking host is
@@ -190,12 +207,6 @@ pub async fn handle_click(
                 }
             });
         }
-    } else {
-        // SM2-F4: char-boundary-safe prefix (see the debug! above).
-        warn!(
-            id_prefix = token_log_prefix(&tracking_id, 20),
-            "Click: invalid tracking token"
-        );
     }
 
     csp_redirect(&redirect_url, redirect_status)
@@ -238,15 +249,23 @@ enum RedirectRefusal {
     /// The authorization store could not answer. Refusing (rather than
     /// guessing) is outage honesty; it is a 503, not a client error.
     Unavailable { domain: String },
+    /// The tracking token is not a well-formed token at all (length,
+    /// alphabet): 400, named, never a bounce.
+    MalformedToken,
+    /// The tracking token is well-formed but does not decrypt (fabricated,
+    /// truncated, or signed with a different key): 404, named, never a
+    /// bounce.
+    UnknownToken,
 }
 
 impl RedirectRefusal {
     fn status(&self) -> StatusCode {
         match self {
-            RedirectRefusal::NotAuthorized { .. } | RedirectRefusal::InvalidTarget { .. } => {
-                StatusCode::BAD_REQUEST
-            }
+            RedirectRefusal::NotAuthorized { .. }
+            | RedirectRefusal::InvalidTarget { .. }
+            | RedirectRefusal::MalformedToken => StatusCode::BAD_REQUEST,
             RedirectRefusal::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            RedirectRefusal::UnknownToken => StatusCode::NOT_FOUND,
         }
     }
 
@@ -264,6 +283,12 @@ impl RedirectRefusal {
                 "The destination host '{domain}' could not be verified right now. The click \
                  was refused rather than guessed; try again in a moment."
             ),
+            RedirectRefusal::MalformedToken => "This tracking link is malformed. The link was \
+                 not followed; check the URL, or ask the sender for a new message."
+                .to_string(),
+            RedirectRefusal::UnknownToken => "This tracking link is not valid. The link was \
+                 not followed; ask the sender for a new message."
+                .to_string(),
         }
     }
 }

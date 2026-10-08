@@ -1,0 +1,50 @@
+{
+  "run": "apr4",
+  "results": [
+    {
+      "probe": "P7.1 Business submits a template (pending)",
+      "ok": true,
+      "detail": "status=200 submission=36b3e8c4-0ad4-47a7-9168-2d172d85450f"
+    },
+    {
+      "probe": "P7.2 approve cycle with maker-checker identity recorded",
+      "ok": true,
+      "detail": "db=approved|35aab4be-8561-4ae1-98e3-99d63d46b90a"
+    },
+    {
+      "probe": "P7.3 reject cycle",
+      "ok": true,
+      "detail": "db_status=rejected"
+    },
+    {
+      "probe": "P7.4 stats endpoint returns real numbers",
+      "ok": true,
+      "detail": "stats={'approved': 1, 'avg_spam_score': 20.0, 'changes_requested': 0, 'pending': 0, 'rejected': 1, 'total': 2} db_total=2"
+    },
+    {
+      "probe": "P7.5 non-entitled tenant -> 403 naming template_approval_workflow",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P7.6 cross-tenant get refused",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P7.6 cross-tenant list refused",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P7.6 cross-tenant approve refused",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P7.7 concurrent approves leave one review identity",
+      "ok": true,
+      "detail": "row=approved|01c0fdbe-1885-480b-93fd-1ef939bfa2fb statuses=[200, 200]"
+    }
+  ]
+}

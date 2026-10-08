@@ -71,6 +71,20 @@ repos:
         pass_filenames: false
         files: ^apps/marketing-zola/.*
 
+      - id: marketing-serving-gate
+        name: marketing serving gate (built pages, artifacts, asset routes)
+        description: >-
+          Every built page in apps/marketing-zola/public must have a
+          marketing_static_document whitelist arm, every root artifact must be
+          world-readable (the image runs as uid 10001), security.txt + the PGP
+          keys must be routed, and the consent banner's policy link must stay
+          locale-prefixed. These four drifted independently and shipped 63
+          live 404s plus an unstyled site (dogfood 2026-10-08).
+        entry: python3 tools/check_marketing_serving.py
+        language: system
+        pass_filenames: false
+        files: ^(apps/marketing-zola/|services/mail-server/(Dockerfile|crates/(ui-foundation|api-server)/src/(axum_router|app)\.rs))
+
       - id: cargo-audit-mail-server
         name: cargo audit (mail-server)
         entry: bash scripts/security-audit.sh

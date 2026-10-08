@@ -1,0 +1,20 @@
+{
+ "accepted": 100,
+ "first_refusal": 101,
+ "refusal": "452 4.5.3 Too many recipients",
+ "transcript": [
+  "S: 220 mail.apexmail.ee ESMTP ApexMail MTA",
+  "S: 250-mail.apexmail.ee Hello mx.many.dogfood2.example",
+  "S: 250-SIZE 26214400",
+  "S: 250-STARTTLS",
+  "S: 250-8BITMIME",
+  "S: 250-PIPELINING",
+  "S: 250-ENHANCEDSTATUSCODES",
+  "S: 250 SMTPUTF8",
+  "S: 250 2.0.0 Ok",
+  "C: RCPT TO x105 (real mailboxes) \u2192 accepted=100, first refusal at #101: 452 4.5.3 Too many recipients",
+  "C: NOOP -> 250 2.0.0 Ok",
+  "C: DATA -> 354 Start mail input; end with <CRLF>.<CRLF>",
+  "S: 250 2.0.0 Ok id=inb_08c9328ca8f7440cadbd1f"
+ ]
+}

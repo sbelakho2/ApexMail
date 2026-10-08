@@ -1,0 +1,80 @@
+{
+  "run": "tt5",
+  "results": [
+    {
+      "probe": "P3.0a real message accepted",
+      "ok": true,
+      "detail": "id=1842bb6f-735f-4bbf-b397-accf412d28f5"
+    },
+    {
+      "probe": "P3.1 real message reached sent via the worker",
+      "ok": true,
+      "detail": "sent_at=2026-10-08T12:09:37.866658Z"
+    },
+    {
+      "probe": "P3.2 at=created_at reconstructs the acceptance edge (accepted/queued; downstream fact wins the identical-timestamp tie-break)",
+      "ok": true,
+      "detail": "state=queued entries=['message.accepted', 'queue.enqueued']"
+    },
+    {
+      "probe": "P3.2b an accepted-but-unqueued message reconstructs 'accepted'",
+      "ok": true,
+      "detail": "state=accepted"
+    },
+    {
+      "probe": "P3.3 at=sent_at reconstructs 'sent'",
+      "ok": true,
+      "detail": "state=sent"
+    },
+    {
+      "probe": "P3.4 past state after later events stays 'sent'",
+      "ok": true,
+      "detail": "state=sent"
+    },
+    {
+      "probe": "P3.5 at=post-injection instant reconstructs 'delivered'",
+      "ok": true,
+      "detail": "state=delivered"
+    },
+    {
+      "probe": "P3.6 bounced message reconstructs 'bounced'",
+      "ok": true,
+      "detail": "state=bounced"
+    },
+    {
+      "probe": "P3.7 before acceptance -> not_yet_accepted (provable absence)",
+      "ok": true,
+      "detail": "state=not_yet_accepted"
+    },
+    {
+      "probe": "P3.8 insufficient history answers honestly (history_complete=false)",
+      "ok": true,
+      "detail": "history_complete=False"
+    },
+    {
+      "probe": "P3.9 missing at is refused (400/422)",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P3.10 cross-tenant id -> 404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P3.11 non-entitled tenant -> 403 naming time_travel_debugging",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P3.12 console timeline page renders the same reconstructed state",
+      "ok": true,
+      "detail": "status=200 links=['data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%23dc2626%22%2F%3E%3Cpath%20d%3D%22M16%207%2026%2025h-5.4L16%2016.6%2011.4%2025H6L16%207Z%22%20fill%3D%22%23ffffff%22%2F%3E%3C%2Fsvg%3E', '/assets/globals.css?v=d58633b56e1a2ef1', '#app-main', '/dashboard', '/campaigns', '/templates']"
+    },
+    {
+      "probe": "P3.13 the timeline page links to the delivery-events surface",
+      "ok": true,
+      "detail": "href /events present=True"
+    }
+  ]
+}

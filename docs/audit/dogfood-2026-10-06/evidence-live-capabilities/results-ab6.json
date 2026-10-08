@@ -1,0 +1,90 @@
+{
+  "run": "ab6",
+  "results": [
+    {
+      "probe": "P2.1 experiment campaign created",
+      "ok": "ed0a3dab-735b-4a27-95db-45cf26283fc1",
+      "detail": "campaign=ed0a3dab-735b-4a27-95db-45cf26283fc1"
+    },
+    {
+      "probe": "P2.2 send accepted",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "probe": "P2.3 every recipient phased with a persisted bucket",
+      "ok": true,
+      "detail": "test=102 holdout=98 total=200"
+    },
+    {
+      "probe": "P2.4 buckets match the md5(campaign:contact) formula exactly",
+      "ok": true,
+      "detail": "mismatches=0 test_pct=51.0%"
+    },
+    {
+      "probe": "P2.5 both arms populated",
+      "ok": true,
+      "detail": "arms=['0', '1']"
+    },
+    {
+      "probe": "P2.6 holdout receives nothing at split",
+      "ok": true,
+      "detail": "holdout queue rows=0 holdout message refs=0"
+    },
+    {
+      "probe": "P2.7 real worker sent the test sample",
+      "ok": true,
+      "detail": "sent=102"
+    },
+    {
+      "probe": "P2.8 GET experiment returns per-arm results",
+      "ok": true,
+      "detail": "arms=[{\"arm_index\": 0, \"template_id\": \"vp74h5cu41bm3jsczxso497385\", \"subject\": \"Arm A ab6\", \"trials\": 45, \"successes\": 0, \"rate\": 0.0}, {\"arm_index\": 1, \"template_id\": \"1rnmgk6ztdmj0w3ci61mcqg5id\", \"subject\": \"Arm B ab6\", \"trials\": 57, \"successes\": 0, \"rate\": 0.0}]"
+    },
+    {
+      "probe": "P2.9 opens from the real pixel landed in events",
+      "ok": true,
+      "detail": "forced=47 distinct_open_events=45"
+    },
+    {
+      "probe": "P2.10 big experiment decides a winner from forced outcomes",
+      "ok": true,
+      "detail": "state=winner"
+    },
+    {
+      "probe": "P2.11 below MIN_ARM_TRIALS the decision refuses with the documented reason",
+      "ok": true,
+      "detail": "state=insufficient_sample reason='arm 0 has 11 sent test recipient(s); 30 are required per arm before a winner can be declared'"
+    },
+    {
+      "probe": "P2.12 manual declaration promotes the holdout + audits",
+      "ok": true,
+      "detail": "promoted_rows=21 audit_rows=1 ab_config={\"arms\": [{\"templateId\": \"vp74h5cu41bm3jsczxso497385\"}, {\"templateId\": \"1rnmgk6ztdmj0w3ci61mcqg5id\"}], \"metric\": \"open\", \"winnerAt\": \"2026-10-08T12:17:29.147318406+00:00\", \"winnerArm\": 1, \"waitMinutes"
+    },
+    {
+      "probe": "P2.13 out-of-range arm refused (named 400)",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "probe": "P2.14 non-entitled tenant -> 403 naming ab_testing",
+      "ok": true,
+      "detail": "status=403 msg='plan `free` does not include `ab_testing`'"
+    },
+    {
+      "probe": "P2.15 cross-tenant campaign -> 404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P2.15 cross-tenant declare -> 404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P2.16 concurrent declarations leave one winner arm",
+      "ok": true,
+      "detail": "distinct_winner_arms=1 audit_rows=2 statuses=[200, 200]"
+    }
+  ]
+}

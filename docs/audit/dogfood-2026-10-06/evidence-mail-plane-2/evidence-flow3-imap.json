@@ -1,0 +1,128 @@
+{
+ "transcripts": [
+  {
+   "name": "RUN 3.1 IMAPS happy path",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: LOGIN -> OK LOGIN succeeded",
+    "C: CAPABILITY -> IMAP4REV1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN",
+    "C: LIST -> OK",
+    "   () \"/\" \"INBOX\"",
+    "C: SELECT INBOX -> OK 2",
+    "C: FETCH 1 (BODY.PEEK[]) -> OK, 702 bytes",
+    "--- fetched message (UID 1) ---",
+    "Received: from mx.dogfood2.example (unknown [172.20.0.1])",
+    "\tby mail.apexmail.ee with UTF8ESMTP id inb_2465a16e2dbc4df68250a5;",
+    "\tThu, 8 Oct 2026 11:33:33 +0000",
+    "Authentication-Results: mail.apexmail.ee;",
+    "\tspf=none smtp.mailfrom=external.dogfood2.example;",
+    "\tdmarc=none header.from=external.dogfood2.example",
+    "From: External Sender <ext-pj6jsujc@external.dogfood2.example>",
+    "To: <inbox-pj6jsujc@mp2-pj6jsujc.test>",
+    "Subject: Flow2 inbound 8bit \u00fcn\u00efc\u00f6d\u00e9 \u65e5\u672c\u8a9e pj6jsujc",
+    "Message-ID: <flow2-a-pj6jsujc@external.dogfood2.example>",
+    "Date: Wed, 08 Oct 2026 11:00:00 +0000",
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Inbound body with \u00fcn\u00efc\u00f6d\u00e9 and \u65e5\u672c\u8a9e\u30c6\u30ad\u30b9\u30c8 \u2014 dogfood2.",
+    "",
+    "C: SEARCH ALL -> OK 1 2",
+    "C: SEARCH SUBJECT \"line probe\" -> OK 2",
+    "C: STATUS INBOX (UIDNEXT MESSAGES) -> \"INBOX\" (MESSAGES 2 UIDNEXT 3)",
+    "C: STORE 1 +FLAGS (\\Flagged \\Seen) -> OK 1 (FLAGS (\\Seen \\Flagged \\Recent))",
+    "C: FETCH 1 (FLAGS) -> 1 (FLAGS (\\Seen \\Flagged \\Recent))",
+    "C: STORE 1 -FLAGS (\\Flagged) -> OK 1 (FLAGS (\\Seen \\Recent))"
+   ]
+  },
+  {
+   "name": "RUN 3.2 expunge / UIDNEXT",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: LOGIN -> OK LOGIN succeeded",
+    "C: STATUS before expunge -> \"INBOX\" (MESSAGES 2 UIDNEXT 3)",
+    "C: EXPUNGE -> OK [None]",
+    "C: STATUS after expunge -> \"INBOX\" (MESSAGES 2 UIDNEXT 3)",
+    "C: SEARCH ALL after expunge -> 1 2"
+   ]
+  },
+  {
+   "name": "RUN 3.3 IMAP login with a wrong password",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: LOGIN <wrong> -> LOGIN failed: Invalid credentials"
+   ]
+  },
+  {
+   "name": "RUN 3.3b IMAP login for an unknown mailbox",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: LOGIN <ghost> -> LOGIN failed: Invalid credentials"
+   ]
+  },
+  {
+   "name": "RUN 3.4 oversized literal (33 MiB) refused",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a1 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test {35651584}",
+    "S: <EOF>"
+   ]
+  },
+  {
+   "name": "RUN 3.5 baseline raw LOGIN",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a2 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test Imap-Dogfood2!2026",
+    "S: a2 OK LOGIN succeeded"
+   ]
+  },
+  {
+   "name": "RUN 3.6 unknown command",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a1 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test Imap-Dogfood2!2026",
+    "S: a1 OK LOGIN succeeded",
+    "C: a2 X-NOT-A-COMMAND",
+    "S: a2 BAD Unknown command"
+   ]
+  },
+  {
+   "name": "RUN 3.7 SELECT without mailbox argument",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a1 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test Imap-Dogfood2!2026",
+    "S: a1 OK LOGIN succeeded",
+    "C: a2 SELECT",
+    "S: a2 BAD Mailbox name required"
+   ]
+  },
+  {
+   "name": "RUN 3.8 FETCH without SELECT",
+   "lines": [
+    "S: * OK [CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS IDLE LITERAL+ AUTH=PLAIN] ApexMail IMAP4rev1 server ready",
+    "C: a1 LOGIN inbox-pj6jsujc@mp2-pj6jsujc.test Imap-Dogfood2!2026",
+    "S: a1 OK LOGIN succeeded",
+    "C: a2 FETCH 1 (BODY[])",
+    "S: a2 BAD No mailbox selected"
+   ]
+  }
+ ],
+ "probes": {
+  "3.1_list_raw": [
+   "() \"/\" \"INBOX\""
+  ],
+  "3.1_select": "2",
+  "3.1_fetch_bytes": 702,
+  "3.1_has_subject": true,
+  "3.1_has_body": true,
+  "3.1_has_auth_results": true,
+  "3.1_search_all": "1 2",
+  "3.1_search_subject": "2",
+  "3.1_uidnext_before": 3,
+  "3.1_flags": "1 (FLAGS (\\Seen \\Flagged \\Recent))",
+  "3.2_expunge_reply": "[None]",
+  "3.2_uidnext_after": "\"INBOX\" (MESSAGES 2 UIDNEXT 3)",
+  "3.3_bad_auth": "LOGIN failed: Invalid credentials",
+  "3.3b_unknown_user": "LOGIN failed: Invalid credentials"
+ }
+}

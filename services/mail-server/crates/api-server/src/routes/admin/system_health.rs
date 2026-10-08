@@ -272,12 +272,18 @@ async fn system_health(
     };
 
     // ── Queues ─────────────────────────────────────────────────
+    // `queue_jobs.queue_name` is nullable (rows written before the
+    // queue_name/queue split, and fixtures that populate only `queue`): the
+    // raw `queue_name` decode into `String` failed with "unexpected null"
+    // and 500'd the whole health endpoint — even though the sibling
+    // queue-writer query below already COALESCEs. Derive the queue identity
+    // exactly like that query.
     let queue_rows = optional_relation_rows(
         sqlx::query_as::<_, (String, i64, i64)>(
-            "SELECT queue_name,
+            "SELECT COALESCE(queue_name, queue) AS queue_name,
                     SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as depth,
                     SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as proc
-             FROM queue_jobs GROUP BY queue_name",
+             FROM queue_jobs GROUP BY COALESCE(queue_name, queue)",
         )
         .fetch_all(&state.db)
         .await,
@@ -583,6 +589,61 @@ mod tests {
             .bind("192.0.2.25")
             .execute(&pool)
             .await;
+    }
+
+    /// `queue_jobs.queue_name` is nullable (the sibling queue-writer query
+    /// already COALESCEs it). A single row with NULL `queue_name` used to
+    /// make the raw `String` decode fail with "unexpected null" and 500 the
+    /// whole health endpoint; the queues query must derive the queue
+    /// identity from `COALESCE(queue_name, queue)` exactly like the writer
+    /// query does.
+    #[tokio::test]
+    async fn queue_rows_with_null_queue_name_do_not_break_health() {
+        let Some(pool) = crate::test_db::canonical_pool("system_health_null_queue").await else {
+            return;
+        };
+
+        // queue_jobs.id and tenant_id are BOTH uuid columns: use real UUIDs
+        // so the insert exercises the nullability, not a type error.
+        const JOB_ID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const JOB_TENANT: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f1";
+        sqlx::query(
+            "INSERT INTO queue_jobs (id, tenant_id, queue, status, attempts, max_attempts,
+                                     priority, payload, created_at, updated_at)
+             VALUES ($1::uuid, $2::uuid, 'health-null-queue', 'pending', 0, 3,
+                     0, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO UPDATE SET queue_name = NULL",
+        )
+        .bind(JOB_ID)
+        .bind(JOB_TENANT)
+        .execute(&pool)
+        .await
+        .expect("seed a queue job with NULL queue_name");
+        // Belt and braces: the insert path above may write queue_name.
+        sqlx::query("UPDATE queue_jobs SET queue_name = NULL WHERE id = $1::uuid")
+            .bind(JOB_ID)
+            .execute(&pool)
+            .await
+            .expect("force NULL queue_name");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let response = system_health(State(state), admin_auth())
+            .await
+            .expect("system health must decode NULL queue_name rows");
+        let body = serde_json::to_value(&response.0).expect("serialize system health");
+
+        let queues = body["queues"].as_array().expect("queues is an array");
+        let entry = queues
+            .iter()
+            .find(|row| row["name"] == "health-null-queue")
+            .expect("the NULL-queue_name job is reported under its COALESCEd queue identity");
+        assert!(entry["depth"].as_i64().unwrap_or(0) >= 1);
+
+        let _ = sqlx::query("DELETE FROM queue_jobs WHERE id = $1::uuid")
+            .bind(JOB_ID)
+            .execute(&pool)
+            .await;
+        pool.close().await;
     }
 
     /// End-to-end: the emitter writes a lease, `system_health` reports it as

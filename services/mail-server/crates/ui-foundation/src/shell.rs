@@ -296,9 +296,9 @@ impl<'a> WebDashboardShell<'a> {
         // operable, focusable, and needs no script to open or close.
         let menu_icon = shell_icon("menu", "h-5 w-5");
         let mobile_sidebar = format!(
-            "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"mobile-sidebar\">\
-            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
-            <div id=\"mobile-sidebar-panel\" class=\"h-screen w-full bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
+            "<details class=\"apex-mobile-nav md:hidden\" id=\"mobile-sidebar\">\
+            <summary class=\"fixed left-4 top-3 z-50 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <div id=\"mobile-sidebar-panel\" class=\"apex-mobile-nav-panel\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
         );

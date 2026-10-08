@@ -4745,8 +4745,15 @@ async fn enqueue_recipient_outcome_webhook(
         0x58,
     ]);
     let subscribed: Vec<(String,)> = match sqlx::query_as(
+        // Dogfood-2 live finding: this filter used to be `enabled = true`
+        // only, while the webhook processor's claim requires
+        // `enabled = true AND status = 'active'`. A webhook disabled through
+        // `PATCH /v1/webhooks/:id` ({status:"disabled"}) keeps `enabled = true`,
+        // so outcome events were still enqueued for it and then never
+        // claimed — rows accumulated forever (and would all fire at once on
+        // re-enable). Enqueue only what the claim path can deliver.
         "SELECT id FROM webhooks \
-         WHERE tenant_id = $1 AND enabled = true \
+         WHERE tenant_id = $1 AND enabled = true AND status = 'active' \
            AND (events ? $2 OR events ? '*')",
     )
     .bind(tenant_id)
@@ -16806,6 +16813,92 @@ mod residual_arms_db_tests {
             .await;
         set_fault(&pool, "sender_event", false).await;
         pool.close().await;
+        Ok(())
+    }
+
+    /// Regression (dogfood-2 live, P2): the outcome-webhook enqueue used to
+    /// subscribe with `enabled = true` alone, while the webhook processor's
+    /// claim requires `enabled = true AND status = 'active'`. A hook disabled
+    /// through `PATCH /v1/webhooks/:id` (`{status:"disabled"}`) therefore kept
+    /// receiving `webhook_queue` rows it could never claim: two rows were
+    /// observed sitting `pending` for a disabled hook on the live stack, and
+    /// re-enabling it would have fired the whole stale backlog at once.
+    #[tokio::test]
+    async fn disabled_webhooks_do_not_receive_outcome_queue_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_webhook_disabled").await else { return Ok(()) };
+
+        let tenant = format!("whdis{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("Webhook disabled {tenant}"))
+        .bind(format!("whdis-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("insert tenant");
+
+        let active_id = format!("whact{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
+        let disabled_id = format!("whdis{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
+        for (id, enabled, status) in [(&active_id, true, "active"), (&disabled_id, true, "disabled")] {
+            sqlx::query(
+                "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, status) \
+                 VALUES ($1, $2, $3, $4, 'whsec_test', '[\"message.accepted\"]'::jsonb, $5, $6)",
+            )
+            .bind(id)
+            .bind(&tenant)
+            .bind(format!("hook {status}"))
+            .bind(format!("http://127.0.0.1:9/{id}"))
+            .bind(enabled)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("insert webhook");
+        }
+
+        let message_id = uuid::Uuid::new_v4().to_string();
+        enqueue_recipient_outcome_webhook(
+            &pool,
+            &tenant,
+            &message_id,
+            "rcpt@example.test",
+            "message.accepted",
+        )
+        .await;
+
+        let queued: Vec<(String, String)> = sqlx::query_as(
+            "SELECT webhook_id, event_type FROM webhook_queue WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("read queue");
+        assert_eq!(
+            queued.len(),
+            1,
+            "a disabled hook must not receive queue rows it can never claim: {queued:?}"
+        );
+        assert_eq!(queued[0].0, active_id);
+        assert_eq!(queued[0].1, "message.accepted");
+
+        sqlx::query("DELETE FROM webhook_queue WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
         Ok(())
     }
 

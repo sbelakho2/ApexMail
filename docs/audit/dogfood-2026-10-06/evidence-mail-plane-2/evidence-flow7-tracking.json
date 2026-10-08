@@ -1,0 +1,44 @@
+{
+ "probes": {
+  "7_message_id": "9e8a62b5-c385-4142-a99d-b6f9e06759d8",
+  "7_pixel_status": "200 image/gif len=43",
+  "7_pixel_bot_status": 200,
+  "7_pixel_head_status": 200,
+  "7_click0_status": 302,
+  "7_click0_location": "https://mp2-pj6jsujc.test/landing?x=1",
+  "7_click1_status": 302,
+  "7_click1_location": "https://apexmail.ee",
+  "7_pg_events": "SQLERR: ERROR:  column \"created_at\" does not exist\nLINE 1: ...d='9e8a62b5-c385-4142-a99d-b6f9e06759d8' order by created_at\n                                                             ^",
+  "7_analytics_queue": "SQLERR: ERROR:  function max(boolean) does not exist\nLINE 1: select count(*), max(processed) from analytics_queue where m...\n                         ^\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.",
+  "7_ch_events": "CHERR: Received exception from server (version 24.8.14):\nCode: 47. DB::Exception: Received from localhost:9000. DB::Exception: Unknown expression identifier 'event_time' in scope SELECT event_type, link_id, recipient FROM apexmail.events WHERE message_id = '9e8a62b5-c385-4142-a99d-b6f9e06759d8' ORDER BY event_time ASC. Maybe you meant: ['event_type']. (UNKNOWN_IDENTIFIER)\n(query: select event_type, link_id, recipient from apexmail.events where message_id='9e8a62b5-c385-4142-a99d-b6f9e06759d8' order by event_time)",
+  "7_unsub_get_status": 200,
+  "7_unsub_get_side_effects": "before=0 after_get=0",
+  "7_unsub_post_status": 200,
+  "7_unsub_post_body": "{\"success\":true}",
+  "7_suppression_rows": "sup_qj70q1w21b78aqurxhl6ki|7myp1cnv9yscwr3z2i1fdkhiry|flow4-sink-pj6jsujc@dogfood.test|unsubscribe|one-click|",
+  "7_pg_unsub_events": "",
+  "7_unsub_replay": "200 {\"success\":true}",
+  "7_suppression_rows_after_replay": "1",
+  "7_unsub_bad_body": "400 {\"error\":\"Invalid request body\"}",
+  "7_unsub_tampered": "400 {\"error\":\"Invalid or expired token\"}",
+  "7_unknown_token_GET": "200 len=1137",
+  "7_unknown_token_POST": "400 len=36",
+  "7_send_after_unsub": "400 b'{\"error\":{\"code\":\"VALIDATION_ERROR\",\"details\":[\"recipient is suppressed: flow4-sink-pj6jsujc@dogfood.test\"],\"message\":\"validation failed\",\"requestId\":\"60d9334f-7953-48a0-85aa-048a4616f963\"}}'",
+  "7_ch_events_after": "CHERR: Received exception from server (version 24.8.14):\nCode: 47. DB::Exception: Received from localhost:9000. DB::Exception: Unknown expression identifier 'event_time' in scope SELECT event_type, link_id FROM apexmail.events WHERE message_id = '9e8a62b5-c385-4142-a99d-b6f9e06759d8' ORDER BY event_time ASC. Maybe you meant: ['event_type']. (UNKNOWN_IDENTIFIER)\n(query: select event_type, link_id from apexmail.events where message_id='9e8a62b5-c385-4142-a99d-b6f9e06759d8' order by event_time)"
+ },
+ "transcripts": [
+  {
+   "name": "RUN 7.1 pixel GET",
+   "lines": [
+    "GET http://127.0.0.1:3001/o/LwjO4O_TY95zyYy1ZkMaIbCVfX9tAH03Uhmr\u2026 -> 200 image/gif bytes=43"
+   ]
+  },
+  {
+   "name": "RUN 7.2 clicks",
+   "lines": [
+    "click[0] -> 302 https://mp2-pj6jsujc.test/landing?x=1",
+    "click[1] -> 302 https://apexmail.ee"
+   ]
+  }
+ ]
+}

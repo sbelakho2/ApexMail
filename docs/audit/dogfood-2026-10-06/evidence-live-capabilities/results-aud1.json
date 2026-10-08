@@ -1,0 +1,50 @@
+{
+  "run": "aud1",
+  "results": [
+    {
+      "probe": "P8.1 audit trail lists real actions",
+      "ok": true,
+      "detail": "status=200 rows=2"
+    },
+    {
+      "probe": "P8.2 generated actions appear (template + send)",
+      "ok": false,
+      "detail": "actions=['retention.updated', 'billing.metering_event_recorded']"
+    },
+    {
+      "probe": "P8.3 keyset pagination continues without overlap",
+      "ok": true,
+      "detail": "page2=0 overlap=0"
+    },
+    {
+      "probe": "P8.4 export csv + jsonl readable and non-empty",
+      "ok": true,
+      "detail": "csv_lines=3 jsonl_lines=3 jsonl_ok=True"
+    },
+    {
+      "probe": "P8.5 the export itself is audited",
+      "ok": true,
+      "detail": "recent_actions=['audit.trail.exported', 'audit.trail.exported', 'retention.updated', 'billing.metering_event_recorded']"
+    },
+    {
+      "probe": "P8.6 scope audit:read enforced (403)",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P8.7 non-entitled tenant -> 403 naming audit_logs",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "probe": "P8.8 cross-tenant read leaked nothing",
+      "ok": true,
+      "detail": "status=200 leaked=0"
+    },
+    {
+      "probe": "P8.9 audit chain head advanced",
+      "ok": true,
+      "detail": "seq 1668 -> 1672"
+    }
+  ]
+}

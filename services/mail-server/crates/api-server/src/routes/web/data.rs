@@ -5190,11 +5190,11 @@ impl CampaignDetailData {
                 "Scheduled",
                 self.scheduled_at.clone().unwrap_or_else(|| "—".into()),
             )
-            // Deferred-feature 7: the schedule is stored, not executed —
-            // nothing polls campaigns for a due time (the worker has no
-            // scheduled-start loop), so the copy states the truth.
+            // The campaign worker starts due scheduled campaigns
+            // automatically (`worker_processors::campaigns` claims
+            // status='scheduled' AND scheduled_at <= NOW()).
             .with_hint(if self.scheduled_at.is_some() {
-                "Waits for a manual Start"
+                "Starts automatically at this time"
             } else {
                 "Scheduled time"
             }),

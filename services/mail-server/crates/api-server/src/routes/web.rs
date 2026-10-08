@@ -1635,11 +1635,14 @@ fn contact_import_summary(
 
 // ─── Campaign lifecycle rules (item B) ────────────────────────────
 //
-// The campaigns status CHECK (live schema) allows draft / sending /
-// paused / stopped / completed / failed — there is no 'scheduled'
-// status, so a picked time stays in scheduled_at on a draft row.
+// The campaigns status vocabulary includes draft / scheduled / sending /
+// paused / stopped / completed / failed. A picked schedule time stores
+// status='scheduled' with scheduled_at; the campaign worker then starts
+// due scheduled campaigns automatically.
 
 /// May a campaign in this status be started (draft/paused → sending)?
+/// A `scheduled` campaign is NOT started manually — the worker claims it
+/// when the stored time arrives.
 fn campaign_start_allowed(status: &str) -> bool {
     matches!(status, "draft" | "paused")
 }
@@ -3606,6 +3609,49 @@ async fn form_logout(
     if let Some(message) = friendly {
         return redirect_error(message, "/dashboard", &state.config);
     }
+
+    // SERVER-SIDE revocation (live dogfood 2026-10-08, D-4): this handler
+    // used to clear cookies only, so a captured `am_session` kept
+    // authenticating after "Sign Out". Mirror the JSON logout — blacklist
+    // the presented token AND revoke its session (per-session marker +
+    // sessions row) — before clearing the cookies. A logout that only
+    // forgets the browser is not a logout.
+    if let Some(token) = crate::routes::helpers::extract_cookie(&headers, "am_session") {
+        let ttl = state.config.jwt_expiry.as_secs();
+        let key = crate::routes::helpers::token_blacklist_key(&token);
+        if let Ok(mut conn) = state.redis.get().await {
+            let _: Result<(), _> =
+                deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &key, "1", ttl).await;
+        }
+        // Best-effort claims read: an already-expired token still gets the
+        // blacklist entry above; a decodable one additionally kills its
+        // session row + writes the per-session revocation marker.
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.set_required_spec_claims(&["sub", "tenant_id"]);
+        if let Ok(data) =
+            crate::middleware::auth::decode_jwt_with_rotation(&token, &state.config, &validation)
+        {
+            let claims = data.claims;
+            if let Err(error) =
+                crate::middleware::auth::revoke_session_marker(&state, &claims.jti, ttl).await
+            {
+                tracing::warn!(error = %error, "console logout could not write the session marker");
+            }
+            if let Err(error) = sqlx::query(
+                "DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid",
+            )
+            .bind(&claims.jti)
+            .bind(&claims.sub)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(error = %error, "console logout could not delete the session row");
+            }
+        }
+    }
+
     let mut response = redirect_success("Signed out.", "/login", &state.config);
     let clear = format!(
         "am_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax{}",
@@ -5389,9 +5435,9 @@ async fn form_campaign_create(
             &state.config,
         );
     }
-    // The campaigns status CHECK (live schema) allows draft/sending/
-    // paused/stopped/completed/failed — there is no 'scheduled' status, so
-    // a picked time is stored in scheduled_at on a draft row.
+    // The campaigns status vocabulary includes draft/scheduled/sending/
+    // paused/stopped/completed/failed. A picked schedule time stores
+    // status='scheduled' with scheduled_at; the worker starts it when due.
     // FIX (outage-honesty audit #16): a hostile date is caller input and is
     // refused HERE — the old shape let Postgres's `::timestamptz` cast
     // failure land in the storage arm, so bad input flashed the same copy
@@ -7537,10 +7583,12 @@ async fn form_template_update(
     let name = field_truncated(&form, "name", 120);
     let subject = field_truncated(&form, "subject", 200);
     let html_body = field(&form, "html_body");
+    // Redirect target is the editor route (same page the form came from),
+    // so save/round-trip stays coherent.
     let back = if id.is_empty() {
         "/templates".to_string()
     } else {
-        format!("/templates/{}", urlencode(&id))
+        format!("/templates/{}/edit", urlencode(&id))
     };
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
@@ -7583,12 +7631,10 @@ async fn form_template_update(
         fields.error("name", "Give the template a name.");
         return redirect_with_field_map(&fields, "Give the template a name.", &back, &state.config);
     }
-    if html_body.trim().is_empty() {
-        fields.error("html_body", "Add some HTML content.");
-        return redirect_with_field_map(&fields, "Add some HTML content.", &back, &state.config);
-    }
-    let existing: Option<(i32, String)> = match sqlx::query_as(
-        "SELECT version, COALESCE(subject, '') FROM templates WHERE id = $1 AND tenant_id = $2",
+    // Blank html_body is NOT rejected here: after the existing row is loaded
+    // below, a blank body keeps the stored content (the editor promises this).
+    let existing: Option<(i32, String, String)> = match sqlx::query_as(
+        "SELECT version, COALESCE(subject, ''), COALESCE(html_body, '') FROM templates WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&id)
     .bind(user.tenant_id.as_str())
@@ -7605,7 +7651,7 @@ async fn form_template_update(
             );
         }
     };
-    let Some((version, existing_subject)) = existing else {
+    let Some((version, existing_subject, existing_html)) = existing else {
         return redirect_error(
             "That template could not be found in this workspace.",
             "/templates",
@@ -7617,6 +7663,14 @@ async fn form_template_update(
         existing_subject
     } else {
         subject
+    };
+    // A blank body keeps the stored one — the editor promises this and
+    // Preview already honors it. Rejecting blank HTML here contradicted
+    // both.
+    let html_body = if html_body.trim().is_empty() {
+        existing_html
+    } else {
+        html_body
     };
     let new_version = version + 1;
     let result: Result<(), sqlx::Error> = async {
@@ -11176,7 +11230,8 @@ mod tests {
 
     #[test]
     fn campaign_lifecycle_rules_match_the_live_status_check() {
-        // There is no 'scheduled' status — it can neither start nor pause.
+        // A 'scheduled' campaign is started automatically by the worker
+        // when due — it is not started manually (draft/paused only).
         assert!(campaign_start_allowed("draft"));
         assert!(campaign_start_allowed("paused"));
         assert!(!campaign_start_allowed("scheduled"));
@@ -27436,13 +27491,15 @@ mod deferred_feature_tests {
         assert_eq!(total, 0, "refusals must never audit a start");
     }
 
-    // ── Feature 7: scheduled campaigns state the manual-start truth ──
+    // ── Feature 7: scheduled campaigns state the auto-start truth ──
 
     #[test]
-    fn scheduled_campaigns_say_they_wait_for_a_manual_start() {
-        // The product truth (pinned): nothing in the worker polls scheduled
-        // campaigns for a due time, so every scheduling surface says the
-        // campaign waits for Start.
+    fn scheduled_campaigns_say_they_start_automatically() {
+        // The product truth (pinned): the campaign worker claims due
+        // `status = 'scheduled' AND scheduled_at <= NOW()` rows and starts
+        // them (`worker-processors/src/campaigns.rs::start_due_scheduled_campaigns`).
+        // Every scheduling surface must say so — a schedule is authorization
+        // to send, not a stored timestamp waiting for a manual Start.
         let editor = ui_foundation::leptos_views::web_campaign_edit_page_with_values(
             &ui_foundation::view_data::CampaignEditData {
                 id: "c1".into(),
@@ -27453,13 +27510,13 @@ mod deferred_feature_tests {
             },
         );
         assert!(
-            editor.contains("waits for you to press Start"),
-            "the editor must state the manual-start truth"
+            editor.contains("starts the send automatically"),
+            "the editor must state that scheduled campaigns start automatically"
         );
         let new_campaign = ui_foundation::leptos_views::web_campaigns_new_page();
         assert!(
-            new_campaign.contains("still waits for you to press Start"),
-            "the new-campaign editor must state the manual-start truth"
+            new_campaign.contains("start automatically"),
+            "the new-campaign editor must state that scheduled campaigns start automatically"
         );
 
         // The detail page's Scheduled KPI names it when a time is stored.
@@ -27482,12 +27539,12 @@ mod deferred_feature_tests {
         let scheduled = stat_kpi(&page, "Scheduled");
         assert_eq!(
             scheduled.hint.as_deref(),
-            Some("Waits for a manual Start"),
-            "a stored schedule must not imply an automatic send"
+            Some("Starts automatically at this time"),
+            "a stored schedule must name the automatic send"
         );
         // And the monitor note repeats the truth.
         let section = ui_foundation::leptos_views::data_list_page(&page, "action");
-        assert!(section.contains("scheduled campaigns wait for a manual Start"));
+        assert!(section.contains("Scheduled campaigns start automatically"));
     }
 
     #[tokio::test]

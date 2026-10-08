@@ -1,0 +1,65 @@
+{
+  "run": "r6",
+  "results": [
+    {
+      "probe": "P1.1 template created",
+      "ok": "1pvt21vtt57xcxg0h2cuwe3bkw",
+      "detail": "id=1pvt21vtt57xcxg0h2cuwe3bkw"
+    },
+    {
+      "probe": "P1.2 template send accepted",
+      "ok": "befc724b-43ab-4496-9131-53a6a1464e34",
+      "detail": "message_id=befc724b-43ab-4496-9131-53a6a1464e34"
+    },
+    {
+      "probe": "P1.2 message+queue rows persisted for the tenant",
+      "ok": true,
+      "detail": "messages.status='queued' queue_rows=1"
+    },
+    {
+      "probe": "P1.2 rendered mail in Mailpit",
+      "ok": true,
+      "detail": "subject='Hi Ada!' html_has_Ada/X1=(True, True) text_len=27"
+    },
+    {
+      "probe": "P1.3 missing variable 422 naming it + nothing queued",
+      "ok": true,
+      "detail": "status=422 names_code=True messages 1->1 queue 1->1"
+    },
+    {
+      "probe": "P1.4 unknown template -> 404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "probe": "P1.5 cross-tenant template -> 404",
+      "ok": true,
+      "detail": "status=404 foreign_tpl=1fcl6shdbfgxlh7up8bt6py41d"
+    },
+    {
+      "probe": "P1.6 batch partial semantics (2 ok, 2 refused with reasons)",
+      "ok": true,
+      "detail": "results=[{\"index\": 0, \"id\": \"d81418ce-55f8-41cc-9bb0-5caa202db55a\", \"status\": \"queued\"}, {\"index\": 1, \"status\": \"rejected\", \"error\": \"template variable 'code' is missing from template_data\"}, {\"index\": 2, \"status\": \"rejected\", \"error\": \"template not found: tpl_nope_0000000000000000\"}, {\"index\": 3, \"id\": \"fa456e2e-e4a0-48ff-afba-e949764ec852\", \"status\": \"queued\"}]"
+    },
+    {
+      "probe": "P1.6 refused rows name the variable / template",
+      "ok": true,
+      "detail": "row2={\"index\": 1, \"status\": \"rejected\", \"error\": \"template variable 'code' is missing from template_data\"} row3={\"index\": 2, \"status\": \"rejected\", \"error\": \"template not found: tpl_nope_0000000000000000\"}"
+    },
+    {
+      "probe": "P1.7 idempotency replay returns the same message (one row)",
+      "ok": true,
+      "detail": "ids 2326799f-5b59-47d0-8a26-0c19dd6e4ba5==2326799f-5b59-47d0-8a26-0c19dd6e4ba5 rows=1"
+    },
+    {
+      "probe": "P1.7 concurrent identical submits -> one message row",
+      "ok": true,
+      "detail": "rows=1 statuses=[409, 202]"
+    },
+    {
+      "probe": "P1.CROSS cross-tenant message read -> 404",
+      "ok": true,
+      "detail": "status=404"
+    }
+  ]
+}
