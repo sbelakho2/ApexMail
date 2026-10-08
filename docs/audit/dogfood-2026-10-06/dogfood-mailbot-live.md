@@ -439,15 +439,21 @@ backlog drained 12→3 rows in ~4 minutes under load, and N=20 simultaneous
 inbounds drained in 61 s with 0 loss/duplication. The pre-fix stall mechanism
 was the stolen-jobs predicate (F-2, fixed).
 
-### 9.6 Suites after the fixes
+### 9.6 Suites after the fixes (revision `3508c3ca`, which carries all four)
 
-`cargo nextest run -p worker-processors -p ai-service` (no-fail-fast):
-**1210/1211 passed, 0 skipped** — the single failure is
-`ai-service routes::tests::chat_route_delivers_answer_and_persists_audit`
-(401 vs 200), a NEW test inside the chatbot agent's uncommitted
-`ai-service/src/routes.rs` work (it fails identically in isolation and touches
-no reply/mailbot path); every worker-processors test and every ai-service
-email-agent/chat-pipeline test passes, including the four new regression
-tests. The api-server leg (`cargo nextest run --no-fail-fast -p api-server`)
-runs after the fixes; its outcome and the exact command lines are recorded in
-`evidence-mailbot-live/suites-*.log`.
+* `cargo nextest run --no-fail-fast -p worker-processors -p ai-service`:
+  **1210/1211 passed, 0 skipped**. The single failure is
+  `ai-service routes::tests::chat_route_delivers_answer_and_persists_audit`
+  (401 vs 200) — a test in the chatbot agent's `ai-service/src/routes.rs`
+  lane; it fails identically in isolation and touches no reply/mailbot path.
+  Every worker-processors test and every email-agent test passes, including
+  the four new regression tests.
+* `cargo nextest run --no-fail-fast -p api-server`:
+  **2083/2083 passed, 0 skipped** (exit 0) — including
+  `ai_drafts_label_shows_the_workspace_name_never_the_raw_id`, the consent
+  regression, and the SSR review-flow test whose fixture now grants consent
+  (that test is why the pre-existing suite caught the consent gate's blast
+  radius: it had been approving a draft with no consent on file).
+
+Logs: `evidence-mailbot-live/suites-worker-ai-after-fixes.log`,
+`evidence-mailbot-live/suites-api-after-fixes.log`.
