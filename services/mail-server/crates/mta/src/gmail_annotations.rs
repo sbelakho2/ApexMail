@@ -424,7 +424,10 @@ mod tests {
         );
         assert_eq!(config.products.len(), 1);
         assert_eq!(config.products[0].image_url, "https://acme.com/widget.png");
-        assert_eq!(config.deal.as_ref().unwrap().description, "25% off everything");
+        assert_eq!(
+            config.deal.as_ref().unwrap().description,
+            "25% off everything"
+        );
         assert_eq!(
             config.deal.as_ref().unwrap().discount_code.as_deref(),
             Some("SAVE25")
@@ -453,7 +456,10 @@ mod tests {
             "products": []
         });
         let config: GmailAnnotationConfig = serde_json::from_value(payload).unwrap();
-        assert_eq!(config.logo_url.as_deref(), Some("https://example.com/logo.png"));
+        assert_eq!(
+            config.logo_url.as_deref(),
+            Some("https://example.com/logo.png")
+        );
         assert_eq!(config.organization.as_deref(), Some("Example Corp"));
     }
 

@@ -963,6 +963,37 @@ mod tests {
         assert!(failed.contains("CNAME points at trk.other.test, expected trk.apexmail.ee"));
         assert!(failed.contains("DNS record to publish"));
         assert!(failed.contains("Verify DNS now"));
+
+        // The shared page wrapper owns the breadcrumb and the page's single
+        // h1 — the live handler composes through it, so live and the
+        // fixture/golden cannot drift (the bare-panel live composition had
+        // NO h1: dogfood 2026-10-08 styled re-capture, 0 live vs 1 fixture).
+        // The route-level (no-data) fixture renders through the plain route
+        // sweep, not `render_bot_state`.
+        let route_html = crate::axum_router::render_route("web", "/domains/d_1/tracking")
+            .expect("the tracking route must render");
+        assert_eq!(route_html.matches("<h1").count(), 1);
+        assert!(route_html.contains("Open a domain from the Domains page"));
+
+        for id in [
+            "web-domains-d_1-tracking-not-verified",
+            "web-domains-d_1-tracking-not-entitled",
+            "web-domains-d_1-tracking-configure",
+            "web-domains-d_1-tracking-pending",
+            "web-domains-d_1-tracking-verified",
+            "web-domains-d_1-tracking-failed",
+        ] {
+            let html = render_bot_state(id).unwrap();
+            assert_eq!(
+                html.matches("<h1").count(),
+                1,
+                "{id} must render exactly one h1"
+            );
+            assert!(
+                html.contains("Custom tracking domain</h1>"),
+                "{id} must carry the page heading",
+            );
+        }
     }
 
     /// The web surface must never leak the operator word "tenant" into

@@ -3461,12 +3461,25 @@ mod verify_source_wire_tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let (reader, mut writer) = tcp.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        assert!(
-            super::tests::fbl_read_reply_bounded(&mut reader, FBL_HEARTBEAT_READ_BOUND)
-                .await
-                .starts_with("220")
-        );
         use tokio::io::AsyncBufReadExt as _;
+        // The greeting read tolerates the one spuriously-elapsed park the
+        // NOOP loop below documents (auto-advance can jump to the client
+        // timer before the peer's readiness is dispatched, at most once --
+        // the edge is latched): retry the bounded read instead of panicking
+        // on it. The previous one-shot helper turned that documented park
+        // into a load-sensitive failure.
+        let greeting = loop {
+            let mut line = String::new();
+            match tokio::time::timeout(FBL_HEARTBEAT_READ_BOUND, reader.read_line(&mut line)).await
+            {
+                Err(_) => continue,
+                Ok(Ok(0)) => panic!("session ended before the greeting"),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => panic!("read failed: {e}"),
+            }
+            break line;
+        };
+        assert!(greeting.starts_with("220"), "{greeting:?}");
         let mut saw_deadline = false;
         for _ in 0..70 {
             writer.write_all(b"NOOP\r\n").await.unwrap();

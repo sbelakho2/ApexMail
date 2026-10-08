@@ -2785,9 +2785,7 @@ Content-Type: text/plain; charset=utf-8\r\n\
 as requested\r\n";
         let mirrors = parse_inbound_mirrors(raw, Some("sales@apexmail.ee"));
         let headers = mirrors.headers.expect("headers JSONB populated");
-        let list_unsubscribe = headers["list-unsubscribe"]
-            .as_str()
-            .unwrap_or_default();
+        let list_unsubscribe = headers["list-unsubscribe"].as_str().unwrap_or_default();
         assert!(
             list_unsubscribe.contains("mailto:unsubscribe@apexmail.ee"),
             "the mailto target must survive the mirror: {list_unsubscribe:?}"

@@ -439,10 +439,12 @@ regression.
 
 Three pages postdate every UI fixture; dogfooded live plus new fixtures and
 gates. Final-image evidence: api-server
-`sha256:fc35113eb887c452544259b52c3fa5d42b6c25536d2cb0660b0b637fc6ce14f8`
-(started 2026-10-08T01:56:07Z), worker `87c7a488181d…`, ai-service `24d34aefc087…`.
+`sha256:e14e12bd9c47ad9fdb3397a484613fadb31be6846f0153a3a077be2dc7f80568`
+(started 2026-10-08T03:45:56Z — the rebuild that carries the F15 CSP fix), earlier
+capability-wave image `fc35113eb887…` (01:56:07Z) for the state probes, worker
+`87c7a488181d…`, ai-service `24d34aefc087…`.
 
-### The headline finding — F15 (P1, fixed in the response layer, live re-verify pending the next api-server build): eight HTML pages render COMPLETELY UNSTYLED because their responses carry an API CSP with no `style-src`
+### The headline finding — F15 (P1, fixed in the response layer, LIVE-VERIFIED on the final image): eight HTML pages rendered COMPLETELY UNSTYLED because their responses carried an API CSP with no `style-src`
 
 Every HTML document built by the hand-written `html_page_response` path was
 served with the minimal API CSP `default-src 'none'; frame-ancestors 'none'` —
@@ -464,8 +466,16 @@ middleware): a response with no CSP of its own now gets `browser_csp_header()`
 (the same policy every rendered console page carries) when
 `Content-Type: text/html`, and the minimal API policy otherwise. Pin:
 `app::tests::html_fallback_pages_carry_the_browser_csp` (green; the existing
-JSON-CSP pin still passes). The fix is api-server code, so live pixels update
-with the next image build; the post-build re-capture is the only open item.
+JSON-CSP pin still passes).
+
+**Live re-verification on the final image** (`sha256:e14e12bd9c47ad9fdb3397a484613fadb31be6846f0153a3a077be2dc7f80568`,
+started 2026-10-08T03:45:56Z): `/no-such-page` returns the full browser CSP with
+`style-src 'self'`; every previously-unstyled page now computes
+`body { font-family: "Inter Variable", system-ui …; background: #f4f4f6 }` with
+the stylesheet readable (`cssRules` = 1088, no SecurityError):
+`/messages/:id/timeline` (populated) at 1280 **and 320** (document overflow
+**0**, was 349 px), the `?at=` past-timestamp state at 320 (0), `/campaigns/c_1`,
+`/lists/l_1`, `/contacts/new`, and the 404 fallback. F15 is closed.
 
 ### F16 (P1, fixed by the coordinator in the same window): `plans.features` rows predated the capability waves, so both new capabilities were ungrantable by plan
 
@@ -549,20 +559,46 @@ markup is unchanged.
 * **Live-verified (pre-CSP-fix image)**: every state and action listed above;
   the pixels of the affected pages were unstyled, which IS the F15 evidence
   (screenshots under `tools/contrast-audit/reports/cap-wave-live/`).
-* **Pending the next api-server image build** (the fix is server code, not
-  CSS): the styled re-capture of the three pages (both themes × 320/768/1280)
-  and the confirmation that F15's 320 px overflow disappears with the sheet
-  applied. The post-rebuild driver is committed-ready
-  (`/tmp/post_rebuild_capture.py`: waits for the CSP header, re-mints sessions,
-  re-runs `tools/contrast-audit/cap-wave-probes.mjs` + the state matrix, and
-  asserts `body font != Times`, `scrollWidth == clientWidth` at 320).
+* **Closed on the final image**: the styled re-capture (both themes ×
+  320/768/1280) ran over the three pages after the rebuild landed; F15's 320 px
+  overflow is gone with the sheet applied (styled matrix under
+  `tools/contrast-audit/reports/cap-wave-matrix/`). The re-capture also caught
+  F19 (live tracking h1) — landed and pinned; its live re-check rides the next
+  image build.
+
+### Styled re-capture on the final image (post-CSP-fix)
+
+* **F15 live-verified**: `/no-such-page` serves the full browser CSP; on
+  `/messages/:id/timeline` (populated and `?at=` past states, 1280 and 320),
+  `/campaigns/c_1`, `/lists/l_1`, `/contacts/new` and the 404 fallback the body
+  computes `"Inter Variable", system-ui` on `#f4f4f6`, `cssRules` reads 1088
+  (no CSP block), and the timeline's **320 px document overflow is 0** (was
+  349 px unstyled).
+* **Styled state matrix** (`tools/contrast-audit/reports/cap-wave-matrix/`,
+  both themes × 320/768/1280): timeline populated + past-timestamp; the six
+  tracking states; `/alerts/rules` populated. h1 exactly 1, 0 ringless focus
+  stops, 0 focus traps, no copy leaks on any run. The alerts/rules page's
+  8-column table extends past the viewport *inside its `.apex-table-wrap`
+  scroll container* (doc overflow 0) — the intended wide-table pattern, noted
+  so the collector's `elements-past-viewport` count is not misread.
+* **F19 (P1 a11y, found by this re-capture, landed)**: the live tracking page
+  had **no `h1`** — the api-server handler composed the bare panel, while the
+  fixture/golden used the shared page wrapper (headings started at the shell's
+  `H3`). The handler now renders through
+  `ui_foundation::tracking_domain::web_domain_tracking_page`, so live and the
+  fixture/golden cannot drift again. Pinned by the per-state
+  `exactly-one-h1` assertions in
+  `tracking_domain_states_render_their_real_surfaces`; live h1 re-check follows
+  the next image build (the fix postdates `e14e12bd9c47`).
 
 ### Gates over the new fixtures (all green)
 
-* `tools/contrast-audit/layout-gate.sh` → **0 findings across 1181 runs** (the
-  timeline/alert-rules state pages AND the six extracted tracking-domain state
-  pages included; both bot surfaces still clean).
-* `tools/contrast-audit/gate.sh` → **PASS 0 AA / 112 pages / 317 runs**.
+* `tools/contrast-audit/layout-gate.sh` → **0 findings across 1181 runs**
+  (re-run on the frozen tree after the styled capture; timeline/alert-rules
+  state pages AND the six extracted tracking-domain state pages included; both
+  bot surfaces still clean).
+* `tools/contrast-audit/gate.sh` → **PASS 0 AA / 112 pages / 317 runs**
+  (re-run on the frozen tree).
 * `cargo test -p ui-foundation` → **475 lib + 12 bin + 1 integration**, goldens
   included (regenerated only for intended diffs; the new route golden is
   `goldens/web/domains_d_1_tracking.html`).

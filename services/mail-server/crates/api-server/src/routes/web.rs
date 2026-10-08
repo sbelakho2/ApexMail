@@ -62,9 +62,7 @@ use ui_foundation::flash::{
 // The tracking-domain panel lives in the shared views (2026-10-08 coverage
 // gap): the router renders it for the manifest/fixture/golden sweep, the
 // api-server composes the same markup for the live page.
-use ui_foundation::tracking_domain::{
-    tracking_domain_panel_html, TrackingDomainPanel, TrackingDomainPanelRow,
-};
+use ui_foundation::tracking_domain::{TrackingDomainPanel, TrackingDomainPanelRow};
 
 use crate::config::Config;
 use crate::middleware::auth::AuthUser;
@@ -6302,7 +6300,15 @@ async fn web_domain_tracking(
     };
     let form_csrf = form_csrf_for_render(&headers, &state.config);
     let mut inner = stub_flash_banner(&flash);
-    inner.push_str(&tracking_domain_panel_html(&panel, &form_csrf.token));
+    // The shared page wrapper owns the breadcrumb and the page's single h1;
+    // composing the bare panel here left the live page with NO level-1
+    // heading while the fixture/golden had one (dogfood 2026-10-08 styled
+    // re-capture: h1Count 0 live vs 1 in the fixture). Same markup the
+    // manifest route renders, so live and goldens cannot drift again.
+    inner.push_str(&ui_foundation::tracking_domain::web_domain_tracking_page(
+        Some(&panel),
+        &form_csrf.token,
+    ));
     let layout = ui_foundation::leptos_views::web_dashboard_layout_with_csrf(
         &inner,
         &back,
@@ -27558,6 +27564,9 @@ mod deferred_feature_tests {
 #[cfg(test)]
 mod tracking_domain_panel_tests {
     use super::*;
+    // The renderer lives in the shared views now; the production path goes
+    // through `web_domain_tracking_page`, so import it only for these tests.
+    use ui_foundation::tracking_domain::tracking_domain_panel_html;
 
     fn panel(
         verified: bool,
