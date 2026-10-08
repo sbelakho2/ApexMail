@@ -56,6 +56,50 @@ fn task_interval(default: Duration) -> Duration {
 
 static DEDICATED_IP_TABLE_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// Run the canonical end-of-period overage + PAYG sweep ONCE against the
+/// live database, log the outcome and return it.
+///
+/// E-SWEEP-TRIGGER (live dogfood 2026-10-08): the scheduled sweep's FIRST
+/// tick is the next UTC midnight (`next_day_start`) and no on-demand trigger
+/// existed anywhere, so an operator could not close a period without waiting
+/// for midnight or running the undeployed billing-service binary by hand.
+/// This is the on-demand entrypoint; `bin/server.rs` exposes it as the
+/// one-shot `--sweep-overage-only` CLI (the `--reconcile-plans-only` ops
+/// pattern), and the nightly loop calls the SAME function — one code path,
+/// one behavior.
+pub async fn sweep_overage_once(
+    state: &AppState,
+) -> Result<crate::overage::OverageSweepResult, String> {
+    let result = crate::overage::sweep_period_overage(state).await?;
+    if result.invoices_created > 0
+        || result.payg_invoices_created > 0
+        || result.skipped_no_address > 0
+        || result.skipped_unknown_plan > 0
+    {
+        info!(
+            periods_checked = result.periods_checked,
+            invoices_created = result.invoices_created,
+            payg_invoices_created = result.payg_invoices_created,
+            wallet_paid = result.wallet_paid,
+            pending_dunning = result.pending_dunning,
+            deferred_no_address = result.skipped_no_address,
+            skipped_unknown_plan = result.skipped_unknown_plan,
+            failed_periods = result.failed_periods,
+            oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
+            aged_needs_review = result.aged_needs_review,
+            pricing_needs_review = result.pricing_needs_review,
+            "processed period usage invoices"
+        );
+    } else if result.failed_periods > 0 {
+        warn!(
+            failed_periods = result.failed_periods,
+            oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
+            "period overage sweep finished with isolated period failures — recorded with backoff"
+        );
+    }
+    Ok(result)
+}
+
 pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let dedicated_ip_state = state.clone();
     tokio::spawn(async move {
@@ -247,35 +291,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             // allowance — see usage::record_with_quota_check and the
             // overage module). Every created invoice is COLLECTED: wallet
             // first, then Stripe invoice item / dunning (see overage.rs).
-            match crate::overage::sweep_period_overage(sla_state.as_ref()).await {
-                Ok(result)
-                    if result.invoices_created > 0
-                        || result.payg_invoices_created > 0
-                        || result.skipped_no_address > 0
-                        || result.skipped_unknown_plan > 0 =>
-                {
-                    info!(
-                        periods_checked = result.periods_checked,
-                        invoices_created = result.invoices_created,
-                        payg_invoices_created = result.payg_invoices_created,
-                        wallet_paid = result.wallet_paid,
-                        pending_dunning = result.pending_dunning,
-                        deferred_no_address = result.skipped_no_address,
-                        skipped_unknown_plan = result.skipped_unknown_plan,
-                        failed_periods = result.failed_periods,
-                        oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
-                        aged_needs_review = result.aged_needs_review,
-                        pricing_needs_review = result.pricing_needs_review,
-                        "processed period usage invoices"
-                    );
-                }
-                Ok(result) if result.failed_periods > 0 => {
-                    warn!(
-                        failed_periods = result.failed_periods,
-                        oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
-                        "period overage sweep finished with isolated period failures — recorded with backoff"
-                    );
-                }
+            match sweep_overage_once(sla_state.as_ref()).await {
                 Ok(_) => {}
                 Err(error_message) => {
                     error!(error = %error_message, "failed to sweep period overage");
@@ -4031,6 +4047,36 @@ mod tests {
         assert_eq!(sla_credit_percentage_for_breach(0.5), 25);
         assert_eq!(sla_credit_percentage_for_breach(0.1), 10);
         assert_eq!(sla_credit_percentage_for_breach(0.05), 0);
+    }
+
+    /// E-SWEEP-TRIGGER pin: the binary must expose the one-shot
+    /// `--sweep-overage-only` trigger and route it through the SAME
+    /// [`sweep_overage_once`] the nightly loop calls — one code path, one
+    /// behavior (a second sweep implementation could drift from the
+    /// scheduled one).
+    #[test]
+    fn the_on_demand_sweep_trigger_is_wired_to_the_canonical_sweep() {
+        let binary = include_str!("bin/server.rs");
+        assert!(
+            binary.contains("sweep_overage_only"),
+            "bin/server.rs must expose the --sweep-overage-only one-shot trigger"
+        );
+        assert!(
+            binary.contains("maintenance::sweep_overage_once"),
+            "the trigger must run the canonical sweep_overage_once, not a copy"
+        );
+        let production = include_str!("maintenance.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section present");
+        let scheduled = production
+            .split("pub fn start_periodic_jobs")
+            .nth(1)
+            .expect("start_periodic_jobs present");
+        assert!(
+            scheduled.contains("sweep_overage_once(sla_state.as_ref())"),
+            "the nightly loop must call the same sweep_overage_once the CLI does"
+        );
     }
 }
 

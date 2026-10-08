@@ -301,6 +301,27 @@ async fn run(config: Config) -> anyhow::Result<()> {
             port = config.metrics_port,
             "Prometheus metrics server ready"
         );
+
+        // OPS-4 (live dogfood 2026-10-08): the documented redis_* eviction
+        // gauges had no emitter in the always-on stack — their only source,
+        // the profile-gated observability service, never runs in dev, so
+        // every redis_* alert/panel was unreachable. The api-server IS
+        // always on and this recorder (:9090) is the exposed scrape target:
+        // poll the same INFO memory monitor here. Interval overridable for
+        // smoke tests; the production default matches the monitor's own
+        // DEFAULT_POLL_INTERVAL_SECS.
+        let redis_monitor_interval = std::env::var("REDIS_MONITOR_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(observability_service::redis_monitor::DEFAULT_POLL_INTERVAL_SECS);
+        observability_service::redis_monitor::spawn_eviction_monitor(
+            state.redis.clone(),
+            redis_monitor_interval,
+        );
+        tracing::info!(
+            interval_secs = redis_monitor_interval,
+            "redis_* eviction monitor started (exposed on the metrics port)"
+        );
     }
 
     // ── Build & serve ───────────────────────────────────────
@@ -477,6 +498,27 @@ mod tests {
         assert!(
             guard.is_none(),
             "the fallback path must not produce an OTLP guard"
+        );
+    }
+
+    /// OPS-4 pin: the always-on api-server must emit the `redis_*` eviction
+    /// series on its EXPOSED metrics recorder (the profile-gated
+    /// observability service used to be the only emitter, so every redis_*
+    /// scrape target was unreachable in the dev stack).
+    #[test]
+    fn the_binary_exposes_redis_eviction_metrics_on_the_scrape_port() {
+        let source = include_str!("server.rs");
+        assert!(
+            source.contains("spawn_eviction_monitor"),
+            "bin/server.rs must start the canonical redis_* eviction monitor"
+        );
+        assert!(
+            source.contains("state.redis.clone()"),
+            "the monitor must poll the api-server's Redis pool"
+        );
+        assert!(
+            source.contains("REDIS_MONITOR_INTERVAL_SECS"),
+            "the poll interval must stay overridable for smoke tests"
         );
     }
 }

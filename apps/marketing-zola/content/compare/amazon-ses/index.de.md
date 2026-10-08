@@ -52,7 +52,7 @@ comparison_sections = [
   { title = "PREISE BEI 100K/MONAT (verifiziert 2026-07-29)", rows = [
     { feature = "Verglichener Tarif", apex = 'Pro: €65/Monat (150.000 E-Mails enthalten, verwaltete Infrastruktur)', comp = 'Pay-as-you-go: ~€9.20 (US$10)/100K E-Mails (reiner Versand, ohne Verwaltung)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Unterschied beim Preismodell", apex = 'Verwaltete E-Mail-Infrastruktur: API, Ereignisspeicherung, Webhook-Zustellung, Support und Analytik inklusive', comp = 'Abrechnung roher Kapazität: IaaS — Zahlung pro Versand plus zusätzliche AWS-Kosten (EC2, S3, CloudWatch, SNS, Support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
-    { feature = "Kostenlose Stufe", apex = '30.000 E-Mails/Monat (keine Kreditkarte, kein Zeitlimit)', comp = '62.000 E-Mails/Monat beim Versand von EC2 (erste 12 Monate); sonst 3.000/Monat<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
+    { feature = "Kostenlose Stufe", apex = '3.000 E-Mails/Monat dauerhaft + einmaliges Startguthaben von 30.000 E-Mails (keine Kreditkarte)', comp = '62.000 E-Mails/Monat beim Versand von EC2 (erste 12 Monate); sonst 3.000/Monat<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},
   { title = "BEREICHE, IN DENEN AMAZON SES STÄRKER IST", rows = [
     { feature = "Reine Kosten pro E-Mail", apex = 'Siehe den aktuellen öffentlichen Katalog und Checkout für die anwendbaren Nutzungsbedingungen', comp = '€0.09 (US$0.10)/1.000 E-Mails — niedrigste Kosten pro Nachricht unter den großen Anbietern<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },

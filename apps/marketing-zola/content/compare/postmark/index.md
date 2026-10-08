@@ -48,7 +48,7 @@ comparison_sections = [
     { feature = "Dedicated Deployment Options", apex = '<span class="text-brand-600 font-semibold">Custom review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "PRICING", rows = [
-    { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000/mo</span>', comp = '<span class="text-surface-600">100/mo</span>', winner = "none" },
+    { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">3,000/mo + one-time 30,000 launch allowance</span>', comp = '<span class="text-surface-600">100/mo</span>', winner = "none" },
     { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unlimited team members", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Custom enterprise terms", apex = '<span class="text-brand-600 font-semibold">Annual contracts</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }

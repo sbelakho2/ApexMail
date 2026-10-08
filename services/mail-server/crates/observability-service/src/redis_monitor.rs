@@ -26,6 +26,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use deadpool_redis::Pool as RedisPool;
@@ -398,6 +399,29 @@ impl RedisKeyMonitor {
         let exceeded = self.process_info_response(&parsed, Instant::now());
         Some(exceeded)
     }
+}
+
+/// Spawn the periodic eviction-monitor task: every `interval_secs` seconds
+/// poll Redis `INFO memory` and emit the `redis_*` series through the
+/// process metrics recorder.
+///
+/// OPS-4 (live dogfood 2026-10-08): the documented `redis_*` eviction
+/// gauges were UNREACHABLE in the running stack — their only emitter lived
+/// in the profile-gated observability service, which the dev stack does not
+/// run. The api-server is always on and its `metrics`-facade exporter on
+/// :9090 is the exposed scrape target, so it spawns the SAME monitor (this
+/// function); the observability service keeps its own collector-backed
+/// instance. One implementation, so the series can never diverge.
+pub fn spawn_eviction_monitor(pool: RedisPool, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+    let monitor = Arc::new(RedisKeyMonitor::new(None));
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            monitor.check_evictions(&pool).await;
+        }
+    })
 }
 
 // ===========================================================================

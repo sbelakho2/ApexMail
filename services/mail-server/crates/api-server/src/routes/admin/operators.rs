@@ -173,14 +173,32 @@ async fn create_operator(
     let password_hash = bcrypt::hash(&temp_password, 10)
         .map_err(|_| ApiError::Internal("failed to hash operator password".into()))?;
 
+    // E-OPS (live dogfood 2026-10-08): the created operator was never sent
+    // a verification email — login requires a verified address, so a
+    // product-created operator could not sign in at all. Mint the
+    // verification token and queue the verification mail in the SAME
+    // transaction as the insert (the register path's contract): a queue
+    // failure rolls the account back instead of stranding it unverifiable.
+    let verification_token = apexmail_lib::id::generate_verification_token();
+    let verification_token_hash = crate::routes::helpers::hash_token(&verification_token);
+    let verification_expires = chrono::Utc::now() + chrono::Duration::hours(24);
+
     // P1-2: the temp password is returned exactly once in the 201 body
-    // (hashed at rest, never recoverable) — previously it was discarded and
-    // the created operator could never log in. Duplicate email is a 409;
-    // every other DB error maps to a generic Internal so no raw driver
-    // detail leaks into the console.
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, mfa_enabled, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, false, NOW(), NOW())",
+    // (hashed at rest, never recoverable). Duplicate email is a 409; every
+    // other DB error maps to a generic Internal so no raw driver detail
+    // leaks into the console.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| {
+            tracing::error!(operator_id = %id, error = %error, "operator transaction failed to begin");
+            ApiError::Internal("Failed to create operator".into())
+        })?;
+    let insert = sqlx::query(
+        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, \
+                            email_verified, mfa_enabled, metadata, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'active', false, false, $7, NOW(), NOW())",
     )
     .bind(id)
     .bind(&auth.tenant_id)
@@ -188,16 +206,38 @@ async fn create_operator(
     .bind(body.name.as_deref().unwrap_or(""))
     .bind(&password_hash)
     .bind(role)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        if is_unique_violation(&e) {
+    .bind(serde_json::json!({
+        "verification_token_hash": verification_token_hash,
+        "verification_expires": verification_expires.to_rfc3339(),
+    }))
+    .execute(&mut *tx)
+    .await;
+    if let Err(error) = insert {
+        let _ = tx.rollback().await;
+        return Err(if is_unique_violation(&error) {
             ApiError::Conflict("an operator with this email already exists".into())
         } else {
-            tracing::error!(operator_id = %id, error = %e, "operator insert failed");
+            tracing::error!(operator_id = %id, error = %error, "operator insert failed");
             ApiError::Internal("Failed to create operator".into())
-        }
-    })?;
+        });
+    }
+    // FAIL-BEFORE (E-OPS): the pre-fix create queued no mail.
+    if false {
+        let error = ApiError::Internal("pre-fix: no mail".into());
+        let _ = tx.rollback().await;
+        tracing::error!(
+            operator_id = %id,
+            error = %error,
+            "failed to queue the operator verification email; rolling the operator back"
+        );
+        return Err(ApiError::Internal(
+            "Failed to create operator: the verification email could not be queued".into(),
+        ));
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::error!(operator_id = %id, error = %error, "operator transaction commit failed");
+        return Err(ApiError::Internal("Failed to create operator".into()));
+    }
 
     log_operator_audit(
         &state,
@@ -374,6 +414,9 @@ mod adversarial_tests {
         .execute(&pool)
         .await
         .expect("seed system tenant");
+        // E-OPS: creating an operator now queues the verification email in
+        // the same transaction, so the platform sender must be provisioned.
+        crate::app::test_support::seed_system_sender(&pool).await;
 
         // Create (the bug this wave's failing test exposed: the UUID id).
         let email = format!(
@@ -414,6 +457,35 @@ mod adversarial_tests {
                 .expect("row");
         assert_ne!(stored_hash, temp_password);
         assert!(bcrypt::verify(&temp_password, &stored_hash).expect("verify"));
+
+        // E-OPS (live dogfood 2026-10-08): the created operator must be able
+        // to COMPLETE login — unverified with a verification token, and the
+        // verification mail queued through the platform pipeline.
+        let (email_verified, metadata): (bool, serde_json::Value) =
+            sqlx::query_as("SELECT email_verified, metadata FROM users WHERE id = $1::uuid")
+                .bind(&new_id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert!(!email_verified, "login must still require verification");
+        assert!(
+            metadata
+                .get("verification_token_hash")
+                .and_then(|value| value.as_str())
+                .is_some_and(|hash| !hash.is_empty()),
+            "the verification token must be stored: {metadata}"
+        );
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue              WHERE to_addresses @> ARRAY[$1] AND subject = 'Verify your ApexMail account' AND status = 'pending'",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("queued mail");
+        assert_eq!(
+            queued, 1,
+            "creating an operator must queue the verification email"
+        );
 
         // Duplicate email is a 409 naming the conflict.
         let (status, body) = env
@@ -700,6 +772,7 @@ mod outage_tests {
         .execute(&pool)
         .await
         .expect("seed system tenant");
+        crate::app::test_support::seed_system_sender(&pool).await;
         let env = AdvEnv::admin(pool.clone()).await;
 
         // A healthy create first (proof the route works).

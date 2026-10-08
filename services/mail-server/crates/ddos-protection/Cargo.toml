@@ -38,8 +38,11 @@ rand = { version = "0.9", optional = true }
 hex = { version = "0.4", optional = true }
 subtle = { version = "2.5", optional = true }
 
-# Metrics
-prometheus = "0.14"
+# Metrics: the `metrics` facade, NOT the `prometheus` crate's private
+# registry — the api-server's scrape target renders the facade recorder
+# (metrics-exporter-prometheus). Registering into a second, unexported
+# registry produced zero ddos_* samples live (OPS-5, dogfood 2026-10-08).
+metrics = { workspace = true }
 
 # Utilities
 uuid = { version = "1.11", features = ["v4"] }
@@ -58,6 +61,9 @@ criterion = "0.8"
 rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"
+# Renders the facade recorder in the OPS-5 regression test (the exact
+# exporter the api-server installs).
+metrics-exporter-prometheus = { workspace = true }
 
 [[bench]]
 name = "rate_limiter"

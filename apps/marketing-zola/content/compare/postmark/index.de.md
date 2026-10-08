@@ -46,7 +46,7 @@ comparison_sections = [
     { feature = "Dedizierte Bereitstellungsoptionen", apex = '<span class="text-brand-600 font-semibold">Individuelle Prüfung</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "PREISE", rows = [
-    { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">30.000/Monat</span>', comp = '<span class="text-surface-600">100/Monat</span>', winner = "none" },
+    { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">3.000/Monat + einmaliges Startguthaben von 30.000</span>', comp = '<span class="text-surface-600">100/Monat</span>', winner = "none" },
     { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/Monat + 90K Überschreitung @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unbegrenzte Teammitglieder", apex = '<span class="text-brand-600 font-semibold">Enterprise-Tarif</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Individuelle Enterprise-Konditionen", apex = '<span class="text-brand-600 font-semibold">Jahresverträge</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }

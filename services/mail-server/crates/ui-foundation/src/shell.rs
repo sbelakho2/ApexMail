@@ -362,6 +362,13 @@ pub struct ControlPlaneShell<'a> {
     pub current_path: &'a str,
     /// CSRF token for the sign-out form (native POST).
     pub csrf_token: &'a str,
+    /// Session identity for the CP header (operator display name, email, and
+    /// the tenant's REAL plan label). `None` renders NO plan label and no
+    /// identity block — a render without session data must never fabricate
+    /// one (dogfood 2026-10-08 F10: the CP render pipeline loaded
+    /// `session_identity` but the layout consumed only the role placeholder,
+    /// so CP pages showed no plan label while the web console did).
+    pub user_context: Option<UserContext<'a>>,
 }
 
 impl<'a> ControlPlaneShell<'a> {
@@ -381,6 +388,36 @@ impl<'a> ControlPlaneShell<'a> {
 
         let sidebar_content = render_cp_sidebar(self.current_path, self.csrf_token);
         let menu_icon = shell_icon("menu", "h-5 w-5");
+
+        // Session identity in the CP header (F10): the real plan label and
+        // the operator's name/email, resolved server-side and never
+        // fabricated. With no session both blocks render empty — the wrapper
+        // stays so the header layout is identical across renders.
+        let plan_label = self
+            .user_context
+            .as_ref()
+            .map(|user| html_escape(user.plan_label))
+            .unwrap_or_default();
+        let plan_label_block = if plan_label.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<div class=\"hidden lg:flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
+                    <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
+                </div>"
+            )
+        };
+        let identity_block = match self.user_context.as_ref() {
+            Some(user) => format!(
+                "<div class=\"text-right hidden sm:block min-w-0\" data-user-identity>\
+                    <p class=\"text-xs font-semibold text-surface-950 truncate\">{display_name}</p>\
+                    <p class=\"text-[10px] font-medium text-surface-500 truncate\">{email}</p>\
+                </div>",
+                display_name = html_escape(user.display_name),
+                email = html_escape(user.email),
+            ),
+            None => String::new(),
+        };
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"control-plane-mobile-sidebar\">\
             <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
@@ -402,6 +439,7 @@ impl<'a> ControlPlaneShell<'a> {
                         <p class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</p>\
                         <p class=\"hidden sm:block text-xs font-medium text-surface-500 truncate\">{page_description}</p>\
                     </div>\
+                    <div class=\"flex items-center gap-4 min-w-0\">{plan_label_block}{identity_block}</div>\
                 </header>\
                 <main class=\"p-8 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
@@ -426,6 +464,8 @@ impl<'a> ControlPlaneShell<'a> {
             page_title = html_escape(self.page_title),
             page_description = html_escape(self.page_description),
             child_html = self.child_html,
+            plan_label_block = plan_label_block,
+            identity_block = identity_block,
         )
     }
 }
@@ -993,6 +1033,7 @@ mod tests {
             child_html: "<section>Ops</section>",
             current_path: "/dashboard",
             csrf_token: "",
+            user_context: None,
         }
         .render_html();
         let marketing = MarketingShell {
@@ -1165,6 +1206,7 @@ mod tests {
             child_html: "<section>Ops</section>",
             current_path: "/dashboard",
             csrf_token: "",
+            user_context: None,
         }
         .render_html();
         assert!(
@@ -1277,6 +1319,7 @@ mod tests {
             child_html: "<section>rows</section>",
             current_path: "/tenants",
             csrf_token: "",
+            user_context: None,
         }
         .render_html();
         let header_at = html.find("<header").expect("header present");
@@ -1284,6 +1327,79 @@ mod tests {
         // The opening tag closes before the title wrapper begins.
         assert!(html[header_at..=header_end].ends_with("z-20\">"));
         assert!(html.contains("</header>"));
+    }
+
+    /// F10 (live dogfood 2026-10-08): the render pipeline loaded
+    /// `session_identity` for the CP surface but the layout consumed only
+    /// the role placeholder — every CP page dropped the tenant's real plan
+    /// label (the web console rendered it). The CP shell must now carry the
+    /// identity and label from the session, escaped like every other input.
+    #[test]
+    fn control_plane_shell_renders_the_session_identity_and_plan_label() {
+        let html = crate::leptos_views::control_plane_app_layout_with_session(
+            "<section>rows</section>",
+            "Tenants",
+            "Workspaces.",
+            "/tenants",
+            "csrf-token",
+            "owner",
+            Some(&UserContext {
+                display_name: "CP Dogfood",
+                email: "cp-dogfood@dogfood.test",
+                plan_label: "Scale Plan — 2M / mo",
+            }),
+            None,
+        );
+        assert!(
+            html.contains("data-plan-label"),
+            "the CP header must carry the plan-label slot"
+        );
+        assert!(
+            html.contains("Scale Plan — 2M / mo"),
+            "the real plan label must render"
+        );
+        assert!(
+            html.contains("data-user-identity"),
+            "the CP header must carry the identity slot"
+        );
+        assert!(html.contains("CP Dogfood"));
+        assert!(html.contains("cp-dogfood@dogfood.test"));
+
+        // A hostile label/name is escaped, never emitted raw.
+        let hostile = crate::leptos_views::control_plane_app_layout_with_session(
+            "<section>x</section>",
+            "Tenants",
+            "Workspaces.",
+            "/tenants",
+            "",
+            "admin",
+            Some(&UserContext {
+                display_name: "\"><script>alert(1)</script>",
+                email: "op@example.test",
+                plan_label: "<img src=x onerror=alert(1)>",
+            }),
+            None,
+        );
+        assert!(!hostile.contains("<script>alert(1)</script>"));
+        assert!(!hostile.contains("<img src=x onerror=alert(1)>"));
+        assert!(hostile.contains("&lt;script&gt;"));
+    }
+
+    /// The no-session render must claim NEITHER a plan label nor an identity
+    /// — the pre-F10 behavior of rendering nothing is preserved for
+    /// anonymous/route-inventory renders.
+    #[test]
+    fn control_plane_shell_without_session_renders_no_plan_label_or_identity() {
+        let html = crate::leptos_views::control_plane_app_layout_with_role(
+            "<section>rows</section>",
+            "Tenants",
+            "Workspaces.",
+            "/tenants",
+            "",
+            "admin",
+        );
+        assert!(!html.contains("data-plan-label"));
+        assert!(!html.contains("data-user-identity"));
     }
 
     /// Item 13 (CP #1, validity extension): the full shell (root layout +
@@ -1301,6 +1417,7 @@ mod tests {
             child_html: "<section>rows</section>",
             current_path: "/tenants",
             csrf_token: "t",
+            user_context: None,
         }
         .render_html();
         let page = crate::leptos_views::control_plane_root_layout(&shell);

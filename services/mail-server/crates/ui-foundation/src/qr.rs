@@ -154,12 +154,15 @@ fn alignment_positions(ver: usize, size: usize) -> Vec<usize> {
 }
 
 fn mask_function(mask: u8) -> impl Fn(usize, usize) -> bool {
+    // ISO/IEC 18004 mask patterns. `x` is the column (j), `y` is the row (i).
+    // Masks 1, 2, and 4 use the row/column orientation from the spec —
+    // earlier versions transposed them, producing non-interoperable codes.
     move |x, y| match mask {
         0 => (x + y) % 2 == 0,
-        1 => x % 2 == 0,
-        2 => y % 3 == 0,
+        1 => y % 2 == 0,
+        2 => x % 3 == 0,
         3 => (x + y) % 3 == 0,
-        4 => ((x / 2) + (y / 3)) % 2 == 0,
+        4 => ((y / 2) + (x / 3)) % 2 == 0,
         5 => (x * y) % 2 + (x * y) % 3 == 0,
         6 => ((x * y) % 2 + (x * y) % 3) % 2 == 0,
         _ => ((x + y) % 2 + (x * y) % 3) % 2 == 0,

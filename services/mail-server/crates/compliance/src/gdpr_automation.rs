@@ -2319,25 +2319,64 @@ impl GdprAutomation {
     /// Request statistics. `tenant_id: None` aggregates across all tenants
     /// (I-1: the route used to pass a literal "" which always matched zero
     /// rows and reported all-zero stats).
+    ///
+    /// E-DSR-STATS (live dogfood 2026-10-08): the previous query bucketed
+    /// `status IN ('rejected', 'failed', 'partial')` as ONE `rejected`
+    /// count, so a partially-completed erasure (some stores erased, others
+    /// skipped/failed — the documented `partial` outcome) was reported to
+    /// the tenant as `rejected`. Every status now has its own bucket and
+    /// `total` is the sum of ALL of them (expired and pending-manual-review
+    /// rows used to vanish from both the buckets and the total).
+    ///
+    /// E-DSR-SLA: the response also carries `overdue`, computed through the
+    /// canonical [`Self::is_statutorily_overdue`] predicate (extended
+    /// deadline wins; only OPEN requests count) — the SLA surface that used
+    /// to be absent, leaving breaches invisible to operators.
     pub async fn get_request_stats(
         &self,
         tenant_id: Option<&str>,
     ) -> Result<serde_json::Value, String> {
-        let row: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
-            "SELECT
-               COUNT(*) FILTER (WHERE status = 'pending_verification'),
-               COUNT(*) FILTER (WHERE status = 'verified'),
-               COUNT(*) FILTER (WHERE status IN ('processing', 'retrying')),
-               COUNT(*) FILTER (WHERE status = 'completed'),
-               COUNT(*) FILTER (WHERE status IN ('rejected', 'failed', 'partial'))
-             FROM data_subject_requests WHERE ($1::text IS NULL OR tenant_id = $1)",
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT status, COUNT(*)::bigint
+             FROM data_subject_requests
+             WHERE ($1::text IS NULL OR tenant_id = $1)
+             GROUP BY status",
         )
         .bind(tenant_id)
-        .fetch_optional(&self.db)
+        .fetch_all(&self.db)
         .await
         .map_err(|e| format!("DB: {e}"))?;
 
-        let (pending, verified, processing, completed, rejected) = row.unwrap_or_default();
+        let mut pending = 0_i64;
+        let mut verified = 0_i64;
+        let mut processing = 0_i64;
+        let mut completed = 0_i64;
+        let mut rejected = 0_i64;
+        let mut failed = 0_i64;
+        let mut partial = 0_i64;
+        let mut expired = 0_i64;
+        let mut pending_manual_review = 0_i64;
+        let mut total = 0_i64;
+        for (status, count) in &rows {
+            total += count;
+            match status.as_str() {
+                "pending_verification" => pending += count,
+                "verified" => verified += count,
+                "processing" => processing += count,
+                "retrying" => processing += count,
+                "completed" => completed += count,
+                "rejected" => rejected += count,
+                "failed" => failed += count,
+                "partial" => partial += count,
+                "expired" => expired += count,
+                "pending_manual_review" => pending_manual_review += count,
+                // Unknown status: it is still counted in `total` so the
+                // aggregate can never silently lose rows.
+                _ => {}
+            }
+        }
+
+        let overdue = self.count_statutorily_overdue(tenant_id).await?;
 
         Ok(serde_json::json!({
             "tenant_id": tenant_id,
@@ -2346,8 +2385,52 @@ impl GdprAutomation {
             "processing": processing,
             "completed": completed,
             "rejected": rejected,
-            "total": pending + verified + processing + completed + rejected,
+            "failed": failed,
+            "partial": partial,
+            "expired": expired,
+            "pending_manual_review": pending_manual_review,
+            "overdue": overdue,
+            "total": total,
         }))
+    }
+
+    /// Count OPEN requests past their statutory deadline (the extended
+    /// deadline when an extension was recorded) for the scope, using THE
+    /// canonical [`Self::is_statutorily_overdue`] decision — never a second,
+    /// SQL-side re-derivation that could disagree with the stored clock.
+    ///
+    /// E-DSR-SLA (live dogfood 2026-10-08): `is_statutorily_overdue` had
+    /// zero production callers, so a backdated request stayed invisible.
+    /// This is that production caller, used by `/gdpr/stats` and by the
+    /// 30 s compliance tick (which logs a warning when a breach is open).
+    pub async fn count_statutorily_overdue(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<u64, String> {
+        let rows: Vec<RequestRow> = sqlx::query_as(
+            "SELECT id, tenant_id, request_type, email, verification_token_hash,
+                    verified, verified_at, status, requested_at, processed_at,
+                    completed_at, expires_at, result, received_at, identity_verified_at,
+                    statutory_due_at, extension_due_at, extension_reason,
+                    extension_notified_at
+             FROM data_subject_requests
+             WHERE ($1::text IS NULL OR tenant_id = $1)
+               AND status NOT IN ('completed', 'rejected', 'expired', 'failed')",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB: {e}"))?;
+
+        let now = Utc::now();
+        let mut overdue = 0_u64;
+        for row in rows {
+            let request = row.into_request()?;
+            if Self::is_statutorily_overdue(&request, now) {
+                overdue += 1;
+            }
+        }
+        Ok(overdue)
     }
 
     // ── Internal Helpers ──────────────────────────────────
@@ -4333,6 +4416,86 @@ mod db_tests {
         assert_eq!(stats["total"], serde_json::json!(1));
         assert_eq!(stats["verified"], serde_json::json!(1));
         assert_eq!(stats["pending_verification"], serde_json::json!(0));
+    }
+
+    /// E-DSR-STATS + E-DSR-SLA regression (live dogfood 2026-10-08):
+    ///
+    /// * a `partial` request must be reported in its OWN bucket, never as
+    ///   `rejected`;
+    /// * a request whose statutory deadline was backdated (SQL repro from
+    ///   the dogfood: `UPDATE … SET statutory_due_at = NOW() - 2 days`, which
+    ///   previously changed nothing anywhere) must make `/gdpr/stats` report
+    ///   `overdue`, through the canonical `is_statutorily_overdue` predicate.
+    #[tokio::test]
+    async fn stats_report_partial_and_backdated_sla_breaches_as_overdue() {
+        let Some((pool, automation)) = automation("sla_stats").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+
+        // An OPEN (partial) request past its statutory clock — the exact
+        // live repro shape.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, received_at, statutory_due_at, expires_at)
+             VALUES ('REQ-sla-over', $1, 'erasure', 'over@example.test', 'hash', true, 'partial',
+                     NOW() - INTERVAL '40 days', NOW() - INTERVAL '40 days',
+                     NOW() - INTERVAL '2 days', NOW() + INTERVAL '30 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("overdue partial request");
+
+        // An OPEN request still inside its clock — NOT overdue.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, received_at, statutory_due_at, expires_at)
+             VALUES ('REQ-sla-in-window', $1, 'erasure', 'intime@example.test', 'hash', true,
+                     'partial', NOW() - INTERVAL '3 days', NOW() - INTERVAL '3 days',
+                     NOW() + INTERVAL '27 days', NOW() + INTERVAL '30 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("in-window partial request");
+
+        // A COMPLETED request with a backdated deadline is never overdue.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, received_at, statutory_due_at, expires_at)
+             VALUES ('REQ-sla-done', $1, 'access', 'done@example.test', 'hash', true, 'completed',
+                     NOW() - INTERVAL '40 days', NOW() - INTERVAL '40 days',
+                     NOW() - INTERVAL '10 days', NOW() + INTERVAL '30 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("completed request");
+
+        let stats = automation
+            .get_request_stats(Some(&tenant))
+            .await
+            .expect("stats");
+        assert_eq!(
+            stats["partial"],
+            serde_json::json!(2),
+            "partial is its own bucket: {stats}"
+        );
+        assert_eq!(
+            stats["rejected"],
+            serde_json::json!(0),
+            "a partial request must never be reported as rejected: {stats}"
+        );
+        assert_eq!(
+            stats["overdue"],
+            serde_json::json!(1),
+            "exactly the backdated OPEN request is statutorily overdue: {stats}"
+        );
+        assert_eq!(stats["total"], serde_json::json!(3));
     }
     // ── Adversarial: hostile strings, boundaries, tenant isolation ──────
 

@@ -5905,3 +5905,53 @@ db_test!(
         assert_eq!(subs_b, 0, "refused events write no subscription rows");
     }
 );
+
+// ---------------------------------------------------------------------------
+// E-SWEEP-TRIGGER — on-demand overage sweep entrypoint
+// ---------------------------------------------------------------------------
+
+/// Live dogfood 2026-10-08: the overage sweep's FIRST scheduled tick is the
+/// next UTC midnight and no on-demand trigger existed anywhere. This drives
+/// the REAL binary's one-shot `--sweep-overage-only` flag against a private
+/// canonical DB clone and asserts the printed report — the ops trigger, end
+/// to end (the sweep semantics themselves are covered by the overage tests
+/// above; here the entrypoint is the subject).
+#[tokio::test]
+async fn sweep_overage_only_cli_runs_the_canonical_sweep_on_demand() {
+    let Some(h) = provision("sweep_overage_only_cli").await else {
+        return;
+    };
+    let server_part = h
+        .admin_url
+        .rsplit_once('/')
+        .expect("admin url has a database segment")
+        .0
+        .to_string();
+    let database_url = format!("{server_part}/{}", h.db_name);
+    let redis_url = std::env::var("TEST_REDIS_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .expect("TEST_REDIS_URL must be set for the sweep CLI test");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_billing-service"))
+        .arg("--sweep-overage-only")
+        .env("DATABASE_URL", &database_url)
+        .env("REDIS_URL", &redis_url)
+        // Keep the JSON log lines short; the assertion reads stdout, where
+        // the one-shot report is printed.
+        .env("RUST_LOG", "error")
+        .output()
+        .expect("spawn billing-service --sweep-overage-only");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the one-shot sweep must exit 0\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("overage sweep: periods_checked=0 invoices_created=0"),
+        "the swept (empty) period set must be reported on demand:\n{stdout}"
+    );
+
+    h.finish().await;
+}

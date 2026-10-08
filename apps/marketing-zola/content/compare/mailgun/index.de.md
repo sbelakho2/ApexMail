@@ -52,7 +52,7 @@ comparison_sections = [
   { title = "PREISE BEI 100K/MONAT (verifiziert 2026-07-29)", rows = [
     { feature = "Verglichener Tarif", apex = 'Pro: €65/Monat (150.000 E-Mails enthalten)', comp = 'Scale: €82.80 (US$90)/Monat (100.000 E-Mails enthalten)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Nutzungsbedingungen", apex = 'Siehe den aktuellen öffentlichen Katalog und Checkout für die anwendbaren Nutzungsbedingungen', comp = 'ab €1.20 (US$1.30)/1.000 bei Foundation-Überschreitung; Staffelraten ab Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
-    { feature = "Kostenlose Stufe", apex = '30.000 E-Mails/Monat', comp = '100 E-Mails/Tag (Flex-Testphase — keine Kreditkarte)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
+    { feature = "Kostenlose Stufe", apex = '3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000 E-Mails', comp = '100 E-Mails/Tag (Flex-Testphase — keine Kreditkarte)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},
   { title = "BEREICHE, IN DENEN MAILGUN STÄRKER IST", rows = [
     { feature = "E-Mail-Validierung", apex = 'E-Mail-Grader-API (DNS/SPF/DKIM/DMARC/Inhalt/Reputation)', comp = 'Dedizierte E-Mail-Validierungs-API mit Echtzeit- und Massenvalidierung<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },

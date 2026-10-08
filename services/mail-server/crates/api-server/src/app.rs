@@ -606,6 +606,9 @@ pub fn build_app(state: AppState) -> Router {
             )),
         )
         .nest("/v1/admin/analytics", routes::admin::analytics::router())
+        // F13: the control-plane job controls (list/retry/cancel) over the
+        // canonical queue_jobs store.
+        .nest("/v1/admin/jobs", routes::admin::jobs::router())
         .nest(
             "/v1/admin/analytics/export",
             routes::admin::analytics_export::router(),
@@ -2311,6 +2314,50 @@ pub(crate) mod test_support {
         .expect("seed tenant");
         let api_key = seed_api_key_for(db, &tenant_id, scopes).await;
         (tenant_id, api_key)
+    }
+
+    /// Provision the platform system sender (a verified, DKIM-enabled
+    /// `apexmail.ee` domain for tenant `system_internal_tenant01`) so
+    /// system-mail queueing succeeds. Every flow that queues a
+    /// verification/password mail in its transaction needs this fixture.
+    pub(crate) async fn seed_system_sender(db: &sqlx::PgPool) {
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+        );
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'testsel',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(
+            uuid::Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                .expect("system domain id is a uuid"),
+        )
+        .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+        .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("system sender seed must insert");
     }
 
     /// Seed a single API key for an EXISTING tenant id; returns the raw key.

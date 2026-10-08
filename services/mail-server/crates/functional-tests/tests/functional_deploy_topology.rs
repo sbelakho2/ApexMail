@@ -94,6 +94,53 @@ fn compose_declares_the_sales_autopilot_service_itself() {
     }
 }
 
+/// D-5 (live dogfood 2026-10-06): every compose file must pass the
+/// api-server the variable its middleware actually READS
+/// (`TRUSTED_PROXIES`), not only the legacy `DDOS_TRUSTED_PROXIES` name —
+/// the base file wired only the legacy name, so X-Forwarded-For trust was
+/// silently ignored and every client behind the proxy shared one limiter
+/// bucket. The legacy name must be derived from the same value (or wired
+/// independently) so the DDoS crate's own env reader cannot drift from the
+/// api-server's.
+#[test]
+fn compose_api_server_passes_the_trusted_proxy_variable_the_code_reads() {
+    for file in ["docker-compose.yml", "docker-compose.prod.yml"] {
+        let compose = compose_file(file);
+        // Panics (fails) when the key is missing — that IS the regression.
+        let trusted = service_env_value(&compose, "api-server", "TRUSTED_PROXIES");
+        assert!(
+            trusted.contains("${TRUSTED_PROXIES"),
+            "{file}: TRUSTED_PROXIES must stay overridable via the documented \
+             TRUSTED_PROXIES variable, got {trusted:?}"
+        );
+        let legacy = service_env_value(&compose, "api-server", "DDOS_TRUSTED_PROXIES");
+        assert!(
+            legacy.contains("${TRUSTED_PROXIES") || legacy.contains("${DDOS_TRUSTED_PROXIES"),
+            "{file}: the legacy DDOS_TRUSTED_PROXIES name must come from \
+             TRUSTED_PROXIES (or itself) so the two middlewares cannot drift, \
+             got {legacy:?}"
+        );
+    }
+}
+
+/// The api-server config must keep accepting the legacy
+/// `DDOS_TRUSTED_PROXIES` name as a fallback (D-5): a deployment that only
+/// sets the old name must still trust forwarded headers. Pins the
+/// `trusted_proxies_from_env` helper by source text — reverting to a bare
+/// `env_or("TRUSTED_PROXIES", "")` fails here.
+#[test]
+fn api_server_config_accepts_the_legacy_ddos_trusted_proxies_name() {
+    const CONFIG_RS: &str = include_str!("../../api-server/src/config.rs");
+    assert!(
+        CONFIG_RS.contains("fn trusted_proxies_from_env()"),
+        "api-server config.rs must keep the two-name trusted-proxy resolver"
+    );
+    assert!(
+        CONFIG_RS.contains("env_or(\"DDOS_TRUSTED_PROXIES\", \"\")"),
+        "the legacy DDOS_TRUSTED_PROXIES name must remain a fallback"
+    );
+}
+
 /// The api-server config default for `SALES_AUTOPILOT_BASE_URL` must be a
 /// routable loopback address, never a bind address. The config test module is
 /// owned elsewhere, so this pins the exact `env_or` call in `config.rs` by

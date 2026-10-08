@@ -364,6 +364,20 @@ documents `ALL_RECIPIENTS_SUPPRESSED`), while the brief expects transactional to
 does implement the bypass — see 3.4: with only the marketing consent revoked (no suppression),
 the transactional send is delivered while marketing is refused.
 
+> **Resolution note (E-SUPPRESSION-TXN, expectation alignment — no code change).** The product
+> contract is authoritative here: *global suppression always applies, regardless of category*.
+> `EmailCategory::is_preference_exempt` exempts categories from **per-category preference**
+> enforcement only, and its own doc comment states “Global suppression always applies
+> regardless” (`services/mail-server/crates/apexmail-lib/src/email_headers.rs:164-170`); the
+> public send contract likewise returns `ALL_RECIPIENTS_SUPPRESSED` (400) when every recipient
+> is suppressed, with no category carve-out (`docs/api/endpoints/messages.md` § Errors). The
+> dogfood brief's expectation — transactional mail bypassing a *marketing* unsubscribe — is
+> therefore **not** the product contract, and the observed `400 VALIDATION_ERROR ["recipient is
+> suppressed: …"]` is correct behavior for both categories. The legitimate bypass arm is the
+> **consent** path, which the flow above demonstrates (revoked marketing consent, no suppression
+> row → transactional delivered, marketing refused). No code change was made: changing this
+> would weaken the suppression guarantee the contract sells.
+
 ### 3.3 Retention + legal hold + audit chain — PASS (retention/hold) / DEFECT (audit chain)
 
 **Retention override respected by the sweep — PASS** (canonical `RetentionSweeper::run_sweep`

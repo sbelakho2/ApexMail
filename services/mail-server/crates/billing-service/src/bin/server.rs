@@ -45,6 +45,14 @@ struct Cli {
     /// server reconciles on every boot anyway).
     #[arg(long, env = "BILLING_RECONCILE_PLANS_ONLY", default_value_t = false)]
     reconcile_plans_only: bool,
+
+    /// Run the canonical end-of-period overage + PAYG sweep ONCE against the
+    /// live database, print the report and exit (one-shot ops entrypoint;
+    /// the scheduled sweep's first tick is the next UTC midnight, so an
+    /// operator otherwise cannot close a period on demand — E-SWEEP-TRIGGER,
+    /// live dogfood 2026-10-08).
+    #[arg(long, env = "BILLING_SWEEP_OVERAGE_ONLY", default_value_t = false)]
+    sweep_overage_only: bool,
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -106,6 +114,48 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "plans reconcile: inserted={} repaired={} deactivated={}",
             reconcile_report.inserted, reconcile_report.repaired, reconcile_report.deactivated
+        );
+        return Ok(());
+    }
+
+    // E-SWEEP-TRIGGER: the on-demand overage sweep (the reconcile-plans
+    // one-shot pattern). Deliberately BEFORE the Stripe webhook-secret
+    // fail-fast: closing a period is an ops action that must work even when
+    // the inbound webhook transport secret is absent — the sweep itself
+    // needs only Postgres plus the Redis pool.
+    if cli.sweep_overage_only {
+        let redis = deadpool_redis::Config::from_url(&cli.redis_url)
+            .create_pool(Some(Runtime::Tokio1))?;
+        let config = BillingConfig {
+            database_url: cli.database_url,
+            redis_url: cli.redis_url,
+            listen_addr: cli.listen.clone(),
+            service_auth_token: cli.service_auth_token,
+            stripe_webhook_secret: cli.stripe_webhook_secret,
+            api_base_url: cli.api_base_url,
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(db, redis, config);
+        let result = maintenance::sweep_overage_once(state.as_ref())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        println!(
+            "overage sweep: periods_checked={} invoices_created={} payg_invoices_created={} \
+             wallet_paid={} pending_dunning={} skipped_no_address={} skipped_no_overage={} \
+             skipped_unknown_plan={} failed_periods={} aged_needs_review={} \
+             pricing_needs_review={} existing_invoice_mismatches={}",
+            result.periods_checked,
+            result.invoices_created,
+            result.payg_invoices_created,
+            result.wallet_paid,
+            result.pending_dunning,
+            result.skipped_no_address,
+            result.skipped_no_overage,
+            result.skipped_unknown_plan,
+            result.failed_periods,
+            result.aged_needs_review,
+            result.pricing_needs_review,
+            result.existing_invoice_mismatches,
         );
         return Ok(());
     }

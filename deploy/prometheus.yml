@@ -33,12 +33,22 @@ scrape_configs:
     # Tracking request and latency signals are high-churn and back 1m availability alerts.
     scrape_interval: 10s
 
-  # Enterprise metrics
+  # Enterprise metrics. The handler admits loopback or a bearer
+  # METRICS_TOKEN (H-3); a network scrape without the credential is a 401
+  # (OPS-3, live dogfood 2026-10-08). Prometheus 2.55 has NO
+  # --config.expand-env (a 3.x flag), so the bearer comes from
+  # `credentials_file`, mounted by docker-compose.yml at the path below. The
+  # dev file carries the same value as the compose default for the
+  # enterprise service's METRICS_TOKEN; a production deployment must mount
+  # the real token file over it (see deploy/DEPLOYMENT.md).
   - job_name: 'apexmail-enterprise'
     static_configs:
       - targets: ['enterprise:3008']
     metrics_path: '/metrics'
     scrape_interval: 15s
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/monitoring/enterprise_metrics_token
 
   # MTA metrics (SMTP ingress availability and auth/cache counters)
   - job_name: 'apexmail-mta'

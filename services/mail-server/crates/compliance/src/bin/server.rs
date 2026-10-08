@@ -52,7 +52,7 @@ use observability_service::otlp_exporter::{
 use std::sync::Arc;
 use tokio::signal;
 use tokio::time::{interval, Duration};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use compliance::bootstrap::build_state;
 use compliance::config::ComplianceConfig;
@@ -315,6 +315,19 @@ async fn run_cron_jobs_with_intervals(
                         match state.gdpr.expire_stale_opt_in_tokens().await {
                             Ok(n) if n > 0 => info!(count = n, "Expired stale DOI tokens"),
                             Err(e) => error!(error = %e, "DOI token expiry failed"),
+                            _ => {}
+                        }
+        // E-DSR-SLA: flag OPEN requests past their statutory (or extended)
+        // Art. 12(3) deadline. This tick used to never look at due dates —
+        // the canonical predicate had zero production callers, so a breach
+        // was invisible to operators. Warn-level so it surfaces in the
+        // deployed container's logs; /gdpr/stats carries the same count.
+                        match state.gdpr.count_statutorily_overdue(None).await {
+                            Ok(n) if n > 0 => warn!(
+                                overdue = n,
+                                "GDPR DSR(s) past the statutory response deadline — SLA breach open"
+                            ),
+                            Err(e) => error!(error = %e, "GDPR statutory-overdue check failed"),
                             _ => {}
                         }
                     }

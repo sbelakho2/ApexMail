@@ -286,6 +286,12 @@ services:
       # ── Observability ─────────────────────────────────────────────────────
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       METRICS_PORT: 9092
+      # The metrics listener binds container loopback unless overridden, so
+      # the documented scrape target `tracking:9092` (deploy/prometheus.yml)
+      # was connection-refused from any other container (OPS-2, live dogfood
+      # 2026-10-08). Bind all interfaces INSIDE the compose network; host
+      # exposure stays 127.0.0.1-only via the port mapping below.
+      METRICS_BIND_ADDR: ${TRACKING_METRICS_BIND_ADDR:-0.0.0.0}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: tracking-service
       RUST_LOG: ${RUST_LOG:-info,tracking_service=debug}
@@ -365,10 +371,26 @@ services:
       # trusted for client-IP extraction (empty = headers never trusted, which
       # is only correct when clients connect directly; behind the nginx edge
       # set it to the compose networks or the proxy IPs — see deploy docs).
+      # The api-server middleware reads TRUSTED_PROXIES
+      # (docs/deployment/configuration.md § API Server) — the base file
+      # previously passed only the legacy DDOS_TRUSTED_PROXIES name, so the
+      # documented knob was inert in the dev compose (dogfood 2026-10-08
+      # D-5). The legacy name stays wired for the DDoS crate's own env
+      # reader; the api-server also accepts it as a fallback.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       DDOS_TRUSTED_PROXIES: ${DDOS_TRUSTED_PROXIES:-}
-      # SES SNS notification topic allow-list (see deploy/DEPLOYMENT.md —
-      # without it the /v1/ses/notifications handler refuses everything).
-      SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-}
+      # SES SNS notification topic allow-list (see deploy/DEPLOYMENT.md).
+      # Dev default: a LOCAL topic ARN so a developer can exercise
+      # POST /v1/ses/notifications without AWS provisioning — the previous
+      # empty default made every notification a 503 "SNS notifications are
+      # not configured" (mail-plane FINDING-5, 2026-10-08). Production sets
+      # the real TOPIC_ARN in .env.
+      SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-arn:aws:sns:eu-central-1:000000000000:apexmail-dev-ses-events}
+      # Dev-only local SNS signing anchor (ignored in production): an RSA
+      # public key PEM, single-line with \n escapes. When set, a developer
+      # can sign notifications locally and exercise the FULL handler
+      # (signature verified against this key; no AWS cert fetch).
+      SNS_DEV_SIGNING_KEY_PEM: ${SNS_DEV_SIGNING_KEY_PEM:-}
       # ── Database ──────────────────────────────────────────────────────────
       DB_HOST: postgres
       DB_PORT: 5432
@@ -521,6 +543,13 @@ services:
       JWT_PRIVATE_KEY_PEM_FILE: ${JWT_PRIVATE_KEY_PEM_FILE:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: enterprise-server
+      # /metrics admits loopback or a bearer METRICS_TOKEN (H-3). Prometheus
+      # scrapes over the compose network with the matching
+      # `authorization.credentials_file` from deploy/prometheus.yml (the dev
+      # credential file carries this same default), so the documented
+      # `enterprise:3008` target is live instead of 401 (OPS-3, live dogfood
+      # 2026-10-08). Override in prod together with the mounted token file.
+      METRICS_TOKEN: ${ENTERPRISE_METRICS_TOKEN:-dev-enterprise-metrics-token-change-me}
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
@@ -1561,6 +1590,11 @@ services:
       - ./deploy/monitoring/alerts/disk-space.yml:/etc/prometheus/monitoring/alerts/disk-space.yml:ro
       - ./deploy/prometheus/alerts/api-alerts.yml:/etc/prometheus/prometheus/alerts/api-alerts.yml:ro
       - ./deploy/prometheus/alerts/infrastructure-alerts.yml:/etc/prometheus/prometheus/alerts/infrastructure-alerts.yml:ro
+      # OPS-3: bearer credential for the apexmail-enterprise scrape
+      # (prometheus.yml `authorization.credentials_file`). The dev file
+      # matches the compose default for the enterprise METRICS_TOKEN;
+      # production must mount the real token here.
+      - ./deploy/monitoring/enterprise_metrics_token:/etc/prometheus/monitoring/enterprise_metrics_token:ro
       # Audit P + hardening: basic auth for the web UI/API. The mounted file
       # is the documented TEMPLATE; render-prometheus-web-config.sh renders
       # the live config to /tmp/prometheus-web.yml at container start from

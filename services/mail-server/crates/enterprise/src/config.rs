@@ -577,6 +577,72 @@ mod tests {
         assert_eq!(cfg.db.max_connections, 20);
     }
 
+    /// OPS-3 (live dogfood 2026-10-08): `/metrics` admits loopback or a
+    /// bearer `METRICS_TOKEN`; the dev compose set no token and
+    /// deploy/prometheus.yml carried no `authorization:` block, so the
+    /// documented `enterprise:3008` scrape target answered 401 from every
+    /// other container. Pin the full wiring: the service receives the
+    /// token, Prometheus sends the mounted credential file (Prometheus
+    /// 2.55 has no --config.expand-env, so env interpolation is not an
+    /// option).
+    #[test]
+    fn dev_deploy_artifacts_authorize_the_enterprise_metrics_scrape() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let compose = std::fs::read_to_string(root.join("docker-compose.yml"))
+            .expect("docker-compose.yml must be readable");
+        let has_line = |needle: &str| compose.lines().any(|line| line.trim() == needle);
+        assert!(
+            has_line(
+                "METRICS_TOKEN: ${ENTERPRISE_METRICS_TOKEN:-dev-enterprise-metrics-token-change-me}"
+            ),
+            "the enterprise service must receive METRICS_TOKEN in the dev compose"
+        );
+        assert!(
+            compose.contains(
+                "./deploy/monitoring/enterprise_metrics_token:/etc/prometheus/monitoring/enterprise_metrics_token:ro"
+            ),
+            "the prometheus service must mount the enterprise scrape credential file"
+        );
+        // Prometheus 2.55 has no --config.expand-env (3.x flag); it must not
+        // appear in the prometheus command (tempo/loki use their OWN
+        // -config.expand-env=true and are out of scope).
+        let prom_command = compose
+            .split("'--config.file=/etc/prometheus/prometheus.yml'")
+            .nth(1)
+            .map(|rest| rest.split("ports:").next().unwrap_or(rest))
+            .expect("the prometheus command list must be present");
+        assert!(
+            !prom_command.contains("--config.expand-env"),
+            "Prometheus 2.55 does not support --config.expand-env and would fail \
+             to start with it:\n{prom_command}"
+        );
+        let prometheus = std::fs::read_to_string(root.join("deploy/prometheus.yml"))
+            .expect("deploy/prometheus.yml must be readable");
+        let enterprise_job = prometheus
+            .split("job_name: 'apexmail-enterprise'")
+            .nth(1)
+            .expect("the apexmail-enterprise job must exist");
+        let job_block = enterprise_job
+            .split("- job_name:")
+            .next()
+            .unwrap_or(enterprise_job);
+        assert!(
+            job_block.contains("authorization:")
+                && job_block.contains(
+                    "credentials_file: /etc/prometheus/monitoring/enterprise_metrics_token"
+                ),
+            "the enterprise scrape job must carry the bearer authorization block:\n{job_block}"
+        );
+        let token = std::fs::read_to_string(root.join("deploy/monitoring/enterprise_metrics_token"))
+            .expect("the dev credential file must be committed");
+        assert_eq!(
+            token.trim(),
+            "dev-enterprise-metrics-token-change-me",
+            "the committed dev credential must match the compose default the \
+             enterprise service receives"
+        );
+    }
+
     #[test]
     fn test_db_url() {
         let db = DatabaseConfig {

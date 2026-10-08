@@ -367,6 +367,27 @@ mod tests {
         }
     }
 
+    /// OPS-2 (live dogfood 2026-10-08): the documented scrape target
+    /// `tracking:9092` was connection-refused because the metrics listener
+    /// binds container loopback by default and no compose file set
+    /// `METRICS_BIND_ADDR`. Pin the dev wiring (and the reader in main.rs,
+    /// the defect class "compose sets a var nothing reads").
+    #[test]
+    fn dev_compose_binds_tracking_metrics_for_the_documented_scrape_target() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let compose = std::fs::read_to_string(root.join("docker-compose.yml"))
+            .expect("docker-compose.yml must be readable");
+        assert!(
+            compose.contains("METRICS_BIND_ADDR: ${TRACKING_METRICS_BIND_ADDR:-0.0.0.0}"),
+            "the tracking service must bind its metrics listener so the \
+             documented `tracking:9092` target is scrapeable"
+        );
+        assert!(
+            include_str!("main.rs").contains("METRICS_BIND_ADDR"),
+            "main.rs must keep honoring the METRICS_BIND_ADDR override"
+        );
+    }
+
     #[test]
     fn trusted_proxy_parsing_accepts_cidr_bare_and_drops_garbage() {
         let parsed = parse_trusted_proxies("10.0.0.0/8, 203.0.113.7 , ,not-an-ip,2001:db8::/32");

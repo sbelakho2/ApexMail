@@ -38,23 +38,22 @@ Uptime is measured by our external monitoring system (Blackbox exporter + Promet
 ## 5. Service Credits
 
 Eligible plans carry a 99.9% monthly availability commitment. When measured
-monthly uptime falls below it, a service credit applies per the tiered bands
-below — the credit percentage is the tenant's monthly recurring charge for the
-affected month.
+monthly uptime falls below it, a service credit applies per the plan-specific
+matrix below — the credit percentage is the tenant's monthly recurring charge for
+the affected month.
 
-| Measured monthly availability | Service credit |
-|---|---:|
-| ≥ 99.9% | 0% (commitment met) |
-| 99.0% – 99.899% | 10% |
-| 95.0% – 98.999% | 25% |
-| < 95.0% | 50% |
+| Measured monthly availability | Business | Enterprise Cloud / contracted |
+|---|---:|---:|
+| ≥ 99.9% | 0% (commitment met) | 0% (commitment met) |
+| 99.0% – 99.899% | 10% | 10% |
+| 95.0% – 98.999% | 20% | 25% |
+| < 95.0% | 30% | 25% |
 
-**Plan schedules:**
+**Plan notes:**
 
-- **Business** — graduated, no flat cap below the tiers:
-  99.0–99.899% → 10% · 95.0–98.999% → 20% · <95% → 30% of the monthly charge.
-- **Enterprise Cloud and contracted deployments** — the tiers above up to 25%
-  (or the contracted figure where an order form specifies one).
+- **Business** — graduated percentages as shown; no flat cap below the tiers.
+- **Enterprise Cloud and contracted deployments** — percentages as shown, capped
+  at 25% (or the contracted figure where an order form specifies one).
 
 Credits are calculated from measured monthly uptime below the commitment and
 capped by the customer's plan.

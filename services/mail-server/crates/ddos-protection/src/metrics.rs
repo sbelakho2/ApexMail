@@ -1,67 +1,243 @@
-//! Prometheus metrics for DDoS protection
+//! Prometheus metrics for DDoS protection.
+//!
+//! OPS-5 (live dogfood 2026-10-08): these series used to be registered in
+//! the **`prometheus` crate's** registry via `register_int_counter_vec!`,
+//! while the api-server exposes the **`metrics` facade's**
+//! `metrics-exporter-prometheus` recorder on `:9090/metrics`. The two
+//! registries never met, so a scrape showed ZERO `ddos_*` samples despite 42
+//! live WAF verdicts and the 429/403 refusals — the A-3 reputation counters
+//! had no observable surface. Every metric now emits through the `metrics`
+//! facade (the SAME recorder the scrape target renders), keeping the
+//! documented series names and label keys
+//! (docs/security/Security_Systems.md § Prometheus metrics).
 
+use metrics::{Key, Label, Level, Metadata};
 use once_cell::sync::Lazy;
-use prometheus::{
-    register_gauge_vec, register_histogram_vec, register_int_counter_vec, GaugeVec, HistogramOpts,
-    HistogramVec, IntCounterVec, Opts,
-};
 
-fn safe_int_counter_vec(name: &str, help: &str, labels: &[&str]) -> Option<IntCounterVec> {
-    match register_int_counter_vec!(name, help, labels) {
-        Ok(metric) => Some(metric),
-        Err(err) => {
-            tracing::warn!(metric = name, error = %err, "Falling back to unregistered IntCounterVec");
-            match IntCounterVec::new(Opts::new(name, help), labels) {
-                Ok(metric) => Some(metric),
-                Err(build_err) => {
-                    tracing::error!(metric = name, error = %build_err, "Failed to construct fallback IntCounterVec");
-                    None
-                }
-            }
+/// Metadata for facade-emitted metrics. `metrics-exporter-prometheus` keys
+/// series by name+labels; the target/level are diagnostic only.
+fn metadata(target: &'static str) -> Metadata<'static> {
+    Metadata::new(target, Level::INFO, Some(module_path!()))
+}
+
+// ─── Facade metric handles ─────────────────────────────────────────────
+//
+// The tiny wrappers below preserve the call-site API this crate already
+// used (`REQUESTS_TOTAL.as_ref()` → `.with_label_values(&[..]).inc()`), so
+// the emission sites needed no rewrite — only the registry behind them
+// changed. Labels are positional (the key names are fixed per metric).
+
+/// A counter family with a fixed, static set of label keys.
+#[derive(Clone, Copy)]
+pub struct CounterVec {
+    name: &'static str,
+    label_keys: &'static [&'static str],
+}
+
+impl CounterVec {
+    /// Construct the family (the facade needs no fallible registration).
+    pub const fn new(name: &'static str, label_keys: &'static [&'static str]) -> Self {
+        Self { name, label_keys }
+    }
+
+    /// Bind label values for one emission.
+    ///
+    /// # Panics
+    /// Never: a value-count mismatch simply truncates to the declared keys
+    /// (the exporter rejects a mismatched series, and the unit tests pin
+    /// every call site's arity).
+    /// Bind one emission's positional label values to the declared keys.
+    pub fn with_label_values<'a>(&self, values: &'a [&'a str]) -> LabeledCounter<'a> {
+        LabeledCounter {
+            name: self.name,
+            label_keys: self.label_keys,
+            values,
         }
     }
 }
 
-fn safe_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Option<GaugeVec> {
-    match register_gauge_vec!(name, help, labels) {
-        Ok(metric) => Some(metric),
-        Err(err) => {
-            tracing::warn!(metric = name, error = %err, "Falling back to unregistered GaugeVec");
-            match GaugeVec::new(Opts::new(name, help), labels) {
-                Ok(metric) => Some(metric),
-                Err(build_err) => {
-                    tracing::error!(metric = name, error = %build_err, "Failed to construct fallback GaugeVec");
-                    None
-                }
-            }
+/// A counter bound to one label set.
+pub struct LabeledCounter<'a> {
+    name: &'static str,
+    label_keys: &'static [&'static str],
+    values: &'a [&'a str],
+}
+
+impl LabeledCounter<'_> {
+    /// Add one to the bound series.
+    pub fn inc(&self) {
+        self.inc_by(1);
+    }
+
+    /// Add `value` to the bound series.
+    pub fn inc_by(&self, value: u64) {
+        let key = self.key();
+        metrics::with_recorder(|recorder| {
+            recorder
+                .register_counter(&key, &metadata(self.name))
+                .increment(value);
+        });
+    }
+
+    fn key(&self) -> Key {
+        Key::from_parts(self.name, labels(self.label_keys, self.values))
+    }
+}
+
+/// A gauge family with a fixed, static set of label keys.
+#[derive(Clone, Copy)]
+pub struct GaugeVec {
+    name: &'static str,
+    label_keys: &'static [&'static str],
+}
+
+impl GaugeVec {
+    /// Construct the family (the facade needs no fallible registration).
+    pub const fn new(name: &'static str, label_keys: &'static [&'static str]) -> Self {
+        Self { name, label_keys }
+    }
+
+    /// Bind one emission's positional label values to the declared keys.
+    pub fn with_label_values<'a>(&self, values: &'a [&'a str]) -> LabeledGauge<'a> {
+        LabeledGauge {
+            name: self.name,
+            label_keys: self.label_keys,
+            values,
         }
     }
 }
 
-fn safe_histogram_vec(
-    name: &str,
-    help: &str,
-    labels: &[&str],
-    buckets: Vec<f64>,
+/// A gauge bound to one label set.
+pub struct LabeledGauge<'a> {
+    name: &'static str,
+    label_keys: &'static [&'static str],
+    values: &'a [&'a str],
+}
+
+impl LabeledGauge<'_> {
+    /// Add one to the bound series.
+    pub fn inc(&self) {
+        self.increment(1.0);
+    }
+
+    /// Subtract one from the bound series.
+    pub fn dec(&self) {
+        self.increment(-1.0);
+    }
+
+    /// Set the bound series to an absolute value.
+    pub fn set(&self, value: f64) {
+        let key = self.key();
+        metrics::with_recorder(|recorder| {
+            recorder.register_gauge(&key, &metadata(self.name)).set(value);
+        });
+    }
+
+    fn increment(&self, delta: f64) {
+        let key = self.key();
+        metrics::with_recorder(|recorder| {
+            recorder
+                .register_gauge(&key, &metadata(self.name))
+                .increment(delta);
+        });
+    }
+
+    fn key(&self) -> Key {
+        Key::from_parts(self.name, labels(self.label_keys, self.values))
+    }
+}
+
+/// A histogram family with a fixed, static set of label keys.
+#[derive(Clone, Copy)]
+pub struct HistogramVec {
+    name: &'static str,
+    label_keys: &'static [&'static str],
+}
+
+impl HistogramVec {
+    /// Construct the family (the facade needs no fallible registration).
+    pub const fn new(name: &'static str, label_keys: &'static [&'static str]) -> Self {
+        Self { name, label_keys }
+    }
+
+    /// Bind one emission's positional label values to the declared keys.
+    pub fn with_label_values<'a>(&self, values: &'a [&'a str]) -> LabeledHistogram<'a> {
+        LabeledHistogram {
+            name: self.name,
+            label_keys: self.label_keys,
+            values,
+        }
+    }
+}
+
+/// A histogram bound to one label set.
+pub struct LabeledHistogram<'a> {
+    name: &'static str,
+    label_keys: &'static [&'static str],
+    values: &'a [&'a str],
+}
+
+impl LabeledHistogram<'_> {
+    /// Record one observation on the bound series.
+    pub fn observe(&self, value: f64) {
+        let key = self.key();
+        metrics::with_recorder(|recorder| {
+            recorder
+                .register_histogram(&key, &metadata(self.name))
+                .record(value);
+        });
+    }
+
+    fn key(&self) -> Key {
+        Key::from_parts(self.name, labels(self.label_keys, self.values))
+    }
+}
+
+fn labels(label_keys: &'static [&'static str], values: &[&str]) -> Vec<Label> {
+    label_keys
+        .iter()
+        .zip(values.iter())
+        .map(|(key, value)| Label::new(*key, value.to_string()))
+        .collect()
+}
+
+// ─── Metric definitions ────────────────────────────────────────────────
+//
+// Each family describes itself (so `# HELP` reaches the scrape output) and
+// then registers with the facade on first use. `Option` is kept so the call
+// sites' `if let Some(metric) = …` shape is untouched; the facade cannot
+// fail registration, so the value is always `Some`.
+
+fn counter_vec(
+    name: &'static str,
+    help: &'static str,
+    label_keys: &'static [&'static str],
+) -> Option<CounterVec> {
+    metrics::describe_counter!(name, metrics::Unit::Count, help);
+    Some(CounterVec::new(name, label_keys))
+}
+
+fn gauge_vec(
+    name: &'static str,
+    help: &'static str,
+    label_keys: &'static [&'static str],
+) -> Option<GaugeVec> {
+    metrics::describe_gauge!(name, metrics::Unit::Count, help);
+    Some(GaugeVec::new(name, label_keys))
+}
+
+fn histogram_vec(
+    name: &'static str,
+    help: &'static str,
+    label_keys: &'static [&'static str],
 ) -> Option<HistogramVec> {
-    match register_histogram_vec!(name, help, labels, buckets.clone()) {
-        Ok(metric) => Some(metric),
-        Err(err) => {
-            tracing::warn!(metric = name, error = %err, "Falling back to unregistered HistogramVec");
-            match HistogramVec::new(HistogramOpts::new(name, help).buckets(buckets), labels) {
-                Ok(metric) => Some(metric),
-                Err(build_err) => {
-                    tracing::error!(metric = name, error = %build_err, "Failed to construct fallback HistogramVec");
-                    None
-                }
-            }
-        }
-    }
+    metrics::describe_histogram!(name, metrics::Unit::Count, help);
+    Some(HistogramVec::new(name, label_keys))
 }
 
 /// Total requests processed
-pub static REQUESTS_TOTAL: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
-    safe_int_counter_vec(
+pub static REQUESTS_TOTAL: Lazy<Option<CounterVec>> = Lazy::new(|| {
+    counter_vec(
         "ddos_requests_total",
         "Total requests processed by DDoS protection",
         &["decision", "layer"],
@@ -70,7 +246,7 @@ pub static REQUESTS_TOTAL: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
 
 /// Currently blocked IPs
 pub static BLOCKED_IPS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
-    safe_gauge_vec(
+    gauge_vec(
         "ddos_blocked_ips",
         "Number of currently blocked IP addresses",
         &["reason"],
@@ -79,27 +255,25 @@ pub static BLOCKED_IPS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
 
 /// Anomaly score distribution
 pub static ANOMALY_SCORE: Lazy<Option<HistogramVec>> = Lazy::new(|| {
-    safe_histogram_vec(
+    histogram_vec(
         "ddos_anomaly_score",
         "Anomaly scores from ML model",
         &["endpoint"],
-        vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
     )
 });
 
 /// Challenge latency (time for client to solve)
 pub static CHALLENGE_LATENCY: Lazy<Option<HistogramVec>> = Lazy::new(|| {
-    safe_histogram_vec(
+    histogram_vec(
         "ddos_challenge_latency_seconds",
         "Time for clients to solve challenges",
         &["type"],
-        vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0],
     )
 });
 
 /// Challenges issued
-pub static CHALLENGES_ISSUED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
-    safe_int_counter_vec(
+pub static CHALLENGES_ISSUED: Lazy<Option<CounterVec>> = Lazy::new(|| {
+    counter_vec(
         "ddos_challenges_issued_total",
         "Total challenges issued",
         &["type"],
@@ -107,8 +281,8 @@ pub static CHALLENGES_ISSUED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
 });
 
 /// Challenges passed
-pub static CHALLENGES_PASSED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
-    safe_int_counter_vec(
+pub static CHALLENGES_PASSED: Lazy<Option<CounterVec>> = Lazy::new(|| {
+    counter_vec(
         "ddos_challenges_passed_total",
         "Total challenges passed",
         &["type"],
@@ -116,8 +290,8 @@ pub static CHALLENGES_PASSED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
 });
 
 /// Challenges failed
-pub static CHALLENGES_FAILED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
-    safe_int_counter_vec(
+pub static CHALLENGES_FAILED: Lazy<Option<CounterVec>> = Lazy::new(|| {
+    counter_vec(
         "ddos_challenges_failed_total",
         "Total challenges failed",
         &["type"],
@@ -126,19 +300,16 @@ pub static CHALLENGES_FAILED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
 
 /// Reputation score distribution
 pub static REPUTATION_SCORE: Lazy<Option<HistogramVec>> = Lazy::new(|| {
-    safe_histogram_vec(
+    histogram_vec(
         "ddos_reputation_score",
         "Distribution of IP reputation scores",
         &[],
-        vec![
-            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0,
-        ],
     )
 });
 
 /// Threat events shared across regions
-pub static THREAT_EVENTS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
-    safe_int_counter_vec(
+pub static THREAT_EVENTS: Lazy<Option<CounterVec>> = Lazy::new(|| {
+    counter_vec(
         "ddos_threat_events_total",
         "Threat events shared across regions",
         &["type", "severity", "source_region"],
@@ -147,7 +318,7 @@ pub static THREAT_EVENTS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
 
 /// Cost budget usage
 pub static COST_BUDGET_USAGE: Lazy<Option<GaugeVec>> = Lazy::new(|| {
-    safe_gauge_vec(
+    gauge_vec(
         "ddos_cost_budget_usage_ratio",
         "Cost budget usage ratio (0-1)",
         &["tenant_id"],
@@ -156,7 +327,7 @@ pub static COST_BUDGET_USAGE: Lazy<Option<GaugeVec>> = Lazy::new(|| {
 
 /// Attack detection state
 pub static UNDER_ATTACK: Lazy<Option<GaugeVec>> = Lazy::new(|| {
-    safe_gauge_vec(
+    gauge_vec(
         "ddos_under_attack",
         "Whether the system is under attack (0 or 1)",
         &["region"],
@@ -164,8 +335,8 @@ pub static UNDER_ATTACK: Lazy<Option<GaugeVec>> = Lazy::new(|| {
 });
 
 /// XDP statistics (if available)
-pub static XDP_PACKETS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
-    safe_int_counter_vec(
+pub static XDP_PACKETS: Lazy<Option<CounterVec>> = Lazy::new(|| {
+    counter_vec(
         "ddos_xdp_packets_total",
         "Packets processed by XDP filter",
         &["action"],
@@ -174,7 +345,7 @@ pub static XDP_PACKETS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
 
 /// Session tracking stats
 pub static ACTIVE_SESSIONS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
-    safe_gauge_vec(
+    gauge_vec(
         "ddos_active_sessions",
         "Number of active sessions being tracked",
         &[],
@@ -345,5 +516,61 @@ mod tests {
     #[test]
     fn same_path_yields_same_label() {
         assert_eq!(endpoint_label("/api/v1/x/1"), endpoint_label("/api/v1/x/1"));
+    }
+
+    /// OPS-5 regression: the ddos counters must render through the EXPOSED
+    /// exporter (`metrics-exporter-prometheus`, the recorder the api-server
+    /// installs on :9090) — not only into the `prometheus` crate's private
+    /// registry. A local facade recorder renders the exact live series.
+    #[test]
+    fn ddos_counters_render_on_the_metrics_facade_exporter() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        // Exercise the real emission call shapes the protection paths use.
+        metrics::with_local_recorder(&recorder, || {
+            REQUESTS_TOTAL
+                .as_ref()
+                .expect("counter registered")
+                .with_label_values(&["blocked", "blocklist"])
+                .inc();
+            REQUESTS_TOTAL
+                .as_ref()
+                .expect("counter registered")
+                .with_label_values(&["rate_limited", "all"])
+                .inc_by(3);
+            BLOCKED_IPS
+                .as_ref()
+                .expect("gauge registered")
+                .with_label_values(&["local"])
+                .inc();
+            ANOMALY_SCORE
+                .as_ref()
+                .expect("histogram registered")
+                .with_label_values(&["/api/v1/users/{id}"])
+                .observe(0.42);
+        });
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("ddos_requests_total"),
+            "the exposed exporter must render ddos_requests_total:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"ddos_requests_total{decision="blocked",layer="blocklist"} 1"#),
+            "labels must reach the scraped series:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"ddos_requests_total{decision="rate_limited",layer="all"} 3"#),
+            "inc_by must accumulate on the same series:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"ddos_blocked_ips{reason="local"} 1"#),
+            "gauges must render with their documented reason label:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("ddos_anomaly_score"),
+            "the anomaly histogram must render:\n{rendered}"
+        );
     }
 }

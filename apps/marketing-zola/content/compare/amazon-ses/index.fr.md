@@ -52,7 +52,7 @@ comparison_sections = [
   { title = "TARIFS À 100K/MOIS (vérifiés le 2026-07-29)", rows = [
     { feature = "Forfait comparé", apex = 'Pro : €65/mois (150 000 emails inclus, infrastructure gérée)', comp = 'Paiement à l’usage : ~€9.20 (US$10)/100K emails (envoi brut, aucune gestion incluse)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Nature du modèle tarifaire", apex = 'Infrastructure email gérée : API, stockage des événements, livraison des webhooks, support et analyse inclus', comp = 'Facturation de capacité brute : IaaS — paiement à l’envoi, plus coûts AWS additionnels (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
-    { feature = "Offre gratuite", apex = '30 000 emails/mois (sans carte bancaire, sans limite de temps)', comp = '62 000 emails/mois en envoi depuis EC2 (12 premiers mois) ; 3 000/mois sinon<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
+    { feature = "Offre gratuite", apex = '3 000 emails/mois récurrents + allocation de lancement unique de 30 000 emails (sans carte bancaire)', comp = '62 000 emails/mois en envoi depuis EC2 (12 premiers mois) ; 3 000/mois sinon<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},
   { title = "DOMAINES OÙ AMAZON SES EST PLUS FORT", rows = [
     { feature = "Coût brut par email", apex = 'Voir le catalogue public actuel et le paiement pour les conditions d’usage applicables', comp = '€0.09 (US$0.10)/1 000 emails — coût par message le plus bas parmi les grands fournisseurs<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },

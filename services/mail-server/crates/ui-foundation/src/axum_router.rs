@@ -33,6 +33,9 @@ pub struct RouteData {
     pub list_edit: Option<ListEditData>,
     /// Template edit form values (server-filled from the templates row).
     pub template_edit: Option<crate::view_data::TemplateEditData>,
+    /// Inbox-placement test detail (`/inbox-placement/{id}`): real status
+    /// and per-provider results. `None` renders the no-data fallback.
+    pub placement_detail: Option<crate::view_data::PlacementDetailData>,
     /// Pending TOTP setup (QR + secret) for the CP security page.
     pub mfa_setup: Option<MfaSetupData>,
     /// Sales-autopilot control data for `/sales`.
@@ -66,6 +69,15 @@ pub struct RouteData {
     /// billing-service sweep evaluates — plus the tenant choices for the
     /// create form. Its `unavailable` flag is the honest failure state.
     pub alert_rules: Option<AlertRulesPageData>,
+    /// `/jobs` control state (F13): recent queue_jobs rows plus the
+    /// retry/cancel affordances' counters. Absent renders the no-data
+    /// fallback (no fabricated controls).
+    pub jobs: Option<crate::view_data::JobsPageData>,
+    /// `/tenants/new` plan catalog (F11). Present means the loader read the
+    /// ACTIVE billing catalog the create handler validates against; absent
+    /// is the no-data fallback, which renders the honest catalog-unavailable
+    /// state instead of a fabricated plan list.
+    pub tenant_new: Option<crate::view_data::TenantNewPageData>,
     /// Authenticated session identity for the console header (display name,
     /// email, REAL plan label). `None` (or a `None` `plan_label`) renders no
     /// plan label — the shell never fabricates one.
@@ -1264,6 +1276,9 @@ pub fn render_route_with_form_fields_and_csrf(
                 ),
                 _ => {
                     let (title, description) = control_plane_route_context(path);
+                    // F10: the session identity (operator name/email + the
+                    // tenant's REAL plan label) rides the CP shell exactly
+                    // like the web shell — the data was loaded but dropped.
                     leptos_views::control_plane_app_layout_with_session(
                         &inner,
                         title,
@@ -1271,6 +1286,7 @@ pub fn render_route_with_form_fields_and_csrf(
                         path,
                         &csrf_token,
                         crate::leptos_views::CONTROL_PLANE_ROLE_PLACEHOLDER,
+                        user_context.as_ref(),
                         impersonation_banner.clone(),
                     )
                 }
@@ -2247,7 +2263,12 @@ fn render_web(
         p if p.starts_with("/campaigns/") => {
             data_backed_inner(p, data).unwrap_or_else(leptos_views::web_campaign_detail_page)
         }
-        p if p.starts_with("/inbox-placement/") => leptos_views::web_inbox_placement_detail_page(),
+        p if p.starts_with("/inbox-placement/") && p != "/inbox-placement/new" => {
+            match data.and_then(|d| d.placement_detail.as_ref()) {
+                Some(detail) => leptos_views::web_inbox_placement_detail_page_with_data(detail),
+                None => leptos_views::web_inbox_placement_detail_page(),
+            }
+        }
         // /templates/{id}/edit — the editor's formaction/formtarget pattern
         // (previously a 404 behind the templates table's edit links).
         p if p.starts_with("/templates/") && p.ends_with("/edit") => {
@@ -2353,7 +2374,9 @@ fn render_control_plane(
             .unwrap_or_else(leptos_views::control_plane_dashboard_page),
         "/tenants" => data_backed_inner("/tenants", data)
             .unwrap_or_else(leptos_views::control_plane_tenants_page),
-        "/tenants/new" => leptos_views::control_plane_tenants_new_page(),
+        "/tenants/new" => leptos_views::control_plane_tenants_new_page_with_data(
+            data.and_then(|d| d.tenant_new.as_ref()),
+        ),
         "/sales" => match data.and_then(|d| d.sales.as_ref()) {
             // Live control-center render: autonomy, decisions, exceptions and
             // queue state from the canonical sales tables.
@@ -2370,9 +2393,12 @@ fn render_control_plane(
             .unwrap_or_else(leptos_views::control_plane_analytics_page),
         "/discovery" => data_backed_inner("/discovery", data)
             .unwrap_or_else(leptos_views::control_plane_discovery_page),
-        "/jobs" => {
-            data_backed_inner("/jobs", data).unwrap_or_else(leptos_views::control_plane_jobs_page)
-        }
+        "/jobs" => match data.and_then(|d| d.jobs.as_ref()) {
+            Some(jobs) => leptos_views::control_plane_jobs_page_with_data(Some(jobs)),
+            None => {
+                data_backed_inner("/jobs", data).unwrap_or_else(leptos_views::control_plane_jobs_page)
+            }
+        },
         "/infrastructure" => leptos_views::control_plane_infrastructure_page(),
         "/infrastructure/nodes" => data_backed_inner("/infrastructure/nodes", data)
             .unwrap_or_else(leptos_views::control_plane_nodes_page),
@@ -3815,7 +3841,9 @@ mod tests {
         .unwrap();
         assert!(html.contains("data-page=\"domain-detail\""));
         assert!(html.contains("select to copy") || html.contains("Select to copy"));
-        assert!(html.contains(&format!("action=\"/domains/{id}/verify\"")));
+        // The verify form must target the mounted browser handler
+        // (`POST /web/domains/:id/verify`), not a bare `/domains/{id}/verify`.
+        assert!(html.contains(&format!("action=\"/web/domains/{id}/verify\"")));
         assert!(html.contains("v=DMARC1; p=none"));
         assert!(html.contains("Verified"));
     }

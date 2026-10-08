@@ -51,7 +51,7 @@ comparison_sections = [
     { feature = "Sandbox-Modus", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
   ]},
   { title = "PREISE", rows = [
-    { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">30.000 E-Mails/Monat</span>', comp = '<span class="text-surface-600">100 E-Mails/Tag</span>', winner = "none" },
+    { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000</span>', comp = '<span class="text-surface-600">100 E-Mails/Tag</span>', winner = "none" },
     { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO inklusive", apex = '<span class="text-brand-600 font-semibold">Business- und Enterprise-Tarife</span>', comp = '<span class="text-surface-600">Ab Pro enthalten</span>', winner = "none" },
     { feature = "Prüfung individueller Bereitstellungen", apex = '<span class="text-brand-600 font-semibold">Enterprise-Review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }

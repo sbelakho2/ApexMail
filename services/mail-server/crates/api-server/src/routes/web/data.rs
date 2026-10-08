@@ -677,6 +677,30 @@ async fn web_route_data(
     } else {
         None
     };
+    // Template edit is data-backed so the editor loads real content
+    // (the blank-start editor could not round-trip a save).
+    let template_edit = if path.starts_with("/templates/") && path.ends_with("/edit") {
+        let id = path
+            .trim_start_matches("/templates/")
+            .trim_end_matches("/edit");
+        load_template_edit(state, &tenant, id).await
+    } else {
+        None
+    };
+    // Placement-test detail carries real status + per-provider results.
+    let placement_detail = if path.starts_with("/inbox-placement/")
+        && path != "/inbox-placement/new"
+        && !path.starts_with("/inbox-placement/new")
+    {
+        let id = path.trim_start_matches("/inbox-placement/");
+        if !id.is_empty() && !id.contains('/') {
+            load_placement_detail(state, &tenant, id).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let assistant = if path == "/assistant" {
         Some(load_assistant(state, &tenant, user).await)
     } else {
@@ -687,6 +711,8 @@ async fn web_route_data(
         campaign_edit,
         campaign_editor,
         list_edit,
+        template_edit,
+        placement_detail,
         mfa_setup: None,
         sales: None,
         assistant,
@@ -1194,6 +1220,125 @@ async fn load_list_edit(
         name,
         description: description.unwrap_or_default(),
         created_at: created_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
+    })
+}
+
+/// Load `/templates/{id}/edit` values from the templates row so the editor
+/// round-trips real content instead of starting blank.
+async fn load_template_edit(
+    state: &AppState,
+    tenant: &str,
+    id: &str,
+) -> Option<ui_foundation::view_data::TemplateEditData> {
+    // templates.id is VARCHAR(26) (nanoid lineage): bind as text.
+    let row: Option<(String, String, Option<String>, Option<String>)> = match sqlx::query_as::<
+        _,
+        (String, String, Option<String>, Option<String>),
+    >("SELECT id, name, COALESCE(subject, ''), COALESCE(html_body, '') FROM templates WHERE id = $1 AND tenant_id = $2")
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(error = %error, "template edit lookup failed");
+            return None;
+        }
+    };
+    let (id, name, subject, html_body) = row?;
+    Some(ui_foundation::view_data::TemplateEditData {
+        id,
+        name,
+        subject: subject.unwrap_or_default(),
+        html_body: html_body.unwrap_or_default(),
+    })
+}
+
+/// Load `/inbox-placement/{id}` detail: the test row's real status plus
+/// per-provider results. `None` means no row (or a storage failure) — the
+/// view then renders the no-data fallback instead of inventing results.
+async fn load_placement_detail(
+    state: &AppState,
+    tenant: &str,
+    id: &str,
+) -> Option<ui_foundation::view_data::PlacementDetailData> {
+    let row: Option<(String, Option<String>, String, i32, i32, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
+        match sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                String,
+                i32,
+                i32,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >(
+            "SELECT id::text, name, status, total_accounts, completed_accounts, created_at, completed_at \
+             FROM placement_tests WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(error = %error, "placement detail lookup failed");
+                return None;
+            }
+        };
+    let (id, name, status, total_accounts, completed_accounts, created_at, completed_at) = row?;
+    // Per-provider results: group the recorded placement_results rows.
+    let provider_rows = match sqlx::query_as::<_, (String, i32, i32, i32, i32, i32)>(
+        "SELECT COALESCE(p.name, 'unknown'), \
+                COUNT(*)::int, \
+                COUNT(*) FILTER (WHERE pr.folder = 'inbox')::int, \
+                COUNT(*) FILTER (WHERE pr.folder = 'promotions')::int, \
+                COUNT(*) FILTER (WHERE pr.folder = 'spam')::int, \
+                COUNT(*) FILTER (WHERE pr.folder IS NULL OR pr.folder = 'absent')::int \
+         FROM placement_results pr \
+         LEFT JOIN seed_accounts sa ON sa.id = pr.account_id \
+         LEFT JOIN placement_providers p ON p.id = sa.provider_id \
+         WHERE pr.test_id = $1::uuid \
+         GROUP BY p.name \
+         ORDER BY p.name",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(provider, tested, inbox, promotions, spam, absent)| {
+                    ui_foundation::view_data::PlacementProviderRow {
+                        provider,
+                        accounts_tested: tested,
+                        inbox,
+                        promotions,
+                        spam,
+                        absent,
+                    }
+                },
+            )
+            .collect(),
+        Err(error) => {
+            tracing::warn!(error = %error, "placement results lookup failed");
+            Vec::new()
+        }
+    };
+    Some(ui_foundation::view_data::PlacementDetailData {
+        id,
+        name: name.unwrap_or_default(),
+        status,
+        total_accounts,
+        completed_accounts,
+        created_at: created_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
+        completed_at: completed_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
+        providers: provider_rows,
     })
 }
 
@@ -3097,6 +3242,20 @@ async fn control_plane_route_data(
     } else {
         None
     };
+    // F11: the create form's plan select binds to the ACTIVE billing
+    // catalog — the same source the handler validates against.
+    let tenant_new = if path == "/tenants/new" {
+        Some(cp_tenant_new(state).await)
+    } else {
+        None
+    };
+    // F13: the jobs page's retry/cancel controls need the real rows (ids and
+    // statuses), not just the per-queue aggregate the list carries.
+    let jobs = if path == "/jobs" {
+        Some(cp_jobs_controls(state).await)
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit: None,
@@ -3109,6 +3268,8 @@ async fn control_plane_route_data(
         demo_viewer: None,
         ai_drafts,
         alert_rules,
+        tenant_new,
+        jobs,
         // The shell identity + impersonation banner are attached by the
         // api-server render pipeline (they need request headers).
         ..RouteData::default()
@@ -4023,6 +4184,82 @@ async fn cp_jobs(state: &AppState, cid: &str) -> ListPageData {
     data
 }
 
+/// `/jobs` control state (F13): recent queue_jobs rows the retry/cancel
+/// controls act on, plus the status counters the header shows.
+///
+/// A read failure is `unavailable` — the page then hides the controls
+/// instead of offering a retry/cancel button against unknown queue state.
+async fn cp_jobs_controls(state: &AppState) -> ui_foundation::view_data::JobsPageData {
+    use ui_foundation::view_data::{JobRowData, JobsPageData};
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            i32,
+            i32,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ),
+    >(
+        "SELECT id::text, COALESCE(queue, 'default'), status, attempts, max_attempts, \
+                error_message, updated_at \
+         FROM queue_jobs ORDER BY updated_at DESC, id LIMIT 50",
+    )
+    .fetch_all(&state.db)
+    .await;
+
+    let counters = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT COUNT(*) FILTER (WHERE status = 'pending')::bigint,
+                COUNT(*) FILTER (WHERE status = 'processing')::bigint,
+                COUNT(*) FILTER (WHERE status = 'dead_letter')::bigint
+         FROM queue_jobs",
+    )
+    .fetch_optional(&state.db)
+    .await;
+
+    let (rows, counters) = match (rows, counters) {
+        (Ok(rows), Ok(Some(counters))) => (rows, counters),
+        (rows, counters) => {
+            if let Err(error) = rows {
+                tracing::error!(error = %error, "jobs page query failed; controls unavailable");
+            }
+            if let Err(error) = counters {
+                tracing::error!(error = %error, "jobs page counters failed; controls unavailable");
+            }
+            return JobsPageData {
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+
+    JobsPageData {
+        jobs: rows
+            .into_iter()
+            .map(
+                |(id, queue, status, attempts, max_attempts, error, updated)| JobRowData {
+                    id,
+                    queue,
+                    status,
+                    attempts,
+                    max_attempts,
+                    error: error.unwrap_or_default(),
+                    updated: updated
+                        .map(|ts| relative_time(Some(ts)))
+                        .unwrap_or_else(|| "—".into()),
+                },
+            )
+            .collect(),
+        unavailable: false,
+        pending: counters.0,
+        processing: counters.1,
+        dead_letter: counters.2,
+    }
+}
+
 /// /infrastructure/nodes query (audit F58). The table behind this route is
 /// the OUTBOUND IP POOL (`ip_pool_addresses`), not an MTA-node heartbeat
 /// registry — no node registry exists in the schema, so the page is titled
@@ -4649,6 +4886,49 @@ async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
     data
 }
 
+/// `/tenants/new` plan catalog (F11): the ACTIVE plans the create handler
+/// validates against, cheapest first with a deterministic tiebreak (parallel
+/// test runs seed their own catalog rows into the shared database).
+///
+/// A read failure is `unavailable` — the page then refuses to render a
+/// submit button rather than inventing an empty plan list, because a tenant
+/// created without a verifiable plan silently lands on `free`.
+async fn cp_tenant_new(state: &AppState) -> ui_foundation::view_data::TenantNewPageData {
+    use ui_foundation::view_data::{TenantNewPageData, TenantPlanChoiceData};
+
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT name, COALESCE(display_name, name), COALESCE(email_limit, 0)::bigint \
+         FROM plans WHERE is_active = true \
+         ORDER BY price_cents ASC, created_at DESC, id LIMIT 50",
+    )
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(rows) => TenantNewPageData {
+            plans: rows
+                .into_iter()
+                .map(|(name, display_name, email_limit)| TenantPlanChoiceData {
+                    name,
+                    display_name,
+                    email_limit,
+                })
+                .collect(),
+            unavailable: false,
+        },
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "tenant plan catalog query failed; /tenants/new renders unavailable"
+            );
+            TenantNewPageData {
+                plans: Vec::new(),
+                unavailable: true,
+            }
+        }
+    }
+}
+
 async fn cp_compliance(state: &AppState, cid: &str) -> ListPageData {
     let gdpr_pending = loaded_count(
         state,
@@ -4901,7 +5181,7 @@ async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
 
     let mut data = base_list(
         "Analytics",
-        "System volume, latency, and availability telemetry.",
+        "System volume, latency, delivery, and queue telemetry.",
         "/analytics",
     );
     data.kpis = vec![
@@ -4913,7 +5193,80 @@ async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
         KpiCardData::new("Complaints", aggregate_kpi(agg_loaded, complained))
             .with_hint(&rate(complained, sent)),
     ];
+
+    // F12: the delivery-analytics read model had no product surface consuming
+    // it (the module IS mounted at /v1/admin/analytics/delivery/*, but the
+    // page showed none of its numbers). The page now renders the SAME
+    // snapshot the API serves — one implementation, no drift.
+    match crate::routes::admin::delivery_analytics::delivery_analytics_snapshot(state, "7d").await {
+        Ok(snapshot) => {
+            data.kpis.push(
+                KpiCardData::new("Delivery rate", fraction_kpi(snapshot.delivery_rate))
+                    .with_hint("7d send cohort"),
+            );
+            data.kpis.push(
+                KpiCardData::new(
+                    "P95 latency",
+                    format!("{:.0} ms", snapshot.latency.p95_ms),
+                )
+                .with_hint(&format!("{} attempts", snapshot.latency.sample_count)),
+            );
+            data.kpis.push(
+                KpiCardData::new("Queue backlog", snapshot.queue_depth.to_string())
+                    .with_hint("Current snapshot"),
+            );
+            data.table = Some(TableData {
+                columns: vec![
+                    "Transport".into(),
+                    "Sent".into(),
+                    "Delivered".into(),
+                    "Bounced".into(),
+                    "Delivery rate".into(),
+                    "Bounce rate".into(),
+                ],
+                rows: snapshot
+                    .delivery_by_provider
+                    .iter()
+                    .map(|provider| DataRowData {
+                        id: format!("transport-{}", provider.provider),
+                        cells: vec![
+                            DataCell::mono(provider.provider.clone()),
+                            DataCell::text(provider.sent.to_string()),
+                            DataCell::text(provider.delivered.to_string()),
+                            DataCell::text(provider.bounced.to_string()),
+                            DataCell::text(fraction_kpi(provider.delivery_rate)),
+                            DataCell::text(fraction_kpi(provider.bounce_rate)),
+                        ],
+                    })
+                    .collect(),
+            });
+            data.empty_title = "No delivery traffic in the window".into();
+            data.empty_description =
+                "Transport rows appear as sends and outcomes land in events.".into();
+        }
+        Err(error) => {
+            // Honest degradation: the volume KPIs stay, the delivery section
+            // says it could not be read — never zero-filled numbers.
+            tracing::error!(
+                error = %error,
+                "delivery analytics snapshot failed; /analytics delivery section unavailable"
+            );
+            data.kpis.push(
+                KpiCardData::new("Delivery analytics", "unavailable")
+                    .with_hint("Read model failed"),
+            );
+        }
+    }
     data
+}
+
+/// Percent render for an entitlement-style fraction (`None` = absent
+/// denominator, never fabricated 0%).
+fn fraction_kpi(value: Option<f64>) -> String {
+    match value {
+        Some(fraction) => format!("{:.1}%", fraction * 100.0),
+        None => "—".to_string(),
+    }
 }
 
 // ─── Detail-page loaders (items A, B, I, J) ──────────────────────
@@ -8308,5 +8661,176 @@ mod coverage_residual_tests {
             })
             .collect();
         assert_eq!(missing, vec!["invoices.status".to_string()]);
+    }
+
+    /// F12 (live dogfood 2026-10-08): the delivery-analytics read model has
+    /// a UI claimant — the control-plane `/analytics` page renders the SAME
+    /// snapshot the JSON endpoints serve, so the numbers are reachable
+    /// without the admin API. This test drives the real DB -> loader path.
+    #[tokio::test]
+    async fn cp_analytics_renders_the_delivery_read_model() {
+        let Some(app) = coverage_support::state("cov_cp_analytics_delivery").await else {
+            eprintln!(
+                "skipping cp_analytics_renders_the_delivery_read_model: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let tag = coverage_support::unique_tag("cpan");
+        let tenant = "system_internal_tenant01";
+        let message_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, transport, created_at)
+             VALUES ($1, $2, 'sender@apexmail.ee', '[]', $3, 'sent', 'ses', NOW() - INTERVAL '5 seconds')",
+        )
+        .bind(message_id)
+        .bind(tenant)
+        .bind(format!("cp analytics probe {tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed message");
+        for event_type in ["sent", "delivered"] {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, NOW() - INTERVAL '5 seconds')",
+            )
+            .bind(format!(
+                "evt_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..20]
+            ))
+            .bind(tenant)
+            .bind(message_id.to_string())
+            .bind(event_type)
+            .bind(format!("cp-analytics-{tag}@example.com"))
+            .execute(&app.db)
+            .await
+            .expect("seed event");
+        }
+
+        let q = parse_list_query(None);
+        let data = control_plane_route_data(
+            &app,
+            "/analytics",
+            &q,
+            &coverage_support::user("system"),
+            "cov-cp-analytics",
+        )
+        .await;
+        let list = data.list.expect("analytics page data");
+        let kpi = |label: &str| {
+            list.kpis
+                .iter()
+                .find(|k| k.label == label)
+                .map(|k| k.value.clone())
+        };
+        // The shared `_api` database accumulates sibling tests' rows, so the
+        // fleet-wide values are asserted structurally; the exact seeded
+        // counts are asserted through the shared read model below.
+        let delivery_rate = kpi("Delivery rate").expect("delivery-rate KPI");
+        assert!(
+            delivery_rate == "—" || delivery_rate.ends_with('%'),
+            "the delivery rate must be a real fraction render: {delivery_rate:?}"
+        );
+        let p95 = kpi("P95 latency").expect("p95 KPI");
+        assert!(p95.ends_with(" ms"), "p95 must be a latency: {p95:?}");
+        assert!(kpi("Queue backlog").is_some(), "the queue snapshot renders");
+        let table = list.table.expect("per-transport table");
+        assert!(
+            table.columns.iter().any(|column| column == "Transport")
+                && table.columns.iter().any(|column| column == "Delivery rate"),
+            "the table must carry the transport/rate dimensions: {:?}",
+            table.columns
+        );
+        assert!(
+            table.rows.iter().any(|row| row
+                .cells
+                .iter()
+                .any(|cell| matches!(cell, ui_foundation::view_data::DataCell::Mono(value) if value == "ses"))),
+            "the seeded ses transport must render a row"
+        );
+
+        // The exact seeded cohort is observed through the SAME snapshot fn
+        // the JSON endpoints serve.
+        let snapshot = crate::routes::admin::delivery_analytics::delivery_analytics_snapshot(
+            &app, "7d",
+        )
+        .await
+        .expect("delivery snapshot");
+        assert!(snapshot.total_sent >= 1, "{snapshot:?}");
+        let ses = snapshot
+            .delivery_by_provider
+            .iter()
+            .find(|provider| provider.provider == "ses")
+            .expect("ses transport in the snapshot");
+        assert!(
+            ses.sent >= 1 && ses.delivered >= 1,
+            "the seeded ses cohort must be counted: {ses:?}"
+        );
+    }
+
+    /// F13: the `/jobs` page's OWN data (the retry/cancel controls' rows)
+    /// rides `RouteData::jobs` — rows with real statuses plus the counters.
+    #[tokio::test]
+    async fn cp_jobs_page_data_carries_rows_and_status_counters() {
+        let Some(app) = coverage_support::state("cov_cp_jobs_controls").await else {
+            eprintln!(
+                "skipping cp_jobs_page_data_carries_rows_and_status_counters: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let tag = coverage_support::unique_tag("jobpg");
+        let dead = uuid::Uuid::new_v4();
+        let processing = uuid::Uuid::new_v4();
+        for (id, status) in [(dead, "dead_letter"), (processing, "processing")] {
+            sqlx::query(
+                "INSERT INTO queue_jobs (id, tenant_id, queue, payload, status, attempts, max_attempts, created_at, updated_at)
+                 VALUES ($1, $2, $3, '{}'::jsonb, $4, 3, 3, NOW(), NOW())",
+            )
+            .bind(id)
+            .bind(uuid::Uuid::new_v4())
+            .bind(format!("jobpg-{tag}-{status}"))
+            .bind(status)
+            .execute(&app.db)
+            .await
+            .expect("seed job");
+        }
+
+        let data = crate::routes::web::data::load_page_data(
+            &app,
+            "control-plane",
+            "/jobs",
+            None,
+            Some(&coverage_support::user("system")),
+        )
+        .await;
+        let jobs = data.jobs.as_ref().expect("jobs page data");
+        assert!(!jobs.unavailable);
+        assert!(jobs.dead_letter >= 1, "{jobs:?}");
+        assert!(jobs.processing >= 1, "{jobs:?}");
+        assert!(
+            jobs.jobs.iter().any(|row| row.id == dead.to_string()
+                && row.status == "dead_letter"
+                && row.queue == format!("jobpg-{tag}-dead_letter")),
+            "the dead-lettered row must render with its real status: {jobs:?}"
+        );
+
+        // The render path consumes the same data: the dead row gets a retry
+        // control, the processing row an in-flight note.
+        let html = ui_foundation::axum_router::render_route_with_data(
+            "control-plane",
+            "/jobs",
+            None,
+            Some(app.config.csrf_secret.as_str()),
+            &[],
+            Some(&data),
+        )
+        .expect("jobs page render");
+        assert!(
+            html.contains(&format!("/web/admin/jobs/{dead}/retry")),
+            "the dead-lettered row must offer retry"
+        );
+        assert!(
+            !html.contains(&format!("/web/admin/jobs/{processing}/retry")),
+            "an in-flight row must not offer retry"
+        );
     }
 }

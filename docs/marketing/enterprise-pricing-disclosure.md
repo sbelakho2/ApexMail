@@ -24,7 +24,7 @@ Enterprise Shared starts at **EUR 3,000 per month** on an annual agreement and i
 | Customer cloud costs | Not included for BYOC; customer pays cloud provider directly |
 | Overage | EUR 0.22–EUR 0.35/1,000 emails (contractual, negotiable) |
 | Professional services | Quoted separately for custom integrations, architecture reviews, etc. |
-| Annual discount | 10% for annual prepayment |
+| Annual discount | 10 monthly payments (≈17% vs 12 monthly payments) |
 | Renewal terms | Automatic renewal unless cancelled 30 days before term end |
 
 ## Important distinctions
@@ -33,7 +33,7 @@ Enterprise Shared starts at **EUR 3,000 per month** on an annual agreement and i
 - **Dedicated Tenant** (EUR 4,000/mo) and **BYOC** (EUR 6,500/mo) are separately priced products with their own one-time setup fees, minimum terms, and scope.
 - Enterprise buyers understand the minimum commitment is 12 months for custom contractual terms.
 - Sales proposals use this same baseline and clearly separate Enterprise Shared pricing from Private Cloud add-ons.
-- Annual prepayment provides a 10% discount on the base subscription fee.
+- Annual prepayment is billed at 10 monthly payments (≈17% below twelve monthly payments) on the base subscription fee.
 
 ## What buyers should ask sales about
 

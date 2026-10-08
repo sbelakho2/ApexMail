@@ -46,7 +46,7 @@ comparison_sections = [
     { feature = "Options de déploiement dédié", apex = '<span class="text-brand-600 font-semibold">Revue personnalisée</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "TARIFS", rows = [
-    { feature = "Offre gratuite", apex = '<span class="text-brand-600 font-semibold">30 000/mois</span>', comp = '<span class="text-surface-600">100/mois</span>', winner = "none" },
+    { feature = "Offre gratuite", apex = '<span class="text-brand-600 font-semibold">3 000/mois + allocation de lancement unique de 30 000</span>', comp = '<span class="text-surface-600">100/mois</span>', winner = "none" },
     { feature = "100K emails/mois", apex = '<span class="text-brand-600 font-semibold">€65 (Pro : 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro : €15.18 (US$16.50)/mois + 90K en dépassement à €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Membres d’équipe illimités", apex = '<span class="text-brand-600 font-semibold">Forfait Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Conditions Enterprise personnalisées", apex = '<span class="text-brand-600 font-semibold">Contrats annuels</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }

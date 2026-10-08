@@ -156,8 +156,13 @@ groups:
           description: "Rolled-back transactions are {{ $value | humanizePercentage }} of committed ones over 10 minutes — failing queries or deadlocks."
           runbook_url: "https://apexmail.ee/docs/runbooks/postgres-rollback-spike"
 
+      # OPS-4 (live dogfood 2026-10-08): retargeted from the redis-exporter
+      # series (`redis_memory_used_bytes{job="redis"}`), which no service in
+      # this topology exports — the rule could never fire. The ratio comes
+      # from the RedisKeyMonitor INFO-memory poll, now also emitted by the
+      # always-on api-server on its scrape port (see alerting-rules.yml).
       - alert: RedisMemoryCritical
-        expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.95
+        expr: redis_memory_utilization_ratio{job="apexmail-api"} > 0.95
         for: 2m
         labels:
           severity: critical

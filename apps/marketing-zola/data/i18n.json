@@ -95,7 +95,7 @@
       "heading_2": "bessere E-Mails?",
       "subtitle": "Starten Sie im Free-Tarif und wachsen Sie mit derselben API — ohne Migration, ohne Neuverhandlung, ohne Überraschungen bei Überschreitungen.",
       "feature_test": "Senden Sie Ihre erste Test-E-Mail in wenigen Minuten",
-      "feature_free": "30.000 kostenlose E-Mails pro Monat, dauerhaft",
+      "feature_free": "3.000 kostenlose E-Mails pro Monat, dauerhaft + einmaliges Startguthaben von 30.000 E-Mails",
       "feature_no_cc": "Keine Kreditkarte erforderlich",
       "feature_migration": "Kostenlose Migrationsunterstützung verfügbar",
       "cta_button": "Kostenlos starten",
@@ -232,10 +232,10 @@
       "stat_no_paid_ai": "Bezahlte KI-APIs",
       "cta_badge": "Start in 5 Minuten",
       "cta_heading": "Bereit für bessere E-Mails?",
-      "cta_subtitle": "ApexMail bietet zuverlässige Transaktions-E-Mails mit integrierter Compliance. Starten Sie kostenlos mit 30.000 E-Mails pro Monat.",
+      "cta_subtitle": "ApexMail bietet zuverlässige Transaktions-E-Mails mit integrierter Compliance. Starten Sie kostenlos mit 3.000 E-Mails pro Monat.",
       "cta_button": "Kostenlos starten",
       "cta_talk": "Vertrieb kontaktieren",
-      "cta_note": "Keine Kreditkarte erforderlich – Kostenlose Stufe beinhaltet 30.000 E-Mails/Monat",
+      "cta_note": "Keine Kreditkarte erforderlich – Kostenlose Stufe beinhaltet 3.000 E-Mails/Monat",
       "details_heading": "Detailansicht der Kernfunktionen",
       "details_subtitle": "Sehen Sie, wie ApexMail komplexe E-Mail-Infrastruktur einfach macht.",
       "detail_api_label": "Entwicklung in Minuten",
@@ -320,7 +320,7 @@
       "stat_latency_link": "Messmethodik"
     },
     "pricing": {
-      "save_annual": "Sparen Sie 10 % bei jährlicher Abrechnung in allen Self-Service-Tarifen",
+      "save_annual": "Sparen Sie rund 16,7 % bei jährlicher Abrechnung (10 Monatszahlungen statt 12) in allen Self-Service-Tarifen",
       "eu_hosted": "EU/EWR-orientierte Bereitstellung; aktive Region bestätigen",
       "overages_at_cost": "Überschreitungen zum Selbstkostenpreis",
       "overage_rates": "Überschreitungsraten",
@@ -391,7 +391,7 @@
       "billing_not_3": "Test-E-Mails im Testmodus oder an verifizierte Testadressen gesendet",
       "billing_overage_title": "Überschreitungsbehandlung",
       "billing_overage_desc": "<strong>Self-Service-Tarife (Developer, Pro, Growth, Business):</strong> Überschreitungen werden bei aktivierter Abrechnung mit €0,40 pro 1.000 E-Mails berechnet. Eine gültige Zahlungsmethode und bestätigte Abrechnung sind erforderlich.",
-      "billing_overage_free": "<strong>Free-Tarif:</strong> Keine automatische Überschreitung. Der Versand wird pausiert, wenn das enthaltene Volumen von 30.000/Monat erreicht ist. Führen Sie ein Upgrade durch, um weiter zu senden.",
+      "billing_overage_free": "<strong>Free-Tarif:</strong> Keine automatische Überschreitung. Der Versand wird pausiert, wenn das enthaltene Volumen von 3.000/Monat erreicht ist. Führen Sie ein Upgrade durch, um weiter zu senden.",
       "billing_unused_title": "Ungenutztes Volumen & Bandpreise",
       "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen — ungenutzte Anteile verfallen am Ende des Abrechnungsmonats."
     },
@@ -646,7 +646,7 @@
       "hero_title": "Preisrechner",
       "hero_subtitle": "Schätzen Sie Ihre monatlichen Kosten basierend auf dem E-Mail-Volumen.",
       "cta_title": "Bereit zu starten?",
-      "cta_subtitle": "Senden Sie bis zu 30.000 E-Mails pro Monat kostenlos.",
+      "cta_subtitle": "Senden Sie bis zu 3.000 E-Mails pro Monat kostenlos.",
       "cta_button": "Kostenlos starten",
       "volume": "E-Mails / Monat",
       "peak_daily": "Spitze / Tag",
@@ -655,7 +655,7 @@
       "dedicated_ips": "dedizierte IPs",
       "billing": "Abrechnung",
       "monthly": "Monatlich",
-      "annual": "Jährlich (10% Rabatt)",
+      "annual": "Jährlich (10 Monatszahlungen, ca. 16,7 % Ersparnis)",
       "compute": "Preis berechnen"
     },
     "home_testimonials": {
@@ -776,7 +776,7 @@
       "heading_2": "de meilleurs emails ?",
       "subtitle": "Commencez avec l'offre gratuite et grandissez avec la même API — sans migration, sans renégociation, sans frais de dépassement surprise.",
       "feature_test": "Envoyez votre premier email de test en quelques minutes",
-      "feature_free": "30 000 emails gratuits chaque mois, pour toujours",
+      "feature_free": "3 000 emails gratuits chaque mois, pour toujours + allocation de lancement unique de 30 000 emails",
       "feature_no_cc": "Aucune carte bancaire requise",
       "feature_migration": "Assistance à la migration disponible",
       "cta_button": "Démarrer gratuitement",
@@ -909,8 +909,8 @@
       "cta_badge": "Démarrez en 5 minutes",
       "cta_button": "Commencer gratuitement",
       "cta_heading": "Prêt à envoyer de meilleurs emails ?",
-      "cta_note": "Aucune carte bancaire requise — le forfait gratuit inclut 30 000 emails/mois",
-      "cta_subtitle": "ApexMail fournit des emails transactionnels fiables avec conformité intégrée. Commencez gratuitement avec 30 000 emails par mois.",
+      "cta_note": "Aucune carte bancaire requise — le forfait gratuit inclut 3 000 emails/mois",
+      "cta_subtitle": "ApexMail fournit des emails transactionnels fiables avec conformité intégrée. Commencez gratuitement avec 3 000 emails par mois.",
       "cta_talk": "Contacter les ventes",
       "detail_api_benefit_1": "Bibliothèques client dans 6 langages",
       "detail_api_benefit_2": "Clés API avec portées granulaires",
@@ -1001,7 +1001,7 @@
       "stat_latency_link": "Méthodologie de mesure"
     },
     "pricing": {
-      "save_annual": "Économisez 10 % avec la facturation annuelle sur tous les forfaits en libre-service",
+      "save_annual": "Économisez environ 16,7 % avec la facturation annuelle (10 paiements mensuels au lieu de 12) sur tous les forfaits en libre-service",
       "eu_hosted": "Déploiement orienté UE/EEE ; confirmer la région active",
       "overages_at_cost": "Dépassements au coût",
       "overage_rates": "Tarifs de dépassement",
@@ -1072,7 +1072,7 @@
       "billing_not_3": "Emails de test envoyés en mode test ou à des adresses de test vérifiées",
       "billing_overage_title": "Gestion des dépassements",
       "billing_overage_desc": "<strong>Forfaits en libre-service (Developer, Pro, Growth, Business) :</strong> Lorsque la facturation des dépassements est activée, les emails supplémentaires sont facturés 0,40 € par 1 000. Un moyen de paiement valide et une facturation confirmée sont requis.",
-      "billing_overage_free": "<strong>Forfait Free :</strong> Pas de dépassement automatique. L'envoi est suspendu lorsque le volume inclus de 30 000/mois est atteint. Effectuez une mise à niveau pour continuer à envoyer.",
+      "billing_overage_free": "<strong>Forfait Free :</strong> Pas de dépassement automatique. L'envoi est suspendu lorsque le volume inclus de 3 000/mois est atteint. Effectuez une mise à niveau pour continuer à envoyer.",
       "billing_unused_title": "Volume inutilisé et tarification par paliers",
       "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté — toute portion inutilisée expire à la fin du mois de facturation."
     },
@@ -1146,7 +1146,7 @@
       "dedicated_ips": "IPs dédiées",
       "billing": "facturation",
       "monthly": "Mensuel",
-      "annual": "Annuel (10% de réduction)",
+      "annual": "Annuel (10 paiements mensuels, env. 16,7 % d'économie)",
       "compute": "Calculer mon prix"
     },
     "home_features": {
@@ -1457,7 +1457,7 @@
       "heading_2": "mejores emails?",
       "subtitle": "Comience con el plan gratuito y crezca con la misma API: sin migración, sin renegociación, sin sorpresas en los excesos.",
       "feature_test": "Envíe su primer email de prueba en minutos",
-      "feature_free": "30 000 emails gratis cada mes, para siempre",
+      "feature_free": "3 000 emails gratis cada mes, para siempre + asignación de lanzamiento única de 30 000 emails",
       "feature_no_cc": "No se requiere tarjeta de crédito",
       "feature_migration": "Asistencia de migración disponible",
       "cta_button": "Comenzar gratis",
@@ -1590,8 +1590,8 @@
       "cta_badge": "Empiece en 5 minutos",
       "cta_button": "Empezar gratis",
       "cta_heading": "¿Listo para enviar mejores emails?",
-      "cta_note": "Sin tarjeta de crédito: el plan gratuito incluye 30.000 emails/mes",
-      "cta_subtitle": "ApexMail ofrece emails transaccionales fiables con cumplimiento integrado. Empiece gratis con 30.000 emails al mes.",
+      "cta_note": "Sin tarjeta de crédito: el plan gratuito incluye 3.000 emails/mes",
+      "cta_subtitle": "ApexMail ofrece emails transaccionales fiables con cumplimiento integrado. Empiece gratis con 3.000 emails al mes.",
       "cta_talk": "Contactar con ventas",
       "detail_api_benefit_1": "Bibliotecas cliente en 6 lenguajes",
       "detail_api_benefit_2": "Claves API con alcances granulares",
@@ -1682,7 +1682,7 @@
       "stat_latency_link": "Metodología de medición"
     },
     "pricing": {
-      "save_annual": "Ahorre un 10 % con facturación anual en todos los planes de autoservicio",
+      "save_annual": "Ahorre un 16,7 % aproximado con facturación anual (10 pagos mensuales en lugar de 12) en todos los planes de autoservicio",
       "eu_hosted": "Implementación orientada a la UE/EEE; confirmar la región activa",
       "overages_at_cost": "Excesos a precio de coste",
       "overage_rates": "Tarifas de exceso",
@@ -1753,7 +1753,7 @@
       "billing_not_3": "Emails de prueba enviados en modo prueba o a direcciones de prueba verificadas",
       "billing_overage_title": "Gestión de excesos",
       "billing_overage_desc": "<strong>Planes de autoservicio (Developer, Pro, Growth, Business):</strong> Cuando la facturación por exceso está habilitada, los emails adicionales se cobran a €0,40 por 1.000. Se requiere un método de pago válido y facturación confirmada.",
-      "billing_overage_free": "<strong>Plan Free:</strong> Sin exceso automático. El envío se pausa cuando se alcanza el volumen incluido de 30.000/mes. Actualice para continuar enviando.",
+      "billing_overage_free": "<strong>Plan Free:</strong> Sin exceso automático. El envío se pausa cuando se alcanza el volumen incluido de 3.000/mes. Actualice para continuar enviando.",
       "billing_unused_title": "Volumen no utilizado y precios por banda",
       "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere — cualquier porción no utilizada expira al final del mes de facturación."
     },
@@ -1827,7 +1827,7 @@
       "dedicated_ips": "IPs dedicadas",
       "billing": "facturación",
       "monthly": "Mensual",
-      "annual": "Anual (10% de descuento)",
+      "annual": "Anual (10 pagos mensuales, ahorro de aprox. 16,7 %)",
       "compute": "Calcular mi precio"
     },
     "home_features": {

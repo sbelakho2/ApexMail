@@ -205,6 +205,7 @@ pub fn control_plane_app_layout_with_role(
         csrf_token,
         user_role,
         None,
+        None,
     )
 }
 
@@ -212,6 +213,11 @@ pub fn control_plane_app_layout_with_role(
 /// session's banner: an operator browsing the control plane while
 /// impersonating keeps the banner and its Terminate form on every page
 /// (dogfood 2026-10-06 — the SSR request path never rendered it).
+///
+/// `user_context` carries the authenticated session's identity (display
+/// name, email, tenant plan label) into the CP header. The render pipeline
+/// already loads it for BOTH console surfaces; before F10 only the web
+/// shell consumed it, so every CP page rendered without its real plan label.
 pub fn control_plane_app_layout_with_session(
     child_html: &str,
     page_title: &str,
@@ -219,6 +225,7 @@ pub fn control_plane_app_layout_with_session(
     current_path: &str,
     csrf_token: &str,
     user_role: &str,
+    user_context: Option<&crate::shell::UserContext<'_>>,
     impersonation_banner: Option<crate::shell::ImpersonationBanner<'_>>,
 ) -> String {
     let shell = ControlPlaneShell {
@@ -234,6 +241,7 @@ pub fn control_plane_app_layout_with_session(
         child_html,
         current_path,
         csrf_token,
+        user_context: user_context.cloned(),
     };
     let page = shell.render_html();
     match impersonation_banner {
@@ -719,7 +727,9 @@ fn domain_transfer_section(data: &ListPageData) -> String {
 fn cp_row_actions(
     base_path: &str,
     row: &crate::view_data::DataRowData,
-) -> Option<(String, String)> {
+) -> Option<(String, String, String)> {
+    // Returns (label, sibling_forms_html, buttons_html). Forms are collected
+    // outside the bulk form; buttons bind back via the `form` attribute.
     let status = row
         .cells
         .iter()
@@ -729,26 +739,59 @@ fn cp_row_actions(
             _ => None,
         })
         .unwrap_or_default();
-    let action_button = |label: &str, target: &str, destructive: bool| {
-        let classes = if destructive {
-            "rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10"
-        } else {
-            "rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent"
+    let mut collected_forms: Vec<String> = Vec::new();
+    // Helper: (form, button) pair. Forms go to the sibling collector; only
+    // the button lands in the row cell.
+    let make_action =
+        |forms: &mut Vec<String>, label: &str, target: &str, destructive: bool| {
+            let classes = if destructive {
+                "rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10"
+            } else {
+                "rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent"
+            };
+            let form_id = format!(
+                "cp-row-{}-{}",
+                html_escape(&row.id),
+                html_escape(&target.trim_start_matches('/').replace('/', "-"))
+            );
+            forms.push(format!(
+                "<form method=\"post\" action=\"{target}\" id=\"{form_id}\"><input type=\"hidden\" name=\"id\" value=\"{id}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /></form>",
+                form_id = form_id,
+                target = html_escape(target),
+                id = html_escape(&row.id),
+                base = html_escape(base_path),
+            ));
+            format!(
+                "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap {classes} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
+                form_id = form_id,
+                classes = classes,
+                label = html_escape(label),
+            )
         };
-        format!(
-            "<form method=\"post\" action=\"{target}\" class=\"inline\"><input type=\"hidden\" name=\"id\" value=\"{id}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap {classes} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
-            target = html_escape(target),
+    let push_confirm_delete = |forms: &mut Vec<String>, buttons: &mut Vec<String>, intent: &str, return_to: &str| {
+        let form_id = format!("row-delete-{}", html_escape(&row.id));
+        forms.push(format!(
+            "<form method=\"get\" action=\"/confirm\" id=\"{form_id}\"><input type=\"hidden\" name=\"intent\" value=\"{intent}\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"{return_to}\"></form>",
+            form_id = form_id,
+            intent = html_escape(intent),
             id = html_escape(&row.id),
-            base = html_escape(base_path),
-            classes = classes,
-            label = html_escape(label),
-        )
+            return_to = html_escape(return_to),
+        ));
+        buttons.push(format!(
+            "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button>",
+            form_id = form_id,
+        ));
     };
     match base_path {
-        "/alerts" if status == "active" => Some((
-            "Triage".to_string(),
-            action_button("Acknowledge", "/web/admin/alerts/ack", false),
-        )),
+        "/alerts" if status == "active" => {
+            let button = make_action(
+                &mut collected_forms,
+                "Acknowledge",
+                "/web/admin/alerts/ack",
+                false,
+            );
+            Some(("Triage".to_string(), collected_forms.join(""), button))
+        }
         "/compliance/gdpr" => {
             // Forward-only triad: pending → in_progress → completed/rejected.
             let mut buttons: Vec<String> = Vec::new();
@@ -758,6 +801,7 @@ fn cp_row_actions(
                     "in_progress",
                     "Start",
                     base_path,
+                    &mut collected_forms,
                 ));
             }
             if matches!(
@@ -769,9 +813,14 @@ fn cp_row_actions(
                     "completed",
                     "Complete",
                     base_path,
+                    &mut collected_forms,
                 ));
                 buttons.push(gdpr_transition_button(
-                    &row.id, "rejected", "Reject", base_path,
+                    &row.id,
+                    "rejected",
+                    "Reject",
+                    base_path,
+                    &mut collected_forms,
                 ));
             }
             if buttons.is_empty() {
@@ -779,6 +828,7 @@ fn cp_row_actions(
             } else {
                 Some((
                     "Actions".to_string(),
+                    collected_forms.join(""),
                     format!(
                         "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
                         buttons.join("")
@@ -789,14 +839,16 @@ fn cp_row_actions(
         "/tenants" => {
             let mut buttons: Vec<String> = Vec::new();
             if matches!(status.as_str(), "pending" | "active") {
-                buttons.push(action_button(
+                buttons.push(make_action(
+                    &mut collected_forms,
                     "Suspend",
                     &format!("/web/admin/tenants/{}/suspend", row.id),
                     false,
                 ));
             }
             if status == "suspended" {
-                buttons.push(action_button(
+                buttons.push(make_action(
+                    &mut collected_forms,
                     "Resume",
                     &format!("/web/admin/tenants/{}/resume", row.id),
                     false,
@@ -809,23 +861,22 @@ fn cp_row_actions(
             // button a non-owner can still click only ever buys them the
             // honest refusal flash.
             if status == "active" {
-                buttons.push(action_button(
+                buttons.push(make_action(
+                    &mut collected_forms,
                     "Impersonate",
                     &format!("/web/admin/tenants/{}/impersonate", row.id),
                     false,
                 ));
             }
             if matches!(status.as_str(), "pending" | "active" | "suspended") {
-                buttons.push(format!(
-                    "<form method=\"get\" action=\"/confirm\" class=\"inline-flex\"><input type=\"hidden\" name=\"intent\" value=\"delete-tenant\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"/tenants\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button></form>",
-                    id = html_escape(&row.id),
-                ));
+                push_confirm_delete(&mut collected_forms, &mut buttons, "delete-tenant", "/tenants");
             }
             if buttons.is_empty() {
                 None
             } else {
                 Some((
                     "Actions".to_string(),
+                    collected_forms.join(""),
                     format!(
                         "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
                         buttons.join("")
@@ -837,12 +888,24 @@ fn cp_row_actions(
     }
 }
 
-fn gdpr_transition_button(id: &str, target: &str, label: &str, base_path: &str) -> String {
-    format!(
-        "<form method=\"post\" action=\"/web/admin/gdpr/{id}/transition\" class=\"inline\"><input type=\"hidden\" name=\"status\" value=\"{target}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
+fn gdpr_transition_button(
+    id: &str,
+    target: &str,
+    label: &str,
+    base_path: &str,
+    forms: &mut Vec<String>,
+) -> String {
+    let form_id = format!("gdpr-{}-{}", html_escape(id), html_escape(target));
+    forms.push(format!(
+        "<form method=\"post\" action=\"/web/admin/gdpr/{id}/transition\" id=\"{form_id}\"><input type=\"hidden\" name=\"status\" value=\"{target}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /></form>",
+        form_id = form_id,
         id = html_escape(id),
         target = html_escape(target),
         base = html_escape(base_path),
+    ));
+    format!(
+        "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
+        form_id = form_id,
         label = html_escape(label),
     )
 }
@@ -992,7 +1055,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 let has_actions = data.detail_path_prefix.is_some() || data.delete_intent.is_some();
 
                 // Per-row CP actions land in an extra trailing column.
-                let row_actions: Vec<Option<(String, String)>> = table
+                let row_actions: Vec<Option<(String, String, String)>> = table
                     .rows
                     .iter()
                     .map(|row| cp_row_actions(&data.base_path, row))
@@ -1088,7 +1151,10 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                             id = html_escape(&row.id),
                         ));
                         }
-                        if let Some((_, action_html)) = row_action {
+                        if let Some((_, action_forms, action_html)) = row_action {
+                            if !action_forms.is_empty() {
+                                row_forms.push(action_forms.clone());
+                            }
                             actions.push(action_html.clone());
                         }
                         if !actions.is_empty() {
@@ -4325,6 +4391,107 @@ pub fn web_inbox_placement_detail_page() -> String {
     )
 }
 
+/// Data-backed placement-test detail: explicit lifecycle status and the
+/// real per-provider results recorded for this test.
+pub fn web_inbox_placement_detail_page_with_data(
+    detail: &crate::view_data::PlacementDetailData,
+) -> String {
+    let status_label = match detail.status.as_str() {
+        "completed" => "Completed",
+        "failed" => "Failed",
+        "running" => "Running",
+        "pending" => "Pending",
+        other => other,
+    };
+    let status_badge = Badge {
+        text: status_label,
+        variant: match detail.status.as_str() {
+            "completed" => "success",
+            "failed" => "destructive",
+            "running" | "pending" => "outline",
+            _ => "outline",
+        },
+        size: "default",
+        icon: None,
+    }
+    .render_html();
+    let name = if detail.name.is_empty() {
+        "Placement test"
+    } else {
+        detail.name.as_str()
+    };
+    let body = match detail.status.as_str() {
+        "completed" if !detail.providers.is_empty() => {
+            let rows: Vec<String> = detail
+                .providers
+                .iter()
+                .map(|p| {
+                    format!(
+                        "<tr class=\"border-b border-surface-100\"><td class=\"py-2 pr-4 text-sm font-medium text-surface-950\">{provider}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{tested}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{inbox}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{promotions}</td><td class=\"py-2 pr-4 text-sm text-surface-700\">{spam}</td><td class=\"py-2 text-sm text-surface-700\">{absent}</td></tr>",
+                        provider = html_escape(&p.provider),
+                        tested = p.accounts_tested,
+                        inbox = p.inbox,
+                        promotions = p.promotions,
+                        spam = p.spam,
+                        absent = p.absent,
+                    )
+                })
+                .collect();
+            format!(
+                "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Per-provider results</h2><table class=\"w-full\"><thead><tr class=\"border-b border-surface-200 text-left text-xs font-bold uppercase tracking-widest text-surface-500\"><th class=\"py-2 pr-4\">Provider</th><th class=\"py-2 pr-4\">Tested</th><th class=\"py-2 pr-4\">Inbox</th><th class=\"py-2 pr-4\">Promotions</th><th class=\"py-2 pr-4\">Spam</th><th class=\"py-2\">Absent</th></tr></thead><tbody>{rows}</tbody></table><p class=\"mt-4 text-xs text-muted-foreground\">{completed} of {total} seed accounts reported.</p></div>",
+                rows = rows.join(""),
+                completed = detail.completed_accounts,
+                total = detail.total_accounts,
+            )
+        }
+        "completed" => EmptyState {
+            title: "This test completed with no recorded results",
+            description: Some("No seed-account responses were stored. Start a new test to measure placement."),
+            icon_markup: None,
+            action_label: Some("New test"),
+            action_href: Some("/inbox-placement/new"),
+        }
+        .render_html(),
+        "failed" => EmptyState {
+            title: "This test failed",
+            description: Some("The probe send or result collection did not complete. Start a new test to try again."),
+            icon_markup: None,
+            action_label: Some("New test"),
+            action_href: Some("/inbox-placement/new"),
+        }
+        .render_html(),
+        _ => EmptyState {
+            title: "Results appear once the test completes",
+            description: Some("Seed accounts report as they receive the probe message — reload this page to check for new results."),
+            icon_markup: None,
+            action_label: Some("Back to tests"),
+            action_href: Some("/inbox-placement"),
+        }
+        .render_html(),
+    };
+    format!(
+        "<div class=\"space-y-6\" data-page=\"inbox-placement-detail\">\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
+<li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
+<li class=\"text-surface-500\">/</li>\
+<li class=\"text-surface-900 font-medium\">{name}</li></ol></nav>\
+<div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
+<div><div class=\"flex items-center gap-3\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{name}</h1>{status_badge}</div>\
+<p class=\"text-sm text-surface-600 mt-1\">{completed} of {total} seed accounts · created {created}</p></div>\
+<div class=\"flex items-center gap-3\">\
+<a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back to tests</a>\
+</div></div>\
+{body}\
+</div>",
+        name = html_escape(name),
+        status_badge = status_badge,
+        completed = detail.completed_accounts,
+        total = detail.total_accounts,
+        created = html_escape(&detail.created_at),
+        body = body,
+    )
+}
+
 /// Analytics page.
 pub fn web_analytics_page() -> String {
     format!(
@@ -5514,15 +5681,81 @@ pub fn control_plane_tenants_page() -> String {
     )
 }
 
-/// New tenant page.
+/// New tenant page — no-data fallback (route inventory, offline renders).
+/// The plan catalog is unknown here, so the page renders the honest
+/// catalog-unavailable state (F11) instead of a fabricated plan list.
 pub fn control_plane_tenants_new_page() -> String {
+    control_plane_tenants_new_page_with_data(None)
+}
+
+/// New tenant page with the bound plan catalog (dogfood 2026-10-08 F11).
+///
+/// The create handler validates `plan` against the SAME catalog; before
+/// this, the form had no plan control, so every CP-created tenant silently
+/// landed on `free` (dead server-side branch). The select is bound to the
+/// active catalog names, `free` preselected as the documented default, and
+/// a missing/unreadable catalog renders no submit button rather than
+/// creating a tenant on a plan nobody could verify.
+pub fn control_plane_tenants_new_page_with_data(
+    data: Option<&crate::view_data::TenantNewPageData>,
+) -> String {
+    use crate::view_data::TenantNewPageData;
+
+    // `None` (no data) and `Some(unavailable)` share the honest failure
+    // render; an empty catalog is equally unusable — a create would have no
+    // verifiable plan to land on.
+    let catalog_usable = matches!(data, Some(TenantNewPageData { unavailable: false, plans }) if !plans.is_empty());
+    let (plan_field, submit) = if catalog_usable {
+        let plans = data.map(|d| d.plans.as_slice()).unwrap_or(&[]);
+        let options = plans
+            .iter()
+            .map(|plan| {
+                let label = format_plan_option_label(&plan.display_name, plan.email_limit);
+                let selected = if plan.name == "free" {
+                    " selected"
+                } else {
+                    ""
+                };
+                format!(
+                    "<option value=\"{}\"{}>{}</option>",
+                    html_escape(&plan.name),
+                    selected,
+                    html_escape(&label),
+                )
+            })
+            .collect::<String>();
+        (
+            format!(
+                "<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" required class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{options}</select><p class=\"text-xs text-muted-foreground\">The plan's entitlements (sending limits and capabilities) apply to the new workspace immediately. Later plan changes go through the audited billing plan-override flow.</p></div>"
+            ),
+            Button {
+                variant: "default",
+                size: "default",
+                label: "Create Tenant",
+                disabled: false,
+                loading: false,
+                left_icon: None,
+                right_icon: None,
+                submit: true,
+            }
+            .render_html(),
+        )
+    } else {
+        (
+            "<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"tenant-new-plan\">Plan</label><select id=\"tenant-new-plan\" name=\"plan\" disabled class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] opacity-60\"><option>Plan catalog unavailable</option></select><p class=\"text-xs text-muted-foreground\">The billing plan catalog could not be read, so a tenant cannot be created on a verifiable plan right now. This is a service problem, not an empty catalog — try again shortly.</p></div>"
+                .to_string(),
+            String::new(),
+        )
+    };
+
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Tenant</h1>\
-<form class=\"space-y-6\" method=\"post\" action=\"/web/admin/tenants\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/admin/tenants\" data-form-id=\"tenant-create\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
-<div class=\"flex gap-3\">{save_button}</div>\
+{plan_field}\
+<div class=\"flex gap-3\">{submit}</div>\
 </form></div>",
         name_label = Label {
             html_for: Some("tenant-new-name"),
@@ -5574,18 +5807,25 @@ pub fn control_plane_tenants_new_page() -> String {
             name: Some("domain"),
         }
         .render_html(),
-        save_button = Button {
-            variant: "default",
-            size: "default",
-            label: "Create Tenant",
-            disabled: false,
-            loading: false,
-            left_icon: None,
-            right_icon: None,
-            submit: true
-        }
-        .render_html(),
+        plan_field = plan_field,
+        submit = submit,
     )
+}
+
+/// Monthly-volume tag for a plan option: "150K emails / mo"; unlimited
+/// (non-positive limit) carries no number.
+fn format_plan_option_label(display_name: &str, email_limit: i64) -> String {
+    if email_limit <= 0 {
+        return display_name.to_string();
+    }
+    let compact = if email_limit % 1_000_000 == 0 {
+        format!("{}M", email_limit / 1_000_000)
+    } else if email_limit % 1_000 == 0 {
+        format!("{}K", email_limit / 1_000)
+    } else {
+        email_limit.to_string()
+    };
+    format!("{display_name} — {compact} emails / mo")
 }
 
 /// Operators list page.
@@ -5731,7 +5971,101 @@ pub fn control_plane_discovery_page() -> String {
 </div></div>".to_string()
 }
 
-/// Jobs page.
+/// Jobs page WITH live control-plane data (F13): recent `queue_jobs` rows
+/// plus the retry/cancel controls that match the queue's own semantics.
+///
+/// * retry renders only for terminal failures (`dead_letter` / `failed`);
+/// * cancel renders only for unclaimed `pending` rows;
+/// * in-flight (`processing`) and terminal (`completed`) rows render an
+///   explicit "in flight" / "history" note instead of a dead control.
+///
+/// Each control is a native zero-JSON POST form (CSRF auto-injected) — the
+/// same no-JavaScript contract as every other CP mutation.
+pub fn control_plane_jobs_page_with_data(data: Option<&crate::view_data::JobsPageData>) -> String {
+    let Some(data) = data else {
+        return control_plane_jobs_page();
+    };
+    if data.unavailable {
+        return "<div class=\"space-y-6\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Jobs</h1>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-8 shadow-premium\">\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Job queues</h3>\
+<p class=\"text-sm text-surface-600\">The job queue store could not be read — this is a service problem, not an idle queue. Retry and cancel controls are hidden until the store answers, because acting on an unknown queue state would be guesswork.</p>\
+</div></div>"
+            .to_string();
+    }
+
+    let mut row_html: Vec<String> = Vec::with_capacity(data.jobs.len());
+    for job in &data.jobs {
+        let escaped_id = html_escape(&job.id);
+        let actions = match job.status.as_str() {
+            "dead_letter" | "failed" => format!(
+                "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/retry\" class=\"inline\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Re-queue this terminal job (attempts reset, schedule now)\">Retry</button></form>"
+            ),
+            "pending" => format!(
+                "<form method=\"post\" action=\"/web/admin/jobs/{escaped_id}/cancel\" class=\"inline\"><button type=\"submit\" class=\"apex-btn apex-btn--sm\" title=\"Delete this unclaimed job from the queue\">Cancel</button></form>"
+            ),
+            "processing" => "<span class=\"text-xs text-surface-500\" title=\"A worker holds the lease; the job returns to the queue after its visibility timeout\">In flight</span>".to_string(),
+            _ => "<span class=\"text-xs text-surface-500\" title=\"Completed history is immutable\">History</span>".to_string(),
+        };
+        let error = if job.error.trim().is_empty() {
+            "—".to_string()
+        } else {
+            html_escape(job.error.trim())
+        };
+        row_html.push(format!(
+            "<tr class=\"border-b align-middle\" data-job-id=\"{escaped_id}\">\
+<td class=\"p-4 apex-mono text-xs\" title=\"{escaped_id}\">{short_id}</td>\
+<td class=\"p-4 text-sm\">{queue}</td>\
+<td class=\"p-4 text-sm\">{status}</td>\
+<td class=\"p-4 text-sm apex-metric-number\">{attempts}/{max_attempts}</td>\
+<td class=\"p-4 text-xs text-surface-600 max-w-[28rem] truncate\" title=\"{error_title}\">{error}</td>\
+<td class=\"p-4 text-xs text-surface-500 whitespace-nowrap\">{updated}</td>\
+<td class=\"p-4 text-right\">{actions}</td>\
+</tr>",
+            escaped_id = escaped_id,
+            short_id = html_escape(&job.id.chars().take(12).collect::<String>()),
+            queue = html_escape(&job.queue),
+            status = html_escape(&job.status),
+            attempts = job.attempts,
+            max_attempts = job.max_attempts,
+            error_title = html_escape(job.error.trim()),
+            error = error,
+            updated = html_escape(&job.updated),
+            actions = actions,
+        ));
+    }
+
+    let rows = if row_html.is_empty() {
+        "<tr><td colspan=\"7\" class=\"p-10 text-center text-sm text-surface-500\">No queued jobs — the worker queues are idle. Rows appear here as workers enqueue work, and dead-lettered jobs become retryable.</td></tr>".to_string()
+    } else {
+        row_html.join("")
+    };
+
+    format!(
+        "<div class=\"space-y-6\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Jobs</h1>\
+<p class=\"text-sm text-surface-500\">Background work across the canonical job queues. Retry re-queues a terminal (dead-lettered) job with a clean attempt counter; cancel deletes a job nothing has claimed yet.</p>\
+<div class=\"grid gap-4 sm:grid-cols-3\">\
+<div class=\"rounded-sm border border-surface-200 bg-card px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Pending</p><p class=\"text-2xl font-bold text-surface-950\">{pending}</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Processing</p><p class=\"text-2xl font-bold text-surface-950\">{processing}</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Dead-lettered</p><p class=\"text-2xl font-bold text-surface-950\">{dead}</p></div>\
+</div>\
+<div class=\"rounded-sm border border-surface-200 bg-card shadow-premium overflow-hidden\">\
+<div class=\"px-6 py-4 border-b border-surface-100\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500\">Recent jobs (newest activity first, up to 50)</h2></div>\
+<div class=\"w-full overflow-x-auto\"><table class=\"w-full min-w-[880px] text-sm\">\
+<thead><tr class=\"border-b bg-muted/20 text-left text-[10px] font-mono uppercase tracking-[0.14em] text-muted-foreground\">\
+<th scope=\"col\" class=\"h-12 px-4\">Job ID</th><th scope=\"col\" class=\"h-12 px-4\">Queue</th><th scope=\"col\" class=\"h-12 px-4\">Status</th><th scope=\"col\" class=\"h-12 px-4\">Attempts</th><th scope=\"col\" class=\"h-12 px-4\">Last error</th><th scope=\"col\" class=\"h-12 px-4\">Last activity</th><th scope=\"col\" class=\"h-12 px-4 text-right\">Controls</th>\
+</tr></thead><tbody>{rows}</tbody></table></div>\
+</div></div>",
+        pending = data.pending,
+        processing = data.processing,
+        dead = data.dead_letter,
+        rows = rows,
+    )
+}
+
+/// Jobs page — no-data fallback (route inventory / offline renders).
 pub fn control_plane_jobs_page() -> String {
     let table = Table {
         caption: Some("Background jobs"),
@@ -8402,6 +8736,83 @@ mod tests {
         assert!(!html.contains("No rows to display"));
     }
 
+    /// F13 (live dogfood 2026-10-08): the data-backed jobs page must carry
+    /// REAL retry/cancel controls, each offered only where the queue's
+    /// semantics allow it.
+    #[test]
+    fn cp_jobs_with_data_renders_queue_semantics_controls() {
+        use crate::view_data::{JobRowData, JobsPageData};
+        let row = |id: &str, status: &str, attempts: i32| JobRowData {
+            id: id.into(),
+            queue: "emails".into(),
+            status: status.into(),
+            attempts,
+            max_attempts: 3,
+            error: if matches!(status, "dead_letter" | "failed") {
+                "smtp 550 mailbox unavailable".into()
+            } else {
+                String::new()
+            },
+            updated: "2 minutes ago".into(),
+        };
+        let data = JobsPageData {
+            jobs: vec![
+                row("11111111-1111-1111-1111-111111111111", "dead_letter", 3),
+                row("22222222-2222-2222-2222-222222222222", "pending", 0),
+                row("33333333-3333-3333-3333-333333333333", "processing", 1),
+                row("44444444-4444-4444-4444-444444444444", "completed", 1),
+            ],
+            unavailable: false,
+            pending: 1,
+            processing: 1,
+            dead_letter: 1,
+        };
+        let html = control_plane_jobs_page_with_data(Some(&data));
+        // Retry exists for the dead-lettered row only.
+        assert!(html.contains("action=\"/web/admin/jobs/11111111-1111-1111-1111-111111111111/retry\""));
+        assert!(!html.contains("22222222-2222-2222-2222-222222222222/retry"));
+        // Cancel exists for the unclaimed pending row only.
+        assert!(html.contains("action=\"/web/admin/jobs/22222222-2222-2222-2222-222222222222/cancel\""));
+        assert!(!html.contains("11111111-1111-1111-1111-111111111111/cancel"));
+        // In-flight and terminal rows carry an explicit, non-actionable note.
+        assert!(html.contains("In flight"));
+        assert!(html.contains("History"));
+        assert!(!html.contains("33333333-3333-3333-3333-333333333333/retry"));
+        assert!(!html.contains("33333333-3333-3333-3333-333333333333/cancel"));
+        // Counters render.
+        assert!(html.contains("Dead-lettered"));
+
+        // Hostile row data is escaped, never emitted raw.
+        let hostile = JobsPageData {
+            jobs: vec![JobRowData {
+                id: "55555555-5555-5555-5555-555555555555".into(),
+                queue: "<script>alert(1)</script>".into(),
+                status: "pending".into(),
+                attempts: 0,
+                max_attempts: 3,
+                error: "<img src=x onerror=alert(1)>".into(),
+                updated: "now".into(),
+            }],
+            unavailable: false,
+            pending: 1,
+            processing: 0,
+            dead_letter: 0,
+        };
+        let html = control_plane_jobs_page_with_data(Some(&hostile));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("<img src=x onerror=alert(1)>"));
+
+        // Unavailable: no controls at all, honest copy.
+        let unavailable = JobsPageData {
+            unavailable: true,
+            ..Default::default()
+        };
+        let html = control_plane_jobs_page_with_data(Some(&unavailable));
+        assert!(html.contains("could not be read"));
+        assert!(!html.contains("/retry"));
+        assert!(!html.contains("/cancel"));
+    }
+
     #[test]
     fn cp_infrastructure_renders_nav() {
         let html = control_plane_infrastructure_page();
@@ -8622,6 +9033,59 @@ mod tests {
                 "marketing page {} missing </html>",
                 i
             );
+        }
+    }
+
+    /// F11 (live dogfood 2026-10-08): the `/tenants/new` form must render the
+    /// bound plan select from the ACTIVE catalog — the create handler
+    /// validates `plan` against that catalog, and with no field every
+    /// CP-created tenant was silently pinned to `free`.
+    #[test]
+    fn control_plane_tenants_new_page_binds_the_plan_catalog() {
+        use crate::view_data::{TenantNewPageData, TenantPlanChoiceData};
+        let data = TenantNewPageData {
+            plans: vec![
+                TenantPlanChoiceData {
+                    name: "free".into(),
+                    display_name: "Free".into(),
+                    email_limit: 3_000,
+                },
+                TenantPlanChoiceData {
+                    name: "scale".into(),
+                    display_name: "Business".into(),
+                    email_limit: 2_000_000,
+                },
+            ],
+            unavailable: false,
+        };
+        let html = control_plane_tenants_new_page_with_data(Some(&data));
+        assert!(
+            html.contains("name=\"plan\""),
+            "the plan select must bind the plan field"
+        );
+        assert!(html.contains("value=\"free\" selected"), "{html}");
+        assert!(html.contains("Free — 3K emails / mo"), "{html}");
+        assert!(html.contains("value=\"scale\""), "{html}");
+        assert!(html.contains("Business — 2M emails / mo"), "{html}");
+        assert!(html.contains("action=\"/web/admin/tenants\""));
+
+        // No data / unavailable / empty catalog: honest refusal to create on
+        // an unverifiable plan — no submit button, no fabricated options.
+        for case in [
+            None,
+            Some(&TenantNewPageData {
+                plans: vec![],
+                unavailable: true,
+            }),
+            Some(&TenantNewPageData {
+                plans: vec![],
+                unavailable: false,
+            }),
+        ] {
+            let html = control_plane_tenants_new_page_with_data(case);
+            assert!(html.contains("Plan catalog unavailable"), "{html}");
+            assert!(!html.contains("Create Tenant"), "{html}");
+            assert!(!html.contains("<option value="), "{html}");
         }
     }
 

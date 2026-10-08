@@ -273,13 +273,28 @@ async fn get_delivery_analytics(
     Query(params): Query<DeliveryQuery>,
 ) -> Result<Json<DeliveryAnalyticsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    Ok(Json(
+        delivery_analytics_snapshot(&state, &params.range).await?,
+    ))
+}
 
-    let interval = parse_range_interval(&params.range);
+/// The delivery-analytics read model, shared by the JSON endpoints and the
+/// control-plane `/analytics` page (F12: the module was already mounted but
+/// had no product surface consuming it, so the numbers existed with no UI
+/// claimant). One implementation — the page and the API can never drift.
+///
+/// The window defaults to 7 days for unknown range tokens (see
+/// [`parse_range_interval`]); queue fields are CURRENT snapshots.
+pub(crate) async fn delivery_analytics_snapshot(
+    state: &AppState,
+    range: &str,
+) -> Result<DeliveryAnalyticsResponse, ApiError> {
+    let interval = parse_range_interval(range);
     let db = &state.db;
 
     // One cohort convention: the send cohort (recipient-send rows), with
     // outcomes attached to the send.
-    let columns = detect_event_columns(&state).await;
+    let columns = detect_event_columns(state).await;
     let counts = send_cohort_counts(db, None, &interval, columns).await?;
 
     let delivery_by_provider = transport_breakdown(db, &interval, columns).await?;
@@ -297,7 +312,7 @@ async fn get_delivery_analytics(
     .ok()
     .flatten();
 
-    Ok(Json(DeliveryAnalyticsResponse {
+    Ok(DeliveryAnalyticsResponse {
         delivery_rate: counts.delivery_rate(),
         bounce_rate: counts.bounce_rate(),
         complaint_rate: counts.complaint_rate(),
@@ -309,7 +324,7 @@ async fn get_delivery_analytics(
         latency,
         queue_depth: queue.map(|(c,)| c).unwrap_or(0),
         notes: delivery_notes(),
-    }))
+    })
 }
 
 async fn get_latency_percentiles(

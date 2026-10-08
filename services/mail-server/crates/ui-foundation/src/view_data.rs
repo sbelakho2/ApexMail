@@ -224,6 +224,33 @@ pub struct TemplateEditData {
     pub html_body: String,
 }
 
+/// Placement-test detail state for `/inbox-placement/{id}`: the recorded
+/// test identity, explicit lifecycle status, and per-provider results.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlacementDetailData {
+    pub id: String,
+    pub name: String,
+    /// `pending` | `running` | `completed` | `failed` (the live
+    /// placement_tests status vocabulary).
+    pub status: String,
+    pub total_accounts: i32,
+    pub completed_accounts: i32,
+    pub created_at: String,
+    pub completed_at: String,
+    /// Per-provider result rows (empty while the test is still running).
+    pub providers: Vec<PlacementProviderRow>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacementProviderRow {
+    pub provider: String,
+    pub accounts_tested: i32,
+    pub inbox: i32,
+    pub promotions: i32,
+    pub spam: i32,
+    pub absent: i32,
+}
+
 /// The campaign editor's live option sources plus optional prefilled values.
 /// Lists and segments are the TENANT's own rows (id, display name) — the old
 /// placeholder select values ('vip', 'newsletter') were never persisted.
@@ -533,6 +560,65 @@ pub struct AlertRulesPageData {
     pub unavailable: bool,
     pub unavailable_note: String,
     pub editing: Option<AlertRuleData>,
+}
+
+/// One selectable plan on the `/tenants/new` create form. The value is the
+/// catalog `plans.name` — the exact token the create handler validates
+/// against, so the form can only submit plans that resolve entitlements.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantPlanChoiceData {
+    pub name: String,
+    /// Human catalog name (`plans.display_name`).
+    pub display_name: String,
+    /// Included monthly email volume (`plans.email_limit`); 0/negative means
+    /// unlimited — the option label then carries no number.
+    pub email_limit: i64,
+}
+
+/// `/tenants/new` control-plane form state: the ACTIVE billing catalog.
+///
+/// Dogfood 2026-10-08 F11: the form rendered no plan field while the handler
+/// validated one — every CP-created tenant silently landed on `free`. With
+/// the catalog bound here, the operator picks a real plan and the created
+/// tenant resolves that plan's entitlements immediately.
+///
+/// `unavailable` is the honest catalog-read failure state: the page then
+/// renders the unavailable note and no submit button instead of an empty
+/// (fabricated) plan list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantNewPageData {
+    pub plans: Vec<TenantPlanChoiceData>,
+    pub unavailable: bool,
+}
+
+/// One row of the control-plane `/jobs` surface (F13): the canonical
+/// `queue_jobs` row the retry/cancel controls act on.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JobRowData {
+    pub id: String,
+    pub queue: String,
+    /// pending | processing | completed | failed | dead_letter
+    pub status: String,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    /// Terminal error, when the queue recorded one.
+    pub error: String,
+    /// Preformatted "last activity" line (worker-facing timestamp).
+    pub updated: String,
+}
+
+/// Control-plane jobs page state: the recent `queue_jobs` rows plus the
+/// status counters the controls' affordances are derived from.
+///
+/// `unavailable` is the honest store-read failure state — the page then
+/// renders no rows and no controls instead of an empty (idle) queue.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JobsPageData {
+    pub jobs: Vec<JobRowData>,
+    pub unavailable: bool,
+    pub pending: i64,
+    pub processing: i64,
+    pub dead_letter: i64,
 }
 
 /// One step of a demo as the public viewer renders it.

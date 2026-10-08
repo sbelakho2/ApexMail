@@ -50,7 +50,7 @@ comparison_sections = [
     { feature = "Sandbox Mode", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
   ]},
   { title = "PRICING", rows = [
-    { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000 emails/mo</span>', comp = '<span class="text-surface-600">100 emails/day</span>', winner = "none" },
+    { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">3,000 emails/mo + one-time 30,000 launch allowance</span>', comp = '<span class="text-surface-600">100 emails/day</span>', winner = "none" },
     { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials from €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO Included", apex = '<span class="text-brand-600 font-semibold">Business and Enterprise plans</span>', comp = '<span class="text-surface-600">Included on Pro</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }

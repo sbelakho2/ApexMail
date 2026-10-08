@@ -269,7 +269,7 @@ print(f"Email queued! ID: {response.id}")
 - **`401 Unauthorized`**: API key is missing or incorrect. Verify `$APEXMAIL_API_KEY` is set.
 - **`403 Forbidden`**: API key lacks `messages:write` scope. Recreate the key with the correct scope.
 - **`400 domain_not_verified`**: Your sending domain is not yet verified. Return to Step 7.
-- **`429 Too Many Requests`**: Rate limit exceeded. Free plan: 30,000 emails/month. Wait and retry.
+- **`429 Too Many Requests`**: Rate limit exceeded. Free plan: 3,000 emails/month recurring (plus a one-time 30,000-email launch allowance). Wait and retry.
 
 ---
 
@@ -355,7 +355,7 @@ def verify_webhook(body: bytes, signature: str, timestamp: str, secret: str) -> 
 
 Before moving to production:
 
-1. **Upgrade from Free plan** if you exceed 30,000 emails/month. See [Pricing](/pricing/).
+1. **Upgrade from Free plan** if you exceed 3,000 emails/month recurring (or your one-time 30,000-email launch allowance). See [Pricing](/pricing/).
 3. **Configure DMARC** for your sending domain with a policy of at least `p=none` initially, progressing to `p=quarantine` or `p=reject`.
 4. **Set up SPF alignment** by ensuring your `Return-Path` domain matches your `From` domain.
 5. **Rotate API keys** — create production-specific keys with minimal scopes and expiry dates.

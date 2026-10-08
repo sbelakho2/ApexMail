@@ -52,7 +52,7 @@ comparison_sections = [
   { title = "PRECIOS A 100K/MES (verificado 2026-07-29)", rows = [
     { feature = "Plan comparado", apex = 'Pro: €65/mes (150.000 emails incluidos)', comp = 'Scale: €82.80 (US$90)/mes (100.000 emails incluidos)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Condiciones de uso", apex = 'Consulte el catálogo público actual y el proceso de contratación para las condiciones de uso aplicables', comp = 'desde €1.20 (US$1.30)/1.000 en el exceso de Foundation; tarifas escalonadas en Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
-    { feature = "Nivel gratuito", apex = '30.000 emails/mes', comp = '100 emails/día (prueba Flex — sin tarjeta de crédito)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
+    { feature = "Nivel gratuito", apex = '3.000 emails/mes + asignación de lanzamiento única de 30.000 emails', comp = '100 emails/día (prueba Flex — sin tarjeta de crédito)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},
   { title = "ÁREAS DONDE MAILGUN ES MÁS FUERTE", rows = [
     { feature = "Validación de email", apex = 'API Email Grader (DNS/SPF/DKIM/DMARC/contenido/reputación)', comp = 'API de validación de email dedicada con validación en tiempo real y masiva<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },

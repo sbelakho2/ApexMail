@@ -30,6 +30,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey};
+use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
 use rsa::RsaPublicKey;
 use serde::Deserialize;
@@ -210,7 +211,17 @@ async fn handle_sns_notification(
     })?;
 
     let allowed_arns_raw = std::env::var("SNS_ALLOWED_TOPIC_ARNS").unwrap_or_default();
-    validate_sns_message(&state.http_client, &sns_msg, &allowed_arns_raw).await?;
+    // F-4.1/FINDING-5: the dev-only local trust anchor (ignored in
+    // production, see `dev_signing_key`).
+    let dev_key_env = std::env::var("SNS_DEV_SIGNING_KEY_PEM").ok();
+    let dev_key = dev_signing_key(state.config.environment, dev_key_env.as_deref());
+    validate_sns_message(
+        &state.http_client,
+        &sns_msg,
+        &allowed_arns_raw,
+        dev_key.as_deref(),
+    )
+    .await?;
 
     // PP-006/L-07: Deduplicate SNS notifications with a Redis marker keyed
     // by (SNS message id + notification type). F75: the marker is now
@@ -341,15 +352,60 @@ async fn validate_sns_message(
     http_client: &reqwest::Client,
     msg: &SnsMessage,
     allowed_arns_raw: &str,
+    dev_signing_key_pem: Option<&str>,
 ) -> Result<(), ApiError> {
     validate_sns_topic_arn(msg, allowed_arns_raw)?;
-    validate_sns_signature(http_client, msg).await?;
+    match dev_signing_key_pem {
+        // Dev trust anchor (FINDING-5): verify against the LOCAL public key.
+        // No outbound fetch happens, so the AWS-only SigningCertURL
+        // allowlist — an SSRF guard for the fetch — has nothing to protect
+        // here; the signature is still cryptographically verified, so a
+        // wrong or tampered signature is refused exactly as in production.
+        Some(pem) => {
+            let key = RsaPublicKey::from_public_key_pem(pem).map_err(|e| {
+                error!(error = %e, "SNS_DEV_SIGNING_KEY_PEM is not a valid RSA public key PEM");
+                ApiError::ServiceUnavailable(
+                    "SNS_DEV_SIGNING_KEY_PEM is not a valid RSA public key PEM".into(),
+                )
+            })?;
+            verify_sns_signature_with_key(msg, &key)?;
+        }
+        None => validate_sns_signature(http_client, msg).await?,
+    }
     // Audit G(2): replay freshness — the signature check above proves the
-    // message was signed by AWS, but not that it is recent. Reject captured
-    // notifications older than 1 hour (SNS retries span at most ~1h including
-    // the initial attempt) and clock-skewed ones more than 10 minutes in the
-    // future.
+    // message was signed by AWS (or, in dev, by the local anchor), but not
+    // that it is recent. Reject captured notifications older than 1 hour
+    // (SNS retries span at most ~1h including the initial attempt) and
+    // clock-skewed ones more than 10 minutes in the future.
     validate_sns_timestamp_freshness(msg)
+}
+
+/// Dev-only local signing trust anchor for
+/// `POST /v1/ses/notifications` (FINDING-5, mail-plane dogfood 2026-10-08).
+///
+/// The production path pins `SigningCertURL` to `https://sns*.amazonaws.com/
+/// SimpleNotificationService-*.pem` and fetches the key over HTTPS from AWS,
+/// so NO locally-signed notification could ever exercise the handler in dev.
+/// `SNS_DEV_SIGNING_KEY_PEM` carries an RSA public key PEM (single-line with
+/// `\n` escapes, per the repo's PEM env convention) and, when the
+/// environment is NOT production, signatures are verified against that key.
+/// In production the variable is IGNORED with an error log — the AWS path is
+/// untouched.
+fn dev_signing_key(
+    environment: crate::config::Environment,
+    raw: Option<&str>,
+) -> Option<String> {
+    let pem = raw
+        .map(|value| value.replace("\\n", "\n"))
+        .filter(|value| !value.trim().is_empty())?;
+    if environment.is_production() {
+        error!(
+            "SNS_DEV_SIGNING_KEY_PEM is set but IGNORED in production — \
+             the AWS SNS signature path is authoritative"
+        );
+        return None;
+    }
+    Some(pem)
 }
 
 /// SNS `Timestamp` freshness bounds (audit G).
@@ -2401,6 +2457,140 @@ mod adversarial_handler_tests {
             verify_sns_signature_with_key(&parsed, &wrong_key),
             Err(ApiError::Forbidden(_))
         ));
+    }
+
+    // ── FINDING-5: dev-local SNS signing anchor ──────────────────────────
+
+    /// The dev anchor is dev-only: a PEM in production is ignored (the AWS
+    /// path stays authoritative), and empty/absent values are never trusted.
+    #[test]
+    fn dev_signing_key_is_ignored_in_production_and_never_empty() {
+        let escaped = "-----BEGIN PUBLIC KEY-----\\nAAAA\\n-----END PUBLIC KEY-----\\n";
+        let dev = dev_signing_key(crate::config::Environment::Development, Some(escaped))
+            .expect("dev accepts the local anchor");
+        assert!(
+            dev.contains('\n') && !dev.contains("\\n"),
+            "the single-line env form must be unescaped: {dev:?}"
+        );
+        assert_eq!(
+            dev_signing_key(crate::config::Environment::Production, Some(escaped)),
+            None,
+            "production must ignore the dev anchor"
+        );
+        assert_eq!(
+            dev_signing_key(crate::config::Environment::Development, Some("   ")),
+            None
+        );
+        assert_eq!(
+            dev_signing_key(crate::config::Environment::Development, None),
+            None
+        );
+    }
+
+    /// End-to-end dev path: a notification signed by the LOCAL key and
+    /// carrying a non-AWS `SigningCertURL` verifies (no fetch, real
+    /// signature math); a tampered body and a mismatched key are still
+    /// refused. This is the path a developer exercises with
+    /// `SNS_DEV_SIGNING_KEY_PEM`.
+    #[tokio::test]
+    async fn dev_local_key_exercises_the_signed_notification_path() {
+        use rsa::pkcs8::EncodePublicKey;
+        let private_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let public_pem =
+            RsaPublicKey::from(&private_key).to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .expect("public key PEM");
+        let signer = SnsSigner {
+            // Deliberately NOT an AWS URL: the dev anchor replaces the
+            // allowlist + fetch by construction.
+            cert_url: "https://localhost/SimpleNotificationService-dev.pem".into(),
+            private_key,
+        };
+        let envelope = SnsEnvelope::new(
+            "Notification",
+            Some("{\"eventType\":\"Bounce\",\"bounce\":{\"bounceType\":\"Permanent\"}}"),
+        );
+
+        let client = reqwest::Client::new();
+        let signed = envelope.sign(&signer);
+        let parsed: SnsMessage = serde_json::from_str(&signed).unwrap();
+        validate_sns_message(&client, &parsed, TOPIC_ARN, Some(&public_pem))
+            .await
+            .expect("a locally signed notification must verify against the dev anchor");
+
+        // Same envelope, tampered payload → 403-class refusal.
+        let mut tampered: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        tampered["Message"] =
+            json!("{\"eventType\":\"Complaint\",\"complaint\":{\"complaintSubType\":\"abuse\"}}");
+        let tampered: SnsMessage = serde_json::from_value(tampered).unwrap();
+        assert!(matches!(
+            validate_sns_message(&client, &tampered, TOPIC_ARN, Some(&public_pem)).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // A different local key is refused.
+        let other = RsaPublicKey::from(
+            &RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap(),
+        )
+        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+        .unwrap();
+        let parsed: SnsMessage = serde_json::from_str(&signed).unwrap();
+        assert!(matches!(
+            validate_sns_message(&client, &parsed, TOPIC_ARN, Some(&other)).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // The topic allowlist still applies in dev (only the DOMAIN check
+        // changed): a foreign topic ARN is refused even with a good key.
+        let mut foreign: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        foreign["TopicArn"] = json!("arn:aws:sns:eu-central-1:999999999999:someone-else");
+        let foreign: SnsMessage = serde_json::from_value(foreign).unwrap();
+        assert!(matches!(
+            validate_sns_message(&client, &foreign, TOPIC_ARN, Some(&public_pem)).await,
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    /// FINDING-5 env wiring pin: the dev compose must ship a NON-EMPTY local
+    /// topic allow-list (the old empty default made every notification a
+    /// 503) and pass the dev signing anchor through.
+    #[test]
+    fn dev_compose_wires_the_sns_allowlist_and_signing_anchor() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let compose = std::fs::read_to_string(root.join("docker-compose.yml"))
+            .expect("docker-compose.yml must be readable");
+        assert!(
+            compose.contains(
+                "SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-arn:aws:sns:eu-central-1:000000000000:apexmail-dev-ses-events}"
+            ),
+            "the dev compose must default the SNS allow-list to a local ARN"
+        );
+        assert!(
+            compose.contains("SNS_DEV_SIGNING_KEY_PEM: ${SNS_DEV_SIGNING_KEY_PEM:-}"),
+            "the dev compose must pass the local signing anchor through"
+        );
+    }
+
+    /// Wiring pin: the handler must consult `SNS_DEV_SIGNING_KEY_PEM`
+    /// through [`dev_signing_key`] (and thereby the production gate) — the
+    /// defect class is "the knob exists but nothing reads it".
+    #[test]
+    fn handler_reads_the_dev_signing_key_through_the_production_gate() {
+        let source = include_str!("ses_notifications.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section present");
+        assert!(
+            source.contains("SNS_DEV_SIGNING_KEY_PEM"),
+            "the handler must read the documented dev anchor env var"
+        );
+        assert!(
+            source.contains("dev_signing_key(state.config.environment"),
+            "the env value must pass through the production gate"
+        );
+        assert!(
+            source.contains("dev_key.as_deref()"),
+            "the gated key must be threaded into signature validation"
+        );
     }
 
     #[test]

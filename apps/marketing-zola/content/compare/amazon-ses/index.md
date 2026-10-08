@@ -51,7 +51,7 @@ comparison_sections = [
   { title = "PRICING AT 100K/MO (verified 2026-07-29)", rows = [
     { feature = "Plan compared", apex = 'Pro: €89/mo (150,000 emails included, managed infrastructure)', comp = 'Pay-as-you-go: ~€9.20 (US$10)/100K emails (raw sending, no management included)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Pricing model distinction", apex = 'Managed email infrastructure: API, event storage, webhook delivery, support, analytics included', comp = 'Raw capacity billing: IaaS — pay per send, plus additional AWS costs (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
-    { feature = "Free tier", apex = '30,000 emails/month (no credit card, no time limit)', comp = '62,000 emails/month when sending from EC2 (first 12 months); 3,000/month otherwise<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
+    { feature = "Free tier", apex = '3,000 emails/month recurring + one-time 30,000-email launch allowance (no credit card)', comp = '62,000 emails/month when sending from EC2 (first 12 months); 3,000/month otherwise<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},
   { title = "AREAS WHERE AMAZON SES IS STRONGER", rows = [
     { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '€0.09 (US$0.10)/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },

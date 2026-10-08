@@ -37,15 +37,13 @@
           <label for="calc-volume" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">
             Monthly email volume
           </label>
-          <div class="flex items-center gap-4">
-            <input type="range" id="calc-volume-slider" name="volume_slider" min="0" max="10000000" step="1000" value="50000"
-                   class="input-range flex-1"
-                   aria-label="Monthly email volume slider" />
-            <input type="number" id="calc-volume" name="volume" min="0" max="100000000" step="1000" value="50000"
-                   class="input-text w-36 text-right"
-                   aria-label="Monthly email volume exact number" />
-          </div>
-          <div class="flex justify-between text-xs font-bold text-surface-400 mt-1.5" aria-hidden="true">
+          {# One authoritative volume control: the number input is what the
+             server reads. A disconnected range slider under no-JS would
+             silently ignore the dragged value. #}
+          <input type="number" id="calc-volume" name="volume" min="0" max="100000000" step="1000" value="50000"
+                 class="input-text w-44"
+                 aria-label="Monthly email volume" />
+          <div class="flex justify-between text-xs font-bold text-surface-400 mt-1.5 max-w-md" aria-hidden="true">
             <span>0</span><span>2M</span><span>4M</span><span>6M</span><span>8M</span><span>10M</span>
           </div>
         </div>
@@ -101,7 +99,7 @@
               <label class="billing-pill" for="calc-billing-monthly">
                 <input type="radio" id="calc-billing-monthly" name="billing_cycle" value="monthly" checked class="sr-only">Monthly</label>
               <label class="billing-pill" for="calc-billing-annual">
-                <input type="radio" id="calc-billing-annual" name="billing_cycle" value="annual" class="sr-only">Annual (2 months free)</label>
+                <input type="radio" id="calc-billing-annual" name="billing_cycle" value="annual" class="sr-only">Annual (10 monthly payments)</label>
             </div>
           </div>
         </div>

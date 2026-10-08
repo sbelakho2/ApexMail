@@ -490,6 +490,11 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
             "/web/admin/gdpr/:id/transition",
             post(form_admin_gdpr_transition),
         )
+        // F13: the /jobs surface's per-row controls. Retry re-queues a
+        // terminal (dead-lettered) job; cancel deletes an unclaimed pending
+        // one. Both call the SAME core the /v1/admin/jobs endpoints use.
+        .route("/web/admin/jobs/:id/retry", post(form_admin_job_retry))
+        .route("/web/admin/jobs/:id/cancel", post(form_admin_job_cancel))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             web_form_rejection_middleware,
@@ -8524,31 +8529,143 @@ async fn form_admin_operator_create(
             &state.config,
         );
     };
-    let result = sqlx::query(
-        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
-                            email_verified, mfa_enabled, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, '!invited-pending-activation', 'admin', 'invited', false, false,
-                 $5::jsonb, NOW(), NOW())",
-    )
-    // users.id is a UUID column (migration 052) — bind a UUID, not a text
-    // nanoid (the insert would fail with invalid uuid syntax).
-    .bind(Uuid::new_v4())
-    .bind(system_tenant)
-    .bind(&email)
-    .bind(if name.is_empty() { None } else { Some(name) })
-    .bind(json!({"invited_by": user.user_id.clone().unwrap_or_default()}))
-    .execute(&state.db)
+    // E-OPS (live dogfood 2026-10-08): the invited operator previously had
+    // an unusable hash, no verification token, and NO mail — nothing could
+    // ever complete the account. The invite now mints BOTH credentials'
+    // tokens (email verification + password setup), keeps the account
+    // `active` (login still refuses while `email_verified = false`, and the
+    // password-reset flow only serves active accounts), and queues the
+    // combined invitation email in the SAME transaction as the insert.
+    let operator_id = Uuid::new_v4();
+    let verification_token = apexmail_lib::id::generate_verification_token();
+    let verification_token_hash = crate::routes::helpers::hash_token(&verification_token);
+    let setup_token = apexmail_lib::id::generate_verification_token();
+    let setup_token_hash = crate::routes::helpers::hash_token(&setup_token);
+    let now = Utc::now();
+
+    let result: Result<(), crate::error::ApiError> = async {
+        let mut tx = state.db.begin().await?;
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, '!invited-pending-activation', 'admin', 'active', false, false,
+                     $5::jsonb, NOW(), NOW())",
+        )
+        // users.id is a UUID column (migration 052) — bind a UUID, not a text
+        // nanoid (the insert would fail with invalid uuid syntax).
+        .bind(operator_id)
+        .bind(system_tenant)
+        .bind(&email)
+        .bind(if name.is_empty() { None } else { Some(name) })
+        .bind(json!({
+            "invited_by": user.user_id.clone().unwrap_or_default(),
+            "verification_token_hash": verification_token_hash,
+            "verification_expires": (now + chrono::Duration::hours(24)).to_rfc3339(),
+            "password_reset_token_hash": setup_token_hash,
+            "password_reset_expires": (now + chrono::Duration::hours(1)).to_rfc3339(),
+            "password_reset_iat": now.to_rfc3339(),
+        }))
+        .execute(&mut *tx)
+        .await?;
+        crate::routes::auth::enqueue_operator_invite_email(
+            &mut tx,
+            &state.config.base_url,
+            &email,
+            &verification_token,
+            &setup_token,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
     .await;
     match result {
-        Ok(_) => redirect_success("Operator invited.", "/operators", &state.config),
+        Ok(()) => redirect_success(
+            &format!("Operator invited — verification and password-setup links sent to {email}."),
+            "/operators",
+            &state.config,
+        ),
         // FIX (outage-honesty audit #16): the storage failure rides the
         // single honest exit — error-logged, outage-counted, standard
         // temporary-unavailable flash — never a bespoke "try again" copy.
-        Err(error) => temporary_storage_failure(
-            &WebActionError::Database(error),
-            "/operators/new",
+        // A duplicate email is the one caller-actionable refusal.
+        Err(crate::error::ApiError::Conflict(message)) => {
+            redirect_error(&message, "/operators/new", &state.config)
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "operator invite failed");
+            temporary_storage_response("/operators/new", &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/jobs/:id/retry (F13) — the /jobs page's per-row retry.
+/// Zero-JS PRG: CSRF-checked, delegating to the SAME core the JSON
+/// `/v1/admin/jobs/:id/retry` endpoint uses, then flashing the outcome.
+async fn form_admin_job_retry(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = "/jobs";
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, back, &state.config);
+    }
+    let Ok(job_id) = Uuid::parse_str(&id) else {
+        return redirect_error("That job id is not valid.", back, &state.config);
+    };
+    match crate::routes::admin::jobs::retry_job_audited(&state, &user, job_id).await {
+        Ok(job) => redirect_success(
+            &format!("Job re-queued on the {} queue.", job.queue),
+            back,
             &state.config,
         ),
+        Err(crate::error::ApiError::Conflict(message)) => {
+            redirect_error(&message, back, &state.config)
+        }
+        Err(crate::error::ApiError::Validation(errors)) => {
+            redirect_error(&errors.join(" "), back, &state.config)
+        }
+        Err(error) => {
+            tracing::error!(error = %error, job_id = %id, "job retry failed");
+            temporary_storage_response(back, &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/jobs/:id/cancel (F13) — delete an unclaimed pending job.
+async fn form_admin_job_cancel(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = "/jobs";
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, back, &state.config);
+    }
+    let Ok(job_id) = Uuid::parse_str(&id) else {
+        return redirect_error("That job id is not valid.", back, &state.config);
+    };
+    match crate::routes::admin::jobs::cancel_job_audited(&state, &user, job_id).await {
+        Ok(job) => redirect_success(
+            &format!("Job cancelled on the {} queue.", job.queue),
+            back,
+            &state.config,
+        ),
+        Err(crate::error::ApiError::Conflict(message)) => {
+            redirect_error(&message, back, &state.config)
+        }
+        Err(crate::error::ApiError::Validation(errors)) => {
+            redirect_error(&errors.join(" "), back, &state.config)
+        }
+        Err(error) => {
+            tracing::error!(error = %error, job_id = %id, "job cancel failed");
+            temporary_storage_response(back, &state.config)
+        }
     }
 }
 
@@ -18580,6 +18697,8 @@ mod coverage_auth_admin_tests {
         .execute(&app.db)
         .await
         .expect("ensure system tenant");
+        // E-OPS: the invite queues its mail transactionally.
+        seed_system_sender(&app.db).await;
         let operator = AuthUser {
             tenant_id: "system".into(),
             user_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -18682,13 +18801,32 @@ mod coverage_auth_admin_tests {
         )
         .await;
         assert!(flash_text(&response, &app.config).contains("Operator invited"));
-        let (role, status): (String, String) =
-            sqlx::query_as("SELECT role, status FROM users WHERE email = $1")
-                .bind(&op_email)
-                .fetch_one(&app.db)
-                .await
-                .unwrap();
-        assert_eq!((role.as_str(), status.as_str()), ("admin", "invited"));
+        // E-OPS: the invite must be COMPLETABLE — an active (but
+        // unverified) operator with BOTH a verification token and a
+        // password-setup token, plus the invitation mail in the queue.
+        let (role, status, email_verified, metadata): (String, String, bool, serde_json::Value) =
+            sqlx::query_as(
+                "SELECT role, status, email_verified, metadata FROM users WHERE email = $1",
+            )
+            .bind(&op_email)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((role.as_str(), status.as_str()), ("admin", "active"));
+        assert!(!email_verified, "login must still require verification");
+        assert!(
+            metadata.get("verification_token_hash").is_some()
+                && metadata.get("password_reset_token_hash").is_some(),
+            "both credential tokens must be minted: {metadata}"
+        );
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE to_emails::text LIKE '%' || $1 || '%' AND subject = 'You have been invited to the ApexMail control plane'",
+        )
+        .bind(&op_email)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1, "the invitation email must be queued for delivery");
 
         // Alerts: ack by id, replay honesty, bulk with invalid/valid ids.
         let alert_id: String =
@@ -18959,6 +19097,241 @@ mod coverage_auth_admin_tests {
         )
         .await;
         assert!(flash_text(&response, &app.config).contains("Type"));
+    }
+
+    /// F13 (live dogfood 2026-10-08): the /jobs page's per-row controls are
+    /// real PRG forms — CSRF-checked, audited, and effectful against the
+    /// canonical queue_jobs store.
+    #[tokio::test]
+    async fn job_control_forms_retry_and_cancel_through_the_prg_flow() {
+        let Some(app) = coverage_support::state("web_job_controls").await else {
+            eprintln!(
+                "skipping job_control_forms_retry_and_cancel_through_the_prg_flow: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let tag = coverage_support::unique_tag("jobctl");
+        let seed = |status: &'static str| {
+            let pool = app.db.clone();
+            let queue = format!("web-jobs-{tag}-{status}");
+            async move {
+                let id = uuid::Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO queue_jobs (id, tenant_id, queue, payload, status, attempts, max_attempts, created_at, updated_at)
+                     VALUES ($1, $2, $3, '{}'::jsonb, $4, 3, 3, NOW(), NOW())",
+                )
+                .bind(id)
+                .bind(uuid::Uuid::new_v4())
+                .bind(&queue)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .expect("seed job");
+                id
+            }
+        };
+        let dead = seed("dead_letter").await;
+        let pending = seed("pending").await;
+        // A second dead-lettered row stays terminal for the refusal check —
+        // the first is retried to `pending` above and would cancel legally.
+        let still_dead = seed("dead_letter").await;
+
+        // Retry a dead-lettered job: 303 back to /jobs with the success flash.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_admin_job_retry(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(dead.to_string()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(location(&response), "/jobs");
+        assert!(
+            flash_text(&response, &app.config).contains("re-queued"),
+            "got {}",
+            flash_text(&response, &app.config)
+        );
+        let after: (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM queue_jobs WHERE id = $1")
+                .bind(dead)
+                .fetch_one(&app.db)
+                .await
+                .expect("retried row");
+        assert_eq!(after, ("pending".to_string(), 0));
+
+        // Cancel a pending job: the row is gone and the flash says so.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_admin_job_cancel(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(pending.to_string()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(flash_text(&response, &app.config).contains("cancelled"));
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM queue_jobs WHERE id = $1")
+            .bind(pending)
+            .fetch_one(&app.db)
+            .await
+            .expect("count");
+        assert_eq!(remaining, 0, "the cancelled row must be deleted");
+
+        // Refusals keep their named copy instead of a generic retry flash.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_admin_job_cancel(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(still_dead.to_string()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("only pending"),
+            "got {}",
+            flash_text(&response, &app.config)
+        );
+    }
+
+    /// F11 (live dogfood 2026-10-08): the `/tenants/new` form must render the
+    /// plan select bound to the ACTIVE billing catalog (DB -> loader ->
+    /// render), and a tenant created WITH a chosen plan must resolve that
+    /// plan's entitlements immediately at the leaf (the entitlement snapshot,
+    /// not just the tenants.plan column).
+    #[tokio::test]
+    async fn cp_tenant_create_binds_the_plan_select_and_applies_entitlements_immediately() {
+        let Some(app) = coverage_support::state("web_tenant_plan_leaf").await else {
+            eprintln!(
+                "skipping cp_tenant_create_binds_the_plan_select_and_applies_entitlements_immediately: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let tag = coverage_support::unique_tag("tpl");
+        let plan_name = format!("plan-{tag}");
+
+        // Deterministic catalog row: the builtin Business/scale feature set
+        // (so the leaf assertions are exact), a distinctive email limit, and
+        // a price below every accumulated test row so both the select and the
+        // handler's catalog order reach it first.
+        let features = serde_json::to_value(
+            billing_service::plans::builtin_plan_seed(Some("scale")).features,
+        )
+        .expect("serialize builtin scale features");
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, features, created_at, updated_at)
+             VALUES ($1, $2, $3, -1000000, 1234567, true, 1, $4, NOW(), NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan_name)
+        .bind(format!("Leaf Plan {tag}"))
+        .bind(&features)
+        .execute(&app.db)
+        .await
+        .expect("seed deterministic plan");
+
+        // 1. The page's loader -> render pipeline carries the plan as an
+        //    option (this is exactly what GET /tenants/new serves).
+        let operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let data = crate::routes::web::data::load_page_data(
+            &app,
+            "control-plane",
+            "/tenants/new",
+            None,
+            Some(&operator),
+        )
+        .await;
+        let loaded = data
+            .tenant_new
+            .as_ref()
+            .expect("the loader must bind the plan catalog");
+        assert!(!loaded.unavailable);
+        assert!(
+            loaded.plans.iter().any(|plan| plan.name == plan_name),
+            "the seeded plan must appear in the select: {:?}",
+            loaded.plans
+        );
+        let html = ui_foundation::axum_router::render_route_with_data(
+            "control-plane",
+            "/tenants/new",
+            None,
+            Some(app.config.csrf_secret.as_str()),
+            &[],
+            Some(&data),
+        )
+        .expect("the CP render must return the page");
+        assert!(
+            html.contains(&format!("value=\"{plan_name}\""))
+                && html.contains(&format!("Leaf Plan {tag}")),
+            "the rendered form must offer the catalog plan"
+        );
+
+        // 2. Creating WITH that plan resolves its entitlements immediately.
+        let tenant_name = format!("Leaf Tenant {tag}");
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("name", tenant_name.as_str()),
+                ("domain", &format!("{tag}.example.test")),
+                ("plan", plan_name.as_str()),
+            ],
+        );
+        let response = form_admin_tenant_create(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("created"),
+            "got {}",
+            flash_text(&response, &app.config)
+        );
+        let tenant_id: String = sqlx::query_scalar("SELECT id FROM tenants WHERE name = $1")
+            .bind(&tenant_name)
+            .fetch_one(&app.db)
+            .await
+            .expect("created tenant row");
+
+        let snapshot = crate::entitlements::snapshot(&app, &tenant_id)
+            .await
+            .expect("entitlement snapshot for the created tenant");
+        assert_eq!(snapshot.plan(), plan_name);
+        assert!(
+            snapshot.has_feature(billing_entitlements::FeatureKey::AuditLogs),
+            "the chosen plan's audit_logs entitlement must apply immediately"
+        );
+        assert!(
+            snapshot.has_feature(billing_entitlements::FeatureKey::CustomTrackingDomain),
+            "the chosen plan's custom_tracking_domain entitlement must apply immediately"
+        );
+        assert!(
+            snapshot.has_feature(billing_entitlements::FeatureKey::Sso),
+            "the chosen plan's sso entitlement must apply immediately"
+        );
+        let quota = billing_service::plans::get_quota_for_tenant(&app.db, &tenant_id)
+            .await
+            .expect("quota lookup")
+            .expect("quota row");
+        assert_eq!(
+            quota.emails_per_month, 1_234_567,
+            "the chosen plan's limit applies"
+        );
     }
 
     #[tokio::test]
@@ -23570,6 +23943,26 @@ mod residual_zero_tests {
                 Form(empty.clone()),
             ),
             "/tenants"
+        );
+        bounced!(
+            form_admin_job_retry(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                Path("some-job".into()),
+                headers.clone(),
+                Form(empty.clone()),
+            ),
+            "/jobs"
+        );
+        bounced!(
+            form_admin_job_cancel(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                Path("some-job".into()),
+                headers.clone(),
+                Form(empty.clone()),
+            ),
+            "/jobs"
         );
         bounced!(
             form_admin_tenant_resume(

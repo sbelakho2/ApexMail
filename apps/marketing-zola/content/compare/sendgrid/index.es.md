@@ -51,7 +51,7 @@ comparison_sections = [
     { feature = "Modo sandbox", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
   ]},
   { title = "PRECIOS", rows = [
-    { feature = "Nivel gratuito", apex = '<span class="text-brand-600 font-semibold">30.000 emails/mes</span>', comp = '<span class="text-surface-600">100 emails/día</span>', winner = "none" },
+    { feature = "Nivel gratuito", apex = '<span class="text-brand-600 font-semibold">3.000 emails/mes + asignación de lanzamiento única de 30.000</span>', comp = '<span class="text-surface-600">100 emails/día</span>', winner = "none" },
     { feature = "100K emails/mes", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials desde €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO incluido", apex = '<span class="text-brand-600 font-semibold">Planes Business y Enterprise</span>', comp = '<span class="text-surface-600">Incluido en Pro</span>', winner = "none" },
     { feature = "Revisión de despliegue personalizado", apex = '<span class="text-brand-600 font-semibold">Revisión Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }

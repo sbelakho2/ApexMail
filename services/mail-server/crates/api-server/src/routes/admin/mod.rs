@@ -39,6 +39,7 @@ pub mod gdpr;
 pub mod growth_analytics;
 pub mod inbox;
 pub mod insights;
+pub mod jobs;
 pub mod leads_discovery;
 pub mod mailboxes;
 pub mod operators;

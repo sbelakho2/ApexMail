@@ -341,6 +341,33 @@ SNS_ALLOWED_TOPIC_ARNS=<the TOPIC_ARN from step 2>
   block must pass it through:
   `SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-}`.
 
+### Exercising the path in development (no AWS)
+
+The dev compose defaults `SNS_ALLOWED_TOPIC_ARNS` to the local ARN
+`arn:aws:sns:eu-central-1:000000000000:apexmail-dev-ses-events` (override it
+in `.env`), so the handler no longer answers 503 unconditionally. A
+developer can then exercise the FULL signed path without AWS:
+
+1. `openssl genrsa -out sns-dev-key.pem 2048`
+2. Put the public key into `.env` as a single line with `\n` escapes:
+   `SNS_DEV_SIGNING_KEY_PEM=$(openssl rsa -in sns-dev-key.pem -pubout | awk '{printf "%s\\n", $0}')`
+3. Build the SNS string-to-sign (Message/MessageId/Timestamp/TopicArn/Type),
+   sign it with `sns-dev-key.pem` (SHA-256 for `SignatureVersion: 2`) and
+   POST the JSON envelope to `/v1/ses/notifications` with the dev `TopicArn`.
+
+`SNS_DEV_SIGNING_KEY_PEM` is **ignored in production** (logged as an error;
+the AWS-only `SigningCertURL` allowlist + fetch stay authoritative). The
+topic allow-list and the timestamp-freshness gate apply in dev too.
+
+**Genuinely unreachable in dev (with proof):** an *authoritative* ARF/FBL
+complaint cannot be produced locally — the FBL registry validates the
+source by PTR/FCrDNS against a registered provider and rejects loopback
+(`complaint_events` records `non-authoritative source 127.0.0.1; claimed
+message_id=` for a local injector). Exercising that arm requires a
+registered FBL mailbox provider with reverse DNS, which no local stack can
+fabricate; the self-hosted VERP bounce path covers the authoritative
+suppression behavior instead (mail-plane dogfood Flow 5C).
+
 **What breaks without it.** With no configuration-set event destination
 pointing at the topic (or with `SES_CONFIGURATION_SET` left empty — the
 compose default), SES publishes nothing and the

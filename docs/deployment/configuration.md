@@ -175,7 +175,8 @@ SES, dedicated IP and domain-signing configuration.
 | `SES_IP_POOL_PREFIX` | `apexmail` | — |
 | `SES_DEFAULT_WARMUP_DAYS` | `14` | — |
 | `SES_CONFIGURATION_SET` | `(empty)` | — |
-| `SNS_ALLOWED_TOPIC_ARNS` | `(empty)` | — |
+| `SNS_ALLOWED_TOPIC_ARNS` | dev compose: a local dev ARN | SNS topic allow-list for `POST /v1/ses/notifications`; every notification is 503 while empty. See `deploy/DEPLOYMENT.md` § "Exercising the path in development". |
+| `SNS_DEV_SIGNING_KEY_PEM` | `(empty)` | **Dev-only** local SNS signing anchor (RSA public key PEM, `\n`-escaped); ignored in production. |
 | `SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP` | `false` | — |
 | `HETZNER_API_TOKEN` | `***` | Your Hetzner API token |
 | `HETZNER_DEFAULT_LOCATION` | `fsn1` | — |

@@ -1800,7 +1800,7 @@ async fn revoke_user_sessions(
     Ok(effective)
 }
 
-async fn enqueue_verification_email(
+pub(crate) async fn enqueue_verification_email(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     base_url: &str,
     email: &str,
@@ -1834,6 +1834,63 @@ async fn enqueue_verification_email(
         &html_body,
         &text_body,
         vec!["system".into(), "verification".into()],
+        crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Operator invitation email: BOTH credentials a created operator needs in
+/// one message — the email-verification link (proves mailbox ownership)
+/// and the password-setup link (the operator was created without a usable
+/// password). Dogfood 2026-10-08 E-OPS: operator creation wrote no mail at
+/// all, so a created operator could never complete login; this reuses the
+/// same `queue_system_email_in_transaction` pipeline as every other system
+/// mail, in the caller's transaction.
+pub(crate) async fn enqueue_operator_invite_email(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    base_url: &str,
+    email: &str,
+    verification_token: &str,
+    password_setup_token: &str,
+) -> Result<(), ApiError> {
+    let verification_link =
+        build_action_link(base_url, "/v1/auth/verify-email", email, verification_token);
+    let setup_link = format!(
+        "{}/reset-password?token={}&email={}",
+        base_url.trim_end_matches('/'),
+        urlencode_component(password_setup_token),
+        urlencode_component(email),
+    );
+    let safe_email = html_escape(email);
+    let safe_verification = html_escape(&verification_link);
+    let safe_setup = html_escape(&setup_link);
+    let html_body = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><title>You have been invited — ApexMail</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Your ApexMail Operator Invitation</h2>
+<p>An ApexMail operator invited <strong>{safe_email}</strong> to the control plane. Two steps complete the account:</p>
+<p><strong>1. Set your password</strong></p>
+<p><a href="{safe_setup}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Set password</a></p>
+<p style="font-size:13px;color:#71717a">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>
+<p><strong>2. Confirm this email address</strong></p>
+<p><a href="{safe_verification}" style="display:inline-block;padding:12px 28px;background:#09090b;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Verify email</a></p>
+<p style="font-size:13px;color:#71717a">This link expires in 24 hours. Control-plane access also requires MFA enrollment at first sign-in.</p>
+<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
+<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999;text-decoration:none">apexmail.ee</a></p>
+</body></html>"#
+    );
+    let text_body = format!(
+        "Your ApexMail Operator Invitation\n\nAn ApexMail operator invited {email} to the control plane.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nControl-plane access also requires MFA enrollment at first sign-in.\n\nApexMail \u{2014} https://apexmail.ee"
+    );
+
+    queue_system_email_in_transaction(
+        tx,
+        email,
+        "You have been invited to the ApexMail control plane",
+        &html_body,
+        &text_body,
+        vec!["system".into(), "operator-invite".into()],
         crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
     )
     .await

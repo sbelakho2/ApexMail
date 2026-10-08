@@ -89,7 +89,7 @@ API calls: first 100K free/month, then €0.10/1K.
 
 ## Annual Billing
 
-Annual plans are billed at 10× monthly price (2 months free; ~17% discount).
+Annual plans are billed at 10× monthly price (10 monthly payments; ~17% discount).
 
 ## Enterprise CTA
 

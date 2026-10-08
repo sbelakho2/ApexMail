@@ -388,6 +388,25 @@ fn parse_duration_hours(key: &str, val: &str) -> Result<Duration, ConfigError> {
     }
 }
 
+/// Client-IP trust list for reverse-proxy headers (`X-Forwarded-For` /
+/// `X-Real-IP`).
+///
+/// The documented api-server variable is `TRUSTED_PROXIES`
+/// (`docs/deployment/configuration.md` § API Server, `.env.example`); the
+/// legacy `DDOS_TRUSTED_PROXIES` name is accepted as a fallback so a
+/// deployment that only sets the old name still gets XFF trust instead of
+/// silently bucketing every client on the proxy address (dogfood 2026-10-08
+/// D-5: the base compose wired only the legacy name while the code read
+/// `TRUSTED_PROXIES`, so forwarded headers were ignored). A non-empty
+/// `TRUSTED_PROXIES` always wins; empty/whitespace is treated as unset.
+fn trusted_proxies_from_env() -> Vec<String> {
+    let primary = parse_csv(&env_or("TRUSTED_PROXIES", ""));
+    if !primary.is_empty() {
+        return primary;
+    }
+    parse_csv(&env_or("DDOS_TRUSTED_PROXIES", ""))
+}
+
 fn parse_csv(val: &str) -> Vec<String> {
     let items: Vec<String> = val
         .split(',')
@@ -1004,7 +1023,7 @@ impl Config {
             max_inflight_requests,
 
             cors_origins,
-            trusted_proxies: parse_csv(&env_or("TRUSTED_PROXIES", "")),
+            trusted_proxies: trusted_proxies_from_env(),
 
             ui_web_hosts: parse_csv(&env_or("UI_WEB_HOSTS", "app.apexmail.ee,127.0.0.1")),
             ui_control_plane_hosts: parse_csv(&env_or(
@@ -1886,6 +1905,7 @@ mod adversarial_tests {
         "RATE_LIMIT_WINDOW_MS",
         "MAX_INFLIGHT_REQUESTS",
         "TRUSTED_PROXIES",
+        "DDOS_TRUSTED_PROXIES",
         "UI_WEB_HOSTS",
         "UI_CONTROL_PLANE_HOSTS",
         "UI_MARKETING_HOSTS",
@@ -2047,6 +2067,39 @@ mod adversarial_tests {
     }
 
     // ── pure helpers ────────────────────────────────────────────
+
+    /// D-5 (live dogfood 2026-10-06): the base compose wired only the legacy
+    /// `DDOS_TRUSTED_PROXIES` name while the api-server reads
+    /// `TRUSTED_PROXIES`, so forwarded headers were silently untrusted.
+    /// Both names must resolve to the same trust list.
+    #[test]
+    fn trusted_proxies_accept_the_documented_and_legacy_names() {
+        let sandbox = EnvSandbox::new();
+
+        // Neither set → never trust forwarded headers.
+        assert!(trusted_proxies_from_env().is_empty());
+
+        // Only the legacy name set → honored (fail-before: this was empty).
+        sandbox.set("DDOS_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.5");
+        assert_eq!(
+            trusted_proxies_from_env(),
+            vec!["10.0.0.0/8".to_string(), "192.168.1.5".to_string()]
+        );
+
+        // The documented name wins when both are present.
+        sandbox.set("TRUSTED_PROXIES", "172.18.0.0/16");
+        assert_eq!(
+            trusted_proxies_from_env(),
+            vec!["172.18.0.0/16".to_string()]
+        );
+
+        // Whitespace-only primary is unset, not an empty override.
+        sandbox.set("TRUSTED_PROXIES", "   ");
+        assert_eq!(
+            trusted_proxies_from_env(),
+            vec!["10.0.0.0/8".to_string(), "192.168.1.5".to_string()]
+        );
+    }
 
     #[test]
     fn adversarial_config_parsers_and_validators() {
