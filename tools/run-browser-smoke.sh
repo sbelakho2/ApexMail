@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Browser smoke lane runner (browser_smoke.py).
+#
+# Usage against the compose stack (the api-server answers on 127.0.0.1:8080;
+# the lane's own default of http://127.0.0.1:3000 is the legacy dev port):
+#   BROWSER_TEST_BASE_URL=http://127.0.0.1:8080 tools/run-browser-smoke.sh
+#   BROWSER_TEST_BASE_URL=http://127.0.0.1:8080 tools/run-browser-smoke.sh --group control-plane
+# Authenticated mode (optional): BROWSER_TEST_WEB_COOKIE / BROWSER_TEST_CP_COOKIE
+# carry session cookies and switch the gated checks from the login-gate
+# assertions to the real console content.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

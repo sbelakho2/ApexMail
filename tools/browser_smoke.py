@@ -335,7 +335,9 @@ def parse_args() -> argparse.Namespace:
         default=_env_or_default(DEFAULT_BASE_URL_ENV, DEFAULT_BASE_URL),
         help=(
             f"Base URL for the live Rust-served app "
-            f"(default: {DEFAULT_BASE_URL}, env: {DEFAULT_BASE_URL_ENV})."
+            f"(default: {DEFAULT_BASE_URL}, env: {DEFAULT_BASE_URL_ENV}). "
+            "Against the compose stack use http://127.0.0.1:8080 — the default "
+            "3000 is the legacy dev port and nothing answers there."
         ),
     )
     parser.add_argument(

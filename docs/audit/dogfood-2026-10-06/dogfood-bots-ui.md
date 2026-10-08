@@ -559,6 +559,11 @@ markup is unchanged.
 * **Live-verified (pre-CSP-fix image)**: every state and action listed above;
   the pixels of the affected pages were unstyled, which IS the F15 evidence
   (screenshots under `tools/contrast-audit/reports/cap-wave-live/`).
+* **Browser smoke lane docs**: the lane's stack usage is now documented —
+  `tools/README.md` (both bullets) and the `run-browser-smoke.sh` header state
+  `BROWSER_TEST_BASE_URL=http://127.0.0.1:8080` against the compose stack (the
+  default `http://127.0.0.1:3000` is the legacy dev port), and the
+  `--base-url` help says so. Re-verified with that exact command: **22/22 PASS**.
 * **Closed on the final image**: the styled re-capture (both themes ×
   320/768/1280) ran over the three pages after the rebuild landed; F15's 320 px
   overflow is gone with the sheet applied (styled matrix under
@@ -581,15 +586,22 @@ markup is unchanged.
   8-column table extends past the viewport *inside its `.apex-table-wrap`
   scroll container* (doc overflow 0) — the intended wide-table pattern, noted
   so the collector's `elements-past-viewport` count is not misread.
-* **F19 (P1 a11y, found by this re-capture, landed)**: the live tracking page
-  had **no `h1`** — the api-server handler composed the bare panel, while the
-  fixture/golden used the shared page wrapper (headings started at the shell's
-  `H3`). The handler now renders through
-  `ui_foundation::tracking_domain::web_domain_tracking_page`, so live and the
-  fixture/golden cannot drift again. Pinned by the per-state
-  `exactly-one-h1` assertions in
-  `tracking_domain_states_render_their_real_surfaces`; live h1 re-check follows
-  the next image build (the fix postdates `e14e12bd9c47`).
+* **F19 (P1 a11y, found by this re-capture, landed, LIVE-VERIFIED)** — the
+  live tracking page had **no `h1`**: the api-server handler composed the bare
+  panel while the fixture/golden used the shared page wrapper (headings started
+  at the shell's `H3`). The handler now renders through
+  `ui_foundation::tracking_domain::web_domain_tracking_page`. Pinned by the
+  per-state `exactly-one-h1` assertions in
+  `tracking_domain_states_render_their_real_surfaces`. **Live re-check on the
+  F19 image** (`sha256:d53e1075d3154f34ebc2d528259269e99966b9fd234c9b0484d05a13a0509377`,
+  started 2026-10-08T04:27:46Z): all six states (not-verified, not-entitled,
+  configure, pending, verified, failed) render exactly one `h1`
+  ("Custom tracking domain") and 0 document overflow. Closed.
+  Observation (P3, not changed): the tracking page's document `<title>` still
+  reads "Domain Detail — ApexMail" because `route_document_title` matches the
+  generic `/domains/` arm; the fixture/golden share that title, so there is no
+  live/fixture drift — a future polish could add a `/domains/{id}/tracking`
+  arm ("Tracking Domain — ApexMail").
 
 ### Gates over the new fixtures (all green)
 
