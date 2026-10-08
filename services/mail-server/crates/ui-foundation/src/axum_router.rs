@@ -2394,8 +2394,13 @@ fn render_control_plane(
         "/discovery" => data_backed_inner("/discovery", data)
             .unwrap_or_else(leptos_views::control_plane_discovery_page),
         "/jobs" => match data.and_then(|d| d.jobs.as_ref()) {
-            Some(jobs) => leptos_views::control_plane_jobs_page_with_data(Some(jobs)),
-            None => {
+            // Controls render only from a READABLE store; an outage falls
+            // through to the generic unavailable list (the same honest
+            // outage copy every other CP nav page renders).
+            Some(jobs) if !jobs.unavailable => {
+                leptos_views::control_plane_jobs_page_with_data(Some(jobs))
+            }
+            _ => {
                 data_backed_inner("/jobs", data).unwrap_or_else(leptos_views::control_plane_jobs_page)
             }
         },

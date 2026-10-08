@@ -19265,6 +19265,14 @@ mod coverage_auth_admin_tests {
             "the seeded plan must appear in the select: {:?}",
             loaded.plans
         );
+        // F10 rides along: with the session identity present, the SAME
+        // render path must carry the real plan label into the CP header.
+        let mut data = data;
+        data.session_identity = Some(ui_foundation::axum_router::SessionIdentity {
+            display_name: "CP Operator".into(),
+            email: "cp-operator@dogfood.test".into(),
+            plan_label: Some("Enterprise Cloud Plan".into()),
+        });
         let html = ui_foundation::axum_router::render_route_with_data(
             "control-plane",
             "/tenants/new",
@@ -19279,6 +19287,11 @@ mod coverage_auth_admin_tests {
                 && html.contains(&format!("Leaf Plan {tag}")),
             "the rendered form must offer the catalog plan"
         );
+        assert!(
+            html.contains("data-plan-label") && html.contains("Enterprise Cloud Plan"),
+            "the CP page must carry the session's real plan label (F10)"
+        );
+        assert!(html.contains("cp-operator@dogfood.test"));
 
         // 2. Creating WITH that plan resolves its entitlements immediately.
         let tenant_name = format!("Leaf Tenant {tag}");

@@ -221,9 +221,14 @@ async fn create_operator(
             ApiError::Internal("Failed to create operator".into())
         });
     }
-    // FAIL-BEFORE (E-OPS): the pre-fix create queued no mail.
-    if false {
-        let error = ApiError::Internal("pre-fix: no mail".into());
+    if let Err(error) = crate::routes::auth::enqueue_verification_email(
+        &mut tx,
+        &state.config.base_url,
+        &email,
+        &verification_token,
+    )
+    .await
+    {
         let _ = tx.rollback().await;
         tracing::error!(
             operator_id = %id,
