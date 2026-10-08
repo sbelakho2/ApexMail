@@ -888,7 +888,27 @@ async fn security_headers(
     }
     headers.insert("Cache-Control", static_asset_cache_control(&path));
     if !headers.contains_key("Content-Security-Policy") {
-        headers.insert("Content-Security-Policy", HDR_CSP.clone());
+        // HTML responses need the BROWSER policy: the hand-written
+        // data-detail handlers (contact/domain/list/campaign detail, the
+        // domain tracking page, the message timeline) and the SSR fallbacks
+        // build their documents without setting their own CSP, and the
+        // minimal API policy (`default-src 'none'`) has no `style-src`, so
+        // the browser blocked globals.css and those pages rendered COMPLETELY
+        // UNSTYLED (dogfood 2026-10-08: body font computed "Times", the
+        // message-timeline table overflowed 349 px at 320 px). JSON/API
+        // responses keep the minimal policy.
+        let is_html = headers
+            .get("Content-Type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"));
+        headers.insert(
+            "Content-Security-Policy",
+            if is_html {
+                browser_csp_header()
+            } else {
+                HDR_CSP.clone()
+            },
+        );
     }
     headers.insert("Permissions-Policy", HDR_PERMISSIONS_POLICY.clone());
     resp
@@ -4648,6 +4668,55 @@ mod tests {
             response.headers().get("Content-Security-Policy").unwrap(),
             "default-src 'none'; frame-ancestors 'none'"
         );
+    }
+
+    /// HTML documents built OUTSIDE the ui-foundation render pipeline (the
+    /// hand-written data-detail handlers and the SSR fallbacks) must still
+    /// carry the browser policy: without `style-src` the browser blocks
+    /// globals.css and the page renders completely unstyled (dogfood
+    /// 2026-10-08 — the message-timeline page computed body font "Times" and
+    /// its unstyled table overflowed 349 px at 320 px). This pins the
+    /// middleware's content-type dispatch on the no-auth 404 fallback.
+    #[tokio::test]
+    async fn html_fallback_pages_carry_the_browser_csp() {
+        let app = test_app().await;
+
+        let response = app
+            .oneshot(
+                Request::get("/no-such-page-html-csp-pin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let csp = response
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if content_type.starts_with("text/html") {
+            assert!(
+                csp.contains("style-src 'self'"),
+                "an HTML fallback page must carry the browser CSP so globals.css loads; got {csp:?}",
+            );
+            assert!(
+                csp.contains("script-src 'none'") || csp.contains("script-src 'nonce-"),
+                "the browser CSP must keep scripts locked down; got {csp:?}",
+            );
+        } else {
+            assert_eq!(
+                csp, "default-src 'none'; frame-ancestors 'none'",
+                "non-HTML responses keep the minimal API policy",
+            );
+        }
     }
 
     #[tokio::test]

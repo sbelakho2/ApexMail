@@ -425,9 +425,21 @@ pub fn is_builtin_plan_name(plan_name: &str) -> bool {
 // Database helpers
 // ---------------------------------------------------------------------------
 
-/// ON CONFLICT clause shape used by [`upsert_plan`] (Fix I1): re-seeding
-/// preserves operator-configured prices/limits/features via COALESCE toward
-/// the existing row; only missing plans receive the seed defaults.
+/// ON CONFLICT clause shape used by [`upsert_plan`] (Fix I1 + live P1).
+///
+/// Fix I1: prices/limits and the operator-tunable non-boolean fields inside
+/// `features` (the numeric capacity limits and the support level) keep
+/// COALESCE-toward-the-existing-row semantics, so re-seeding never reverts
+/// admin-configured values.
+///
+/// Live P1 (capability flips): the BOOLEAN capability flags are catalog
+/// facts — the grant list a plan sells — not operator preferences. Every
+/// [`billing_entitlements::FeatureKey`] value in the seed is overlaid onto
+/// the existing `features` object (`$11` names exactly those keys), so an
+/// environment whose rows predate a capability wave gains the new grants on
+/// re-seed instead of keeping them false forever (which made the new
+/// capabilities ungrantable by plan). A NULL/legacy features column takes
+/// the whole seed.
 const SEED_PLAN_UPSERT_SQL: &str = r#"
         INSERT INTO plans (
             id, name, display_name, description,
@@ -446,7 +458,17 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
             price_yearly  = COALESCE(plans.price_yearly, EXCLUDED.price_yearly),
             email_limit   = COALESCE(plans.email_limit, EXCLUDED.email_limit),
             api_call_limit= COALESCE(plans.api_call_limit, EXCLUDED.api_call_limit),
-            features      = COALESCE(plans.features, EXCLUDED.features),
+            features      = CASE
+                WHEN plans.features IS NULL THEN EXCLUDED.features
+                ELSE plans.features || COALESCE(
+                    (
+                        SELECT jsonb_object_agg(flag.key, flag.value)
+                        FROM jsonb_each(EXCLUDED.features) AS flag(key, value)
+                        WHERE flag.key = ANY($11)
+                    ),
+                    '{}'::jsonb
+                )
+            END,
             sort_order    = EXCLUDED.sort_order,
             updated_at    = $10
         RETURNING
@@ -456,12 +478,30 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
             is_active, sort_order, created_at, updated_at
         "#;
 
+/// The `PlanFeatures` boolean keys whose value is a catalog-owned capability
+/// fact: every [`billing_entitlements::FeatureKey`] field name. Bound as
+/// `$11` of [`SEED_PLAN_UPSERT_SQL`] so the seed overlays exactly the
+/// capability flags (and nothing else) onto an existing row's features.
+fn capability_flag_keys() -> Vec<String> {
+    billing_entitlements::FeatureKey::ALL
+        .iter()
+        .map(|key| key.field_name().to_string())
+        .collect()
+}
+
 /// Upsert a plan seed into the database.
 ///
-/// Fix I1 — seeding must never clobber prices, limits, or features an
-/// operator has already configured (e.g. a custom Enterprise price set via
-/// the admin PATCH route). Existing values win; only missing plans are
-/// inserted with the seed defaults.
+/// Fix I1 — seeding must never clobber prices, limits, or numeric capacity
+/// settings an operator has already configured (e.g. a custom Enterprise
+/// price set via the admin PATCH route): existing values win for those
+/// columns.
+///
+/// Live P1 — capability flags DO sync: the boolean flags are catalog facts,
+/// so every [`billing_entitlements::FeatureKey`] field is overlaid from the
+/// seed onto the existing `features` JSON. An environment that predates a
+/// capability wave therefore converges on re-seed (a plan that is sold must
+/// grant what the canonical seed grants; per-tenant exceptions belong in
+/// `feature_flag_overrides`). Only missing plans are inserted whole.
 pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::Error> {
     let features_json =
         serde_json::to_value(&seed.features).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
@@ -478,6 +518,7 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
         .bind(&features_json)
         .bind(seed.sort_order)
         .bind(now)
+        .bind(capability_flag_keys())
         .fetch_one(pool)
         .await?;
 
@@ -547,8 +588,11 @@ pub struct PlanReconcileReport {
 ///
 /// This pass:
 /// 1. upserts every catalog plan, FORCING the catalog values (prices,
-///    limits, features, retention/team through features, display name,
-///    description, sort order, `is_active = true`);
+///    limits, display name, description, sort order, `is_active = true`,
+///    and the whole `features` object — retention/team limits included, and
+///    every capability boolean, so a row that predates a capability wave
+///    converges its grant list; the live P1 is pinned by
+///    `reconcile_repairs_drifted_capability_flags`);
 /// 2. deactivates every active row whose name is not a catalog plan.
 ///
 /// Stripe price-id columns are preserved. All SQL runs in ONE transaction,
@@ -1288,14 +1332,13 @@ mod tests {
 
     #[test]
     fn seed_upsert_sql_preserves_configured_plan_values() {
-        // The seed SQL must COALESCE toward the existing row so re-seeding
-        // never reverts admin-configured prices/limits/features.
+        // Fix I1: the seed SQL must COALESCE toward the existing row for
+        // prices/limits so re-seeding never reverts admin-configured values.
         for column in [
             "price_monthly",
             "price_yearly",
             "email_limit",
             "api_call_limit",
-            "features",
         ] {
             let preserve = format!("COALESCE(plans.{column}, EXCLUDED.{column})");
             assert!(
@@ -1303,6 +1346,27 @@ mod tests {
                 "seed upsert must preserve plans.{column} (expected `{preserve}`)"
             );
         }
+        // Live P1: capability BOOLEANS are catalog facts and ARE overlaid
+        // from the seed, so an environment predating a capability wave gains
+        // the new grants instead of keeping them false forever. The overlay
+        // is exactly the $11 FeatureKey list; everything else in the
+        // existing features object (operator numerics, support level) stays.
+        // A NULL/legacy features column takes the whole seed.
+        for fragment in [
+            "WHEN plans.features IS NULL THEN EXCLUDED.features",
+            "plans.features || COALESCE(",
+            "jsonb_each(EXCLUDED.features)",
+            "flag.key = ANY($11)",
+        ] {
+            assert!(
+                SEED_PLAN_UPSERT_SQL.contains(fragment),
+                "seed upsert must merge capability flags (expected `{fragment}`)"
+            );
+        }
+        assert!(
+            !SEED_PLAN_UPSERT_SQL.contains("COALESCE(plans.features, EXCLUDED.features)"),
+            "features must no longer be preserved wholesale — capability flags sync"
+        );
     }
 
     #[test]
@@ -1887,6 +1951,83 @@ mod coverage_adversarial {
                     .await
                     .expect("rows");
             assert_eq!(rows, 1);
+        }
+    );
+
+    // Live P1 (capability waves) — the SEED path must converge capability
+    // flags too: an existing row from an environment seeded before a
+    // capability wave carries every flag false; `upsert_plan` with the
+    // canonical seed overlays the `FeatureKey` booleans while the
+    // operator-configured price/limit/seat settings survive (Fix I1).
+    env_test!(
+        seed_upsert_syncs_capability_flags_without_clobbering_operator_values,
+        |env| {
+            // The stale live row: a full PlanFeatures JSON (a partial object
+            // is corruption by contract), every capability flag false, plus
+            // an operator-tuned seat cap and admin-set price/limits.
+            let mut stale_features =
+                serde_json::to_value(PlanFeatures::default()).expect("PlanFeatures serializes");
+            stale_features["max_team_members"] = serde_json::json!(77);
+            sqlx::query(
+                "INSERT INTO plans (id, name, display_name, description, price_monthly,
+                                    price_yearly, email_limit, api_call_limit, features,
+                                    is_active, sort_order, created_at, updated_at)
+                 VALUES ('pln_growth_stale', 'growth', 'Growth', 'pre-capability row',
+                         1234, 12345, 7, 8, $1, true, 3, NOW(), NOW())",
+            )
+            .bind(&stale_features)
+            .execute(&env.pool)
+            .await
+            .expect("seed stale pre-capability row");
+
+            let seed = builtin_plan_seed(Some("growth"));
+            let plan = upsert_plan(&env.pool, &seed).await.expect("seed upsert");
+
+            // The capability flags the live environment reported false must
+            // converge to the canonical seed on re-seed.
+            for (flag, expected) in [
+                ("audit_logs", seed.features.audit_logs),
+                ("ab_testing", seed.features.ab_testing),
+                ("time_travel_debugging", seed.features.time_travel_debugging),
+                (
+                    "custom_tracking_domain",
+                    seed.features.custom_tracking_domain,
+                ),
+                ("custom_retention", seed.features.custom_retention),
+            ] {
+                assert!(expected, "the growth seed must grant `{flag}`");
+                let stored: bool = sqlx::query_scalar(
+                    "SELECT (features->>$1)::bool FROM plans WHERE name = 'growth'",
+                )
+                .bind(flag)
+                .fetch_one(&env.pool)
+                .await
+                .expect("read stored flag");
+                assert!(stored, "re-seed must sync the capability flag `{flag}`");
+            }
+
+            // Fix I1 still holds: operator-configured values survive.
+            assert_eq!(plan.features.max_team_members, 77, "seat cap preserved");
+            assert_eq!(plan.price_monthly, 1234, "admin price preserved");
+            assert_eq!(plan.email_limit, 7, "admin limit preserved");
+            let stored_seats: i32 = sqlx::query_scalar(
+                "SELECT (features->>'max_team_members')::int FROM plans WHERE name = 'growth'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("read stored seats");
+            assert_eq!(stored_seats, 77, "numeric features survive the merge");
+
+            // Idempotent: a second seed pass changes nothing.
+            let again = upsert_plan(&env.pool, &seed).await.expect("re-seed");
+            assert_eq!(again.features.max_team_members, 77);
+            let stored_json: serde_json::Value =
+                sqlx::query_scalar("SELECT features FROM plans WHERE name = 'growth'")
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("read features");
+            assert_eq!(stored_json["ab_testing"], serde_json::json!(true));
+            assert_eq!(stored_json["max_team_members"], serde_json::json!(77));
         }
     );
 

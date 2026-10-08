@@ -68,6 +68,58 @@ async fn seed_tenant(pool: &PgPool, id: &str) {
     .expect("seed tenant");
 }
 
+/// Capability wave 1 (plan entitlement) fixture: the HTTP template-approval
+/// and sub-account routes gate on the owning tenant's entitlement snapshot
+/// (`billing_service::plans::get_entitlement_snapshot`). Service-level tests
+/// bypass the route gate by construction; route tests need a tenant whose
+/// plan actually sells the capabilities. Mirrors the wave-1 unit fixture
+/// (`routes.rs::seed_capability_plan` + `seed_capability_tenant`): a
+/// dedicated plan row carrying both flags, then a tenant on that plan.
+const ENTITLED_PLAN: &str = "adv-entitled";
+
+async fn seed_entitled_plan(pool: &PgPool) {
+    use billing_service::plans::PlanSeed;
+    use billing_service::types::PlanFeatures;
+    let seed = PlanSeed {
+        name: ENTITLED_PLAN,
+        display_name: "Adversarial Entitled",
+        description: "wave-1 entitlement fixture",
+        price_monthly: 0,
+        price_yearly: 0,
+        email_limit: 1_000_000,
+        api_call_limit: 1_000_000,
+        sort_order: 999,
+        features: PlanFeatures {
+            api_access: true,
+            template_approval_workflow: true,
+            subaccounts: true,
+            max_subaccounts: 100,
+            ..PlanFeatures::default()
+        },
+    };
+    billing_service::plans::upsert_plan(pool, &seed)
+        .await
+        .expect("seed entitled plan");
+}
+
+/// A NEW tenant on [`ENTITLED_PLAN`], distinct from [`seed_tenant`]'s free
+/// fixture tenants so a non-entitled refusal arm can use `free` alongside.
+async fn seed_entitled_tenant(pool: &PgPool) -> String {
+    seed_entitled_plan(pool).await;
+    let id = t26();
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) \
+         VALUES ($1, $2, $1, $3, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+    )
+    .bind(&id)
+    .bind(format!("t {id}"))
+    .bind(ENTITLED_PLAN)
+    .execute(pool)
+    .await
+    .expect("seed entitled tenant");
+    id
+}
+
 fn ok<T: serde::Serialize + std::fmt::Debug>(
     result: Result<enterprise::types::ApiResult<T>, String>,
 ) -> T {
@@ -1628,8 +1680,10 @@ db_test!(
     routes_sub_accounts_templates_qbr_and_whitelabel_surface,
     pool,
     {
-        let tenant = t26();
-        seed_tenant(&pool, &tenant).await;
+        // Wave-1 gate: sub-account CRUD and template approval resolve the
+        // owning tenant's plan entitlement, so the route fixture tenant is
+        // on the entitled plan (the free-plan refusal is pinned below).
+        let tenant = seed_entitled_tenant(&pool).await;
         let (app, token) = build_router(&pool, &tenant).await;
 
         // Sub-account create → get → list → stats → api key → revoke.
@@ -1954,6 +2008,40 @@ db_test!(
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+
+        // The wave-1 gate itself stays covered: a FREE-plan tenant is refused
+        // 403 naming the capability (the entitled fixture above is what admits
+        // the flows — the gate is the plan flag, not a weakened check).
+        let free_tenant = t26();
+        seed_tenant(&pool, &free_tenant).await;
+        let (_, free_token) = build_router(&pool, &free_tenant).await;
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/sub-accounts",
+            Some(&free_token),
+            Some(serde_json::json!({"parent_id": free_tenant, "name": "denied"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(error.contains("subaccounts"), "{json}");
+        assert!(error.contains("free"), "{json}");
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/templates/submit",
+            Some(&free_token),
+            Some(serde_json::json!({
+                "tenant_id": free_tenant, "name": "denied", "subject": "s",
+                "html_content": "<p>x</p>", "submitted_by": "author"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(error.contains("template_approval_workflow"), "{json}");
+        assert!(error.contains("free"), "{json}");
     }
 );
 

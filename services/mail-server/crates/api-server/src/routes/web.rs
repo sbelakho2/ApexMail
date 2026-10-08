@@ -59,6 +59,12 @@ use uuid::Uuid;
 use ui_foundation::flash::{
     flash_clear_cookie, flash_set_cookie, verify_confirmation, FlashMessage, FLASH_COOKIE_NAME,
 };
+// The tracking-domain panel lives in the shared views (2026-10-08 coverage
+// gap): the router renders it for the manifest/fixture/golden sweep, the
+// api-server composes the same markup for the live page.
+use ui_foundation::tracking_domain::{
+    tracking_domain_panel_html, TrackingDomainPanel, TrackingDomainPanelRow,
+};
 
 use crate::config::Config;
 use crate::middleware::auth::AuthUser;
@@ -449,10 +455,7 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         )
         // The /alerts/rules management surface: CRUD over the evaluated
         // usage-alert store, PRG + CSRF like every sibling CP form.
-        .route(
-            "/web/admin/alert-rules",
-            post(form_admin_alert_rule_create),
-        )
+        .route("/web/admin/alert-rules", post(form_admin_alert_rule_create))
         .route(
             "/web/admin/alert-rules/:id/update",
             post(form_admin_alert_rule_update),
@@ -6196,112 +6199,6 @@ async fn web_domain_detail(
 
 // ─── Custom tracking domain console surface (capability wave 2) ──────────────
 
-/// The render inputs for the tracking-domain page/panel. Pure data so the
-/// panel is directly testable without a database.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TrackingDomainPanel {
-    /// The sending domain id (the page path segment; POST targets).
-    pub domain_id: String,
-    /// The sending domain this page is about (`customer.test`).
-    pub domain_name: String,
-    /// The sending domain is verified — a prerequisite per the docs.
-    pub domain_verified: bool,
-    /// Whether the plan grants `custom_tracking_domain` (Pro and above).
-    pub entitled: bool,
-    /// The configured tracking domain for this parent, when one exists.
-    pub configured: Option<TrackingDomainPanelRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TrackingDomainPanelRow {
-    pub domain: String,
-    pub status: String,
-    pub status_reason: Option<String>,
-    pub cname_target: String,
-    pub verified_at: Option<String>,
-}
-
-/// Render the honest custom-tracking-domain panel:
-/// * parent not verified → say so (the API refuses with the same rule);
-/// * not entitled → say the capability is Pro and above (no dead form);
-/// * entitled + empty → the ONE documented configure form;
-/// * configured → status + named reason + the exact CNAME record and the
-///   verify/remove actions for the current state.
-pub(crate) fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str) -> String {
-    let escape = ui_foundation::shell::html_escape;
-    let domain_name = escape(&panel.domain_name);
-    let csrf = escape(csrf_token);
-    let card = |inner: String| {
-        format!(
-            "<section data-page=\"tracking-domain\" class=\"space-y-4\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{inner}</div></section>"
-        )
-    };
-    const BTN: &str = "inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
-    const H2: &str = "text-xs font-bold uppercase tracking-widest text-surface-500";
-
-    if !panel.domain_verified {
-        return card(format!(
-            "<h2 class=\"{H2}\">Custom tracking domain</h2><p class=\"mt-2 text-sm text-muted-foreground\">Verify <span class=\"font-mono\">{domain_name}</span> first. A tracking domain must be a subdomain of a verified domain in your workspace, so it can only be configured after this domain passes verification.</p>"
-        ));
-    }
-
-    if !panel.entitled {
-        return card(format!(
-            "<h2 class=\"{H2}\">Custom tracking domain</h2><p class=\"mt-2 text-sm text-muted-foreground\">Custom tracking domains are available on Pro and above. Your current plan does not include this capability, so no setup form is shown here.</p>"
-        ));
-    }
-
-    match &panel.configured {
-        None => card(format!(
-            "<h2 class=\"{H2}\">Custom tracking domain</h2>\
-             <p class=\"mt-2 text-sm text-muted-foreground\">Use your own subdomain (for example <span class=\"font-mono\">email.{domain_name}</span>) for open and click tracking links. It must be a subdomain of <span class=\"font-mono\">{domain_name}</span>, one per verified domain, and must not use a mail or web label such as <span class=\"font-mono\">www</span> or <span class=\"font-mono\">mail</span>.</p>\
-             <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain\" class=\"mt-4 flex flex-col gap-3 sm:flex-row\" data-form-id=\"tracking-domain-create\">\
-               <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
-               <label class=\"sr-only\" for=\"tracking-domain-input\">Tracking domain</label>\
-               <input id=\"tracking-domain-input\" name=\"domain\" required placeholder=\"email.{domain_name}\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">\
-               <button type=\"submit\" class=\"{BTN}\">Use custom tracking domain</button>\
-             </form>\
-             <p class=\"mt-2 text-xs text-muted-foreground\">The CNAME record to publish is shown here immediately after setup, and verification checks it live.</p>",
-            domain_id = escape(&panel.domain_id)
-        )),
-        Some(row) => {
-            let status = escape(&row.status);
-            let reason = row
-                .status_reason
-                .as_deref()
-                .map(|reason| format!("<p class=\"mt-2 text-sm text-muted-foreground\">{}</p>", escape(reason)))
-                .unwrap_or_default();
-            let record = if row.status == "verified" {
-                String::new()
-            } else {
-                format!(
-                    "<div class=\"mt-4 rounded-sm border border-primary/30 bg-primary/5 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS record to publish</p><p class=\"mt-2 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Type · Host · Value</p><p class=\"mt-1 font-mono text-xs break-all select-text text-surface-800\">CNAME · {host} · {value}</p></div>",
-                    host = escape(&row.domain),
-                    value = escape(&row.cname_target),
-                )
-            };
-            let verified_note = match row.verified_at.as_deref() {
-                Some(at) => format!(
-                    "<p class=\"mt-2 text-xs text-muted-foreground\">Verified at {}. Tracked links on this host are served for this workspace.</p>",
-                    escape(at)
-                ),
-                None => String::new(),
-            };
-            card(format!(
-                "<h2 class=\"{H2}\">Custom tracking domain</h2>\
-                 <div class=\"mt-2 flex flex-wrap items-center gap-3\"><span class=\"font-mono text-sm\">{domain}</span><span class=\"inline-flex items-center rounded-full border border-surface-200 px-2 py-0.5 text-[11px] font-bold uppercase tracking-widest text-surface-500\">{status}</span></div>\
-                 {reason}{verified_note}{record}\
-                 <div class=\"mt-4 flex flex-wrap gap-3\">\
-                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/verify\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"{BTN}\">Verify DNS now</button></form>\
-                   <form method=\"post\" action=\"/web/domains/{domain_id}/tracking-domain/delete\" class=\"inline\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Remove</button></form>\
-                 </div>",
-                domain = escape(&row.domain),
-                domain_id = escape(&panel.domain_id),
-            ))
-        }
-    }
-}
-
 /// GET /domains/{id}/tracking — the documented console surface for custom
 /// tracking domains. Honest in every state: no row is an empty state with
 /// the configure form, a failed check names its reason, and a capability the
@@ -6391,7 +6288,9 @@ async fn web_domain_tracking(
     // Presentation only: the POST path re-runs the authoritative gate.
     let entitled = crate::entitlements::snapshot(&state, &user.tenant_id)
         .await
-        .map(|snapshot| snapshot.has_feature(billing_entitlements::FeatureKey::CustomTrackingDomain))
+        .map(|snapshot| {
+            snapshot.has_feature(billing_entitlements::FeatureKey::CustomTrackingDomain)
+        })
         .unwrap_or(false);
 
     let panel = TrackingDomainPanel {
@@ -6463,7 +6362,11 @@ async fn form_tracking_domain_create(
         Ok(row) => row,
         Err(error) => return temporary_storage_failure(&error, &back, &state.config),
     }) else {
-        return redirect_error("That domain could not be found in this workspace.", "/domains", &state.config);
+        return redirect_error(
+            "That domain could not be found in this workspace.",
+            "/domains",
+            &state.config,
+        );
     };
     if !verified {
         return redirect_error(
@@ -6490,12 +6393,14 @@ async fn form_tracking_domain_create(
             &back,
             &state.config,
         ),
-        Err(crate::error::ApiError::Validation(messages)) => redirect_error(
-            &messages.join("; "),
+        Err(crate::error::ApiError::Validation(messages)) => {
+            redirect_error(&messages.join("; "), &back, &state.config)
+        }
+        Err(error) => redirect_error(
+            &format!("Could not add the tracking domain: {error}"),
             &back,
             &state.config,
         ),
-        Err(error) => redirect_error(&format!("Could not add the tracking domain: {error}"), &back, &state.config),
     }
 }
 
@@ -6515,7 +6420,11 @@ async fn form_tracking_domain_verify(
         Ok(row) => row,
         Err(error) => return temporary_storage_failure(&error, &back, &state.config),
     }) else {
-        return redirect_error("That domain could not be found in this workspace.", "/domains", &state.config);
+        return redirect_error(
+            "That domain could not be found in this workspace.",
+            "/domains",
+            &state.config,
+        );
     };
     let row_id = match tn_tracking_row_id(&state, &user.tenant_id, &name).await {
         Ok(Some(row_id)) => row_id,
@@ -6546,7 +6455,11 @@ async fn form_tracking_domain_verify(
             };
             redirect_success(&flash, &back, &state.config)
         }
-        Err(error) => redirect_error(&format!("Verification could not run: {error}"), &back, &state.config),
+        Err(error) => redirect_error(
+            &format!("Verification could not run: {error}"),
+            &back,
+            &state.config,
+        ),
     }
 }
 
@@ -6567,7 +6480,11 @@ async fn form_tracking_domain_delete(
         Ok(row) => row,
         Err(error) => return temporary_storage_failure(&error, &back, &state.config),
     }) else {
-        return redirect_error("That domain could not be found in this workspace.", "/domains", &state.config);
+        return redirect_error(
+            "That domain could not be found in this workspace.",
+            "/domains",
+            &state.config,
+        );
     };
     let row_id = match tn_tracking_row_id(&state, &user.tenant_id, &name).await {
         Ok(Some(row_id)) => row_id,
@@ -6592,7 +6509,11 @@ async fn form_tracking_domain_delete(
             &back,
             &state.config,
         ),
-        Err(error) => redirect_error(&format!("Could not remove the tracking domain: {error}"), &back, &state.config),
+        Err(error) => redirect_error(
+            &format!("Could not remove the tracking domain: {error}"),
+            &back,
+            &state.config,
+        ),
     }
 }
 
@@ -6722,15 +6643,26 @@ fn message_timeline_page_data(
 ) -> ui_foundation::view_data::ListPageData {
     use ui_foundation::view_data::{DataCell, DataRowData, KpiCardData, ListPageData, TableData};
 
+    // One timestamp policy: the wire payload keeps the raw RFC 3339 value,
+    // the render shows the house relative prose (the same shared helper the
+    // events table uses). The raw nanosecond string in the description and
+    // the "When" cells was the dogfood 2026-10-08 copy finding.
+    let at_dt = chrono::DateTime::parse_from_rfc3339(&timeline.at)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&chrono::Utc));
+    let at_display = match at_dt {
+        Some(ts) => data::relative_time(Some(ts)),
+        None => timeline.at.clone(),
+    };
     let mut data = ListPageData {
         title: "Message timeline".into(),
         description: format!(
             "State as of {}: {}. {}",
-            timeline.at, timeline.state.status, timeline.state.description
+            at_display, timeline.state.status, timeline.state.description
         ),
         kpis: vec![
             KpiCardData::new("State", &timeline.state.status),
-            KpiCardData::new("As of", &timeline.at),
+            KpiCardData::new("As of", &at_display),
             KpiCardData::new(
                 "History",
                 if timeline.history_complete {
@@ -6774,7 +6706,15 @@ fn message_timeline_page_data(
             .map(|(index, entry)| DataRowData {
                 id: format!("{index}"),
                 cells: vec![
-                    DataCell::time(entry.at.clone(), entry.at.clone()),
+                    DataCell::time(
+                        chrono::DateTime::parse_from_rfc3339(&entry.at)
+                            .ok()
+                            .map(|parsed| {
+                                data::relative_time(Some(parsed.with_timezone(&chrono::Utc)))
+                            })
+                            .unwrap_or_else(|| entry.at.clone()),
+                        entry.at.clone(),
+                    ),
                     DataCell::mono(entry.source),
                     DataCell::mono(entry.kind.clone()),
                     entry
@@ -9096,7 +9036,14 @@ fn alert_rule_form_fields(form: &HashMap<String, String>, form_id: &str) -> Form
     fields.set("channel", &field(form, "channel"));
     fields.set("severity", &field(form, "severity"));
     fields.set("threshold", &field(form, "threshold"));
-    fields.set("enabled", if field(form, "enabled") == "true" { "true" } else { "false" });
+    fields.set(
+        "enabled",
+        if field(form, "enabled") == "true" {
+            "true"
+        } else {
+            "false"
+        },
+    );
     fields
 }
 
@@ -9170,7 +9117,12 @@ async fn form_admin_alert_rule_create(
         Ok(true) => {}
         Ok(false) => {
             fields.error("tenant", "Unknown tenant — pick one from the list.");
-            return redirect_with_field_map(&fields, "Unknown tenant.", "/alerts/rules", &state.config);
+            return redirect_with_field_map(
+                &fields,
+                "Unknown tenant.",
+                "/alerts/rules",
+                &state.config,
+            );
         }
         Err(error) => {
             return temporary_storage_failure(
@@ -9227,9 +9179,11 @@ async fn form_admin_alert_rule_create(
             "/alerts/rules",
             &state.config,
         ),
-        Err(error) => {
-            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
-        }
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
+            "/alerts/rules",
+            &state.config,
+        ),
     }
 }
 
@@ -9318,15 +9272,21 @@ async fn form_admin_alert_rule_update(
             .await;
             redirect_success("Alert rule updated.", "/alerts/rules", &state.config)
         }
-        Ok(_) => redirect_error("That alert rule no longer exists.", "/alerts/rules", &state.config),
+        Ok(_) => redirect_error(
+            "That alert rule no longer exists.",
+            "/alerts/rules",
+            &state.config,
+        ),
         Err(error) if rules::is_unique_violation(&error) => redirect_error(
             "Another rule for this tenant and metric already uses that threshold.",
             "/alerts/rules",
             &state.config,
         ),
-        Err(error) => {
-            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
-        }
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
+            "/alerts/rules",
+            &state.config,
+        ),
     }
 }
 
@@ -9398,10 +9358,16 @@ async fn form_admin_alert_rule_toggle(
                 &state.config,
             )
         }
-        Ok(None) => redirect_error("That alert rule no longer exists.", "/alerts/rules", &state.config),
-        Err(error) => {
-            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
-        }
+        Ok(None) => redirect_error(
+            "That alert rule no longer exists.",
+            "/alerts/rules",
+            &state.config,
+        ),
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
+            "/alerts/rules",
+            &state.config,
+        ),
     }
 }
 
@@ -9448,10 +9414,16 @@ async fn form_admin_alert_rule_delete(
             };
             redirect_success(&message, "/alerts/rules", &state.config)
         }
-        Ok(None) => redirect_error("That alert rule no longer exists.", "/alerts/rules", &state.config),
-        Err(error) => {
-            temporary_storage_failure(&WebActionError::Database(error), "/alerts/rules", &state.config)
-        }
+        Ok(None) => redirect_error(
+            "That alert rule no longer exists.",
+            "/alerts/rules",
+            &state.config,
+        ),
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
+            "/alerts/rules",
+            &state.config,
+        ),
     }
 }
 
@@ -10047,6 +10019,78 @@ pub fn decode_flash_from_cookie_header(header_value: &str, secret: &str) -> Vec<
 mod tests {
     use super::*;
     use crate::app::test_support::test_config;
+
+    /// The timeline page-data builder formats timestamps with the house
+    /// helper: relative prose in the cell + the KPI/description, the raw
+    /// RFC 3339 kept in the title/datetime slot (and on the wire). The raw
+    /// nanosecond string in the visible copy was the dogfood 2026-10-08
+    /// finding.
+    #[test]
+    fn timeline_page_data_formats_timestamps_with_the_house_helper() {
+        use crate::routes::message_timeline::{
+            CurrentMessageState, MessageTimelineResponse, ReconstructedState, TimelineEntry,
+        };
+        use ui_foundation::view_data::DataCell;
+
+        let raw = (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339();
+        let timeline = MessageTimelineResponse {
+            message_id: "m_1".to_string(),
+            at: raw.clone(),
+            state: ReconstructedState {
+                status: "delivered".to_string(),
+                since: None,
+                source: None,
+                description: "accepted by the delivery route".to_string(),
+            },
+            history_complete: true,
+            insufficient_history: None,
+            truncated: false,
+            timeline: vec![TimelineEntry {
+                at: raw.clone(),
+                source: "delivery",
+                kind: "message.accepted".to_string(),
+                status: Some("accepted".to_string()),
+                detail: Some("queued for delivery".to_string()),
+            }],
+            current: CurrentMessageState {
+                status: "delivered".to_string(),
+                created_at: raw.clone(),
+                scheduled_at: None,
+                sent_at: None,
+                delivered_at: None,
+            },
+        };
+
+        let list = message_timeline_page_data("m_1", &timeline);
+
+        assert!(
+            list.description.contains("3 minutes ago"),
+            "the description must use relative prose, got {:?}",
+            list.description,
+        );
+        assert!(
+            !list.description.contains(&raw),
+            "the raw RFC 3339 timestamp must not render in the description",
+        );
+        let as_of = list
+            .kpis
+            .iter()
+            .find(|kpi| kpi.label == "As of")
+            .expect("the As-of KPI");
+        assert_eq!(as_of.value, "3 minutes ago");
+
+        let table = list.table.expect("the transition table");
+        match &table.rows[0].cells[0] {
+            DataCell::Time { relative, utc } => {
+                assert_eq!(relative, "3 minutes ago", "the cell shows relative prose");
+                assert_eq!(
+                    utc, &raw,
+                    "the raw RFC 3339 stays in the title/datetime slot"
+                );
+            }
+            other => panic!("the When cell must be a Time cell, got {other:?}"),
+        }
+    }
 
     #[test]
     fn flash_round_trip_through_cookie_header() {
@@ -27535,7 +27579,10 @@ mod tracking_domain_panel_tests {
     fn unverified_parent_renders_the_prerequisite_not_a_form() {
         let html = tracking_domain_panel_html(&panel(false, true, None), "csrf-token");
         assert!(html.contains("Verify"), "{html}");
-        assert!(!html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+        assert!(
+            !html.contains("data-form-id=\"tracking-domain-create\""),
+            "{html}"
+        );
     }
 
     /// A plan without the capability gets the honest reason and no dead form.
@@ -27543,7 +27590,10 @@ mod tracking_domain_panel_tests {
     fn unentitled_plan_renders_no_setup_form() {
         let html = tracking_domain_panel_html(&panel(true, false, None), "csrf-token");
         assert!(html.contains("Pro and above"), "{html}");
-        assert!(!html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+        assert!(
+            !html.contains("data-form-id=\"tracking-domain-create\""),
+            "{html}"
+        );
     }
 
     /// The empty entitled state carries the one documented configure form
@@ -27551,8 +27601,14 @@ mod tracking_domain_panel_tests {
     #[test]
     fn empty_state_renders_the_configure_form() {
         let html = tracking_domain_panel_html(&panel(true, true, None), "csrf-token");
-        assert!(html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
-        assert!(html.contains("name=\"_csrf\" value=\"csrf-token\""), "{html}");
+        assert!(
+            html.contains("data-form-id=\"tracking-domain-create\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("name=\"_csrf\" value=\"csrf-token\""),
+            "{html}"
+        );
         assert!(html.contains("one per verified domain"), "{html}");
     }
 
@@ -27577,7 +27633,10 @@ mod tracking_domain_panel_tests {
         assert!(html.contains("publish the CNAME record"), "{html}");
         assert!(html.contains("/tracking-domain/verify"), "{html}");
         assert!(html.contains("/tracking-domain/delete"), "{html}");
-        assert!(!html.contains("data-form-id=\"tracking-domain-create\""), "{html}");
+        assert!(
+            !html.contains("data-form-id=\"tracking-domain-create\""),
+            "{html}"
+        );
 
         let failed = panel(
             true,
@@ -27610,7 +27669,10 @@ mod tracking_domain_panel_tests {
             }),
         );
         let html = tracking_domain_panel_html(&verified, "csrf-token");
-        assert!(html.contains("Verified at 2026-10-07T10:00:00+00:00"), "{html}");
+        assert!(
+            html.contains("Verified at 2026-10-07T10:00:00+00:00"),
+            "{html}"
+        );
         assert!(html.contains("served for this workspace"), "{html}");
         assert!(html.contains("/tracking-domain/delete"), "{html}");
     }

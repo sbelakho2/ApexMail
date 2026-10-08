@@ -38,7 +38,7 @@ pub struct BotStateFixture {
     pub route: &'static str,
 }
 
-pub const BOT_STATE_FIXTURES: [BotStateFixture; 11] = [
+pub const BOT_STATE_FIXTURES: [BotStateFixture; 22] = [
     BotStateFixture {
         id: "web-assistant-populated",
         surface: "web",
@@ -93,6 +93,67 @@ pub const BOT_STATE_FIXTURES: [BotStateFixture; 11] = [
         id: "control-plane-reviews-ai-drafts-already-handled-flash",
         surface: "control-plane",
         route: "/reviews/ai-drafts",
+    },
+    // ── capability-wave pages (2026-10-08 batch): the message timeline and
+    // the alert-rules management surface. Both render through shared
+    // primitives (data-list page / the CP alert-rules view); these states
+    // put their populated/edge renders under the browser + in-crate gates.
+    BotStateFixture {
+        id: "web-messages-m_1-timeline-populated",
+        surface: "web",
+        route: "/messages/m_1/timeline",
+    },
+    BotStateFixture {
+        id: "web-messages-m_1-timeline-insufficient",
+        surface: "web",
+        route: "/messages/m_1/timeline",
+    },
+    BotStateFixture {
+        id: "control-plane-alerts-rules-populated",
+        surface: "control-plane",
+        route: "/alerts/rules",
+    },
+    BotStateFixture {
+        id: "control-plane-alerts-rules-unavailable",
+        surface: "control-plane",
+        route: "/alerts/rules",
+    },
+    BotStateFixture {
+        id: "control-plane-alerts-rules-editing",
+        surface: "control-plane",
+        route: "/alerts/rules",
+    },
+    // Custom tracking domain (capability wave 2), extracted into the shared
+    // views so the manifest/fixtures/gates cover it structurally.
+    BotStateFixture {
+        id: "web-domains-d_1-tracking-not-verified",
+        surface: "web",
+        route: "/domains/d_1/tracking",
+    },
+    BotStateFixture {
+        id: "web-domains-d_1-tracking-not-entitled",
+        surface: "web",
+        route: "/domains/d_1/tracking",
+    },
+    BotStateFixture {
+        id: "web-domains-d_1-tracking-configure",
+        surface: "web",
+        route: "/domains/d_1/tracking",
+    },
+    BotStateFixture {
+        id: "web-domains-d_1-tracking-pending",
+        surface: "web",
+        route: "/domains/d_1/tracking",
+    },
+    BotStateFixture {
+        id: "web-domains-d_1-tracking-verified",
+        surface: "web",
+        route: "/domains/d_1/tracking",
+    },
+    BotStateFixture {
+        id: "web-domains-d_1-tracking-failed",
+        surface: "web",
+        route: "/domains/d_1/tracking",
     },
 ];
 
@@ -197,6 +258,201 @@ pub fn assistant_disabled() -> AssistantPageData {
         capability_disabled: true,
         ..Default::default()
     }
+}
+
+/// The six custom-tracking-domain states the live flow reaches.
+fn tracking_panel(state: &str) -> crate::tracking_domain::TrackingDomainPanel {
+    use crate::tracking_domain::{TrackingDomainPanel, TrackingDomainPanelRow};
+
+    let base =
+        |domain_verified: bool, entitled: bool, configured: Option<TrackingDomainPanelRow>| {
+            TrackingDomainPanel {
+                domain_id: "d_1".to_string(),
+                domain_name: "northwind-saas.example".to_string(),
+                domain_verified,
+                entitled,
+                configured,
+            }
+        };
+    let row =
+        |status: &str, reason: Option<&str>, verified_at: Option<&str>| TrackingDomainPanelRow {
+            domain: "track.northwind-saas.example".to_string(),
+            status: status.to_string(),
+            status_reason: reason.map(str::to_string),
+            cname_target: "trk.apexmail.ee".to_string(),
+            verified_at: verified_at.map(str::to_string),
+        };
+    match state {
+        "not-verified" => base(false, true, None),
+        "not-entitled" => base(true, false, None),
+        "configure" => base(true, true, None),
+        "pending" => base(true, true, Some(row("pending", None, None))),
+        "verified" => base(
+            true,
+            true,
+            Some(row("verified", None, Some("2026-10-08 03:10 UTC"))),
+        ),
+        "failed" => base(
+            true,
+            true,
+            Some(row(
+                "failed",
+                Some("CNAME points at trk.other.test, expected trk.apexmail.ee"),
+                None,
+            )),
+        ),
+        other => panic!("unknown tracking state {other}"),
+    }
+}
+
+/// A populated time-travel reconstruction, mirroring the api-server's
+/// `message_timeline_page_data`: state/as-of/history KPIs over the
+/// transition table (shared data-list primitives).
+fn timeline_populated_data() -> crate::view_data::ListPageData {
+    use crate::view_data::{DataCell, DataRowData, KpiCardData, ListPageData, TableData};
+
+    ListPageData {
+        title: "Message timeline".to_string(),
+        description: "State as of 2026-10-08 01:40 UTC: delivered. The append-only                       sources agree at this timestamp."
+            .to_string(),
+        kpis: vec![
+            KpiCardData::new("State", "delivered"),
+            KpiCardData::new("As of", "2 minutes ago"),
+            KpiCardData::new("History", "complete"),
+        ],
+        table: Some(TableData {
+            columns: vec![
+                "When".to_string(),
+                "Source".to_string(),
+                "Event".to_string(),
+                "Status".to_string(),
+                "Detail".to_string(),
+            ],
+            rows: vec![
+                DataRowData {
+                    id: "0".to_string(),
+                    cells: vec![
+                        DataCell::time("2 minutes ago", "2026-10-08T01:39:12Z"),
+                        DataCell::mono("delivery"),
+                        DataCell::mono("queued"),
+                        DataCell::status("accepted"),
+                        DataCell::text("queued for delivery"),
+                    ],
+                },
+                DataRowData {
+                    id: "1".to_string(),
+                    cells: vec![
+                        DataCell::time("2 minutes ago", "2026-10-08T01:39:41Z"),
+                        DataCell::mono("mta"),
+                        DataCell::mono("smtp_transaction"),
+                        DataCell::status("delivered"),
+                        DataCell::text("250 2.0.0 Ok: queued as 4Wx1"),
+                    ],
+                },
+                DataRowData {
+                    id: "2".to_string(),
+                    cells: vec![
+                        DataCell::time("just now", "2026-10-08T01:40:03Z"),
+                        DataCell::mono("events"),
+                        DataCell::mono("open"),
+                        DataCell::status("tracked"),
+                        DataCell::text("opened from a masked client"),
+                    ],
+                },
+            ],
+        }),
+        primary_action: Some(("Back to events".to_string(), "/events".to_string())),
+        base_path: "/messages/m_1/timeline".to_string(),
+        per_page: 3,
+        total_count: 3,
+        total_pages: 1,
+        page: 1,
+        empty_title: "No state transitions at this timestamp".to_string(),
+        empty_description: "No timeline entry exists at or before this timestamp — the message did not exist yet."
+            .to_string(),
+        ..Default::default()
+    }
+}
+
+/// The honest insufficient-history state: the sources cannot prove the state
+/// at the requested timestamp.
+fn timeline_insufficient_data() -> crate::view_data::ListPageData {
+    use crate::view_data::{KpiCardData, ListPageData, TableData};
+
+    ListPageData {
+        title: "Message timeline".to_string(),
+        description: "State as of 2 minutes ago: unknown. History is not complete at this timestamp."
+            .to_string(),
+        kpis: vec![
+            KpiCardData::new("State", "unknown"),
+            KpiCardData::new("As of", "2 minutes ago"),
+            KpiCardData::new("History", "insufficient"),
+        ],
+        table: Some(TableData {
+            columns: vec![
+                "When".to_string(),
+                "Source".to_string(),
+                "Event".to_string(),
+                "Status".to_string(),
+                "Detail".to_string(),
+            ],
+            rows: Vec::new(),
+        }),
+        primary_action: Some(("Back to events".to_string(), "/events".to_string())),
+        base_path: "/messages/m_1/timeline".to_string(),
+        per_page: 1,
+        total_count: 0,
+        total_pages: 1,
+        page: 1,
+        empty_title: "No state transitions at this timestamp".to_string(),
+        empty_description: "The delivery log rotated before this timestamp, so the sources                             cannot prove the state — ask support for the archived window if you                             need it."
+            .to_string(),
+        ..Default::default()
+    }
+}
+
+fn alert_rules_populated_data() -> crate::view_data::AlertRulesPageData {
+    use crate::view_data::{AlertRuleData, AlertRulesPageData, TenantChoiceData};
+
+    AlertRulesPageData {
+        rules: vec![
+            AlertRuleData {
+                id: "ar_dogfood_0001".to_string(),
+                tenant_id: "wsp_dogfood_ui_visual".to_string(),
+                name: "Emails near plan limit".to_string(),
+                metric_type: "emails".to_string(),
+                threshold_percent: 80,
+                notification_channel: "both".to_string(),
+                severity: "warning".to_string(),
+                enabled: true,
+                last_triggered: Some("2026-10-08 00:12 UTC".to_string()),
+            },
+            AlertRuleData {
+                id: "ar_dogfood_0002".to_string(),
+                tenant_id: "wsp_dogfood_ui_visual".to_string(),
+                name: String::new(),
+                metric_type: "api_calls".to_string(),
+                threshold_percent: 95,
+                notification_channel: "webhook".to_string(),
+                severity: "critical".to_string(),
+                enabled: false,
+                last_triggered: None,
+            },
+        ],
+        tenants: vec![TenantChoiceData {
+            id: "wsp_dogfood_ui_visual".to_string(),
+            label: "Northwind SaaS (wsp_dogfood_ui_visual)".to_string(),
+        }],
+        unavailable: false,
+        unavailable_note: String::new(),
+        editing: None,
+    }
+}
+
+fn alert_rules_editing_data() -> crate::view_data::AlertRulesPageData {
+    let mut data = alert_rules_populated_data();
+    data.editing = data.rules.first().cloned();
+    data
 }
 
 /// The loader-failure state (session store unreadable): honest copy, never
@@ -350,6 +606,43 @@ pub fn render_bot_state(id: &str) -> Option<String> {
         "control-plane-reviews-ai-drafts-already-handled-flash" => {
             data.ai_drafts = Some(drafts_populated());
             vec![FlashMessage::error("That draft was already handled.")]
+        }
+        "web-messages-m_1-timeline-populated" => {
+            data.list = Some(timeline_populated_data());
+            Vec::new()
+        }
+        "web-messages-m_1-timeline-insufficient" => {
+            data.list = Some(timeline_insufficient_data());
+            Vec::new()
+        }
+        "control-plane-alerts-rules-populated" => {
+            data.alert_rules = Some(alert_rules_populated_data());
+            Vec::new()
+        }
+        "control-plane-alerts-rules-unavailable" => {
+            data.alert_rules = Some(crate::view_data::AlertRulesPageData {
+                unavailable: true,
+                unavailable_note: "The rule store did not answer (correlation id 7f3c…). Re-run                                    the query once the database recovers."
+                    .to_string(),
+                ..Default::default()
+            });
+            Vec::new()
+        }
+        "control-plane-alerts-rules-editing" => {
+            data.alert_rules = Some(alert_rules_editing_data());
+            Vec::new()
+        }
+        "web-domains-d_1-tracking-not-verified"
+        | "web-domains-d_1-tracking-not-entitled"
+        | "web-domains-d_1-tracking-configure"
+        | "web-domains-d_1-tracking-pending"
+        | "web-domains-d_1-tracking-verified"
+        | "web-domains-d_1-tracking-failed" => {
+            data.tracking_domain = Some(tracking_panel(
+                id.strip_prefix("web-domains-d_1-tracking-")
+                    .unwrap_or_default(),
+            ));
+            Vec::new()
         }
         _ => return None,
     };
@@ -556,6 +849,120 @@ mod tests {
             html.contains("min-w-0") && html.contains("truncate"),
             "the header identity must carry the shrink/ellipsis classes"
         );
+    }
+
+    /// The capability-wave pages: the message timeline's populated and
+    /// insufficient-history renders (through the shared data-list primitives)
+    /// and the alert-rules management states.
+    #[test]
+    fn capability_wave_states_render_their_real_content() {
+        let timeline = render_bot_state("web-messages-m_1-timeline-populated").unwrap();
+        assert!(timeline.contains("Message timeline"));
+        assert!(timeline.contains("delivered"), "the state KPI must render");
+        assert!(timeline.contains("History"), "the history KPI must render");
+        assert!(
+            timeline.contains(">When<"),
+            "the transition table header must render"
+        );
+        assert!(
+            timeline.contains("smtp_transaction"),
+            "transition rows must render"
+        );
+        assert!(
+            !timeline.contains("No message selected"),
+            "the data-backed state must not render the static skeleton"
+        );
+
+        let insufficient = render_bot_state("web-messages-m_1-timeline-insufficient").unwrap();
+        assert!(insufficient.contains("insufficient"));
+        assert!(
+            insufficient.contains("cannot prove the state"),
+            "the insufficient-history state must carry the honest reason"
+        );
+        assert!(insufficient.contains("No state transitions at this timestamp"));
+
+        let rules = render_bot_state("control-plane-alerts-rules-populated").unwrap();
+        assert!(rules.contains("Emails near plan limit"));
+        assert!(
+            rules.contains("Unnamed rule ("),
+            "a blank rule name must render the explicit unnamed fallback"
+        );
+        assert!(rules.contains("Enabled") && rules.contains("Disabled"));
+        assert!(
+            rules.contains("Disable") && rules.contains("Enable"),
+            "toggle labels must render"
+        );
+        assert!(rules.contains("Delete"), "delete action must render");
+        assert!(
+            rules.contains("/alerts/rules?edit=ar_dogfood_0001"),
+            "edit link must render"
+        );
+
+        let unavailable = render_bot_state("control-plane-alerts-rules-unavailable").unwrap();
+        assert!(unavailable.contains("The rule list is unavailable right now"));
+        assert!(
+            unavailable.contains("correlation id"),
+            "the note must carry the reference"
+        );
+        assert!(
+            unavailable.contains("Alert rules could not be loaded"),
+            "the unavailable state must render the error callout"
+        );
+
+        let editing = render_bot_state("control-plane-alerts-rules-editing").unwrap();
+        assert!(editing.contains("Edit rule"));
+        assert!(editing.contains("Emails near plan limit"));
+        assert!(
+            editing.contains("fixed — delete and recreate"),
+            "the edit form names the fixed fields"
+        );
+        assert!(editing.contains("Cancel"));
+    }
+
+    /// The custom tracking-domain panel's six states (extracted into the
+    /// shared views on 2026-10-08): each renders its honest surface, and the
+    /// configure form only exists where the capability is actually usable.
+    #[test]
+    fn tracking_domain_states_render_their_real_surfaces() {
+        let not_verified = render_bot_state("web-domains-d_1-tracking-not-verified").unwrap();
+        assert!(not_verified.contains("A tracking domain must be a subdomain of a verified domain"));
+        assert!(
+            !not_verified.contains("tracking-domain-create"),
+            "an unverified parent must not render the configure form"
+        );
+
+        let not_entitled = render_bot_state("web-domains-d_1-tracking-not-entitled").unwrap();
+        assert!(not_entitled.contains("available on Pro and above"));
+        assert!(
+            !not_entitled.contains("tracking-domain-create"),
+            "an unentitled plan must not render a dead configure form"
+        );
+
+        let configure = render_bot_state("web-domains-d_1-tracking-configure").unwrap();
+        assert!(configure.contains("Use your own subdomain"));
+        assert!(configure.contains("data-form-id=\"tracking-domain-create\""));
+
+        let pending = render_bot_state("web-domains-d_1-tracking-pending").unwrap();
+        assert!(pending.contains("track.northwind-saas.example"));
+        assert!(
+            pending.contains("trk.apexmail.ee"),
+            "the CNAME target must render"
+        );
+        assert!(pending.contains("Verify DNS now") && pending.contains("Remove"));
+        assert!(pending.contains(">pending<"));
+
+        let verified = render_bot_state("web-domains-d_1-tracking-verified").unwrap();
+        assert!(verified.contains(">verified<"));
+        assert!(verified.contains("Verified at"));
+        assert!(
+            !verified.contains("DNS record to publish"),
+            "a verified domain does not need the publish block"
+        );
+
+        let failed = render_bot_state("web-domains-d_1-tracking-failed").unwrap();
+        assert!(failed.contains("CNAME points at trk.other.test, expected trk.apexmail.ee"));
+        assert!(failed.contains("DNS record to publish"));
+        assert!(failed.contains("Verify DNS now"));
     }
 
     /// The web surface must never leak the operator word "tenant" into

@@ -470,9 +470,7 @@ async fn get_contact_trust_score(
     let trust = service
         .calculate_trust(&auth.tenant_id, &contact.email)
         .await
-        .map_err(|error| {
-            ApiError::Internal(format!("trust score computation failed: {error}"))
-        })?;
+        .map_err(|error| ApiError::Internal(format!("trust score computation failed: {error}")))?;
     // The trend is an enrichment: a failure to compute it never withholds
     // the score itself, but it is recorded rather than silently defaulted.
     let trend = match service.trust_trend(&auth.tenant_id, &contact.email).await {
@@ -3321,10 +3319,8 @@ mod trust_score_tests {
         let Some(pool) = crate::test_db::canonical_pool("contacts_trust_score").await else {
             return;
         };
-        let (env, tenant) =
-            AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
-        let (other_env, other_tenant) =
-            AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        let (other_env, other_tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
 
         let email = format!(
             "trust-{}@example.test",
@@ -3343,20 +3339,28 @@ mod trust_score_tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         assert_eq!(body["subscriberId"], contact.to_string());
         let overall = body["overall"].as_u64().expect("overall integer");
-        assert!(overall > 0, "real engagement must produce a positive score: {body}");
+        assert!(
+            overall > 0,
+            "real engagement must produce a positive score: {body}"
+        );
         assert!(
             ["A", "B", "C", "D", "F"].contains(&body["grade"].as_str().unwrap_or("")),
             "{body}"
         );
         assert!(
-            ["low", "medium", "high", "critical"].contains(&body["riskLevel"].as_str().unwrap_or("")),
+            ["low", "medium", "high", "critical"]
+                .contains(&body["riskLevel"].as_str().unwrap_or("")),
             "{body}"
         );
         assert!(
             body["components"]["credibility"].as_u64().unwrap_or(0) > 0,
             "opens must raise credibility: {body}"
         );
-        assert!(body["components"]["selfOrientation"].is_f64() || body["components"]["selfOrientation"].is_u64(), "{body}");
+        assert!(
+            body["components"]["selfOrientation"].is_f64()
+                || body["components"]["selfOrientation"].is_u64(),
+            "{body}"
+        );
         assert_eq!(body["trend"], "improving", "{body}");
 
         // Same address, other tenant: no events there, so the score MUST NOT
@@ -3367,7 +3371,10 @@ mod trust_score_tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{other_body}");
         assert_eq!(other_body["trend"], "unknown", "{other_body}");
         assert!(
-            other_body["components"]["credibility"].as_u64().unwrap_or(0) == 0,
+            other_body["components"]["credibility"]
+                .as_u64()
+                .unwrap_or(0)
+                == 0,
             "another tenant's opens must not leak into this score: {other_body}"
         );
         assert!(

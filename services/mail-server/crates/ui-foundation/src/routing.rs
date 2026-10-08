@@ -185,7 +185,11 @@ mod tests {
         // Time-travel debugging: the message timeline page joins the web
         // manifest (data-backed /messages/{id}/timeline, linked from the
         // delivery events surface) — web 37 → 38, total 126 → 127.
-        assert_eq!(declared_route_count("web"), Some(38));
+        // Capability wave 2 (2026-10-08): the custom tracking-domain page
+        // joins the web manifest (shared view in `ui_foundation::
+        // tracking_domain`, so fixtures/goldens/gates cover it) —
+        // web 38 → 39, total 127 → 128.
+        assert_eq!(declared_route_count("web"), Some(39));
         // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
         // demo viewer (/demo) join the baseline — control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
@@ -193,7 +197,7 @@ mod tests {
         assert_eq!(declared_route_count("control-plane"), Some(32));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 127);
+        assert_eq!(total_route_count(), 128);
     }
 
     #[test]

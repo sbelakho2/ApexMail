@@ -182,7 +182,9 @@ pub(crate) async fn ask_assistant(
                 // surface. Projecting here (the single choke point) covers
                 // the JSON route, the persisted session turns and the
                 // console PRG handler alike.
-                citations: public_citations(out.get("citations").unwrap_or(&serde_json::Value::Null)),
+                citations: public_citations(
+                    out.get("citations").unwrap_or(&serde_json::Value::Null),
+                ),
                 escalated: out["escalated"].as_bool().unwrap_or(false),
                 disclosure: out["disclosure"]
                     .as_str()
@@ -911,25 +913,27 @@ mod adversarial_tests {
         let app = axum::Router::new()
             .route(
                 "/chat",
-                post(move |axum::Json(body): axum::Json<serde_json::Value>| async move {
-                    state.lock().unwrap().push(body);
-                    axum::Json(serde_json::json!({
-                        "answer": "Ship the adversarial test.",
-                        // The upstream payload ALSO carries internal retrieval
-                        // metadata (path/snippet/score); the route must project
-                        // it away before any caller sees it.
-                        "citations": [{
-                            "path": "marketing/pricing.md",
-                            "title": "ApexMail docs",
-                            "url": "https://apexmail.ee/docs",
-                            "snippet": "internal passage text",
-                            "score": 1.027,
-                        }],
-                        "escalated": false,
-                        "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
-                        "docs_version": "v42",
-                    }))
-                }),
+                post(
+                    move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        state.lock().unwrap().push(body);
+                        axum::Json(serde_json::json!({
+                            "answer": "Ship the adversarial test.",
+                            // The upstream payload ALSO carries internal retrieval
+                            // metadata (path/snippet/score); the route must project
+                            // it away before any caller sees it.
+                            "citations": [{
+                                "path": "marketing/pricing.md",
+                                "title": "ApexMail docs",
+                                "url": "https://apexmail.ee/docs",
+                                "snippet": "internal passage text",
+                                "score": 1.027,
+                            }],
+                            "escalated": false,
+                            "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
+                            "docs_version": "v42",
+                        }))
+                    },
+                ),
             )
             .route(
                 "/admin/chat/history",
@@ -1208,8 +1212,7 @@ mod adversarial_tests {
                 headers[0]
             );
             assert!(
-                rendered.contains("x-apexmail-user-id:")
-                    && headers[0].contains(user.as_str()),
+                rendered.contains("x-apexmail-user-id:") && headers[0].contains(user.as_str()),
                 "history proxy must forward the caller's own user identity: {}",
                 headers[0]
             );
@@ -1423,7 +1426,10 @@ mod session_tests {
 
         // 1. The response projects the assistant turn's citations.
         super::adversarial_tests::assert_public_citations(&out["assistant_turn"]["citations"]);
-        assert_eq!(out["assistant_turn"]["citations"][0]["title"], "ApexMail docs");
+        assert_eq!(
+            out["assistant_turn"]["citations"][0]["title"],
+            "ApexMail docs"
+        );
 
         // 2. The PERSISTED row is clean: the write choke point projected
         // before the insert, so the DB never holds the internal fields.
@@ -1452,7 +1458,9 @@ mod session_tests {
         .execute(&pool)
         .await
         .expect("plant legacy row");
-        let (status, window) = env.get(&format!("/v1/ai/chat/sessions/{id}/turns?limit=50")).await;
+        let (status, window) = env
+            .get(&format!("/v1/ai/chat/sessions/{id}/turns?limit=50"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{window}");
         let legacy = window["turns"]
             .as_array()
@@ -1554,15 +1562,13 @@ mod session_tests {
         // The console resolves the newest session for (tenant, user) and
         // calls the shared flow with it; model the same row.
         let session_id = apexmail_lib::id::generate_id("chat", 21);
-        sqlx::query(
-            "INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(&session_id)
-        .bind(&tenant)
-        .bind(&tenant)
-        .execute(&pool)
-        .await
-        .expect("seed session");
+        sqlx::query("INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)")
+            .bind(&session_id)
+            .bind(&tenant)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed session");
 
         sqlx::query(
             "INSERT INTO feature_flag_overrides (id, flag_key, tenant_id, value, created_at)
@@ -1622,19 +1628,18 @@ mod session_tests {
                 .await;
         let user_key = tenant.clone();
         let session_id = apexmail_lib::id::generate_id("chat", 21);
-        sqlx::query(
-            "INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(&session_id)
-        .bind(&tenant)
-        .bind(&user_key)
-        .execute(&pool)
-        .await
-        .expect("seed session");
+        sqlx::query("INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)")
+            .bind(&session_id)
+            .bind(&tenant)
+            .bind(&user_key)
+            .execute(&pool)
+            .await
+            .expect("seed session");
 
         let mut limited = false;
         for i in 0..21 {
-            match session_turn_inner(&state, &tenant, &user_key, &session_id, &format!("q{i}")).await
+            match session_turn_inner(&state, &tenant, &user_key, &session_id, &format!("q{i}"))
+                .await
             {
                 Ok(_) => {}
                 Err(ApiError::RateLimitedMessage(message)) => {

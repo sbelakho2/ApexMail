@@ -316,6 +316,10 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     "/web/lists/delete-bulk",
     "/web/domains",
     "/web/domains/:id/verify",
+    // Capability wave 2: the custom tracking-domain setup/verify/remove forms.
+    "/web/domains/:id/tracking-domain",
+    "/web/domains/:id/tracking-domain/verify",
+    "/web/domains/:id/tracking-domain/delete",
     "/web/templates",
     "/web/templates/update",
     "/web/templates/preview",

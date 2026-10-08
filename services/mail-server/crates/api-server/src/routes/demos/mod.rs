@@ -636,6 +636,20 @@ async fn run_step(state: &AppState, kind: &str, input: &serde_json::Value) -> se
                 .get("tenant_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("system");
+            // Dogfood F-O1 (P3): the capability flag governs the ASSISTANT,
+            // not one wire format — the presenter must not narrate a workspace
+            // whose `ai_chat` an administrator switched off. Same flag, same
+            // named refusal the JSON route returns, surfaced as the step's own
+            // error shape (the presenter panel renders it).
+            if let Err(error) = crate::routes::ai_chat::require_ai_chat_enabled(state, tenant).await
+            {
+                return serde_json::json!({
+                    "kind": "chat_narrate",
+                    "status": StatusCode::FORBIDDEN.as_u16(),
+                    "question": question,
+                    "error": error.to_string(),
+                });
+            }
             match crate::routes::ai_chat::ask_assistant(
                 state,
                 tenant,
@@ -717,6 +731,96 @@ mod tests {
             session_id: Some("sess-demo-test".into()),
             scopes: vec!["*".into()],
         }
+    }
+
+    /// Dogfood F-O1 (P3): the presenter must not narrate a workspace whose
+    /// `ai_chat` capability is switched off — the flag governs the ASSISTANT,
+    /// not one wire format. The refusal is the same named reason the JSON
+    /// route returns, surfaced in the step's own error shape.
+    #[tokio::test]
+    async fn chat_narrate_respects_the_capability_flag() {
+        let Some(db) = pool("demos_chat_flag").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(db.clone()).await;
+        let tenant = apexmail_lib::id::generate_id("demo", 20);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'demo flag tenant', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("tenant");
+        sqlx::query(
+            "INSERT INTO feature_flag_overrides (id, flag_key, tenant_id, value, created_at)
+             VALUES ($1, 'ai_chat', $2, 'false'::jsonb, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("disable ai_chat");
+
+        let refused = run_step(
+            &state,
+            "chat_narrate",
+            &serde_json::json!({
+                "tenant_id": tenant,
+                "params": {"question": "What does the Pro plan cost?"},
+            }),
+        )
+        .await;
+        assert_eq!(refused["kind"], "chat_narrate");
+        assert_eq!(
+            refused["status"], 403,
+            "a disabled capability must refuse the narration: {refused}"
+        );
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not enabled"),
+            "the refusal names the capability: {refused}"
+        );
+
+        // With the flag gone the step no longer refuses ON THE FLAG (the
+        // unconfigured model in this test env may still fail — that is a
+        // different status and must not be the named flag refusal).
+        sqlx::query("DELETE FROM feature_flag_overrides WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .expect("restore flag");
+        // A FRESH state: flag resolution is cached (30 s TTL) per AppState, so
+        // the same state would still answer from the disabled value.
+        let state = crate::app::test_support::test_state_over(db.clone()).await;
+        let allowed = run_step(
+            &state,
+            "chat_narrate",
+            &serde_json::json!({
+                "tenant_id": tenant,
+                "params": {"question": "What does the Pro plan cost?"},
+            }),
+        )
+        .await;
+        assert_ne!(
+            allowed["status"], 403,
+            "an enabled workspace is not refused by the flag: {allowed}"
+        );
+        assert!(
+            !allowed["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not enabled"),
+            "{allowed}"
+        );
+
+        let _ = sqlx::query("DELETE FROM feature_flag_overrides WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
     }
 
     /// The owner-gated presenter API, end to end: create → advance (idempotent)

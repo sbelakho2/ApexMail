@@ -1680,6 +1680,96 @@ db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
     assert_eq!(default_plans().len(), platform_catalog::PLANS.len());
 });
 
+// The live P1 (capability waves): existing environments' plan rows predate
+// the new capability flags, so every row reported them false and the new
+// capabilities were ungrantable by plan. The reconcile must therefore
+// converge the feature BOOLEANS — not just prices/limits — on boot/seed.
+db_test!(reconcile_repairs_drifted_capability_flags, |h| {
+    use billing_service::plans::{
+        default_plans, reconcile_plans_with_catalog, PlanReconcileReport,
+    };
+    use billing_service::types::PlanFeatures;
+
+    // Stale rows exactly as a pre-capability environment held them: the
+    // full, parseable PlanFeatures JSON with every capability flag false.
+    let stale = serde_json::to_value(PlanFeatures::default()).expect("PlanFeatures serializes");
+    let stale_plans = ["pro", "growth", "scale", "enterprise"];
+    for (index, name) in stale_plans.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly,
+                                price_yearly, email_limit, api_call_limit, features,
+                                is_active, sort_order, created_at, updated_at)
+             VALUES ($1, $2, $2, 'stale pre-capability row', 0, 0, 0, 0, $3, true, $4, NOW(), NOW())",
+        )
+        .bind(format!("pln_stale_{name}"))
+        .bind(name)
+        .bind(&stale)
+        .bind(index as i32)
+        .execute(&h.pool)
+        .await
+        .expect("seed stale capability row");
+    }
+
+    let report = reconcile_plans_with_catalog(&h.pool)
+        .await
+        .expect("reconcile plans");
+    assert_eq!(
+        report.repaired, 4,
+        "every stale capability row must be reported repaired"
+    );
+
+    // The P1 flags this test exists for: the plan that sells the capability
+    // must grant it after the reconcile (red before the fix: the flag that
+    // drifted, e.g. `growth.time_travel_debugging`, stayed false).
+    for (name, flag) in [
+        ("growth", "time_travel_debugging"),
+        ("growth", "custom_retention"),
+        ("pro", "custom_tracking_domain"),
+        ("scale", "template_approval_workflow"),
+        ("enterprise", "subaccounts"),
+    ] {
+        let stored: bool = sqlx::query_scalar(
+            "SELECT (features->>$1)::bool FROM plans WHERE name = $2",
+        )
+        .bind(flag)
+        .bind(name)
+        .fetch_one(&h.pool)
+        .await
+        .expect("read converged flag");
+        assert!(stored, "{name}.{flag} must converge to the seed's grant");
+    }
+
+    // And the reconciled features equal the canonical seeds exactly.
+    for seed in default_plans() {
+        if !stale_plans.contains(&seed.name) {
+            continue;
+        }
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT features FROM plans WHERE name = $1")
+                .bind(seed.name)
+                .fetch_one(&h.pool)
+                .await
+                .expect("read reconciled features");
+        assert_eq!(
+            stored,
+            serde_json::to_value(&seed.features).expect("seed features serialize"),
+            "{}: features must converge to the canonical seed",
+            seed.name
+        );
+    }
+
+    // Idempotence still holds after a features-only repair: a second pass
+    // reports zero changes and never deactivates a catalog row.
+    let second = reconcile_plans_with_catalog(&h.pool)
+        .await
+        .expect("reconcile replay");
+    assert_eq!(
+        second,
+        PlanReconcileReport::default(),
+        "reconcile must be a no-op once the capability flags converged"
+    );
+});
+
 // ---------------------------------------------------------------------------
 // usage.rs — pure boundary functions
 // ---------------------------------------------------------------------------

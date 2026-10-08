@@ -432,3 +432,164 @@ regression.
 | `crates/ui-foundation/src/leptos_views.rs` | F12: `break-words` on the six sales JSON-mutation chips | `sales_code_chips_and_table_wrapper_layout_pins` + layout gate |
 | `crates/ui-foundation/assets/globals.css` + `globals.input.css` | F13: `.apex-table-wrap` `position: relative` (+ authored rule reconciled with the built one) | same test + layout gate |
 | `tools/browser_smoke.py` | F14: env-driven CP/marketing hosts, login-gate/authenticated fragment model, shipped copy | 22/22 PASS in both modes |
+
+---
+
+## 8. Capability-wave pages (2026-10-08): /alerts/rules, /messages/:id/timeline, /domains/:id/tracking
+
+Three pages postdate every UI fixture; dogfooded live plus new fixtures and
+gates. Final-image evidence: api-server
+`sha256:fc35113eb887c452544259b52c3fa5d42b6c25536d2cb0660b0b637fc6ce14f8`
+(started 2026-10-08T01:56:07Z), worker `87c7a488181d…`, ai-service `24d34aefc087…`.
+
+### The headline finding — F15 (P1, fixed in the response layer, live re-verify pending the next api-server build): eight HTML pages render COMPLETELY UNSTYLED because their responses carry an API CSP with no `style-src`
+
+Every HTML document built by the hand-written `html_page_response` path was
+served with the minimal API CSP `default-src 'none'; frame-ancestors 'none'` —
+no `style-src` — so the browser **blocked globals.css** and the page rendered as
+raw browser-default HTML. Verified live on `/messages/:id/timeline` and
+`/campaigns/c_1`: `getComputedStyle(document.body).fontFamily === "Times"`,
+`background: transparent`, `document.styleSheets[0].cssRules` throws
+SecurityError (CSP-blocked sheet), and the unstyled 5-column table is exactly
+why the document overflowed **349 px at 320 px** (it fits at 768/1280, so the
+layout gate's mobile width never saw it and the fixtures — which apply the sheet
+normally — were clean). Affected handlers (all `html_page_response` callers):
+contact edit, domain detail, **domain tracking**, **message timeline**, list
+detail, campaign detail, and the SSR/404 fallbacks. Pages served through the
+ui-foundation render pipeline (`/events`, `/dashboard`, `/assistant`, the drafts
+queue) were unaffected — they set the browser CSP themselves.
+
+Fix (shared response layer, `crates/api-server/src/app.rs` security-headers
+middleware): a response with no CSP of its own now gets `browser_csp_header()`
+(the same policy every rendered console page carries) when
+`Content-Type: text/html`, and the minimal API policy otherwise. Pin:
+`app::tests::html_fallback_pages_carry_the_browser_csp` (green; the existing
+JSON-CSP pin still passes). The fix is api-server code, so live pixels update
+with the next image build; the post-build re-capture is the only open item.
+
+### F16 (P1, fixed by the coordinator in the same window): `plans.features` rows predated the capability waves, so both new capabilities were ungrantable by plan
+
+All nine `plans` rows reported `time_travel_debugging=false` and
+`custom_tracking_domain=false` while `builtin_plan_seed` and the shipped copy
+grant them (Growth+ / Pro+). Entitlement resolution prefers the present-but-
+stale DB JSON (`from_plan_features_json` defaults absent keys to false), so a
+paying Growth/Pro tenant got the same refusal as Free. Proven live both ways:
+free → the honest refusal naming the feature ("plan `free` does not include
+`time_travel_debugging`. It ships with Growth and above."); with a per-tenant
+`feature_flag_overrides` grant → the populated reconstruction and the tracking
+configure flow. The coordinator has since corrected pro/growth/scale/enterprise
+to the shipped flags, so the entitled states now render without overrides.
+
+### Page-by-page, state-by-state (live, verified before the plans fix via the documented override escape hatch)
+
+**`/alerts/rules` (CP) — full CRUD verified live**, both themes × 320/768/1280
+via the state capture, plus form-level probes: list (existing rules render),
+create (`Alert rule "UI visual dogfood rule" created.` + DB row), edit form
+(`?edit=<id>` prefilled name/threshold, "fixed — delete and recreate" note for
+tenant/metric), toggle (DB `enabled=false`, flash "Alert rule disabled."),
+delete (DB row gone, flash). Empty/unavailable renders are covered by the new
+fixtures (`No alert rules yet — create one above.` / "The rule list is
+unavailable right now — this is a service problem, not an empty list." + the
+error callout carrying the correlation reference). The blank-name fallback
+("Unnamed rule (Emails sent)") is pinned in `fixture_states` tests.
+Observations: the list's tenant cell shows the raw tenant id (operator surface —
+consistent with the drafts page's working-key display); the unavailable state
+still renders the create form (a create against an unavailable store fails with
+its own honest error) — both noted, not changed.
+
+**`/messages/:id/timeline` (console)** — populated reconstruction verified live
+(6 transitions from `messages` + `email_queue` + `events`), plan refusal (free
+tenant, named feature + "Growth and above"), tenant-scoped not-found ("That
+message could not be found in this workspace."), and the past-timestamp
+no-entry state. The route was **not data-aware in the shared router** (it always
+rendered the static "No message selected" skeleton), so fixtures could never
+audit the real page; wired now to render the shared `data_list_page(list,
+"entry")` when data is present (identical to the api-server's live composition)
+with the skeleton kept as the no-data fallback, and two state fixtures added
+(`-populated`, `-insufficient`). **Fixed (F17, P2)**: the description, the "As of" KPI and the "When" cells
+rendered the raw RFC 3339 timestamp with nanoseconds
+(`2026-10-08T02:46:11.984213272+00:00`). The page-data builder now formats
+through the same shared helper the events table uses (`data::relative_time`,
+promoted to `pub(crate)`), keeping the raw RFC 3339 value on the wire and in
+the cell's `title`/`datetime` slot — the one-timestamp policy. Pin:
+`web::tests::timeline_page_data_formats_timestamps_with_the_house_helper`; the
+timeline state fixtures were aligned to the house form (relative prose + raw
+UTC in the title slot).
+
+**`/domains/:id/tracking` (console)** — all six states reached live through the
+product's own flow: parent-not-verified, not-entitled (free plan), configure
+form, and configured **pending / verified / failed** (each with the CNAME target
+and the Verify/Remove actions; the failed state carries the named reason).
+**Coverage gap — CLOSED (F18)**: the panel was hand-rolled inline in
+`crates/api-server/src/routes/web.rs`, and the route was absent from
+`docs/development/ui-baseline-manifest.json`, so no fixture/golden/gate ever
+saw it. Extracted into the shared view layer as
+`crates/ui-foundation/src/tracking_domain.rs` (`TrackingDomainPanel`,
+`TrackingDomainPanelRow`, `tracking_domain_panel_html`,
+`web_domain_tracking_page` — markup moved byte-identical, `pub(crate)` → `pub`);
+the ui router serves the route with `RouteData.tracking_domain`, the manifest
+gained `/domains/d_1/tracking` (`canonicalPattern /domains/[id]/tracking`; web
+38 → 39, total 127 → 128, routing test updated), the link gate registered the
+three tracking POST endpoints, and **six state fixtures** (not-verified,
+not-entitled, configure, pending, verified, failed) plus a content pin
+(`tracking_domain_states_render_their_real_surfaces`) put every state under the
+contrast/layout/class-integrity gates and the goldens. The api-server handler
+now imports the shared types/renderer (`use ui_foundation::tracking_domain::…`)
+and keeps owning the loaders, the entitlement gate and the POSTs — the live
+markup is unchanged.
+
+### Verification status at hand-in
+
+* **In-tree + pinned**: F15 (browser CSP for hand-written HTML responses) and
+  the timeline route wiring; `cargo test -p api-server -- csp security_headers`
+  → 12/12 green (including the new `html_fallback_pages_carry_the_browser_csp`);
+  `cargo test -p ui-foundation` → 475 lib + 12 bin + 1 integration green
+  (goldens regenerated for the new route only);
+  `cargo fmt -p ui-foundation -p api-server --check` clean.
+* **Live-verified (pre-CSP-fix image)**: every state and action listed above;
+  the pixels of the affected pages were unstyled, which IS the F15 evidence
+  (screenshots under `tools/contrast-audit/reports/cap-wave-live/`).
+* **Pending the next api-server image build** (the fix is server code, not
+  CSS): the styled re-capture of the three pages (both themes × 320/768/1280)
+  and the confirmation that F15's 320 px overflow disappears with the sheet
+  applied. The post-rebuild driver is committed-ready
+  (`/tmp/post_rebuild_capture.py`: waits for the CSP header, re-mints sessions,
+  re-runs `tools/contrast-audit/cap-wave-probes.mjs` + the state matrix, and
+  asserts `body font != Times`, `scrollWidth == clientWidth` at 320).
+
+### Gates over the new fixtures (all green)
+
+* `tools/contrast-audit/layout-gate.sh` → **0 findings across 1181 runs** (the
+  timeline/alert-rules state pages AND the six extracted tracking-domain state
+  pages included; both bot surfaces still clean).
+* `tools/contrast-audit/gate.sh` → **PASS 0 AA / 112 pages / 317 runs**.
+* `cargo test -p ui-foundation` → **475 lib + 12 bin + 1 integration**, goldens
+  included (regenerated only for intended diffs; the new route golden is
+  `goldens/web/domains_d_1_tracking.html`).
+* `cargo test -p api-server -- csp security_headers timeline_page_data` →
+  15/15 green (the browser-CSP pin and the timeline timestamp pin included).
+* `cargo fmt -p ui-foundation -p api-server --check` clean.
+
+### Exact tree state handed to the final rebuild (2026-10-08 ~03:25Z)
+
+| Area | State |
+|---|---|
+| `crates/ui-foundation/src/tracking_domain.rs` (new) | shared panel + page (F18); `lib.rs` registers it |
+| `crates/ui-foundation/src/axum_router.rs` | `RouteData.tracking_domain` + `/domains/{id}/tracking` route; timeline route data-aware |
+| `crates/ui-foundation/src/fixture_states.rs` | 11 new states (timeline ×2, alert-rules ×3, tracking ×6) + pins |
+| `crates/ui-foundation/src/gate_support.rs` | the three tracking POST endpoints registered for gate I |
+| `crates/ui-foundation/src/routing.rs` + `docs/development/ui-baseline-manifest.json` | `/domains/d_1/tracking`; web 39, total 128 |
+| `crates/api-server/src/app.rs` | F15 browser-CSP dispatch for hand-written HTML responses + pin |
+| `crates/api-server/src/routes/web.rs` + `web/data.rs` | F17 timestamp formatting via `data::relative_time`; panel types/renderer imported from ui-foundation |
+| `tools/contrast-audit/fixtures/**` | re-exported (300 manifest entries) |
+| `crates/ui-foundation/goldens/**` | regenerated (new tracking route golden; no other diffs) |
+| Gates | layout 0/1181, contrast PASS 0 AA/112 pages/317 runs, ui-foundation 475+12+1, api-server pins 15/15, fmt clean |
+
+### New fixtures/pins added by this section
+
+| File | Change | Pin |
+|---|---|---|
+| `fixture_states.rs` | 5 new states: timeline populated/insufficient, alert-rules populated/unavailable/editing | `capability_wave_states_render_their_real_content` (+ existing honesty pins) |
+| `axum_router.rs` | timeline route renders the shared data-list page when data is present | the two timeline state fixtures + the route render sweep |
+| `app.rs` | HTML responses without their own CSP get the browser policy (F15) | `html_fallback_pages_carry_the_browser_csp` |
+| `tools/contrast-audit/cap-wave-probes.mjs` (new) | live CRUD + state driver for the three pages | probe report + screenshots under `reports/cap-wave-live/` |

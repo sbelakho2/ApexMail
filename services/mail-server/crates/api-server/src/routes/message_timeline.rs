@@ -203,9 +203,7 @@ async fn message_timeline(
     )
     .await?;
 
-    Ok(success(
-        reconstruct_timeline(&state, message_id, at).await?,
-    ))
+    Ok(success(reconstruct_timeline(&state, message_id, at).await?))
 }
 
 /// Reconstruct one message's state at `at` from the append-only sources.
@@ -520,13 +518,20 @@ async fn collect_entries(
     .bind(PER_SOURCE_LIMIT)
     .fetch_all(&state.db)
     .await?;
-    let queue_attempt_caps: std::collections::HashMap<Uuid, i32> = queue_rows
-        .iter()
-        .map(|row| (row.0, row.3))
-        .collect();
+    let queue_attempt_caps: std::collections::HashMap<Uuid, i32> =
+        queue_rows.iter().map(|row| (row.0, row.3)).collect();
     let mut queue_ids: Vec<Uuid> = Vec::new();
-    for (row_id, status, attempts, max_attempts, last_error, created_at, sent_at, delivered_at, updated_at) in
-        queue_rows
+    for (
+        row_id,
+        status,
+        attempts,
+        max_attempts,
+        last_error,
+        created_at,
+        sent_at,
+        delivered_at,
+        updated_at,
+    ) in queue_rows
     {
         queue_ids.push(row_id);
         counts[2] += 1;
@@ -607,8 +612,15 @@ async fn collect_entries(
         .bind(PER_SOURCE_LIMIT)
         .fetch_all(&state.db)
         .await?;
-        for (row_id, email_id, attempt_number, success, smtp_response, error_message, attempted_at) in
-            attempt_rows
+        for (
+            row_id,
+            email_id,
+            attempt_number,
+            success,
+            smtp_response,
+            error_message,
+            attempted_at,
+        ) in attempt_rows
         {
             counts[3] += 1;
             let max_attempts = queue_attempt_caps.get(&email_id).copied().unwrap_or(5);
@@ -636,17 +648,22 @@ async fn collect_entries(
     }
 
     // 5. events — provider/analytics facts.
-    let event_rows: Vec<(String, String, Option<String>, Option<String>, DateTime<Utc>)> =
-        sqlx::query_as(
-            "SELECT id, event_type, link_url, bounce_type, timestamp \
+    let event_rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        "SELECT id, event_type, link_url, bounce_type, timestamp \
              FROM events WHERE message_id = $1 AND timestamp <= $2 \
              ORDER BY timestamp LIMIT $3",
-        )
-        .bind(message_id.to_string())
-        .bind(at)
-        .bind(PER_SOURCE_LIMIT)
-        .fetch_all(&state.db)
-        .await?;
+    )
+    .bind(message_id.to_string())
+    .bind(at)
+    .bind(PER_SOURCE_LIMIT)
+    .fetch_all(&state.db)
+    .await?;
     for (row_id, event_type, link_url, bounce_type, timestamp) in event_rows {
         counts[4] += 1;
         entries.push(RawEntry {
@@ -958,9 +975,16 @@ mod tests {
         let full = reconstruct(&state, message_id, second(100)).await;
         let sources: Vec<&str> = full.timeline.iter().map(|entry| entry.source).collect();
         for expected in ["messages", "email_queue", "email_delivery_log", "events"] {
-            assert!(sources.contains(&expected), "missing source {expected}: {sources:?}");
+            assert!(
+                sources.contains(&expected),
+                "missing source {expected}: {sources:?}"
+            );
         }
-        let instants: Vec<&str> = full.timeline.iter().map(|entry| entry.at.as_str()).collect();
+        let instants: Vec<&str> = full
+            .timeline
+            .iter()
+            .map(|entry| entry.at.as_str())
+            .collect();
         let mut sorted = instants.clone();
         sorted.sort_unstable();
         assert_eq!(instants, sorted, "entries are chronological");
@@ -1051,7 +1075,9 @@ mod tests {
             State(state.clone()),
             auth_for(&other, SCOPE_READ),
             Path(message_id.to_string()),
-            Query(TimelineQuery { at: Some(at.clone()) }),
+            Query(TimelineQuery {
+                at: Some(at.clone()),
+            }),
         )
         .await;
         match denied {
@@ -1119,9 +1145,7 @@ mod tests {
             "the reason states the gap: {}",
             insufficient.reason
         );
-        assert!(insufficient
-            .checked_sources
-            .contains(&"email_delivery_log"));
+        assert!(insufficient.checked_sources.contains(&"email_delivery_log"));
         assert_eq!(gap.state.status, "accepted", "only acceptance is provable");
 
         cleanup(&pool, &tenant).await;
@@ -1150,7 +1174,9 @@ mod tests {
             State(state.clone()),
             auth_for(&tenant, SCOPE_READ),
             Path(message_id.to_string()),
-            Query(TimelineQuery { at: Some(at.clone()) }),
+            Query(TimelineQuery {
+                at: Some(at.clone()),
+            }),
         )
         .await;
         match denied {

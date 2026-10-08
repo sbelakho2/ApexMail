@@ -184,6 +184,58 @@ fn mint_token(tenant: &str, subject: &str, admin: bool) -> String {
     .unwrap()
 }
 
+/// Capability wave 1 (plan entitlement) fixture: the template-approval and
+/// sub-account routes now gate on the owning tenant's entitlement snapshot
+/// (`billing_service::plans::get_entitlement_snapshot`). The shared harness
+/// tenants stay on `free`, so the gated flows below provision their OWN
+/// tenant on a dedicated plan row carrying the wave-1 flags — the same
+/// fixture shape as wave-1's `routes.rs::seed_capability_plan` /
+/// `seed_capability_tenant`.
+const ENTITLED_PLAN: &str = "adv-entitled";
+
+async fn seed_entitled_plan(db: &PgPool) {
+    use billing_service::plans::PlanSeed;
+    use billing_service::types::PlanFeatures;
+    let seed = PlanSeed {
+        name: ENTITLED_PLAN,
+        display_name: "Adversarial Entitled",
+        description: "wave-1 entitlement fixture",
+        price_monthly: 0,
+        price_yearly: 0,
+        email_limit: 1_000_000,
+        api_call_limit: 1_000_000,
+        sort_order: 999,
+        features: PlanFeatures {
+            api_access: true,
+            template_approval_workflow: true,
+            subaccounts: true,
+            max_subaccounts: 100,
+            ..PlanFeatures::default()
+        },
+    };
+    billing_service::plans::upsert_plan(db, &seed)
+        .await
+        .expect("seed entitled plan");
+}
+
+/// A NEW tenant on [`ENTITLED_PLAN`], distinct from `tenant_a`/`tenant_b`
+/// (which stay `free` so the non-entitled refusal arm below is real).
+async fn seed_entitled_tenant(db: &PgPool) -> String {
+    seed_entitled_plan(db).await;
+    let id = format!("e{}", &Uuid::new_v4().simple().to_string()[..25]);
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) \
+         VALUES ($1, $2, $1, $3, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+    )
+    .bind(&id)
+    .bind(format!("Entitled {id}"))
+    .bind(ENTITLED_PLAN)
+    .execute(db)
+    .await
+    .expect("seed entitled tenant");
+    id
+}
+
 async fn call(
     app: &Router,
     method: &str,
@@ -1595,13 +1647,18 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
     run(async {
         let Some(h) = harness().await else { return };
         let app = h.app.clone();
-        let tenant = h.tenant_a.clone();
+        // Wave-1 fixture: sub-account CRUD gates on the PARENT tenant's plan
+        // entitlement. This test uses a dedicated entitled tenant; the shared
+        // `tenant_a` stays on `free` (the contract test pins its plan), and
+        // the free-plan refusal arm at the end keeps the gate covered.
+        let tenant = seed_entitled_tenant(&h.db).await;
+        let token = mint_token(&tenant, &h.user_a, false);
 
         let (status, json) = call(
             &app,
             "POST",
             "/sub-accounts",
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({
                 "parent_id": tenant, "name": "Adv Sub", "email": "sub@example.com",
                 "plan": "starter", "volume_limit": 1000
@@ -1616,7 +1673,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "GET",
             &format!("/sub-accounts/{sub_id}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1634,7 +1691,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "PUT",
             &format!("/sub-accounts/{sub_id}"),
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({"name": "Renamed Sub", "volume_limit": 2000})),
         )
         .await;
@@ -1643,7 +1700,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "GET",
             &format!("/sub-accounts/parent/{tenant}?status=active"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1652,7 +1709,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "GET",
             &format!("/sub-accounts/stats/{tenant}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1664,7 +1721,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "POST",
             &format!("/sub-accounts/{sub_id}/api-keys"),
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({"name": "adv key", "permissions": ["send"]})),
         )
         .await;
@@ -1677,7 +1734,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "GET",
             &format!("/sub-accounts/{sub_id}/api-keys"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1693,7 +1750,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "POST",
             &format!("/sub-accounts/{sub_id}/api-keys/{key_id}/revoke"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1711,7 +1768,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "POST",
             &format!("/sub-accounts/{sub_id}/suspend"),
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({"reason": "adversarial"})),
         )
         .await;
@@ -1720,7 +1777,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "DELETE",
             &format!("/sub-accounts/{sub_id}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1729,7 +1786,7 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             &app,
             "GET",
             &format!("/sub-accounts/{sub_id}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1739,6 +1796,22 @@ fn sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds() {
             "a not-found result is a real 404: {json}"
         );
         assert_eq!(json["success"], false, "deleted sub-account is not found");
+
+        // The wave-1 gate itself, still covered: the shared FREE-plan tenant
+        // is refused 403 naming `subaccounts` — the entitled fixture tenant
+        // above is what admits the lifecycle, never a weakened check.
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/sub-accounts",
+            Some(&h.token_b),
+            Some(serde_json::json!({"parent_id": h.tenant_b, "name": "denied"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(error.contains("subaccounts"), "{json}");
+        assert!(error.contains("free"), "{json}");
     });
 }
 
@@ -1749,14 +1822,21 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
     run(async {
         let Some(h) = harness().await else { return };
         let app = h.app.clone();
-        let tenant = h.tenant_a.clone();
+        // Wave-1 fixture: template submit/get/list/stats and approve/reject
+        // all gate on the owning tenant's plan entitlement via the owning
+        // SNAPSHOT (not the tenant type), so this test runs on a dedicated
+        // entitled tenant with its own member + admin tokens. The shared
+        // `tenant_b` stays `free` for the cross-tenant and refusal arms.
+        let tenant = seed_entitled_tenant(&h.db).await;
+        let token = mint_token(&tenant, &h.user_a, false);
+        let admin_token = mint_token(&tenant, &h.admin_a, true);
 
         // Templates: submit → get → list → admin review.
         let (status, json) = call(
             &app,
             "POST",
             "/templates/submit",
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({
                 "tenant_id": tenant, "name": "Adv Template", "subject": "Hello",
                 "html_content": "<h1>Hi</h1>", "submitted_by": h.user_a.clone()
@@ -1773,7 +1853,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "GET",
             &format!("/templates/{template_id}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1791,7 +1871,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "GET",
             &format!("/templates/tenant/{tenant}?limit=1000"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1801,7 +1881,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             &format!("/templates/{template_id}/approve"),
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({"reviewed_by": h.user_a.clone()})),
         )
         .await;
@@ -1810,7 +1890,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             &format!("/templates/{template_id}/approve"),
-            Some(&h.admin_token),
+            Some(&admin_token),
             Some(serde_json::json!({"reviewed_by": h.admin_a.clone(), "notes": "ok"})),
         )
         .await;
@@ -1819,7 +1899,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "GET",
             &format!("/templates/stats/{tenant}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1831,7 +1911,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "PUT",
             "/whitelabel/config",
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({
                 "tenant_id": tenant, "company_name": "Adv Corp", "primary_color": "#123456"
             })),
@@ -1842,7 +1922,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "GET",
             &format!("/whitelabel/config/{tenant}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1863,7 +1943,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             "/whitelabel/domains",
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({
                 "tenant_id": tenant, "domain": domain, "domain_type": "tracking"
             })),
@@ -1871,7 +1951,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
         .await;
         assert_eq!(status, StatusCode::OK, "{json}");
         let domain_id: Uuid = json["data"]["id"].as_str().unwrap().parse().unwrap();
-        let token = json["data"]["verification_token"]
+        let token_for_dns = json["data"]["verification_token"]
             .as_str()
             .unwrap()
             .to_string();
@@ -1883,7 +1963,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
         assert_eq!(failed.data.unwrap().verification_status, "failed");
         let verified = service
             .verify_domain_with_lookup(domain_id, move |_| {
-                let record = format!("apexmail-verification={token}");
+                let record = format!("apexmail-verification={token_for_dns}");
                 async move { Ok(vec![record]) }
             })
             .await
@@ -1896,7 +1976,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             "/qbr",
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({
                 "tenant_id": tenant, "quarter": 3, "year": 2026,
                 "attendees": [{"name": "Alice"}]
@@ -1906,14 +1986,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["success"], true, "{json}");
         let qbr_id = json["data"]["id"].as_str().expect("qbr id").to_string();
-        let (status, _) = call(
-            &app,
-            "GET",
-            &format!("/qbr/{qbr_id}"),
-            Some(&h.token_a),
-            None,
-        )
-        .await;
+        let (status, _) = call(&app, "GET", &format!("/qbr/{qbr_id}"), Some(&token), None).await;
         assert_eq!(status, StatusCode::OK);
         let (status, _) = call(
             &app,
@@ -1928,7 +2001,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "GET",
             &format!("/qbr/tenant/{tenant}"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1937,7 +2010,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             &format!("/qbr/{qbr_id}/generate"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1946,7 +2019,7 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             &format!("/qbr/{qbr_id}/deliver"),
-            Some(&h.token_a),
+            Some(&token),
             None,
         )
         .await;
@@ -1955,16 +2028,35 @@ fn templates_whitelabel_and_qbr_flows_are_tenant_scoped() {
             &app,
             "POST",
             &format!("/qbr/{qbr_id}/feedback"),
-            Some(&h.token_a),
+            Some(&token),
             Some(serde_json::json!({"rating": 5, "feedback_text": "solid"})),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = call(&app, "GET", "/qbr/benchmarks", Some(&h.token_a), None).await;
+        let (status, _) = call(&app, "GET", "/qbr/benchmarks", Some(&token), None).await;
         assert_eq!(status, StatusCode::OK);
         // NOTE: /qbr/:id/pdf and /dpa/:tenant_id/pdf are exercised by
         // `pdf_routes_require_a_configured_and_reachable_renderer` against an
         // in-process mock renderer (PDF_RENDERER_URL is read per call).
+
+        // The wave-1 gate itself, still covered: the shared FREE-plan tenant
+        // is refused 403 naming `template_approval_workflow` — the entitled
+        // fixture tenant above is what admits the flow, never a weakened gate.
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/templates/submit",
+            Some(&h.token_b),
+            Some(serde_json::json!({
+                "tenant_id": h.tenant_b, "name": "denied", "subject": "Hello",
+                "html_content": "<h1>Hi</h1>", "submitted_by": "user-b-subject"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(error.contains("template_approval_workflow"), "{json}");
+        assert!(error.contains("free"), "{json}");
     });
 }
 

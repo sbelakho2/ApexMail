@@ -25,14 +25,21 @@ Status legend: PASS / FAIL / NOT-VERIFIED (could not prove).
 
 | Item | State |
 |---|---|
-| Live matrix (isolation, RBAC, concurrency, hostile input) | DONE — 26/27 + 13/13; the one red probe is F3 (fixed in tree, PENDING-IMAGE) |
+| Live matrix (isolation, RBAC, concurrency, hostile input) | DONE — all green on the final image (the F3 window probe closed live: default window = newest 12 turns) |
 | SSR /assistant states | DONE — 7/7 (anonymous 303, named disabled refusal, no form, console POST refused) |
-| Performance budgets (16×4, 65 s) | DONE — 6/6 (0 × 5xx, p95 874 ms, 0 contamination, limiter probe) |
+| Performance budgets (16×4, ≥60 s) | DONE — 6/6 final: 144 turns, 0 × 5xx, 0 × 429, p95 575 ms (budget 2000 ms) |
 | Disclosure suite (B3) | DONE — 18/19 (one mock-routing failure, MOCK-DEPENDENT) |
 | Content corpus (owner mandate) | DONE — driven live, 98 PASS / 73 MOCK-DEPENDENT (mock routing), classes in §5 |
-| Fixes landed in owned paths | F1/F2 console gates, F3 turns-window, F4 verifier parallel-list, F5 pool sizing, F6 history per-caller — each with red→green tests |
-| PENDING-IMAGE (batch rebuild) | F3 live probe, F6 live probe, one perf re-run |
-| Residual owners | O1 demos call-site (P3), O2 CRM-capture disclosure (P2), O3 stale drafts test (P2, mailbot), O4 mock routing (P2, mailbot) |
+| Fixes landed in owned paths | F1/F2 console gates, F3 turns-window, F4 verifier parallel-list, F5 pool sizing, F6 history per-caller, F7 demo-presenter flag gate, F8 contact-capture disclosure — each with red→green tests or gate evidence |
+| PENDING-IMAGE | NONE — both probes closed, perf re-run green |
+| Residual closures (post-hand-in wave) | O1 FIXED (demos flag gate + test), O2 FIXED (docs + page copy + fixture, contrast gate green), O3 CLOSED (the test now seeds consent; green in isolation), O4 stays with the mock owner (P2) |
+
+Final revision under test: **`94022471`** (the batch commit). Final image ids:
+api-server `sha256:fc35113eb887c452544259b52c3fa5d42b6c25536d2cb0660b0b637fc6ce14f8`,
+ai-service `sha256:24d34aefc087041037815da07d3b9c3df5fd0005f4fea6e6384747da2e359446`,
+worker `sha256:87c7a488181daa048fa0f2d71b98bc00cc799b75d8979f8164002b2d8589b25a`,
+mta `sha256:a1af42364a089c3939cc1798e67927dae8a7f734599a8f253b7d68fcdc847864`.
+`/health/ready`: db+redis+schema green.
 
 ## 1. Enumeration — the assistant's answerable space
 
@@ -181,9 +188,45 @@ header is 401 — fail-before shows Bob's turn in Alice's read) and the updated
 `x-apexmail-user-id`, tenant-level key gets 403 with NO service call —
 fail-before shows 200 + no user header). Both proven red-then-green.
 
-**Status: FIXED in tree, PENDING-IMAGE** — the live probe
-`history: a tenant-level key never reads a user's conversation` stays red
-until the batch rebuild.
+**Status: FIXED — live-verified on the final image**: console user posts a
+nonce; the tenant-level `ai:read` key's `GET /v1/ai/chat/history` → **403**
+"chat history is per user and this credential has no user identity", and the
+nonce never appears (pre-fix: 200 with the nonce, §4.2/F6).
+
+### F7 (P3, O1) — the demo presenter bypassed the capability flag
+`routes/demos/mod.rs::chat_narrate` called `ai_chat::ask_assistant` directly,
+so a workspace with `ai_chat` switched off could still be narrated in a demo.
+Fix: the step runs `require_ai_chat_enabled` first and returns the SAME named
+refusal in the step's own error shape (`status: 403`), which the presenter
+panel renders. Test `chat_narrate_respects_the_capability_flag` (disabled →
+403 + "not enabled"; after the flag is restored on a FRESH state — the flag
+cache is per-state, 30 s TTL — the step is no longer refused on the flag).
+Fail-before: with the gate removed the disabled arm does not refuse.
+
+### F8 (P2, O2) — the chat→CRM contact capture is now disclosed
+`docs/user-guide/assistant.md` §Privacy states it plainly: when a message asks
+us to contact the user and includes an address, that address and the message
+are passed to the sales team as a contact request, recorded for a human
+follow-up only — no email is sent by that path and nothing is added to the
+user's contacts. The assistant page carries the same note under the message
+form ("Questions that ask us to contact you are shared with our sales team as
+a contact request."). Gates after the change: `docs-lint` for
+`docs/user-guide/assistant.md` reports 0 violations in every category;
+`tools/contrast-audit/gate.sh` PASSES with **0 AA failures across 99 pages /
+278 runs** (the note is audited in all three `web /assistant` themes);
+`check_flash_copy`, `check_ui_terminology`, `check_ui_form_hygiene` all green;
+the regenerated golden (`goldens/web/assistant.html`) and the contrast fixture
+carry the note, and the ui-foundation suite is **487/487**.
+
+### O3 — CLOSED (owner fixed it while the lane wrapped)
+`ai_draft_review_queue_approve_and_reject_flow_through_the_page` now seeds an
+active marketing consent record for the approved recipient (the shipped F4
+send-admission gate) and asserts the rejection arm's `processed_at`. It passes
+in isolation (`1 test run: 1 passed`, 7.3 s). The earlier red was the test
+predating the consent gate; a later red during this wave was environmental
+(test-DB pool exhaustion while sibling suites ran in parallel:
+`pool timed out while waiting for an open connection`), and it clears in
+isolation.
 
 ### Static notes (not defects)
 - `ai_chat_session_turns` has `ON DELETE CASCADE` from sessions, so the
@@ -193,10 +236,10 @@ until the batch rebuild.
 
 ## 4. Live matrix
 
-Revision under test: `git rev-parse HEAD` = `0557e55d`; api-server container
-image `sha256:9fc3894c054ccdf16c149a8f30e696823c4af6adb28eab74110b1b2f19e7c22a`
-(built from this tree with the F1/F2 fixes); ai-service rebuilt with the
-verifier fix; `AI_MODEL_ENABLED=true`,
+Lane runs spanned two revisions: the bulk of the matrix/UI/disclosure/content
+lanes ran on `0557e55d` (image `sha256:9fc3894c…`), and the two F3/F6 probes
+plus the perf re-run were closed on the final batch revision **`94022471`**
+(api-server `sha256:fc35113e…`). ai-service: `AI_MODEL_ENABLED=true`,
 `AI_MODEL_ENDPOINT=http://mock-llm:8099/v1` (the compose-network mock).
 
 Provisioning (documented signup → Mailpit → verify → login → MFA, then
@@ -247,9 +290,10 @@ Fix (owned path `ai_chat.rs`): select the newest `limit` rows in a subquery
 (`DESC LIMIT`) and re-order ascending. Regression test
 `session_window_returns_the_newest_turns_not_the_oldest` (seeds 16 turns):
 fails with the old SQL (window = oldest 12, newest exchange absent), passes
-with the fix. **Status: P1-PENDING-IMAGE** (api-server rebuild batched by the
-coordinator); the live probe `sessions: default window returns the NEWEST
-turns` stays red until then.
+with the fix. **Status: FIXED — live-verified on the final image (`94022471`)**: 14 console
+turns in one session, default window read → 12 turns, newest exchange present,
+oldest turn hidden (first returned row = the 13th-newest turn). The pre-fix
+live evidence (12 of 16 rows, newest hidden) is in §4.3.
 
 ### 4.4 Adversarial input — 13/13 honest
 - 2 MB body → 400 `message too long (max 4000 chars)`, no 5xx.
@@ -272,16 +316,16 @@ turns` stays red until then.
 - flag-disabled console POST → 303 refusal flash, **no turn stored** (0 rows
   before and after).
 
-### 4.6 Performance budgets — 6/6 honest (final run)
+### 4.6 Performance budgets — 6/6 honest (final-image run)
 Run: 16 concurrent console conversations, 2 workers × 8 users across 4
-tenants (console identities, so the chat bucket is per USER), 65 s target.
+tenants (console identities, so the chat bucket is per USER), ≥60 s target.
 
-| Metric | Budget | Measured (final) |
+| Metric | Budget | Measured (final image, 94022471) |
 |---|---|---|
-| server errors | 0 | **0** (64.0 s wall, 128 turns served) |
+| server errors | 0 | **0** (72.1 s wall, 144 turns served) |
 | cross-tenant contamination | 0 | **0** |
-| p95 turn latency | ≤ 2000 ms | **874 ms** |
-| worst turn | ≤ 10 000 ms | **969 ms** |
+| p95 turn latency | ≤ 2000 ms | **575 ms** |
+| worst turn | ≤ 10 000 ms | **618 ms** |
 | DB truth (turn tenant = session tenant) | 0 mismatches | **0** |
 | paced load under the 20/min bucket | 0 × 429 | **0** |
 | tenant A hammered | 429 while B serves | **A=[200,429] B=200** |
@@ -398,7 +442,7 @@ cargo nextest run -p ai-service -E 'test(repetition) or test(parallel_plan) or t
 ```
 
 Suite status with these fixes:
-- `ui-foundation`: **483/483 pass**.
+- `ui-foundation`: **487/487 pass** (after regenerating the assistant golden for the disclosed page copy; contrast gate 0 AA failures).
 - `ai-service`: **463/463 pass** (the older `chat_route_delivers_answer_and_persists_audit` test was updated to send the now-REQUIRED user header, and a tenant-header-only case asserts the 401 — the coordinator's report); the targeted set
   (`chat_history_is_scoped_to_the_forwarded_user`, `docs_pool_carries_the_chat_concurrency_budget`,
   the three verifier arms) → **5/5 pass**.

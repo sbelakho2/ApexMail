@@ -16,6 +16,7 @@ pub mod routing;
 pub mod shell;
 pub mod ssr;
 pub mod tokens;
+pub mod tracking_domain;
 pub mod view_data;
 
 // ─── UI/UX CI gates (test-only) ────────────────────────────────────────
@@ -450,9 +451,9 @@ mod tests {
             // no scroll) ahead of the canonical one; the canonical rule is
             // the one carrying the scroll container. At least one must be
             // positioned too.
-            let positioned = sheet
-                .match_indices(".apex-table-wrap")
-                .any(|(at, _)| sheet[at..(at + 400).min(sheet.len())].contains("position: relative"));
+            let positioned = sheet.match_indices(".apex-table-wrap").any(|(at, _)| {
+                sheet[at..(at + 400).min(sheet.len())].contains("position: relative")
+            });
             assert!(
                 positioned,
                 "{name}: a .apex-table-wrap rule must be position: relative so abspos descendants stay inside the scroll container",
@@ -460,7 +461,10 @@ mod tests {
             let scrolls = sheet
                 .match_indices(".apex-table-wrap")
                 .any(|(at, _)| sheet[at..(at + 400).min(sheet.len())].contains("overflow-x: auto"));
-            assert!(scrolls, "{name}: .apex-table-wrap must keep its horizontal scroll");
+            assert!(
+                scrolls,
+                "{name}: .apex-table-wrap must keep its horizontal scroll"
+            );
         }
     }
 

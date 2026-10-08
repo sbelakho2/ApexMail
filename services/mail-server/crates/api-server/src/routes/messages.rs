@@ -1226,9 +1226,8 @@ fn validate_rendered_send_content(body: &SendMessageRequest) -> Vec<String> {
     let html_present = body.html.as_deref().is_some_and(|html| !html.is_empty());
     let text_present = body.text.as_deref().is_some_and(|text| !text.is_empty());
     if !html_present && !text_present {
-        errors.push(
-            "template rendered an empty html/text body; provide a body override".to_string(),
-        );
+        errors
+            .push("template rendered an empty html/text body; provide a body override".to_string());
     }
     errors
 }
@@ -6091,16 +6090,18 @@ Bcc: victim@example.com"@example.com"#
     /// Every message + queue row the tenant owns (a refused send must leave
     /// both at zero; an accepted one queues exactly its recipients).
     async fn tenant_message_counts(pool: &sqlx::PgPool, tenant: &str) -> (i64, i64) {
-        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_one(pool)
-            .await
-            .expect("count messages");
-        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_one(pool)
-            .await
-            .expect("count queue rows");
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(pool)
+                .await
+                .expect("count messages");
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(pool)
+                .await
+                .expect("count queue rows");
         (messages, queued)
     }
 
@@ -6616,10 +6617,7 @@ Bcc: victim@example.com"@example.com"#
 
         // Shape refusals, left of the template load.
         for (patch, expected) in [
-            (
-                serde_json::json!({"name": "Ada"}),
-                "requires 'template_id'",
-            ),
+            (serde_json::json!({"name": "Ada"}), "requires 'template_id'"),
             (serde_json::json!([]), "must be a JSON object"),
         ] {
             let mut payload = serde_json::json!({
@@ -6691,7 +6689,10 @@ Bcc: victim@example.com"@example.com"#
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["data"]["accepted"], 1, "body: {body}");
         assert_eq!(body["data"]["rejected"], 1, "body: {body}");
-        assert_eq!(body["data"]["results"][0]["status"], "queued", "body: {body}");
+        assert_eq!(
+            body["data"]["results"][0]["status"], "queued",
+            "body: {body}"
+        );
         assert_eq!(
             body["data"]["results"][1]["status"], "rejected",
             "body: {body}"
@@ -6707,13 +6708,12 @@ Bcc: victim@example.com"@example.com"#
         // Exactly the accepted item is queued — with rendered content.
         let (messages, queued) = tenant_message_counts(&fixture.pool, &fixture.tenant).await;
         assert_eq!((messages, queued), (1, 1), "body: {body}");
-        let (subject, html): (String, Option<String>) = sqlx::query_as(
-            "SELECT subject, html_body FROM messages WHERE tenant_id = $1",
-        )
-        .bind(&fixture.tenant)
-        .fetch_one(&fixture.pool)
-        .await
-        .expect("fetch batched template message");
+        let (subject, html): (String, Option<String>) =
+            sqlx::query_as("SELECT subject, html_body FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .expect("fetch batched template message");
         assert_eq!(subject, "Hi Ada");
         assert_eq!(html.as_deref(), Some("<p>Ada</p>"));
 

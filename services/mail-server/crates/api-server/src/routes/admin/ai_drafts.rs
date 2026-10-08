@@ -307,14 +307,13 @@ pub(crate) async fn approve_draft_core(
     // review. The refusal is still durable decision evidence via the
     // committed best-effort write below, exactly like the unroutable-draft
     // refusal.
-    let admission = billing_service::send_admission::SendAdmissionService::new(
-        std::sync::Arc::new(
+    let admission =
+        billing_service::send_admission::SendAdmissionService::new(std::sync::Arc::new(
             billing_service::send_admission::PostgresAdmissionBackend::new(
                 state.db.clone(),
                 state.redis.clone(),
             ),
-        ),
-    );
+        ));
     let category = apexmail_lib::email_headers::message_category::MARKETING;
     {
         match admission
@@ -1031,7 +1030,10 @@ mod approval_http_tests {
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(tenant)
-        .bind(format!("sub-{tenant}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]))
+        .bind(format!(
+            "sub-{tenant}-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ))
         .bind(recipient)
         .execute(pool)
         .await
@@ -1374,13 +1376,12 @@ mod approval_http_tests {
             );
 
             // Nothing was consumed and nothing was queued.
-            let pending: bool = sqlx::query_scalar(
-                "SELECT pending_approval FROM inbound_messages WHERE id = $1",
-            )
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .expect("draft row");
+            let pending: bool =
+                sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("draft row");
             assert!(
                 pending,
                 "a consent-refused approval must not consume the draft"
@@ -1392,7 +1393,10 @@ mod approval_http_tests {
             .fetch_one(&pool)
             .await
             .expect("queue count");
-            assert_eq!(queued, 0, "a consent-refused approval must not queue a reply");
+            assert_eq!(
+                queued, 0,
+                "a consent-refused approval must not queue a reply"
+            );
 
             // An active marketing consent record makes the same draft approvable.
             grant_marketing_consent(&pool, tenant, &recipient).await;

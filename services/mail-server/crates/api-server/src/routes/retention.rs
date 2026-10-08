@@ -134,21 +134,14 @@ async fn update_retention(
     require_scopes(&auth, &["retention:write"])?;
     // The capability gate: Growth and above per docs/pricing.md, through the
     // canonical entitlement gate.
-    let snapshot = crate::entitlements::require_feature(
-        &state,
-        &auth.tenant_id,
-        FeatureKey::CustomRetention,
-    )
-    .await?;
+    let snapshot =
+        crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::CustomRetention)
+            .await?;
     let ceiling = snapshot.capacity(CapacityKey::RetentionDays);
     // Named 400/403 bounds check (legal minimum + plan ceiling).
     validate_retention_update(body.retention_days, ceiling)?;
     // Authoritative capacity gate (override-aware; names the plan + limit).
-    crate::entitlements::gate_capacity(
-        &snapshot,
-        CapacityKey::RetentionDays,
-        body.retention_days,
-    )?;
+    crate::entitlements::gate_capacity(&snapshot, CapacityKey::RetentionDays, body.retention_days)?;
 
     let previous = configured_retention(&state, &auth.tenant_id).await?;
     sqlx::query("UPDATE tenants SET retention_days = $1, updated_at = NOW() WHERE id = $2")

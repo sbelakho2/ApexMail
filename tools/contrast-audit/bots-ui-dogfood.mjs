@@ -46,6 +46,8 @@ const argValue = (name, fallback = null) => {
 const OUT = path.resolve(argValue('out', path.join(ROOT, 'reports/bots-ui')));
 const BASE = argValue('base', 'http://127.0.0.1:8080');
 const CP_BASE = argValue('cp-base', 'http://localhost:8080');
+const ROUTES = argValue('routes', ''); // comma-separated extra live routes (web)
+const CP_ROUTES = argValue('cp-routes', ''); // comma-separated extra live routes (control plane)
 const COOKIES = argValue('cookies', '');
 const CP_COOKIES = argValue('cp-cookies', '');
 const POST = args.includes('--post');
@@ -286,11 +288,23 @@ async function main() {
       server.close();
     } else if (MODE === 'live') {
       if (!COOKIES) throw new Error('live mode needs --cookies');
-      const assistant = await capture(browser, BASE, COOKIES, '/assistant', 'live-assistant');
-      report.runs.push(...assistant);
-      if (CP_COOKIES) {
-        const drafts = await capture(browser, CP_BASE, CP_COOKIES, '/reviews/ai-drafts', 'live-drafts');
-        report.runs.push(...drafts);
+      if (ROUTES || CP_ROUTES) {
+        // Targeted pages (capability-wave routes etc.): label from the path.
+        for (const route of ROUTES.split(',').map((r) => r.trim()).filter(Boolean)) {
+          const label = `live-${route.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '')}`;
+          report.runs.push(...(await capture(browser, BASE, COOKIES, route, label)));
+        }
+        for (const route of CP_ROUTES.split(',').map((r) => r.trim()).filter(Boolean)) {
+          const label = `live-cp-${route.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '')}`;
+          report.runs.push(...(await capture(browser, CP_BASE, CP_COOKIES || COOKIES, route, label, { surface: 'control-plane' })));
+        }
+      } else {
+        const assistant = await capture(browser, BASE, COOKIES, '/assistant', 'live-assistant');
+        report.runs.push(...assistant);
+        if (CP_COOKIES) {
+          const drafts = await capture(browser, CP_BASE, CP_COOKIES, '/reviews/ai-drafts', 'live-drafts');
+          report.runs.push(...drafts);
+        }
       }
     } else {
       throw new Error(`unknown mode ${MODE}`);

@@ -261,13 +261,12 @@ async fn load_experiment_campaign(
     tenant_id: &str,
     campaign_id: Uuid,
 ) -> Result<ExperimentCampaign, ApiError> {
-    let row: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-        "SELECT status, ab_config FROM campaigns WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(campaign_id)
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(String, Option<serde_json::Value>)> =
+        sqlx::query_as("SELECT status, ab_config FROM campaigns WHERE id = $1 AND tenant_id = $2")
+            .bind(campaign_id)
+            .bind(tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     let Some((status, ab_config)) = row else {
         return Err(ApiError::NotFound("campaign not found".into()));
     };
@@ -373,8 +372,7 @@ async fn build_experiment_response(
             .bind(campaign_id)
             .fetch_one(&state.db)
             .await?;
-    let window_closes_at =
-        window_opened_at.map(|opened| opened + Duration::minutes(wait_minutes));
+    let window_closes_at = window_opened_at.map(|opened| opened + Duration::minutes(wait_minutes));
     let window_elapsed = window_closes_at
         .map(|closes| Utc::now() >= closes)
         .unwrap_or(false);
@@ -398,7 +396,11 @@ async fn build_experiment_response(
                 format!(
                     "arm {arm} was declared the winner by the {} experiment rule \
                      (two-proportion z-test at the two-sided 95% level)",
-                    if source == "manual" { "manual" } else { "automatic" }
+                    if source == "manual" {
+                        "manual"
+                    } else {
+                        "automatic"
+                    }
                 )
             });
         ExperimentDecision {
@@ -419,9 +421,7 @@ async fn build_experiment_response(
     } else if !test_drained {
         pending_decision(
             metric_wire,
-            format!(
-                "the test sample is still sending ({test_in_flight} recipient(s) in flight)"
-            ),
+            format!("the test sample is still sending ({test_in_flight} recipient(s) in flight)"),
         )
     } else if !window_elapsed {
         pending_decision(
@@ -712,7 +712,13 @@ mod tests {
         }
     }
 
-    async fn seed_holdout(pool: &sqlx::PgPool, tenant: &str, campaign: Uuid, label: &str, count: usize) {
+    async fn seed_holdout(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        campaign: Uuid,
+        label: &str,
+        count: usize,
+    ) {
         for index in 0..count {
             let contact_id = Uuid::new_v4();
             sqlx::query(
@@ -843,7 +849,10 @@ mod tests {
         assert!((body.arms[0].rate - 0.3).abs() < 1e-9);
         assert_eq!(body.recipients.test, 200);
         assert_eq!(body.recipients.holdout, 6);
-        assert!(!body.holdout_promoted, "the API only reports; it never promotes");
+        assert!(
+            !body.holdout_promoted,
+            "the API only reports; it never promotes"
+        );
 
         sqlx::query("DELETE FROM campaigns WHERE tenant_id = $1")
             .bind(&tenant)
@@ -980,7 +989,9 @@ mod tests {
         .await
         .expect("holdout phases");
         assert_eq!(phases.len(), 4);
-        assert!(phases.iter().all(|(phase, arm)| phase == "winner" && *arm == 1));
+        assert!(phases
+            .iter()
+            .all(|(phase, arm)| phase == "winner" && *arm == 1));
 
         let audited: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_logs \

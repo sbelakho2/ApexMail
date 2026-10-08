@@ -401,3 +401,253 @@ tests (first poll attempts refused, then ready — no action taken).
 `…/api-server/src/routes/capability_gate.rs` (deleted),
 `tools/validate_pricing_drift.py`,
 `tools/check_knowledge_consistency.py`.
+
+## ENTERPRISE FIXTURES (wave-1 gate fallout in the older suites, 2026-10-07)
+
+The wave-1 gates (`require_plan_feature` / `guard_plan_feature` in
+`crates/enterprise/src/routes.rs`, resolving
+`billing_service::plans::get_entitlement_snapshot`) landed while six OLDER
+enterprise tests still seeded every fixture tenant with `plan = 'free'`,
+so their positive paths started collecting the (correct) 403.
+
+Triage note — constructor arity: `TemplateApprovalService::new` is
+`(db, auto_reject_threshold)` (2 args) and `tests/adversarial_services.rs`
+calls it with 2 args; `cargo nextest run -p enterprise --no-run` is clean,
+so the earlier arity compile break had already been fixed upstream. No
+further change was needed there.
+
+No `src/` code changed: the gate is intact and was not weakened. Only the
+three test fixtures changed.
+
+### Fail-before evidence
+
+Env: `TEST_DATABASE_URL=postgresql://apexmail:…@127.0.0.1:5432/apexmail`,
+`TEST_REDIS_URL=redis://…@127.0.0.1:16379/0`,
+`ENTERPRISE_TEST_DATABASE_URL=$TEST_DATABASE_URL`. Command: targeted
+`cargo nextest run -p enterprise -E '<the six tests>' --no-fail-fast`.
+
+```
+Summary [  1.541s] 6 tests run: 0 passed, 6 failed, 430 skipped
+FAIL (1/6) enterprise::adversarial_services routes_sub_accounts_templates_qbr_and_whitelabel_surface
+FAIL (2/6) enterprise::adversarial_db_tests sub_accounts_and_api_keys_enforce_lifecycle_and_tenant_bounds
+FAIL (3/6) enterprise::adversarial_db_tests templates_whitelabel_and_qbr_flows_are_tenant_scoped
+FAIL (4/6) enterprise::security_regression sub_account_api_key_lifecycle_enforces_revocation
+FAIL (5/6) enterprise::security_regression template_approve_reject_require_admin
+FAIL (6/6) enterprise::security_regression cross_tenant_by_id_handlers_are_blocked
+```
+
+Representative panics (the gate refusing the free fixture tenant):
+
+```
+adversarial_db_tests.rs:1766: 403 != 200
+  {"error":"plan `free` does not include `template_approval_workflow`"}
+security_regression.rs:393: seed template failed: 403 != 200
+  {"error":"plan `free` does not include `template_approval_workflow`"}
+security_regression.rs:538: called `Option::unwrap()` on a `None` value   (submit refused → data.id absent)
+security_regression.rs:1568: called `Option::unwrap()` on a `None` value  (sub-account create refused → data.id absent)
+```
+
+### Fixture fix (wave-1 shape: seed the plan row, then the tenant)
+
+Same approach as wave-1's own `routes.rs::seed_capability_plan` /
+`seed_capability_tenant` / `seed_canonical_business_plan`:
+
+* `adversarial_db_tests.rs` — new `seed_entitled_plan` + `seed_entitled_tenant`
+  (`adv-entitled` plan via `billing_service::plans::upsert_plan`; features:
+  `template_approval_workflow`, `subaccounts`, `max_subaccounts = 100`).
+  The two gated tests now run on a DEDICATED entitled tenant with its own
+  minted member/admin tokens; the shared `tenant_a`/`tenant_b` stay `free`
+  (the contract test mutates tenant A's plan, so a dedicated tenant avoids
+  that ordering race entirely).
+* `adversarial_services.rs` — same helpers; the route-surface test's tenant
+  now comes from `seed_entitled_tenant` instead of free `seed_tenant`.
+* `security_regression.rs` — `entitle_tenant(app, tenant)` helper (canonical
+  `upsert_plan` row `security-regression-entitled` + `UPDATE tenants SET plan`)
+  called by the three failing tests on `tenant_a` only. `EXTRA_DDL` now also
+  bootstraps `plans` / `plan_overrides` / `feature_flag_overrides` (the
+  canonical chain provides them in CI; `IF NOT EXISTS` is a no-op) so the
+  standalone suite cannot fail closed with a 500 on a bare database.
+  `execute_loose` drops chunks whose first non-space char is `-`, so the DDL
+  statements stay comment-free (noted above the const).
+
+### Named-refusal arms kept/added (gate NOT weakened)
+
+Every touched suite still proves a non-entitled tenant is refused 403 naming
+the capability, alongside the entitled positive path:
+
+* `adversarial_services routes_sub_accounts_templates_qbr_and_whitelabel_surface`:
+  free tenant → `POST /sub-accounts` 403 naming `subaccounts`; `POST
+  /templates/submit` 403 naming `template_approval_workflow`.
+* `adversarial_db_tests` (both fixed tests): free `tenant_b` → 403 naming
+  `subaccounts` / `template_approval_workflow` and plan `free`.
+* `security_regression template_approve_reject_require_admin` (the RBAC
+  test): the non-admin arms are retained on the entitled tenant, and a
+  free-tenant submit refusal naming `template_approval_workflow` was added.
+* `security_regression sub_account_api_key_lifecycle_enforces_revocation`:
+  free tenant B create refusal naming `subaccounts`.
+
+Wave-1's own refusal unit tests
+(`non_entitled_plan_is_refused_with_the_named_capability`,
+`non_entitled_plan_cannot_create_subaccounts`,
+`subaccount_cap_refuses_the_cap_plus_one_with_a_named_reason`) remain
+untouched and green.
+
+### After evidence
+
+Targeted rerun of the same six:
+```
+Summary [  3.996s] 6 tests run: 6 passed, 430 skipped
+```
+
+Full battery — `cargo nextest run -p enterprise`, same env:
+```
+run 1: Summary [ 34.865s] 436 tests run: 436 passed, 0 skipped
+run 2: Summary [ 22.490s] 436 tests run: 436 passed, 0 skipped
+run 3 (final tree, after `cargo fmt -p enterprise`):
+       Summary [ 19.803s] 436 tests run: 436 passed, 0 skipped
+```
+Runs 2–3 reuse the already-provisioned shared canonical DBs, so the
+fixtures are idempotent across runs (and concurrent calls across the
+parallel test binaries are safe: `upsert_plan` is `ON CONFLICT (name)`).
+`cargo fmt -p enterprise -- --check` is clean.
+
+### Files touched (this fix; tests only)
+
+`services/mail-server/crates/enterprise/tests/adversarial_db_tests.rs`,
+`services/mail-server/crates/enterprise/tests/adversarial_services.rs`,
+`services/mail-server/crates/enterprise/tests/security_regression.rs`.
+
+## LIVE P1 — capability flags now converge on BOTH seed paths (2026-10-07)
+
+Symptom (found by the UI agent): every row in the LIVE `plans` table
+reported the capability flags as false, so the capabilities shipped by the
+waves were ungrantable by plan on environments whose rows predate the
+waves. Live rows were hand-patched to the shipped seeds as a stopgap; this
+is the permanent fix.
+
+### Root cause — two seed paths, one hole
+
+* `reconcile_plans_with_catalog` (boot: `billing-service/src/bin/server.rs`
+  step, and `POST /plans/seed`) ALREADY forced the whole `features` object
+  (`features = EXCLUDED.features`), so it converges capability booleans. No
+  behavior change was needed there — but nothing pinned that guarantee, and
+  a future "prices/limits only" edit would silently reintroduce the P1.
+* `upsert_plan` — the non-clobbering seeder (Fix I1) — preserved the
+  existing `features` object wholesale
+  (`features = COALESCE(plans.features, EXCLUDED.features)`). THIS was the
+  hole: any environment seeded through it never gained a capability flag
+  added after its rows were written.
+
+### Fix
+
+1. **Seed upsert (real change)** — `SEED_PLAN_UPSERT_SQL` now overlays
+   exactly the catalog-owned capability booleans onto the existing features
+   object and keeps Fix I1 semantics for everything else:
+
+   ```sql
+   features = CASE
+       WHEN plans.features IS NULL THEN EXCLUDED.features
+       ELSE plans.features || COALESCE(
+           (SELECT jsonb_object_agg(flag.key, flag.value)
+              FROM jsonb_each(EXCLUDED.features) AS flag(key, value)
+             WHERE flag.key = ANY($11)),
+           '{}'::jsonb)
+   END,
+   ```
+
+   `$11` is `FeatureKey::ALL` field names (`capability_flag_keys()`), i.e.
+   every boolean in `PlanFeatures` — the model's own definition of a
+   capability. Prices/limits and the non-boolean feature fields (numeric
+   capacity limits, support level) keep `COALESCE`-toward-the-existing-row,
+   so an operator's admin-PATCH tuning survives a re-seed while the grant
+   list converges to the catalog. A NULL/legacy features column takes the
+   whole seed.
+2. **Reconcile (pinned + documented, no behavior change)** — its doc now
+   states the capability-boolean guarantee explicitly, and the new
+   integration test locks the full-features forcing in place.
+
+### Fail-before evidence (mutation probes, both directions executed)
+
+Env: `TEST_DATABASE_URL=postgresql://apexmail:…@127.0.0.1:5432/apexmail`
+(plus `TEST_REDIS_URL` for the coverage binary — see gate note below).
+
+1. Seed upsert, mutated back to the pre-fix
+   `features = COALESCE(plans.features, EXCLUDED.features)`:
+
+   ```
+   $ cargo test -p billing-service --lib -- seed_upsert_syncs_capability_flags_without_clobbering_operator_values
+   thread '…seed_upsert_syncs_capability_flags_without_clobbering_operator_values' panicked at plans.rs:1993:
+   re-seed must sync the capability flag `audit_logs`
+   test result: FAILED. 0 passed; 1 failed; 626 filtered out
+   ```
+
+   Restored (merge clause back in) → the test is green (below).
+
+2. Reconcile, features forcing temporarily replaced by the "prices/limits
+   only" shape (`COALESCE(plans.features, EXCLUDED.features)`):
+
+   ```
+   $ cargo test -p billing-service --test coverage_adversarial -- reconcile_repairs_drifted_capability_flags
+   thread 'reconcile_repairs_drifted_capability_flags' panicked at coverage_adversarial.rs:1739:
+   growth.time_travel_debugging must converge to the seed's grant
+   test result: FAILED. 0 passed; 1 failed; 85 filtered out
+   ```
+
+   Restored `features = EXCLUDED.features,` → green (below).
+
+### Green runs (after restore)
+
+| Command | Result |
+|---|---|
+| `cargo test -p billing-service --lib` (TEST_DATABASE_URL + TEST_REDIS_URL) | **627 passed; 0 failed** (626 + the new seed test) |
+| `cargo test -p billing-service --test coverage_adversarial` | **86 passed; 0 failed** (incl. both reconcile tests) |
+| `cargo test -p billing-service --lib -- plans::coverage_adversarial` | 9 passed |
+| `cargo test -p billing-service --lib -- seed_upsert` | 2 passed |
+| `cargo test -p api-server --lib -- entitlements::tests` | 9 passed (seeder callers unaffected) |
+| `python3 tools/check_knowledge_consistency.py` / `validate_pricing_drift.py` / `check_feature_entitlements.py` | PASS / PASS / PASS |
+
+Gate note: some billing coverage tests require `TEST_REDIS_URL` (they panic
+at `stripe_webhooks.rs:5585` without it); a run with only
+`TEST_DATABASE_URL` produced 155 unrelated failures that all vanish with the
+redis var set — the 627/0 numbers above are with it set.
+
+### Tests added / updated
+
+* NEW `plans::coverage_adversarial::seed_upsert_syncs_capability_flags_without_clobbering_operator_values`
+  — a stale row (full `PlanFeatures::default()` JSON, seats tuned to 77,
+  price 1234, limit 7) converges every capability flag from the canonical
+  Growth seed on `upsert_plan`, while the operator price/limit/seat values
+  survive; a second pass is idempotent.
+* NEW `coverage_adversarial::reconcile_repairs_drifted_capability_flags`
+  — four stale catalog rows (all flags false) are reported `repaired` and
+  converge to the canonical seeds exactly; explicit assertions name
+  `growth.time_travel_debugging`, `growth.custom_retention`,
+  `pro.custom_tracking_domain`, `scale.template_approval_workflow`,
+  `enterprise.subaccounts`; a second pass is a no-op.
+* UPDATED `plans::tests::seed_upsert_sql_preserves_configured_plan_values`
+  — prices/limits still pin `COALESCE`; the features pin now requires the
+  capability-merge fragments (`$11`, `jsonb_each`) and forbids the old
+  wholesale `COALESCE(plans.features, …)`.
+
+### Live DB check (read-only, post-hand-patch)
+
+`SELECT … FROM plans` on the live database matches the shipped seeds:
+free/starter/payg all flags false; `pro.custom_tracking_domain = true`;
+growth `audit_logs`/`ab_testing`/`time_travel_debugging`/
+`custom_tracking_domain`/`custom_retention` true; scale/enterprise all true;
+the stale `df5small`/`df5big` rows are inactive. A reconcile pass would now
+be a no-op on live, and any future environment that predates a capability
+wave converges via boot reconcile or a re-seed.
+
+### Files touched (live-P1 fix)
+
+`services/mail-server/crates/billing-service/src/plans.rs` (SQL + docs +
+textual pin + new DB test),
+`services/mail-server/crates/billing-service/tests/coverage_adversarial.rs`
+(new reconcile regression test).
+
+Cross-check for the shared `upsert_plan`: `cargo test -p enterprise --lib`
+single-threaded is 343/343 green; the parallel run intermittently fails
+`routes::tests::oidc_sso_completes_end_to_end_through_the_router` on a
+pre-existing shared-fixture race (the SSO fixture inserts only a tenant row
+— no `plans`/`upsert_plan` interaction; the test also passes in isolation).

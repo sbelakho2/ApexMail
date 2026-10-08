@@ -52,6 +52,11 @@ pub struct RouteData {
     pub demo_viewer: Option<crate::view_data::DemoViewerData>,
     /// Control-plane AI-drafts review data (`/reviews/ai-drafts`).
     pub ai_drafts: Option<crate::view_data::AiDraftsPageData>,
+    /// Custom tracking-domain panel data (`/domains/{id}/tracking`, capability
+    /// wave 2). Present means the loader produced the honest state (parent
+    /// verification, entitlement, configured row); absent is the no-data
+    /// fallback for the route inventory sweep and the exported route fixture.
+    pub tracking_domain: Option<crate::tracking_domain::TrackingDomainPanel>,
     /// Control-plane alert-rules management data (`/alerts/rules`).
     ///
     /// Present means the loader read the evaluated store
@@ -1921,7 +1926,14 @@ fn render_web(
         // this static skeleton is the honest fallback (and backs the route
         // inventory/render sweep like every other detail route).
         p if p.starts_with("/messages/") && p.ends_with("/timeline") => {
-            leptos_views::web_message_timeline_page()
+            // The live reconstruction renders through the shared data-list
+            // page (noun "entry") — exactly what the api-server's data path
+            // composes. The static skeleton stays the no-data fallback for
+            // the route inventory sweep and the exported route fixture.
+            match data.and_then(|route_data| route_data.list.as_ref()) {
+                Some(list) => leptos_views::data_list_page(list, "entry"),
+                None => leptos_views::web_message_timeline_page(),
+            }
         }
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
             match data.and_then(|d| d.campaign_editor.as_ref()) {
@@ -1943,6 +1955,17 @@ fn render_web(
                 .trim_start_matches("/templates/")
                 .trim_end_matches("/edit");
             leptos_views::web_template_edit_page(id)
+        }
+        // /domains/{id}/tracking — the custom tracking-domain surface
+        // (capability wave 2). Its panel lives in the shared views
+        // (`crate::tracking_domain`), so the manifest route, the state
+        // fixtures and the goldens exercise the same markup the api-server
+        // composes live.
+        p if p.starts_with("/domains/") && p.ends_with("/tracking") => {
+            crate::tracking_domain::web_domain_tracking_page(
+                data.and_then(|route_data| route_data.tracking_domain.as_ref()),
+                csrf_token,
+            )
         }
         // /domains/{id} — the DNS detail flow; without data the list page
         // renders as the honest fallback.

@@ -273,7 +273,8 @@ pub(crate) async fn create_tracking_domain_gated(
 ) -> Result<(StatusCode, Json<TrackingDomainResponse>), ApiError> {
     // The capability gate: Pro and above per docs/pricing.md, through the
     // canonical entitlement gate.
-    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTrackingDomain).await?;
+    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTrackingDomain)
+        .await?;
     let target = default_cname_target();
     create_tracking_domain_with_target(state, tenant_id, body, &target).await
 }
@@ -403,7 +404,8 @@ pub(crate) async fn verify_tracking_domain_gated(
     tenant_id: &str,
     id: &str,
 ) -> Result<Json<TrackingDomainResponse>, ApiError> {
-    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTrackingDomain).await?;
+    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTrackingDomain)
+        .await?;
     verify_tracking_domain_with_dns(state, tenant_id, id, &SystemResolver).await
 }
 

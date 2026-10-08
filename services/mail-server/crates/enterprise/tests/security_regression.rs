@@ -159,6 +159,16 @@ fn mint_token_as(
     .unwrap()
 }
 
+// The bootstrap keeps the suite self-contained on a bare database:
+// capability wave 1 made the enterprise template/sub-account routes resolve
+// plan entitlements through billing-service, which reads plans +
+// plan_overrides + feature_flag_overrides. CI applies the canonical chain
+// (these already exist; IF NOT EXISTS is a no-op), but without them the
+// gated handlers would fail closed with a 500 on a bare database.
+//
+// NOTE: every statement must be comment-free — `execute_loose` drops any
+// split chunk whose first non-space character is `-` (a chunk with a leading
+// SQL comment would swallow the CREATE that follows it).
 const EXTRA_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS tenants (
     id VARCHAR(26) PRIMARY KEY,
@@ -171,6 +181,42 @@ CREATE TABLE IF NOT EXISTS tenants (
     legal_hold BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS plans (
+    id VARCHAR(26) PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
+    name TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    price_monthly BIGINT NOT NULL DEFAULT 0,
+    price_yearly BIGINT NOT NULL DEFAULT 0,
+    email_limit BIGINT NOT NULL DEFAULT 30000,
+    api_call_limit BIGINT NOT NULL DEFAULT 100000,
+    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    stripe_price_id_monthly VARCHAR(128),
+    stripe_price_id_yearly VARCHAR(128),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS plan_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(26) NOT NULL,
+    plan VARCHAR(64) NOT NULL,
+    expires_at TIMESTAMPTZ,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS feature_flag_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    flag_key VARCHAR(128) NOT NULL,
+    tenant_id VARCHAR(26) NOT NULL,
+    value JSONB NOT NULL DEFAULT 'true'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
 
@@ -314,6 +360,51 @@ async fn setup() -> Option<TestApp> {
     try_setup().await
 }
 
+/// Capability wave 1 (plan entitlement) fixture: the template-approval and
+/// sub-account routes gate on the OWNING tenant's entitlement snapshot
+/// (`billing_service::plans::get_entitlement_snapshot`, override-aware).
+/// Point a fixture tenant at a dedicated plan row that sells both
+/// capabilities. The row is written through the canonical
+/// `billing_service::plans::upsert_plan` (the same fixture shape as wave-1's
+/// `routes.rs::seed_capability_plan`), so the stored features JSONB is the
+/// complete `PlanFeatures` object — a partial object fails deserialization
+/// closed with a 500 by design.
+///
+/// The name is unique to this fixture, so `upsert_plan`'s
+/// preserve-existing-features clause can never inherit a stale row.
+const ENTITLED_PLAN: &str = "security-regression-entitled";
+
+async fn entitle_tenant(app: &TestApp, tenant: &str) {
+    use billing_service::plans::PlanSeed;
+    use billing_service::types::PlanFeatures;
+    let seed = PlanSeed {
+        name: ENTITLED_PLAN,
+        display_name: "Security Regression Entitled",
+        description: "wave-1 entitlement fixture",
+        price_monthly: 0,
+        price_yearly: 0,
+        email_limit: 1_000_000,
+        api_call_limit: 1_000_000,
+        sort_order: 999,
+        features: PlanFeatures {
+            api_access: true,
+            template_approval_workflow: true,
+            subaccounts: true,
+            max_subaccounts: 100,
+            ..PlanFeatures::default()
+        },
+    };
+    billing_service::plans::upsert_plan(&app.db, &seed)
+        .await
+        .expect("seed entitled plan");
+    sqlx::query("UPDATE tenants SET plan = $2 WHERE id = $1")
+        .bind(tenant)
+        .bind(ENTITLED_PLAN)
+        .execute(&app.db)
+        .await
+        .expect("point fixture tenant at the entitled plan");
+}
+
 /// Skip gracefully when the optional test database is not reachable.
 fn skip_notice(test: &str) {
     eprintln!("SKIP [{test}]: no test database available");
@@ -329,6 +420,11 @@ async fn cross_tenant_by_id_handlers_are_blocked() {
     };
     let a = app.token(&app.tenant_a, false);
     let b = app.token(&app.tenant_b, false);
+    // Wave-1 fixture: seeding/reading tenant A's template goes through the
+    // plan-entitlement gate, so tenant A must be on an entitled plan
+    // (tenant B stays free — the cross-tenant refusals below are pinned by
+    // the token/tenant guard, which runs before the plan gate).
+    entitle_tenant(&app, &app.tenant_a).await;
 
     // Seed one resource of each vulnerable type as tenant A.
     let (status, stream) = app
@@ -524,6 +620,10 @@ async fn template_approve_reject_require_admin() {
     };
     let a = app.token(&app.tenant_a, false);
     let admin = app.token(&app.tenant_a, true);
+    // Wave-1 fixture: submit/approve resolve tenant A's plan entitlement, so
+    // the RBAC arms run on an entitled tenant; tenant B stays free for the
+    // named-capability refusal arm at the end.
+    entitle_tenant(&app, &app.tenant_a).await;
 
     let (_, template) = app
         .post(
@@ -589,6 +689,30 @@ async fn template_approve_reject_require_admin() {
         Some("user-test-subject"),
         "reviewer must be derived from token claims"
     );
+
+    // The wave-1 gate itself, kept covered: tenant B is on the free plan, so
+    // its submit is refused 403 naming the capability AND the plan — the
+    // entitled fixture tenant above is what admits the RBAC flow, never a
+    // weakened check.
+    let admin_b = app.token(&app.tenant_b, true);
+    let (status, body) = app
+        .post(
+            "/templates/submit",
+            &admin_b,
+            Some(serde_json::json!({
+                "tenant_id": app.tenant_b, "name": "denied", "subject": "s",
+                "html_content": "<p>x</p>", "submitted_by": "user2"
+            })),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "free plan must be refused: {body}"
+    );
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("template_approval_workflow"), "{body}");
+    assert!(error.contains("free"), "{body}");
 }
 
 // ── Fix B: cross-tenant decryption oracle ───────────────────────────────────
@@ -1557,6 +1681,10 @@ async fn sub_account_api_key_lifecycle_enforces_revocation() {
     };
     let a = app.token(&app.tenant_a, false);
     let b = app.token(&app.tenant_b, false);
+    // Wave-1 fixture: sub-account CRUD gates on the PARENT tenant's plan
+    // entitlement. Tenant A is entitled; tenant B stays free for the
+    // named-capability refusal arm at the end.
+    entitle_tenant(&app, &app.tenant_a).await;
 
     let (_, sub) = app
         .post(
@@ -1619,6 +1747,25 @@ async fn sub_account_api_key_lifecycle_enforces_revocation() {
         service.verify_api_key(&raw_key).await.unwrap().is_none(),
         "revoked key must fail verification"
     );
+
+    // The wave-1 gate itself, kept covered: tenant B's free plan is refused
+    // 403 naming `subaccounts` — the entitled fixture tenant above is what
+    // admits the lifecycle, never a weakened check.
+    let (status, body) = app
+        .post(
+            "/sub-accounts",
+            &b,
+            Some(serde_json::json!({"parent_id": app.tenant_b, "name": "denied"})),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "free plan must be refused: {body}"
+    );
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("subaccounts"), "{body}");
+    assert!(error.contains("free"), "{body}");
 }
 
 #[tokio::test]

@@ -371,10 +371,7 @@ async fn record_failure(db: &PgPool, row: &ClaimedNotification, error: &str) {
 /// Returns the pass's counters. A per-row delivery failure is recorded on the
 /// row (retry/park) and does NOT fail the pass — one bad tenant cannot block
 /// the queue for everyone.
-pub async fn drain_notification_queue(
-    db: &PgPool,
-    batch: i64,
-) -> Result<DrainStats, ApiError> {
+pub async fn drain_notification_queue(db: &PgPool, batch: i64) -> Result<DrainStats, ApiError> {
     let ClaimOutcome { rows, mut stats } = claim_batch(db, batch).await?;
 
     for row in &rows {
@@ -435,7 +432,10 @@ mod tests {
 
     /// Seed a tenant with an owner user. Returns the tenant id.
     async fn seed_tenant_with_owner(db: &PgPool, suffix: &str) -> String {
-        let tenant = format!("nd{}", &suffix[..4.min(suffix.len())].replace(['-', '_'], "x"));
+        let tenant = format!(
+            "nd{}",
+            &suffix[..4.min(suffix.len())].replace(['-', '_'], "x")
+        );
         let tenant: String = tenant.chars().take(26).collect();
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
@@ -560,9 +560,7 @@ mod tests {
         let notification_id = seed_notification(&db, &tenant, "usage_alert", 0, 3).await;
         seed_system_sender(&db).await;
 
-        let stats = drain_notification_queue(&db, 50)
-            .await
-            .expect("drain pass");
+        let stats = drain_notification_queue(&db, 50).await.expect("drain pass");
         assert_eq!(stats.claimed, 1, "the pending row must be claimed");
         assert_eq!(stats.sent, 1, "the notification must be delivered");
 
@@ -584,7 +582,10 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .expect("queued message must exist");
-        assert_eq!(from_email, crate::routes::system_sender::SYSTEM_FROM_ADDRESS);
+        assert_eq!(
+            from_email,
+            crate::routes::system_sender::SYSTEM_FROM_ADDRESS
+        );
         assert!(
             subject.contains("usage alert") && subject.contains("emails"),
             "subject must be the rendered notification, got {subject:?}"
@@ -681,7 +682,9 @@ mod tests {
 
         // attempts is now 1 → backoff 60 s; an immediate second pass must not
         // re-claim the row.
-        let second = drain_notification_queue(&db, 50).await.expect("second pass");
+        let second = drain_notification_queue(&db, 50)
+            .await
+            .expect("second pass");
         assert_eq!(
             second.claimed, 0,
             "a backed-off row must not be re-claimed immediately"
@@ -703,10 +706,7 @@ mod tests {
     /// a producer added later must never be a silent drop.
     #[test]
     fn unknown_type_renders_a_generic_message_with_the_payload() {
-        let rendered = render_notification(
-            "brand_new_alert",
-            &serde_json::json!({"foo": "bar"}),
-        );
+        let rendered = render_notification("brand_new_alert", &serde_json::json!({"foo": "bar"}));
         assert!(rendered.subject.contains("brand_new_alert"));
         assert!(rendered.text.contains("brand_new_alert"));
         assert!(rendered.text.contains("bar"));

@@ -1302,6 +1302,9 @@ def perf(state: dict) -> None:
     )
     reset_chat_buckets(state)
 
+    # The window starts when the load does (the limiter probe above can take
+    # a minute of its own).
+    stop_at = time.time() + BUDGETS["duration_secs"]
     threads = [threading.Thread(target=worker, args=(name,)) for name, _index in workers]
     started = time.time()
     for thread in threads:

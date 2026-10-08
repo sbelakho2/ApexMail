@@ -63,5 +63,10 @@ domains) to the model runtime. Answers and citations are stored with the
 conversation. No other workspace data is sent, and the assistant cannot
 change anything in your workspace.
 
+If your message asks us to contact you and includes an email address, that
+address and the message are passed to our sales team as a contact request.
+The request is recorded for a human follow-up only: no email is sent to you
+by that path, and nothing is added to your contacts.
+
 The assistant is AI-powered. Answers are informational and do not constitute
 legal, tax or compliance advice.

@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 38,
+      "routeCount": 39,
       "routes": [
         {
           "path": "/",
@@ -184,6 +184,13 @@
           "name": "New Domain",
           "category": "dashboard",
           "authRequired": true
+        },
+        {
+          "path": "/domains/d_1/tracking",
+          "name": "Tracking Domain",
+          "category": "dashboard",
+          "authRequired": true,
+          "canonicalPattern": "/domains/[id]/tracking"
         },
         {
           "path": "/settings",

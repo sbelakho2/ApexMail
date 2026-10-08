@@ -4732,7 +4732,8 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
 <button type=\"submit\" class=\"apex-btn apex-btn--sm\">Send</button>\
 <span class=\"text-xs text-surface-500\">AI-generated answers; cited when grounded.</span>\
 </div>\
-</form>"
+</form>\
+<p class=\"text-xs leading-5 text-surface-500\">Questions that ask us to contact you are shared with our sales team as a contact request.</p>"
             .to_string()
     };
 

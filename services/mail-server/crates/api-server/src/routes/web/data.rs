@@ -547,7 +547,7 @@ fn base_list(title: &str, description: &str, base_path: &str) -> ListPageData {
     }
 }
 
-fn relative_time(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> String {
+pub(crate) fn relative_time(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> String {
     match timestamp {
         Some(ts) => {
             let delta = chrono::Utc::now() - ts;
@@ -720,11 +720,7 @@ async fn load_assistant(
     // and never a rendered form for a capability whose state is unknown.
     match state
         .feature_flags
-        .enabled(
-            tenant,
-            crate::routes::ai_chat::AI_CHAT_FEATURE_FLAG,
-            true,
-        )
+        .enabled(tenant, crate::routes::ai_chat::AI_CHAT_FEATURE_FLAG, true)
         .await
     {
         Ok(true) => {}

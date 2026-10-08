@@ -41,7 +41,10 @@ pub fn router() -> Router<AppState> {
         .route("/reports/:id/review", post(review_report))
         .route("/reports/:id/resolve", post(resolve_report))
         .route("/restrictions", post(impose_restriction))
-        .route("/restrictions/:tenant_id/:kind", axum::routing::delete(clear_restriction))
+        .route(
+            "/restrictions/:tenant_id/:kind",
+            axum::routing::delete(clear_restriction),
+        )
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -131,7 +134,13 @@ pub struct ListReportsQuery {
     pub limit: Option<i64>,
 }
 
-const ABUSE_STATUSES: [&str; 5] = ["open", "investigating", "confirmed", "dismissed", "resolved"];
+const ABUSE_STATUSES: [&str; 5] = [
+    "open",
+    "investigating",
+    "confirmed",
+    "dismissed",
+    "resolved",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,6 +196,9 @@ async fn list_reports(
     auth: AuthUser,
     Query(params): Query<ListReportsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Wildcard operator scope (admin boundary test): the route file must
+    // enforce it in addition to the mounted control-plane gate.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     let _ = &auth;
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     if let Some(tenant_id) = params.tenant_id.as_deref() {
@@ -228,7 +240,17 @@ async fn list_reports(
     let reports: Vec<serde_json::Value> = rows
         .into_iter()
         .map(
-            |(id, tenant_id, report_type, source, status, details, created_at, reviewed_at, reviewed_by)| {
+            |(
+                id,
+                tenant_id,
+                report_type,
+                source,
+                status,
+                details,
+                created_at,
+                reviewed_at,
+                reviewed_by,
+            )| {
                 json!({
                     "id": id,
                     "tenantId": tenant_id,
@@ -252,6 +274,9 @@ async fn record_report(
     auth: AuthUser,
     Json(body): Json<RecordReportBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Wildcard operator scope (admin boundary test): the route file must
+    // enforce it in addition to the mounted control-plane gate.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     validate_tenant_key(&body.tenant_id)?;
     if body.report_type.trim().is_empty() || body.report_type.chars().count() > 64 {
         return Err(ApiError::BadRequest(
@@ -296,6 +321,9 @@ async fn review_report(
     Path(id): Path<String>,
     Json(body): Json<ReviewReportBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Wildcard operator scope (admin boundary test): the route file must
+    // enforce it in addition to the mounted control-plane gate.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     let id = uuid::Uuid::parse_str(&id)
         .map_err(|_| ApiError::BadRequest("report id must be a UUID".into()))?;
     if !ABUSE_STATUSES.contains(&body.status.as_str()) {
@@ -336,6 +364,9 @@ async fn resolve_report(
     Path(id): Path<String>,
     Json(body): Json<ResolveReportBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Wildcard operator scope (admin boundary test): the route file must
+    // enforce it in addition to the mounted control-plane gate.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     let id = uuid::Uuid::parse_str(&id)
         .map_err(|_| ApiError::BadRequest("report id must be a UUID".into()))?;
     let notes = body.notes.as_deref().unwrap_or("");
@@ -361,6 +392,9 @@ async fn impose_restriction(
     auth: AuthUser,
     Json(body): Json<ImposeRestrictionBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Wildcard operator scope (admin boundary test): the route file must
+    // enforce it in addition to the mounted control-plane gate.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     validate_tenant_key(&body.tenant_id)?;
     if !RESTRICTION_KINDS.contains(&body.kind.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -404,6 +438,9 @@ async fn clear_restriction(
     Path((tenant_id, kind)): Path<(String, String)>,
     Query(params): Query<ClearRestrictionQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Wildcard operator scope (admin boundary test): the route file must
+    // enforce it in addition to the mounted control-plane gate.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     validate_tenant_key(&tenant_id)?;
     if !RESTRICTION_KINDS.contains(&kind.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -411,7 +448,9 @@ async fn clear_restriction(
             RESTRICTION_KINDS.join(", ")
         )));
     }
-    let reason = params.reason.unwrap_or_else(|| "operator cleared".to_string());
+    let reason = params
+        .reason
+        .unwrap_or_else(|| "operator cleared".to_string());
     let cleared_by = reviewer(&auth);
     let cleared = billing_service::maintenance::clear_tenant_restriction(
         &state.db,
@@ -479,7 +518,9 @@ mod adversarial_tests {
 
         // The review queue shows it.
         let (status, body) = env
-            .get(&format!("/v1/admin/billing/abuse/reports?tenant_id={tenant}"))
+            .get(&format!(
+                "/v1/admin/billing/abuse/reports?tenant_id={tenant}"
+            ))
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let reports = body["reports"].as_array().expect("reports");
@@ -609,9 +650,7 @@ mod adversarial_tests {
             return;
         };
         let (env, tenant) = AdvEnv::tenant(pool.clone(), &["*"]).await;
-        let (status, _body) = env
-            .get("/v1/admin/billing/abuse/reports")
-            .await;
+        let (status, _body) = env.get("/v1/admin/billing/abuse/reports").await;
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
@@ -621,7 +660,10 @@ mod adversarial_tests {
         // The same wildcard key works on its own tenant surface — the gate is
         // about the /v1/admin prefix, not the credential itself.
         let (status, _body) = env.get("/v1/contacts/counts").await;
-        assert!(status != StatusCode::FORBIDDEN, "customer surface still served");
+        assert!(
+            status != StatusCode::FORBIDDEN,
+            "customer surface still served"
+        );
         let _ = tenant;
     }
 
