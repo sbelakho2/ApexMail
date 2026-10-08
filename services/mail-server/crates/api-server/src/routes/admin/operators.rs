@@ -187,14 +187,10 @@ async fn create_operator(
     // (hashed at rest, never recoverable). Duplicate email is a 409; every
     // other DB error maps to a generic Internal so no raw driver detail
     // leaks into the console.
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|error| {
-            tracing::error!(operator_id = %id, error = %error, "operator transaction failed to begin");
-            ApiError::Internal("Failed to create operator".into())
-        })?;
+    let mut tx = state.db.begin().await.map_err(|error| {
+        tracing::error!(operator_id = %id, error = %error, "operator transaction failed to begin");
+        ApiError::Internal("Failed to create operator".into())
+    })?;
     let insert = sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, \
                             email_verified, mfa_enabled, metadata, created_at, updated_at) \

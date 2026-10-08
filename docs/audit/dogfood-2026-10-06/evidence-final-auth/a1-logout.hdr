@@ -1,0 +1,19 @@
+HTTP/1.1 204 No Content
+set-cookie: am_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax
+x-ratelimit-limit: 20
+x-ratelimit-remaining: 19
+x-ratelimit-reset: 1791489240000
+x-api-version: v1
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+x-request-id: 4bef3d16-04bb-4a46-baa0-a9a0b40a6db3
+x-correlation-id: corr-bdf5ad99-89eb-4f7b-a8b0-3dfae30a841d
+vary: origin, access-control-request-method, access-control-request-headers
+date: Thu, 08 Oct 2026 19:53:42 GMT
+

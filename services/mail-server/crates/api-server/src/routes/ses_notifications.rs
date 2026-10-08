@@ -391,10 +391,7 @@ async fn validate_sns_message(
 /// environment is NOT production, signatures are verified against that key.
 /// In production the variable is IGNORED with an error log — the AWS path is
 /// untouched.
-fn dev_signing_key(
-    environment: crate::config::Environment,
-    raw: Option<&str>,
-) -> Option<String> {
+fn dev_signing_key(environment: crate::config::Environment, raw: Option<&str>) -> Option<String> {
     let pem = raw
         .map(|value| value.replace("\\n", "\n"))
         .filter(|value| !value.trim().is_empty())?;
@@ -2496,9 +2493,9 @@ mod adversarial_handler_tests {
     async fn dev_local_key_exercises_the_signed_notification_path() {
         use rsa::pkcs8::EncodePublicKey;
         let private_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
-        let public_pem =
-            RsaPublicKey::from(&private_key).to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-                .expect("public key PEM");
+        let public_pem = RsaPublicKey::from(&private_key)
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("public key PEM");
         let signer = SnsSigner {
             // Deliberately NOT an AWS URL: the dev anchor replaces the
             // allowlist + fetch by construction.
@@ -2528,11 +2525,10 @@ mod adversarial_handler_tests {
         ));
 
         // A different local key is refused.
-        let other = RsaPublicKey::from(
-            &RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap(),
-        )
-        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-        .unwrap();
+        let other =
+            RsaPublicKey::from(&RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap())
+                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap();
         let parsed: SnsMessage = serde_json::from_str(&signed).unwrap();
         assert!(matches!(
             validate_sns_message(&client, &parsed, TOPIC_ARN, Some(&other)).await,

@@ -1136,7 +1136,14 @@ pub trait EmailStackObserver: Send + Sync {
 /// that actually resolve; absence of all of them stays
 /// `deficiency_no_dkim_selector_observed`, never a claim.
 pub const DKIM_SELECTORS_PROBED: &[&str] = &[
-    "default", "google", "selector1", "selector2", "k1", "s1", "mail", "dkim",
+    "default",
+    "google",
+    "selector1",
+    "selector2",
+    "k1",
+    "s1",
+    "mail",
+    "dkim",
 ];
 
 /// Live DNS observer over the shared cached resolver
@@ -1770,9 +1777,9 @@ mod tests {
         let dmarc = Some("v=DMARC1; p=reject; rua=mailto:dmarc@example.com");
         let mx = vec!["aspmx.l.google.com".to_string()];
 
-        let rows = analyse_email_stack_at(&spf, &dkim, &[], dmarc, &mx, &[], "example.com", observed);
-        let propositions: Vec<String> =
-            rows.iter().map(|row| row.proposition.clone()).collect();
+        let rows =
+            analyse_email_stack_at(&spf, &dkim, &[], dmarc, &mx, &[], "example.com", observed);
+        let propositions: Vec<String> = rows.iter().map(|row| row.proposition.clone()).collect();
         let quality =
             authentication_quality_from_propositions(&propositions).expect("observed stack");
         assert!(
@@ -1790,9 +1797,7 @@ mod tests {
             "dmarc_policy_monitoring_only".to_string(),
             "mx_hosts_observed".to_string(),
         ];
-        assert!(
-            (authentication_quality_from_propositions(&partial).unwrap() - 0.75).abs() < 1e-6
-        );
+        assert!((authentication_quality_from_propositions(&partial).unwrap() - 0.75).abs() < 1e-6);
 
         // No authentication observation at all → None, never a zero that
         // could be confused with "observed as unauthenticated".
@@ -1808,7 +1813,10 @@ mod tests {
             "deficiency_missing_dmarc".to_string(),
             "dmarc_record_missing".to_string(),
         ];
-        assert_eq!(authentication_quality_from_propositions(&deficient), Some(0.0));
+        assert_eq!(
+            authentication_quality_from_propositions(&deficient),
+            Some(0.0)
+        );
     }
 
     // ---- Composite + change detection -------------------------------------

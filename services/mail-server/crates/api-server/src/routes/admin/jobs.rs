@@ -262,8 +262,7 @@ pub(crate) async fn cancel_job_audited(
 }
 
 fn parse_job_id(raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw)
-        .map_err(|_| ApiError::Validation(vec!["job id must be a UUID".into()]))
+    Uuid::parse_str(raw).map_err(|_| ApiError::Validation(vec!["job id must be a UUID".into()]))
 }
 
 async fn retry_job_endpoint(
@@ -285,7 +284,10 @@ async fn cancel_job_endpoint(
     require_scopes(&auth, &["*"])?;
     require_system_tenant(&state, &auth).await?;
     let id = parse_job_id(&id)?;
-    Ok((StatusCode::OK, Json(cancel_job_audited(&state, &auth, id).await?)))
+    Ok((
+        StatusCode::OK,
+        Json(cancel_job_audited(&state, &auth, id).await?),
+    ))
 }
 
 #[cfg(test)]
@@ -341,53 +343,22 @@ mod adversarial_tests {
         let env = AdvEnv::admin(pool.clone()).await;
         let tag = Uuid::new_v4().simple().to_string();
 
-        let dead = seed_job(
-            &pool,
-            &format!("jobs-ctl-dl-{tag}"),
-            "dead_letter",
-            5,
-            3,
-        )
-        .await;
-        let in_flight = seed_job(
-            &pool,
-            &format!("jobs-ctl-proc-{tag}"),
-            "processing",
-            1,
-            3,
-        )
-        .await;
-        let completed = seed_job(
-            &pool,
-            &format!("jobs-ctl-done-{tag}"),
-            "completed",
-            1,
-            3,
-        )
-        .await;
-        let pending = seed_job(
-            &pool,
-            &format!("jobs-ctl-pend-{tag}"),
-            "pending",
-            0,
-            3,
-        )
-        .await;
+        let dead = seed_job(&pool, &format!("jobs-ctl-dl-{tag}"), "dead_letter", 5, 3).await;
+        let in_flight = seed_job(&pool, &format!("jobs-ctl-proc-{tag}"), "processing", 1, 3).await;
+        let completed = seed_job(&pool, &format!("jobs-ctl-done-{tag}"), "completed", 1, 3).await;
+        let pending = seed_job(&pool, &format!("jobs-ctl-pend-{tag}"), "pending", 0, 3).await;
 
         // Dead-letter → re-queued with a clean slate.
-        let (status, body) = env
-            .post(&format!("/v1/admin/jobs/{dead}/retry"), "")
-            .await;
+        let (status, body) = env.post(&format!("/v1/admin/jobs/{dead}/retry"), "").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["status"], "pending");
         assert_eq!(body["attempts"], 0);
-        let (db_status, attempts, error): (String, i32, Option<String>) = sqlx::query_as(
-            "SELECT status, attempts, error_message FROM queue_jobs WHERE id = $1",
-        )
-        .bind(dead)
-        .fetch_one(&pool)
-        .await
-        .expect("row");
+        let (db_status, attempts, error): (String, i32, Option<String>) =
+            sqlx::query_as("SELECT status, attempts, error_message FROM queue_jobs WHERE id = $1")
+                .bind(dead)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
         assert_eq!(db_status, "pending");
         assert_eq!(attempts, 0, "retry resets the attempt counter");
         assert!(error.is_none(), "retry clears the terminal error");
@@ -524,8 +495,8 @@ mod adversarial_tests {
             return;
         };
         // A system-tenant key WITHOUT the wildcard: the scope gate refuses.
-        let key = crate::app::test_support::seed_api_key_for(&pool, "system", &["analytics:read"])
-            .await;
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["analytics:read"]).await;
         let scoped = AdvEnv::over(pool.clone(), key).await;
         let id = seed_job(
             &pool,
@@ -540,7 +511,11 @@ mod adversarial_tests {
             format!("/v1/admin/jobs/{id}/retry"),
             format!("/v1/admin/jobs/{id}/cancel"),
         ] {
-            let method = if uri == "/v1/admin/jobs" { "GET" } else { "POST" };
+            let method = if uri == "/v1/admin/jobs" {
+                "GET"
+            } else {
+                "POST"
+            };
             let (status, body) = if method == "GET" {
                 scoped.get(&uri).await
             } else {

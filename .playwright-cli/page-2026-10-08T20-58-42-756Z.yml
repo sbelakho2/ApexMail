@@ -1,0 +1,166 @@
+- generic [active] [ref=e1]:
+  - link "Skip to content" [ref=e2] [cursor=pointer]:
+    - /url: "#app-main"
+  - generic [ref=e3]:
+    - complementary "Primary sidebar navigation" [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ApexMail
+        - navigation "Primary sidebar navigation" [ref=e9]:
+          - generic [ref=e10]:
+            - heading "Overview" [level=3] [ref=e11]
+            - link [ref=e13] [cursor=pointer]:
+              - /url: /dashboard
+          - generic [ref=e18]:
+            - heading "Send" [level=3] [ref=e19]
+            - generic [ref=e20]:
+              - link [ref=e21] [cursor=pointer]:
+                - /url: /campaigns
+              - link [ref=e26] [cursor=pointer]:
+                - /url: /templates
+              - link [ref=e32] [cursor=pointer]:
+                - /url: /contacts
+              - link [ref=e39] [cursor=pointer]:
+                - /url: /lists
+          - generic [ref=e42]:
+            - heading "Measure" [level=3] [ref=e43]
+            - generic [ref=e44]:
+              - link [ref=e45] [cursor=pointer]:
+                - /url: /analytics
+              - link [ref=e49] [cursor=pointer]:
+                - /url: /reports
+              - link [ref=e54] [cursor=pointer]:
+                - /url: /inbox-placement
+              - link [ref=e59] [cursor=pointer]:
+                - /url: /events
+          - generic [ref=e63]:
+            - heading "Configure" [level=3] [ref=e64]
+            - generic [ref=e65]:
+              - link [ref=e66] [cursor=pointer]:
+                - /url: /domains
+              - link [ref=e71] [cursor=pointer]:
+                - /url: /settings/api-keys
+              - link [ref=e77] [cursor=pointer]:
+                - /url: /settings/webhooks
+              - link [ref=e81] [cursor=pointer]:
+                - /url: /settings/dedicated-ips
+              - link [ref=e86] [cursor=pointer]:
+                - /url: /settings/suppressions
+          - generic [ref=e91]:
+            - heading "Account" [level=3] [ref=e92]
+            - generic [ref=e93]:
+              - link [ref=e94] [cursor=pointer]:
+                - /url: /assistant
+              - link [ref=e98] [cursor=pointer]:
+                - /url: /settings/billing
+              - link [ref=e102] [cursor=pointer]:
+                - /url: /settings
+        - button "Sign Out" [ref=e109] [cursor=pointer]
+    - generic [ref=e111]:
+      - banner [ref=e112]:
+        - search [ref=e115]:
+          - generic [ref=e116]: Search campaigns
+          - generic [ref=e117]:
+            - searchbox "Search campaigns" [ref=e121]
+            - button "Search" [ref=e122] [cursor=pointer]
+        - generic "Signed in as AM" [ref=e125]: AM
+      - main [ref=e127]:
+        - generic [ref=e129]:
+          - navigation "Breadcrumb" [ref=e130]:
+            - list [ref=e131]:
+              - listitem [ref=e132]:
+                - link "Dashboard" [ref=e133] [cursor=pointer]:
+                  - /url: /
+              - listitem [ref=e134]: /
+              - listitem [ref=e135]: Campaigns
+          - generic [ref=e136]:
+            - generic [ref=e137]:
+              - heading "Campaigns" [level=1] [ref=e138]
+              - paragraph [ref=e139]: Search, filter, and batch-manage campaigns — every action is a plain form post rendered server-side.
+            - link "New Campaign" [ref=e140] [cursor=pointer]:
+              - /url: /campaigns/new
+          - search [ref=e142]:
+            - generic [ref=e143]:
+              - generic [ref=e144]: Search campaigns
+              - searchbox "Search campaigns" [ref=e146]: spring
+              - paragraph [ref=e147]: Press Apply to run the search — results are rendered entirely server-side.
+            - generic [ref=e148]:
+              - generic [ref=e149]:
+                - generic [ref=e150]:
+                  - generic [ref=e151]: Filter by status
+                  - combobox "Filter by status" [ref=e152]:
+                    - option "Draft" [selected]
+                    - option "Scheduled"
+                    - option "Sent"
+                - generic [ref=e153]:
+                  - generic [ref=e154]: Sort order
+                  - combobox "Sort order" [ref=e155]:
+                    - option "Recently updated" [selected]
+                    - option "Recently created"
+                    - option "Open rate"
+              - generic [ref=e156]:
+                - button "Apply filters" [ref=e157] [cursor=pointer]
+                - link "Clear filters" [ref=e158] [cursor=pointer]:
+                  - /url: /campaigns
+          - generic [ref=e159]:
+            - generic [ref=e161]:
+              - generic [ref=e163]:
+                - paragraph [ref=e164]: Select rows to act on them in bulk
+                - paragraph [ref=e165]: There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.
+              - button "Delete selected" [ref=e167] [cursor=pointer]
+            - generic [ref=e168]:
+              - table [ref=e170]:
+                - rowgroup [ref=e171]:
+                  - row [ref=e172]:
+                    - columnheader [ref=e173]
+                    - columnheader "Name" [ref=e174]
+                    - columnheader "Status" [ref=e175]
+                    - columnheader "Audience" [ref=e176]
+                    - columnheader "Open Rate" [ref=e177]
+                    - columnheader "Updated" [ref=e178]
+                    - columnheader "Actions" [ref=e179]
+                - rowgroup [ref=e180]:
+                  - row [ref=e181]:
+                    - cell [ref=e182]:
+                      - checkbox "Select Spring Winback campaign" [ref=e183]
+                    - cell [ref=e184]:
+                      - link "Spring Winback" [ref=e185] [cursor=pointer]:
+                        - /url: /campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring
+                    - cell "Draft" [ref=e186]
+                    - cell "VIP Customers" [ref=e190]
+                    - cell "41.2%" [ref=e191]
+                    - cell "2 minutes ago" [ref=e192]
+                    - cell [ref=e193]:
+                      - generic [ref=e194]:
+                        - link "Review" [ref=e195] [cursor=pointer]:
+                          - /url: /campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring
+                        - link "Delete" [ref=e196] [cursor=pointer]:
+                          - /url: /confirm?intent=delete-campaign&id=c_spring&return_to=%2Fcampaigns&sig=1791493980.3TyABdDfGPjhoeu_JSjKrsf7FFGwue5EdBQXnudX8F8
+                  - row [ref=e197]:
+                    - cell [ref=e198]:
+                      - checkbox "Select Launch Announcement campaign" [ref=e199]
+                    - cell [ref=e200]:
+                      - link "Launch Sequence" [ref=e201] [cursor=pointer]:
+                        - /url: /campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring
+                    - cell "Scheduled" [ref=e202]
+                    - cell "Trial Accounts" [ref=e205]
+                    - cell "28.4%" [ref=e206]
+                    - cell "15 minutes ago" [ref=e207]
+                    - cell [ref=e208]:
+                      - generic [ref=e209]:
+                        - link "Review" [ref=e210] [cursor=pointer]:
+                          - /url: /campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring
+                        - link "Edit" [ref=e211] [cursor=pointer]:
+                          - /url: /campaigns/c_launch/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring
+                - caption [ref=e212]: Campaigns
+              - generic [ref=e213]:
+                - paragraph [ref=e214]: Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.
+                - navigation "Pagination controls" [ref=e215]:
+                  - link "First" [ref=e216] [cursor=pointer]:
+                    - /url: /campaigns?page=1&status=draft&query=spring
+                  - link "Previous" [ref=e217] [cursor=pointer]:
+                    - /url: /campaigns?page=1&status=draft&query=spring
+                  - generic [ref=e218]: Page 2 of 5
+                  - link "Next" [ref=e219] [cursor=pointer]:
+                    - /url: /campaigns?page=3&status=draft&query=spring
+                  - link "Last" [ref=e220] [cursor=pointer]:
+                    - /url: /campaigns?page=5&status=draft&query=spring

@@ -741,7 +741,10 @@ async fn send_time_windows_respect_tenant_offset_and_cold_start() {
         .await
         .expect("override window");
     assert_eq!(overridden.utc_offset_minutes, 180);
-    assert_eq!(overridden.windows[0].hour, 17, "14:00 UTC is 17:00 at +03:00");
+    assert_eq!(
+        overridden.windows[0].hour, 17,
+        "14:00 UTC is 17:00 at +03:00"
+    );
 
     // The offset-0 tenant keeps its 14:00 bucket (tenant caches are scoped).
     let warm_uk = optimizer

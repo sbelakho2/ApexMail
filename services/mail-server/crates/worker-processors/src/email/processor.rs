@@ -4322,20 +4322,19 @@ fn maybe_annotate_html(html: Option<String>, job: &EmailJob) -> Option<String> {
         return html;
     }
 
-    let config =
-        match serde_json::from_value::<mta::gmail_annotations::GmailAnnotationConfig>(
-            annotations.clone(),
-        ) {
-            Ok(config) => config,
-            Err(error) => {
-                warn!(
-                    job_id = %job.id,
-                    error = %error,
-                    "gmail_annotations metadata is not a valid annotation config — sending without annotations"
-                );
-                return html;
-            }
-        };
+    let config = match serde_json::from_value::<mta::gmail_annotations::GmailAnnotationConfig>(
+        annotations.clone(),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(
+                job_id = %job.id,
+                error = %error,
+                "gmail_annotations metadata is not a valid annotation config — sending without annotations"
+            );
+            return html;
+        }
+    };
 
     let result =
         mta::gmail_annotations::GmailAnnotationsService::new().generate_annotations(&config);
@@ -16843,7 +16842,10 @@ mod residual_arms_db_tests {
 
         let active_id = format!("whact{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
         let disabled_id = format!("whdis{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
-        for (id, enabled, status) in [(&active_id, true, "active"), (&disabled_id, true, "disabled")] {
+        for (id, enabled, status) in [
+            (&active_id, true, "active"),
+            (&disabled_id, true, "disabled"),
+        ] {
             sqlx::query(
                 "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, status) \
                  VALUES ($1, $2, $3, $4, 'whsec_test', '[\"message.accepted\"]'::jsonb, $5, $6)",
@@ -16869,13 +16871,12 @@ mod residual_arms_db_tests {
         )
         .await;
 
-        let queued: Vec<(String, String)> = sqlx::query_as(
-            "SELECT webhook_id, event_type FROM webhook_queue WHERE tenant_id = $1",
-        )
-        .bind(&tenant)
-        .fetch_all(&pool)
-        .await
-        .expect("read queue");
+        let queued: Vec<(String, String)> =
+            sqlx::query_as("SELECT webhook_id, event_type FROM webhook_queue WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("read queue");
         assert_eq!(
             queued.len(),
             1,
@@ -17429,7 +17430,10 @@ mod residual_arms_db_tests {
             "annotation script block must be present: {out}"
         );
         assert!(out.contains("SAVE25"), "deal code must be in the JSON-LD");
-        assert!(out.contains("\"@type\": \"PromotionCard\"") || out.contains("\"@type\":\"PromotionCard\""));
+        assert!(
+            out.contains("\"@type\": \"PromotionCard\"")
+                || out.contains("\"@type\":\"PromotionCard\"")
+        );
         let head_end = out.find("</head>").expect("head preserved");
         let script_at = out.find("application/ld+json").expect("script present");
         assert!(
@@ -17479,9 +17483,14 @@ mod residual_arms_db_tests {
     #[test]
     fn gmail_annotations_head_detection_variants() {
         let script = "<script type=\"application/ld+json\">{\"a\":1}</script>";
-        let with_attrs = inject_json_ld_into_head("<html><head data-x=\"1\"><body>b</body></head></html>", script);
+        let with_attrs = inject_json_ld_into_head(
+            "<html><head data-x=\"1\"><body>b</body></head></html>",
+            script,
+        );
         assert!(with_attrs.contains("application/ld+json"));
-        assert!(with_attrs.find("application/ld+json").unwrap() < with_attrs.find("<body>").unwrap());
+        assert!(
+            with_attrs.find("application/ld+json").unwrap() < with_attrs.find("<body>").unwrap()
+        );
 
         let headless = inject_json_ld_into_head("<p>fragment</p>", script);
         assert!(headless.starts_with(script));

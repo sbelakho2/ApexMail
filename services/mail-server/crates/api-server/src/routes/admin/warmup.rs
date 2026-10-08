@@ -25,11 +25,12 @@
 //! it; SES does not report it either), so a `min(canonical, ISP target)` rule
 //! cannot be computed in the send path.
 
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -218,6 +219,7 @@ pub struct WarmupAction {
 async fn warmup_action(
     State(state): State<AppState>,
     auth: AuthUser,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<WarmupAction>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -249,11 +251,24 @@ async fn warmup_action(
         .await?;
     }
 
-    // Audit log
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    // Audit log. The client IP must come from the SAME trusted-proxy-aware
+    // extraction the auth/rate-limit stack uses (live dogfood 2026-10-08,
+    // D-5): this handler used to record the raw request `X-Forwarded-For`,
+    // so with an empty/incomplete `TRUSTED_PROXIES` any caller (here: an
+    // operator) could write an arbitrary IP into `audit_logs.ip_address`.
+    // With a trusted proxy configured, the forwarded chain is honored
+    // exactly as elsewhere; otherwise the socket peer is the client.
+    let client_ip = connect_info
+        .as_ref()
+        .map(|ConnectInfo(addr)| {
+            crate::middleware::rate_limiter::extract_public_client_ip(
+                &headers,
+                addr.ip(),
+                &state.config.trusted_proxies,
+            )
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let ip = client_ip.as_str();
     let ua = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -556,5 +571,53 @@ mod adversarial_tests {
         let scoped = AdvEnv::over(pool, key).await;
         let (status, body) = scoped.get("/v1/admin/warmup").await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    /// D-5 class (live dogfood 2026-10-08): the audit row must record the
+    /// SOCKET peer, never a raw client-supplied `X-Forwarded-For`, whenever
+    /// the peer is not a configured trusted proxy. The handler previously
+    /// read the header directly, so any caller could forge the IP in
+    /// `audit_logs.ip_address`.
+    #[tokio::test]
+    async fn warmup_audit_ip_ignores_spoofed_xff_without_trusted_proxies() {
+        use tower::ServiceExt;
+
+        let Some(pool) = crate::test_db::canonical_pool("warmup_audit_xff").await else {
+            return;
+        };
+        let mut env = AdvEnv::admin(pool.clone()).await;
+        let peer: std::net::SocketAddr = "127.0.0.9:4444".parse().expect("peer addr");
+        env.client_ip = Some(peer);
+        let pool_id = seed_pool_with_plan(&pool, "XFF", "pending").await;
+
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/admin/warmup")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("x-api-key", &env.credential)
+            .header("x-forwarded-for", "203.0.113.77")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "poolId": pool_id, "action": "start" }).to_string(),
+            ))
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        let response = env.app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ip: Option<String> = sqlx::query_scalar(
+            "SELECT ip_address FROM audit_logs WHERE resource_id = $1 AND action = 'warmup.start'",
+        )
+        .bind(&pool_id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit row");
+        assert_eq!(
+            ip.as_deref(),
+            Some("127.0.0.9"),
+            "the socket peer is the client IP; a forged X-Forwarded-For must never \
+             be recorded while the peer is not a trusted proxy"
+        );
     }
 }

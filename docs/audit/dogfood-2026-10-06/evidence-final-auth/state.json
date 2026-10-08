@@ -1,0 +1,125 @@
+{
+ "id_user": {
+  "owner": {
+   "email": "fa-id-0996e745@dogfood.test",
+   "password": "Dogfood!2026-Correct-Horse-9",
+   "mfa_secret": "2THUAZ5FTPACRZO5DUE7YJGODZR7Q45F",
+   "user_id": "8e9d7b83-ed25-476d-9abb-777a6f85466b",
+   "tenant_id": "tnthrichtr2iaizmt5wztk2fsg",
+   "cookie": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI4ZTlkN2I4My1lZDI1LTQ3NmQtOWFiYi03NzdhNmY4NTQ2NmIiLCJ0ZW5hbnRfaWQiOiJ0bnRocmljaHRyMmlhaXptdDV3enRrMmZzZyIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTQwNSwiaWF0IjoxNzkxNDg5MDA1LCJqdGkiOiI2Mzc2ZWUxZi01ZjkxLTQ4NDgtODM0YS0yOGQzMDUwMmExMTMiLCJ0eXAiOiJzZXNzaW9uIn0.yfCgSh0aQfnr1aE8r9DrcfIaj1_gTN9T6sikCzOiEnVDOu0aGrdkY6IvI-M4jo-4nrtMz46VnRVO1a82tq0g9APpVnxpsvOsG_Cktw5NHjzgeaAOSHrFmRlh2IdWY9ySgsHcWWTpGcNA_ZId6XvSMmNVYi0VDi_SjpZpTRC5zMFcqpvVbI5h2lulJORQ_DYfCUfMb3-p45EQeaidXAsFiZYWgwsD3O0SY7iyxuRsD5QaZgKgEv2MDvUlUCHO2HBo8a1-I-rp31YylyghzxNcuqNgatPHTNOp2BjVGb7kV_s2gNlQ-RIPj2dpH6A60zI9Z8O5VMlJQ9sSznybCADAhg",
+   "csrf_cookie": "MTc5MTQ4OTAwNTMzNDphMjAzZGEzZS1jODA5LTRhNTYtYTk2Ny01NTIwZWI2YjIzNDg.ehMgONIQLJWzH9rGjcEBTU_7NJfYmhIIZcr3ManyCbc",
+   "csrf": "MTc5MTQ4OTAwNTMzNDphMjAzZGEzZS1jODA5LTRhNTYtYTk2Ny01NTIwZWI2YjIzNDg.ehMgONIQLJWzH9rGjcEBTU_7NJfYmhIIZcr3ManyCbc",
+   "jti": "6376ee1f-5f91-4848-834a-28d30502a113",
+   "jwt_payload": {
+    "sub": "8e9d7b83-ed25-476d-9abb-777a6f85466b",
+    "tenant_id": "tnthrichtr2iaizmt5wztk2fsg",
+    "scopes": [
+     "*"
+    ],
+    "exp": 1791575405,
+    "iat": 1791489005,
+    "jti": "6376ee1f-5f91-4848-834a-28d30502a113",
+    "typ": "session"
+   }
+  },
+  "session_a": {
+   "email": "fa-id-0996e745@dogfood.test",
+   "password": "Dogfood!2026-Correct-Horse-9",
+   "mfa_secret": "2THUAZ5FTPACRZO5DUE7YJGODZR7Q45F",
+   "user_id": "8e9d7b83-ed25-476d-9abb-777a6f85466b",
+   "tenant_id": "tnthrichtr2iaizmt5wztk2fsg",
+   "cookie": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI4ZTlkN2I4My1lZDI1LTQ3NmQtOWFiYi03NzdhNmY4NTQ2NmIiLCJ0ZW5hbnRfaWQiOiJ0bnRocmljaHRyMmlhaXptdDV3enRrMmZzZyIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTQwNSwiaWF0IjoxNzkxNDg5MDA1LCJqdGkiOiI2Mzc2ZWUxZi01ZjkxLTQ4NDgtODM0YS0yOGQzMDUwMmExMTMiLCJ0eXAiOiJzZXNzaW9uIn0.yfCgSh0aQfnr1aE8r9DrcfIaj1_gTN9T6sikCzOiEnVDOu0aGrdkY6IvI-M4jo-4nrtMz46VnRVO1a82tq0g9APpVnxpsvOsG_Cktw5NHjzgeaAOSHrFmRlh2IdWY9ySgsHcWWTpGcNA_ZId6XvSMmNVYi0VDi_SjpZpTRC5zMFcqpvVbI5h2lulJORQ_DYfCUfMb3-p45EQeaidXAsFiZYWgwsD3O0SY7iyxuRsD5QaZgKgEv2MDvUlUCHO2HBo8a1-I-rp31YylyghzxNcuqNgatPHTNOp2BjVGb7kV_s2gNlQ-RIPj2dpH6A60zI9Z8O5VMlJQ9sSznybCADAhg",
+   "csrf_cookie": "MTc5MTQ4OTAwNTMzNDphMjAzZGEzZS1jODA5LTRhNTYtYTk2Ny01NTIwZWI2YjIzNDg.ehMgONIQLJWzH9rGjcEBTU_7NJfYmhIIZcr3ManyCbc",
+   "csrf": "MTc5MTQ4OTAwNTMzNDphMjAzZGEzZS1jODA5LTRhNTYtYTk2Ny01NTIwZWI2YjIzNDg.ehMgONIQLJWzH9rGjcEBTU_7NJfYmhIIZcr3ManyCbc",
+   "jti": "6376ee1f-5f91-4848-834a-28d30502a113",
+   "jwt_payload": {
+    "sub": "8e9d7b83-ed25-476d-9abb-777a6f85466b",
+    "tenant_id": "tnthrichtr2iaizmt5wztk2fsg",
+    "scopes": [
+     "*"
+    ],
+    "exp": 1791575405,
+    "iat": 1791489005,
+    "jti": "6376ee1f-5f91-4848-834a-28d30502a113",
+    "typ": "session"
+   }
+  },
+  "session_b": {
+   "email": "fa-id-0996e745@dogfood.test",
+   "password": "Dogfood!2026-Correct-Horse-9",
+   "mfa_secret": "2THUAZ5FTPACRZO5DUE7YJGODZR7Q45F",
+   "user_id": "8e9d7b83-ed25-476d-9abb-777a6f85466b",
+   "tenant_id": "tnthrichtr2iaizmt5wztk2fsg",
+   "cookie": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI4ZTlkN2I4My1lZDI1LTQ3NmQtOWFiYi03NzdhNmY4NTQ2NmIiLCJ0ZW5hbnRfaWQiOiJ0bnRocmljaHRyMmlhaXptdDV3enRrMmZzZyIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTQzMywiaWF0IjoxNzkxNDg5MDMzLCJqdGkiOiI1NGEyYWVjMC03ZmI0LTQ4YjQtODM3Zi01MTE2ODQ0ZDMxNzMiLCJ0eXAiOiJzZXNzaW9uIn0.xFhAEdfzdXoojYXPsFUrxAqgMJ1bfMb9qZKgZcQJkvw9uLDMqVg1lsjB5lhwOeC2j5qzfhkbms2PkhPNefOK9g1JzfJG7-a5-OKNoXXWo6ZNuKitOFSTooUopH3xJtm792S3zQvQ6ezaouwssvMUsdId2aWKPWLmntVRfOhrNfyRYdgPd0Pgex9H3QLL5e0jU_SNZ7bvAk85r7h3MBm0UkqCGO8Q7yHpv7wt2EqLcJthhxpqUUCEoCFVD0Zy2Sa6fEky8X2GpxZRkb2eEWNgq0FESW4C9xAszWM0wSPfX0dhpZdVk0UbhPFO-5_iGHyH4gBPs8eM5mkJtNB6MZt5DQ",
+   "csrf_cookie": "MTc5MTQ4OTAzMjk0NzoyYTBjMjFkYy1hMjA1LTQxMzEtODE3MC01MDVjMmZhNjA2MDc.ST6oOQCkf0Quhm5q0CHHp_DCVHjw4wdoXcUt_gF5T_c",
+   "csrf": "MTc5MTQ4OTAzMjk0NzoyYTBjMjFkYy1hMjA1LTQxMzEtODE3MC01MDVjMmZhNjA2MDc.ST6oOQCkf0Quhm5q0CHHp_DCVHjw4wdoXcUt_gF5T_c",
+   "jti": "54a2aec0-7fb4-48b4-837f-5116844d3173",
+   "jwt_payload": {
+    "sub": "8e9d7b83-ed25-476d-9abb-777a6f85466b",
+    "tenant_id": "tnthrichtr2iaizmt5wztk2fsg",
+    "scopes": [
+     "*"
+    ],
+    "exp": 1791575433,
+    "iat": 1791489033,
+    "jti": "54a2aec0-7fb4-48b4-837f-5116844d3173",
+    "typ": "session"
+   }
+  }
+ },
+ "tpl_user": {
+  "email": "fa-tpl-0996e745@dogfood.test",
+  "password": "Dogfood!2026-Correct-Horse-9",
+  "mfa_secret": "A3TYACXI3EOOVZZQS4DUAWUOK7YMERYH",
+  "user_id": "c1d4bd69-c283-482e-83b3-f60cb2fbbf65",
+  "tenant_id": "kcycl9549i4nbn44ee4jk6eta8",
+  "cookie": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjMWQ0YmQ2OS1jMjgzLTQ4MmUtODNiMy1mNjBjYjJmYmJmNjUiLCJ0ZW5hbnRfaWQiOiJrY3ljbDk1NDlpNG5ibjQ0ZWU0ams2ZXRhOCIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTQ0MCwiaWF0IjoxNzkxNDg5MDQwLCJqdGkiOiJhOGU2NjQzMi0xMjhjLTQzNjAtODAwNC0xNjI1MTIyYTJiZTUiLCJ0eXAiOiJzZXNzaW9uIn0.HaF9-35Kk6Hi3rrPFaa4nKzlMvrkgD0Kf0SJskU7p_W76oxWwDbgYFv1XlAgjFmiJsWakxaAJRXtgrPN8fhSPuqI6c0wMlW5tUbL8Ru9yjTdR6M26k6QhuZup2LfsnA0b1pPr7Gqx6d6pELvYomLnQv_F-OSeMdPYg99zNx_wvUTEBFWe5e6YH_2FmRmep9Y6LVMBkNzKHfH9HAQwsFvOni1luxRqOF3fmAfEDZFd7blj0rdaS2w1QiMtlCl29gHVwNUO-8M8Mj3Ld7VbnTNK4fmpHvENKiUCBzL4XQIgQX1c8UDpI2z8bmy6XPpmsSlOO0D39sSG46attr2u6aH-w",
+  "csrf_cookie": "MTc5MTQ4OTA0MDEwMDpiNmRmOGFkMy04NGI0LTRlNjYtOWFkZi0wY2M4Mjg0ODY3YTI.oapMKpLDLFsshUUDtyeFAcTbXEFrsk5y13Ik89SDD28",
+  "csrf": "MTc5MTQ4OTA0MDEwMDpiNmRmOGFkMy04NGI0LTRlNjYtOWFkZi0wY2M4Mjg0ODY3YTI.oapMKpLDLFsshUUDtyeFAcTbXEFrsk5y13Ik89SDD28",
+  "jti": "a8e66432-128c-4360-8004-1625122a2be5",
+  "jwt_payload": {
+   "sub": "c1d4bd69-c283-482e-83b3-f60cb2fbbf65",
+   "tenant_id": "kcycl9549i4nbn44ee4jk6eta8",
+   "scopes": [
+    "*"
+   ],
+   "exp": 1791575440,
+   "iat": 1791489040,
+   "jti": "a8e66432-128c-4360-8004-1625122a2be5",
+   "typ": "session"
+  },
+  "seed_template_id": "9pdn92t96mscgfvwz2mfgs77mm"
+ },
+ "dom_user": {
+  "email": "fa-dom-0996e745@dogfood.test",
+  "password": "Dogfood!2026-Correct-Horse-9",
+  "mfa_secret": "UIBRNJ6Y55NVGCDI66KE7W35LIJD7P6P",
+  "user_id": "deb547c3-2418-4589-848c-d30b1674d094",
+  "tenant_id": "88ak427ox04ga6s216rnhm07m6",
+  "cookie": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJkZWI1NDdjMy0yNDE4LTQ1ODktODQ4Yy1kMzBiMTY3NGQwOTQiLCJ0ZW5hbnRfaWQiOiI4OGFrNDI3b3gwNGdhNnMyMTZybmhtMDdtNiIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTQ0NiwiaWF0IjoxNzkxNDg5MDQ2LCJqdGkiOiI2N2MwY2UxMy1mYTRiLTRlMjgtYTEyOS0xY2I2MTE2NWY5ZmQiLCJ0eXAiOiJzZXNzaW9uIn0.HkNUUAqBCchJ-BgWWLIQvJ-0K_rCRW8R7JiTVVdRRzWrEBv4fAN2CtZxne3RoI1iW7inLyim4pvV9_9364WbAH6GbSbKUWoyWT9FMCuvZayVe7ISgoBNqX-OGrc-F0qHYRaQiPjXLIcu3f37FXyCr63qqj7MMLjsL-Eszx-_4HA7q_lapWS0t8B6LPGZpNemfPayJUt75erERdCrheEhPpwmrExIA1pxsyHTIDhOcOcmLAXV6-PaafOMLaveg2HiebklIgYszVHR0EVmBMzZ8-cvpfs2kUp-9QLiZhRKEWFGGB_my1zSAVK_ZvqrTdxvKFGsWIguEqIpfHxfyXqFxA",
+  "csrf_cookie": "MTc5MTQ4OTA0NTcxOTozMTI4NGQwZi03NDg0LTRhYjQtODVhZS03MGMzZmE3ZDBmMDM.EgaixGvxrusa7IUaAwZacQJPkrZKpUJEtc1zyBJNXVk",
+  "csrf": "MTc5MTQ4OTA0NTcxOTozMTI4NGQwZi03NDg0LTRhYjQtODVhZS03MGMzZmE3ZDBmMDM.EgaixGvxrusa7IUaAwZacQJPkrZKpUJEtc1zyBJNXVk",
+  "jti": "67c0ce13-fa4b-4e28-a129-1cb61165f9fd",
+  "jwt_payload": {
+   "sub": "deb547c3-2418-4589-848c-d30b1674d094",
+   "tenant_id": "88ak427ox04ga6s216rnhm07m6",
+   "scopes": [
+    "*"
+   ],
+   "exp": 1791575446,
+   "iat": 1791489046,
+   "jti": "67c0ce13-fa4b-4e28-a129-1cb61165f9fd",
+   "typ": "session"
+  },
+  "domain1": "fa4-a-0996e745.apexdogfood.test",
+  "domain1_id": "f4acc2b6-539e-4551-96bf-513811d76976"
+ },
+ "nonadmin_key": {
+  "key": "am_live_FUhvu3TAgoDNK2ZK3l2IIwdU9ckIcX4K",
+  "id": "ab5219c6-0c32-4823-a193-bd366366b75b",
+  "tenant_id": "kcycl9549i4nbn44ee4jk6eta8",
+  "owner_session": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjMWQ0YmQ2OS1jMjgzLTQ4MmUtODNiMy1mNjBjYjJmYmJmNjUiLCJ0ZW5hbnRfaWQiOiJrY3ljbDk1NDlpNG5ibjQ0ZWU0ams2ZXRhOCIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTQ0MCwiaWF0IjoxNzkxNDg5MDQwLCJqdGkiOiJhOGU2NjQzMi0xMjhjLTQzNjAtODAwNC0xNjI1MTIyYTJiZTUiLCJ0eXAiOiJzZXNzaW9uIn0.HaF9-35Kk6Hi3rrPFaa4nKzlMvrkgD0Kf0SJskU7p_W76oxWwDbgYFv1XlAgjFmiJsWakxaAJRXtgrPN8fhSPuqI6c0wMlW5tUbL8Ru9yjTdR6M26k6QhuZup2LfsnA0b1pPr7Gqx6d6pELvYomLnQv_F-OSeMdPYg99zNx_wvUTEBFWe5e6YH_2FmRmep9Y6LVMBkNzKHfH9HAQwsFvOni1luxRqOF3fmAfEDZFd7blj0rdaS2w1QiMtlCl29gHVwNUO-8M8Mj3Ld7VbnTNK4fmpHvENKiUCBzL4XQIgQX1c8UDpI2z8bmy6XPpmsSlOO0D39sSG46attr2u6aH-w",
+  "owner_csrf": "MTc5MTQ4OTA0MDEwMDpiNmRmOGFkMy04NGI0LTRlNjYtOWFkZi0wY2M4Mjg0ODY3YTI.oapMKpLDLFsshUUDtyeFAcTbXEFrsk5y13Ik89SDD28",
+  "owner_csrf_cookie": "MTc5MTQ4OTA0MDEwMDpiNmRmOGFkMy04NGI0LTRlNjYtOWFkZi0wY2M4Mjg0ODY3YTI.oapMKpLDLFsshUUDtyeFAcTbXEFrsk5y13Ik89SDD28"
+ }
+}

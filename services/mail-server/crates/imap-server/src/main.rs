@@ -5801,7 +5801,9 @@ async fn handle_plaintext_with_starttls(
                 // requires a BYE before a server-initiated close, and the
                 // module contract already promises one; the timeout arm of
                 // `read_command_bounded` sends it, so the error arm must too.
-                let _ = writer.write_all(bye("Command read failed, closing connection").as_bytes()).await;
+                let _ = writer
+                    .write_all(bye("Command read failed, closing connection").as_bytes())
+                    .await;
                 let _ = writer.flush().await;
                 return Ok(());
             }

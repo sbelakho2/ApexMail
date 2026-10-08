@@ -197,10 +197,14 @@ mod tests {
         // Dogfood 2026-10-08: the typed /confirm page (CP destructive-action
         // confirmation; previously web-only, 404ing on the operator host) —
         // control-plane 32 → 33, total 128 → 129.
-        assert_eq!(declared_route_count("control-plane"), Some(33));
+        // Lane C C1 (final live-verification wave, 2026-10-08): the tenant
+        // detail page with the audited plan-change select joins the CP
+        // manifest (the plan change had no SSR surface) —
+        // control-plane 33 → 34, total 129 → 130.
+        assert_eq!(declared_route_count("control-plane"), Some(34));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 129);
+        assert_eq!(total_route_count(), 130);
     }
 
     #[test]

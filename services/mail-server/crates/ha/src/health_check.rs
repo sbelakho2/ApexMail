@@ -558,9 +558,11 @@ mod tests {
     /// the health endpoint forever.
     #[tokio::test]
     async fn hung_probe_is_cut_off_by_the_configured_timeout() {
-        let report = check_component("hung", 20, std::future::pending::<
-            Result<(HealthStatus, Option<String>), String>,
-        >())
+        let report = check_component(
+            "hung",
+            20,
+            std::future::pending::<Result<(HealthStatus, Option<String>), String>>(),
+        )
         .await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
         let message = report.message.expect("timeout message");
@@ -571,10 +573,7 @@ mod tests {
     /// rely on.
     #[tokio::test]
     async fn zero_timeout_keeps_direct_probe_behavior() {
-        let report = check_component("fast", 0, async {
-            Ok((HealthStatus::Healthy, None))
-        })
-        .await;
+        let report = check_component("fast", 0, async { Ok((HealthStatus::Healthy, None)) }).await;
         assert_eq!(report.status, HealthStatus::Healthy);
     }
 }

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Months, SubsecRound, TimeDelta, Utc};
+use chrono::{DateTime, Duration, Months, TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -2403,10 +2403,7 @@ impl GdprAutomation {
     /// zero production callers, so a backdated request stayed invisible.
     /// This is that production caller, used by `/gdpr/stats` and by the
     /// 30 s compliance tick (which logs a warning when a breach is open).
-    pub async fn count_statutorily_overdue(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<u64, String> {
+    pub async fn count_statutorily_overdue(&self, tenant_id: Option<&str>) -> Result<u64, String> {
         let rows: Vec<RequestRow> = sqlx::query_as(
             "SELECT id, tenant_id, request_type, email, verification_token_hash,
                     verified, verified_at, status, requested_at, processed_at,
@@ -4654,6 +4651,8 @@ mod hostile_db_tests {
     use super::*;
     use crate::test_support;
     use crate::types::{ConsentSource, ConsentType, RequestStatus};
+    // Only this module's fixtures round timestamps; the lib itself does not.
+    use chrono::SubsecRound;
 
     async fn hostile_db(suffix: &str) -> Option<PgPool> {
         test_support::canonical_pool(

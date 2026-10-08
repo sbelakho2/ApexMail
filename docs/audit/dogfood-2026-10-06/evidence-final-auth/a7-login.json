@@ -1,0 +1,1 @@
+{"status":"mfa_setup_required","challengeToken":"mfa_8ipukvaco0d0jg1bg38itj","secret":"CWW2HVF2NKCASRRBF3T5M7NXEWSQ4ZBE","otpauthUrl":"otpauth://totp/ApexMail%3Afa-a7-0390e3b1%40dogfood.test?secret=CWW2HVF2NKCASRRBF3T5M7NXEWSQ4ZBE&issuer=ApexMail&algorithm=SHA256&digits=6&period=30"}

@@ -1242,7 +1242,10 @@ fn repetition_normalize(text: &str) -> Vec<String> {
     let mut current = String::new();
     for c in text.chars() {
         let digit_grouping = (c == ',' || c == '.')
-            && current.chars().next().is_some_and(|first| first.is_ascii_digit());
+            && current
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_digit());
         if c.is_alphanumeric() || c == '€' || digit_grouping {
             current.push(c.to_ascii_lowercase());
         } else if !current.is_empty() {

@@ -3140,19 +3140,23 @@ mod tests {
         .await;
         process_message_by_id(&handler, &msg_id).await.unwrap();
 
-        let request: (String, String, String, bool, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
-            "SELECT id, request_type, status, verified, statutory_due_at \
+        let request: (String, String, String, bool, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT id, request_type, status, verified, statutory_due_at \
              FROM data_subject_requests WHERE tenant_id = $1 AND lower(email) = lower($2)",
-        )
-        .bind(&tenant)
-        .bind(&fixture.email)
-        .fetch_one(&pool)
-        .await
-        .expect("the DSR intake must create the canonical request");
+            )
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .fetch_one(&pool)
+            .await
+            .expect("the DSR intake must create the canonical request");
         assert_eq!(request.1, "erasure");
         assert_eq!(request.2, "pending_verification");
         assert!(!request.3);
-        assert!(request.4.is_some(), "the statutory clock is persisted at intake");
+        assert!(
+            request.4.is_some(),
+            "the statutory clock is persisted at intake"
+        );
 
         let (outbox_status, verify_url, token): (String, String, String) = sqlx::query_as(
             "SELECT status, verify_url, verification_token FROM dsr_verification_outbox \
@@ -3177,7 +3181,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(dsr_record["status"], serde_json::json!("pending_verification"));
+        assert_eq!(
+            dsr_record["status"],
+            serde_json::json!("pending_verification")
+        );
         assert_eq!(dsr_record["request_type"], serde_json::json!("erasure"));
         assert_eq!(
             dsr_record["request_id"].as_str(),
@@ -3206,15 +3213,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(replay_record["status"], serde_json::json!("already_open"));
-        assert_eq!(replay_record["request_id"].as_str(), Some(request.0.as_str()));
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM data_subject_requests WHERE tenant_id = $1",
-        )
-        .bind(&tenant)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(count, 1, "a replay must not open a second statutory request");
+        assert_eq!(
+            replay_record["request_id"].as_str(),
+            Some(request.0.as_str())
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM data_subject_requests WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 1,
+            "a replay must not open a second statutory request"
+        );
 
         // 3. A GDPR-shaped QUESTION must not open a request.
         let question_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -3236,7 +3248,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert!(question_dsr.is_none(), "ordinary questions never open a DSR");
+        assert!(
+            question_dsr.is_none(),
+            "ordinary questions never open a DSR"
+        );
 
         for id in [&msg_id, &replay_id, &question_id] {
             let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = $1")

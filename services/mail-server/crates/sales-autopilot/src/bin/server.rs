@@ -259,9 +259,12 @@ async fn run_(
             // account's real SPF/DKIM/DMARC/MX posture (persisted as
             // dns_observation evidence). A resolver that cannot initialize is
             // a named warning, not a silent skip.
-            let observer = match sales_autopilot::signals::email_stack::DnsEmailStackObserver::new() {
+            let observer = match sales_autopilot::signals::email_stack::DnsEmailStackObserver::new()
+            {
                 Ok(observer) => Some(std::sync::Arc::new(observer)
-                    as std::sync::Arc<dyn sales_autopilot::signals::email_stack::EmailStackObserver>),
+                    as std::sync::Arc<
+                        dyn sales_autopilot::signals::email_stack::EmailStackObserver,
+                    >),
                 Err(error) => {
                     tracing::warn!(
                         error = %error,

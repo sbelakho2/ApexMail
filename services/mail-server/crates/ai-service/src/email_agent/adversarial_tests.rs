@@ -455,7 +455,12 @@ async fn worker_classified_rows_still_receive_their_draft() {
         &db,
         &id,
         Some(&tenant),
-        &mime(&sender, "Re: proposal", "Can we schedule a call Thursday at 10?", &[]),
+        &mime(
+            &sender,
+            "Re: proposal",
+            "Can we schedule a call Thursday at 10?",
+            &[],
+        ),
     )
     .await;
     // The worker wins the race and finishes first: processed_at set,
@@ -501,7 +506,8 @@ async fn worker_classified_rows_still_receive_their_draft() {
             .await
             .expect("suggested_action");
     assert_eq!(
-        action["first_response"], serde_json::json!(true),
+        action["first_response"],
+        serde_json::json!(true),
         "the worker's first_response marker survives the draft merge: {action}"
     );
     assert_eq!(action["action"], serde_json::json!("schedule_demo"));
@@ -536,7 +542,12 @@ async fn duplicate_delivery_gets_no_second_draft() {
     let tenant = unique("tn_em");
     let sender = unique_sender("dup.delivery");
     let message_id = format!("<dup-{}@relay.test>", uuid::Uuid::new_v4().simple());
-    let raw = mime(&sender, "Re: proposal", "Can we schedule a call Thursday at 10?", &[]);
+    let raw = mime(
+        &sender,
+        "Re: proposal",
+        "Can we schedule a call Thursday at 10?",
+        &[],
+    );
 
     // First delivery: the draft.
     let first = unique("em_dup_first");

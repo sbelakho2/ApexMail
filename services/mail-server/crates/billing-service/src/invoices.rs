@@ -1684,7 +1684,8 @@ mod tests {
 
         // Round trip through the canonical writer: encode -> decode.
         let encoded = encode_invoice_line_items(&items).expect("encode canonical shape");
-        let decoded = decode_invoice_line_items(invoice_id, encoded).expect("decode canonical shape");
+        let decoded =
+            decode_invoice_line_items(invoice_id, encoded).expect("decode canonical shape");
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].unit_price, 5000);
         assert_eq!(decoded[0].vat_amount, 1200);

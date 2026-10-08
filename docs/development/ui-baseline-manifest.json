@@ -250,7 +250,7 @@
     },
     {
       "id": "control-plane",
-      "routeCount": 33,
+      "routeCount": 34,
       "routes": [
         {
           "path": "/login",
@@ -285,6 +285,12 @@
         {
           "path": "/tenants/new",
           "name": "New Tenant",
+          "category": "admin",
+          "authRequired": true
+        },
+        {
+          "path": "/tenants/t_1",
+          "name": "Tenant Detail",
           "category": "admin",
           "authRequired": true
         },

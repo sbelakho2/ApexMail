@@ -1,0 +1,193 @@
+- generic [active] [ref=e1]:
+  - link "Skip to content" [ref=e2] [cursor=pointer]:
+    - /url: "#app-main"
+  - generic [ref=e3]:
+    - complementary "Primary sidebar navigation" [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ApexMail
+        - navigation "Primary sidebar navigation" [ref=e9]:
+          - generic [ref=e10]:
+            - heading "Overview" [level=3] [ref=e11]
+            - link [ref=e13] [cursor=pointer]:
+              - /url: /dashboard
+          - generic [ref=e18]:
+            - heading "Send" [level=3] [ref=e19]
+            - generic [ref=e20]:
+              - link [ref=e21] [cursor=pointer]:
+                - /url: /campaigns
+              - link [ref=e26] [cursor=pointer]:
+                - /url: /templates
+              - link [ref=e32] [cursor=pointer]:
+                - /url: /contacts
+              - link [ref=e39] [cursor=pointer]:
+                - /url: /lists
+          - generic [ref=e42]:
+            - heading "Measure" [level=3] [ref=e43]
+            - generic [ref=e44]:
+              - link [ref=e45] [cursor=pointer]:
+                - /url: /analytics
+              - link [ref=e49] [cursor=pointer]:
+                - /url: /reports
+              - link [ref=e54] [cursor=pointer]:
+                - /url: /inbox-placement
+              - link [ref=e59] [cursor=pointer]:
+                - /url: /events
+          - generic [ref=e63]:
+            - heading "Configure" [level=3] [ref=e64]
+            - generic [ref=e65]:
+              - link [ref=e66] [cursor=pointer]:
+                - /url: /domains
+              - link [ref=e71] [cursor=pointer]:
+                - /url: /settings/api-keys
+              - link [ref=e77] [cursor=pointer]:
+                - /url: /settings/webhooks
+              - link [ref=e81] [cursor=pointer]:
+                - /url: /settings/dedicated-ips
+              - link [ref=e86] [cursor=pointer]:
+                - /url: /settings/suppressions
+          - generic [ref=e91]:
+            - heading "Account" [level=3] [ref=e92]
+            - generic [ref=e93]:
+              - link [ref=e94] [cursor=pointer]:
+                - /url: /assistant
+              - link [ref=e98] [cursor=pointer]:
+                - /url: /settings/billing
+              - link [ref=e102] [cursor=pointer]:
+                - /url: /settings
+        - button "Sign Out" [ref=e109] [cursor=pointer]
+    - generic [ref=e111]:
+      - banner [ref=e112]:
+        - search [ref=e115]:
+          - generic [ref=e116]: Search campaigns
+          - generic [ref=e117]:
+            - searchbox "Search campaigns" [ref=e121]
+            - button "Search" [ref=e122] [cursor=pointer]
+        - generic "Signed in as AM" [ref=e125]: AM
+      - main [ref=e127]:
+        - generic [ref=e128]:
+          - navigation "Breadcrumb" [ref=e129]:
+            - list [ref=e130]:
+              - listitem [ref=e131]:
+                - link "Campaigns" [ref=e132] [cursor=pointer]:
+                  - /url: /campaigns?page=1
+              - listitem [ref=e133]: /
+              - listitem [ref=e134]: New Campaign
+          - generic [ref=e135]:
+            - generic [ref=e137]:
+              - generic [ref=e138]:
+                - paragraph [ref=e139]: Draft protection
+                - heading "Create Campaign" [level=1] [ref=e140]
+                - paragraph [ref=e141]: Your work is saved when you press Save Draft — no background sync to wait for.
+              - generic [ref=e142]:
+                - generic [ref=e143]:
+                  - generic [ref=e144]: Draft
+                  - generic [ref=e145]: Unsaved changes live only in this form
+                - paragraph [ref=e146]: Use Preview to see a sanitized structural view of the HTML.
+            - generic [ref=e147]:
+              - generic [ref=e148]:
+                - generic [ref=e149]: Campaign Name*
+                - textbox "Campaign Name*" [ref=e150]:
+                  - /placeholder: My awesome campaign
+              - generic [ref=e151]:
+                - generic [ref=e152]:
+                  - generic [ref=e153]: Subject Line*
+                  - textbox "Subject Line*" [ref=e154]:
+                    - /placeholder: Enter email subject...
+                - generic [ref=e155]:
+                  - generic [ref=e156]: Preview Text(optional)
+                  - textbox "Preview Text(optional)" [ref=e157]:
+                    - /placeholder: Inbox snippet shown after the subject
+              - generic [ref=e158]:
+                - generic [ref=e159]:
+                  - generic [ref=e160]: Sender Address(optional)
+                  - textbox "Sender Address(optional)" [ref=e161]:
+                    - /placeholder: newsletter@yourcompany.com
+                - generic [ref=e162]:
+                  - generic [ref=e163]: Sender Name(optional)
+                  - textbox "Sender Name(optional)" [ref=e164]:
+                    - /placeholder: Your Company
+              - generic [ref=e165]:
+                - generic [ref=e166]:
+                  - generic [ref=e167]: Reply-To(optional)
+                  - textbox "Reply-To(optional)" [ref=e168]:
+                    - /placeholder: support@yourcompany.com
+                - generic [ref=e169]:
+                  - text: Schedule (optional)
+                  - textbox "Schedule (optional)" [ref=e170]
+                  - paragraph [ref=e171]: Pick a send time to schedule the campaign. Scheduled campaigns start automatically when their time arrives — saving a schedule authorizes that automatic send. Leave blank to save as a draft.
+              - generic [ref=e172]:
+                - generic [ref=e173]:
+                  - text: Audience Lists
+                  - listbox "Audience Lists" [ref=e174]
+                  - paragraph [ref=e175]: Ctrl/Cmd-click to select several lists. The audience is their subscribed members.
+                - generic [ref=e176]:
+                  - generic [ref=e177]: Segment(optional)
+                  - combobox "Segment(optional)" [ref=e178]:
+                    - option "No segment" [selected]
+                  - paragraph [ref=e179]: Optional saved segment narrows the audience by its tag and status rules.
+              - generic [ref=e180]:
+                - text: HTML Content
+                - generic [ref=e181]:
+                  - textbox "HTML Content" [ref=e182]:
+                    - /placeholder: Paste your HTML content here...
+                  - generic [ref=e183]: 0/25000
+              - generic [ref=e184]:
+                - generic [ref=e185]:
+                  - generic [ref=e186]: Variables(optional)
+                  - generic [ref=e187]:
+                    - text: Variables
+                    - textbox "Variables(optional) Variables" [ref=e188]:
+                      - /placeholder: month=October
+                  - paragraph [ref=e189]:
+                    - text: One
+                    - code [ref=e190]: key=value
+                    - text: "per line, usable as {{key}} in the subject and body."
+                - generic [ref=e191]:
+                  - paragraph [ref=e192]: Tracking
+                  - generic [ref=e193]:
+                    - checkbox "Track opens" [ref=e194]
+                    - generic [ref=e195]: Track opens
+                  - generic [ref=e196]:
+                    - checkbox "Track clicks" [ref=e197]
+                    - generic [ref=e198]: Track clicks
+                  - paragraph [ref=e199]: The unsubscribe link is always included.
+              - generic [ref=e200]:
+                - generic [ref=e201]:
+                  - generic [ref=e202]: UTM Source(optional)
+                  - textbox "UTM Source(optional)" [ref=e203]:
+                    - /placeholder: email
+                - generic [ref=e204]:
+                  - generic [ref=e205]: UTM Medium(optional)
+                  - textbox "UTM Medium(optional)" [ref=e206]:
+                    - /placeholder: newsletter
+                - generic [ref=e207]:
+                  - generic [ref=e208]: UTM Campaign(optional)
+                  - textbox "UTM Campaign(optional)" [ref=e209]:
+                    - /placeholder: january-launch
+              - generic [ref=e210]:
+                - generic [ref=e211]:
+                  - generic [ref=e212]: Throttle Rate(optional)
+                  - textbox "Throttle Rate(optional)" [ref=e213]:
+                    - /placeholder: "1000"
+                  - paragraph [ref=e214]: Maximum emails per hour for this campaign (0 = unlimited).
+                - generic [ref=e215]:
+                  - generic [ref=e216]: Dedicated IP Pool(optional)
+                  - textbox "Dedicated IP Pool(optional)" [ref=e217]:
+                    - /placeholder: pool-name
+                  - paragraph [ref=e218]: Optional dedicated-IP pool name to route this campaign through.
+              - generic [ref=e219]:
+                - generic [ref=e220]:
+                  - generic [ref=e221]: Timezone(optional)
+                  - textbox "Timezone(optional)" [ref=e222]:
+                    - /placeholder: Europe/Tallinn
+                - generic [ref=e223]:
+                  - paragraph [ref=e224]: Send-time optimization
+                  - generic [ref=e225]:
+                    - checkbox "Optimize send time per recipient" [ref=e226]
+                    - generic [ref=e227]: Optimize send time per recipient
+                  - paragraph [ref=e228]: Schedule each recipient at their optimal engagement hour.
+              - generic [ref=e229]:
+                - paragraph [ref=e230]: "Everything runs server-side: submit, schedule, and preview are plain form posts."
+                - generic [ref=e231]:
+                  - button "Preview" [ref=e232] [cursor=pointer]
+                  - button "Save Draft" [ref=e233] [cursor=pointer]

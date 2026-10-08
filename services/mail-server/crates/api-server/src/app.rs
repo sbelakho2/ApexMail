@@ -4304,11 +4304,7 @@ mod tests {
 
         // RFC 9116 file and the PGP keys its `Encryption:` field points at
         // must be routable (they 404'd before 2026-10-08).
-        for uri in [
-            "/.well-known/security.txt",
-            "/pgp-key.asc",
-            "/pgp-key.txt",
-        ] {
+        for uri in ["/.well-known/security.txt", "/pgp-key.asc", "/pgp-key.txt"] {
             let response = app
                 .clone()
                 .oneshot(

@@ -78,6 +78,10 @@ pub struct RouteData {
     /// is the no-data fallback, which renders the honest catalog-unavailable
     /// state instead of a fabricated plan list.
     pub tenant_new: Option<crate::view_data::TenantNewPageData>,
+    /// `/tenants/{id}` detail + plan-change form (lane C C1). Present means
+    /// the loader read the tenant row and the ACTIVE billing catalog; absent
+    /// is the no-data fallback (honest unavailable state, no select/submit).
+    pub tenant_detail: Option<crate::view_data::TenantDetailPageData>,
     /// Authenticated session identity for the console header (display name,
     /// email, REAL plan label). `None` (or a `None` `plan_label`) renders no
     /// plan label — the shell never fabricates one.
@@ -1944,6 +1948,13 @@ pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
             "Add Tenant",
             "Create a tenant workspace for enterprise onboarding.",
         ),
+        // Lane C C1: the tenant detail page owns the plan-change form, so it
+        // gets its own route context (the "Tenants" list context described a
+        // collection, not a single workspace).
+        p if p.starts_with("/cp/tenants/") || p.starts_with("/tenants/") => (
+            "Tenant",
+            "Workspace identity, status, and the audited plan change.",
+        ),
         "/cp/sales" | "/sales" => (
             "Sales Autopilot",
             "Autonomy, decisions, exceptions and revenue — is the machine \
@@ -2256,7 +2267,19 @@ fn render_web(
                 Some(editor) => leptos_views::web_campaign_edit_page_with_data(editor),
                 None => match data.and_then(|d| d.campaign_edit.as_ref()) {
                     Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
-                    None => leptos_views::web_campaign_edit_page(),
+                    None => {
+                        // Without loaded data the route path still names the
+                        // row: keep the id so the form POSTs to the update
+                        // handler instead of the create path.
+                        let id = p
+                            .trim_start_matches("/campaigns/")
+                            .trim_end_matches("/edit");
+                        if id.is_empty() {
+                            leptos_views::web_campaign_edit_page()
+                        } else {
+                            leptos_views::web_campaign_edit_page_for_id(id)
+                        }
+                    }
                 },
             }
         }
@@ -2377,6 +2400,21 @@ fn render_control_plane(
         "/tenants/new" => leptos_views::control_plane_tenants_new_page_with_data(
             data.and_then(|d| d.tenant_new.as_ref()),
         ),
+        // /cp/tenants/{id} and /tenants/{id} — the tenant detail page with
+        // the audited plan-change form (lane C C1). The exact arms above win,
+        // so /tenants/new still renders the create form; everything else
+        // under the tenant path renders the detail view (honest unavailable
+        // state when the loader could not answer).
+        p if p.starts_with("/cp/tenants/") => {
+            leptos_views::control_plane_tenant_detail_page_with_data(
+                data.and_then(|d| d.tenant_detail.as_ref()),
+            )
+        }
+        p if p.starts_with("/tenants/") => {
+            leptos_views::control_plane_tenant_detail_page_with_data(
+                data.and_then(|d| d.tenant_detail.as_ref()),
+            )
+        }
         "/sales" => match data.and_then(|d| d.sales.as_ref()) {
             // Live control-center render: autonomy, decisions, exceptions and
             // queue state from the canonical sales tables.
@@ -2400,9 +2438,8 @@ fn render_control_plane(
             Some(jobs) if !jobs.unavailable => {
                 leptos_views::control_plane_jobs_page_with_data(Some(jobs))
             }
-            _ => {
-                data_backed_inner("/jobs", data).unwrap_or_else(leptos_views::control_plane_jobs_page)
-            }
+            _ => data_backed_inner("/jobs", data)
+                .unwrap_or_else(leptos_views::control_plane_jobs_page),
         },
         "/infrastructure" => leptos_views::control_plane_infrastructure_page(),
         "/infrastructure/nodes" => data_backed_inner("/infrastructure/nodes", data)

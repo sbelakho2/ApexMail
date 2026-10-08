@@ -1,0 +1,23 @@
+HTTP/1.1 200 OK
+content-type: application/json
+cache-control: no-store, no-cache, must-revalidate
+pragma: no-cache
+set-cookie: am_session=eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI5NDIxOWE2ZS03OTZkLTRkMTYtYTBhNS05MWU3ZTBiMDI4ZTUiLCJ0ZW5hbnRfaWQiOiJqZmc5eHk3bDl1NDhnZWd1M2k3aG1lMzF2cCIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTc2MywiaWF0IjoxNzkxNDg5MzYzLCJqdGkiOiI4NjczM2E4Mi0yODA0LTRhMzYtYmQxZS0xNjlhYmU4YTZhZTEiLCJ0eXAiOiJzZXNzaW9uIn0.pEtTztKqDIa75fUYnUu4z8l3i3prnb-FSv77hh5ADgZYjUsdKe88CS6I4lOH9a3jLTYE3vgjxbpnMVnbmQC4yG5wZnX1Lh4MoruM4b0V302pqrAFC6TE1740-oLkDHc-aR50kqUc4mj-TiVSh_I6oHlIytNzIX8uuptfsLqJDlIpcH2CJkE0c0qSIZYv-wVD79AO8U4ektBHlGVV1AvfOyvvUX2iabWlQzszw2-dhXU4k5JIrGRA8KGuCdijej_Ew0sQm9CodQKBg8OiHslkVYp8BIdaAsJxA6Kf494kSLtBfHdUNVkwPLM3cq6Ul87YhuIulaAhEzXJTnuJnlD1zw; HttpOnly; Path=/; Max-Age=86400; SameSite=Strict
+x-ratelimit-limit: 20
+x-ratelimit-remaining: 19
+x-ratelimit-reset: 1791489420000
+x-api-version: v1
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+referrer-policy: strict-origin-when-cross-origin
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+x-request-id: 7c3527a5-659e-4963-92b5-2d98744f440a
+x-correlation-id: corr-35e2e374-32b1-479f-8b1c-6cadf16e724a
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+transfer-encoding: chunked
+date: Thu, 08 Oct 2026 19:56:02 GMT
+

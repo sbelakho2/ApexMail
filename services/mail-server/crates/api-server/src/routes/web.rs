@@ -474,6 +474,9 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
             "/web/admin/tenants/:id/resume",
             post(form_admin_tenant_resume),
         )
+        // Lane C C1: the tenant detail page's audited plan change (the
+        // plan-override machinery, projected onto `tenants.plan`).
+        .route("/web/admin/tenants/:id/plan", post(form_admin_tenant_plan))
         .route(
             "/web/admin/tenants/:id/delete",
             post(form_admin_tenant_delete),
@@ -3644,13 +3647,12 @@ async fn form_logout(
             {
                 tracing::warn!(error = %error, "console logout could not write the session marker");
             }
-            if let Err(error) = sqlx::query(
-                "DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid",
-            )
-            .bind(&claims.jti)
-            .bind(&claims.sub)
-            .execute(&state.db)
-            .await
+            if let Err(error) =
+                sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid")
+                    .bind(&claims.jti)
+                    .bind(&claims.sub)
+                    .execute(&state.db)
+                    .await
             {
                 tracing::warn!(error = %error, "console logout could not delete the session row");
             }
@@ -9689,6 +9691,183 @@ async fn form_admin_tenant_resume(
             temporary_storage_failure(&WebActionError::Database(error), "/tenants", &state.config)
         }
     }
+}
+
+/// POST /web/admin/tenants/{id}/plan — the control-plane plan change (lane C
+/// C1: before this surface existed, the CP could read a tenant's plan but not
+/// change it; the only writer was the billing-admin JSON override).
+///
+/// The change travels the SAME audited machinery as
+/// `POST /v1/billing/admin/tenants/{id}/plan-override` — a `plan_overrides`
+/// upsert carrying the operator as `admin_id`, committed together with an
+/// actor-attributed audit row — and then projects the new plan onto
+/// `tenants.plan` so the canonical column and the effective override agree.
+/// Entitlements resolve from the override immediately (the paid-subscription
+/// cache is dropped exactly like the JSON path does).
+async fn form_admin_tenant_plan(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/cp/tenants/{}", urlencode(&id));
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let plan_id = field(&form, "plan").trim().to_string();
+    if plan_id.is_empty() {
+        return redirect_error(
+            "Pick a plan before changing this tenant.",
+            &back,
+            &state.config,
+        );
+    }
+    // The select is bound to the ACTIVE catalog; validate against the SAME
+    // source so a hand-crafted POST of an unknown/inactive plan is refused by
+    // name instead of silently landing on a plan nobody can resolve.
+    let plan_exists = match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM plans WHERE name = $1 AND is_active = true)",
+    )
+    .bind(&plan_id)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(exists) => exists,
+        Err(error) => {
+            tracing::error!(error = %error, tenant = %id, "tenant plan change: catalog lookup failed");
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                &back,
+                &state.config,
+            );
+        }
+    };
+    if !plan_exists {
+        return redirect_error(
+            &format!(
+                "“{plan_id}” is not an active plan in the billing catalog — pick one from the list."
+            ),
+            &back,
+            &state.config,
+        );
+    }
+    // Effective-plan resolution: an active override wins over the column
+    // (the precedence the entitlement resolver applies), so re-selecting the
+    // override's plan is correctly a no-op.
+    let current: Option<(String, String)> = match sqlx::query_as(
+        "SELECT COALESCE(t.plan, ''), COALESCE(o.plan, '') \
+         FROM tenants t \
+         LEFT JOIN plan_overrides o ON o.tenant_id = t.id AND o.active \
+              AND (o.expires_at IS NULL OR o.expires_at > NOW()) \
+         WHERE t.id::text = $1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(error = %error, tenant = %id, "tenant plan change: tenant lookup failed");
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                &back,
+                &state.config,
+            );
+        }
+    };
+    let Some((column_plan, override_plan)) = current else {
+        return redirect_error("That tenant could not be found.", "/tenants", &state.config);
+    };
+    let effective = if override_plan.is_empty() {
+        column_plan
+    } else {
+        override_plan
+    };
+    if effective == plan_id {
+        return redirect_success(
+            &format!("This tenant is already on the “{plan_id}” plan — nothing changed."),
+            &back,
+            &state.config,
+        );
+    }
+    let admin_id = user.user_id.clone().unwrap_or_default();
+    let reason = format!("Control-plane plan change: {effective} → {plan_id}");
+    let audit_details = serde_json::json!({
+        "oldPlan": effective,
+        "newPlan": plan_id,
+        "reason": reason,
+    });
+
+    // The override, the column projection and the audit row commit together:
+    // a crash between them must never leave an unaudited plan change (the
+    // same transaction shape the billing-admin override uses).
+    let tx_result: Result<(), sqlx::Error> = async {
+        let mut tx = state.db.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO plan_overrides (
+                tenant_id, plan, plan_id, reason, admin_id, expires_at,
+                active, created_at, updated_at
+            ) VALUES ($1, $2, $2, $3, $4, NULL, true, NOW(), NOW())
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                plan = $2,
+                plan_id = $2,
+                reason = $3,
+                admin_id = $4,
+                expires_at = NULL,
+                active = true,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&id)
+        .bind(&plan_id)
+        .bind(&reason)
+        .bind(&admin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id::text = $2")
+            .bind(&plan_id)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+
+        crate::audit_log::insert_audit_log_in_tx_with_env(
+            &mut tx,
+            state.config.environment.is_production(),
+            Some(user.tenant_id.as_str()),
+            Some(admin_id.as_str()),
+            "control_plane.tenant.plan_changed",
+            "tenant",
+            Some(id.as_str()),
+            audit_details.clone(),
+            None,
+            None,
+            chrono::Utc::now(),
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = tx_result {
+        tracing::error!(error = %error, tenant = %id, "tenant plan change failed");
+        return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+    }
+
+    // The override may move the tenant between priced and unpriced plans:
+    // drop the cached paid-subscription gate so quota enforcement picks up
+    // the new effective plan immediately (mirrors the JSON override path).
+    billing_service::overage::invalidate_subscription_cache(&id);
+
+    redirect_success(
+        &format!("Plan changed to “{plan_id}” — the new entitlements apply immediately."),
+        &back,
+        &state.config,
+    )
 }
 
 /// POST /web/admin/tenants/{id}/delete — signs a `delete-tenant`
@@ -18826,7 +19005,10 @@ mod coverage_auth_admin_tests {
         .fetch_one(&app.db)
         .await
         .unwrap();
-        assert_eq!(queued, 1, "the invitation email must be queued for delivery");
+        assert_eq!(
+            queued, 1,
+            "the invitation email must be queued for delivery"
+        );
 
         // Alerts: ack by id, replay honesty, bulk with invalid/valid ids.
         let alert_id: String =
@@ -19222,10 +19404,9 @@ mod coverage_auth_admin_tests {
         // (so the leaf assertions are exact), a distinctive email limit, and
         // a price below every accumulated test row so both the select and the
         // handler's catalog order reach it first.
-        let features = serde_json::to_value(
-            billing_service::plans::builtin_plan_seed(Some("scale")).features,
-        )
-        .expect("serialize builtin scale features");
+        let features =
+            serde_json::to_value(billing_service::plans::builtin_plan_seed(Some("scale")).features)
+                .expect("serialize builtin scale features");
         sqlx::query(
             "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, features, created_at, updated_at)
              VALUES ($1, $2, $3, -1000000, 1234567, true, 1, $4, NOW(), NOW())",
@@ -19622,6 +19803,220 @@ mod coverage_auth_admin_tests {
         );
         let body = body_of(response).await;
         assert!(!body.contains("leak.example") || !body.contains("Tenant workspace created"));
+    }
+
+    /// Lane C C1 (final live-verification wave, 2026-10-08): the tenant
+    /// detail page + audited plan change.
+    ///
+    /// Fail-before: `GET /cp/tenants/{id}` answered 404 — no SSR surface
+    /// could change a tenant's plan (the billing-admin JSON override was the
+    /// only writer). This drives the real loader → render → handler → DB
+    /// path: the select binds the ACTIVE catalog with the effective plan
+    /// preselected, the POST writes the override + the `tenants.plan`
+    /// projection + an actor-attributed audit row in ONE transaction, and the
+    /// entitlement resolver reflects the new plan immediately.
+    #[tokio::test]
+    async fn tenant_detail_plan_change_through_the_cp_form_is_audited_and_effective() {
+        let Some(app) = coverage_support::state("web_tenant_plan_detail").await else {
+            eprintln!(
+                "skipping tenant_detail_plan_change_through_the_cp_form_is_audited_and_effective: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let tag = coverage_support::unique_tag("tpd");
+        let plan_name = format!("plan-d-{tag}");
+        // Deterministic catalog row: builtin Business/scale features with a
+        // distinctive email limit, priced below every accumulated test row so
+        // both the select and the handler's catalog order reach it first.
+        let features =
+            serde_json::to_value(billing_service::plans::builtin_plan_seed(Some("scale")).features)
+                .expect("serialize builtin scale features");
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, features, created_at, updated_at)
+             VALUES ($1, $2, $3, -2000000, 4321, true, 1, $4, NOW(), NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan_name)
+        .bind(format!("Detail Plan {tag}"))
+        .bind(&features)
+        .execute(&app.db)
+        .await
+        .expect("seed deterministic plan");
+        let tenant = format!("tpd-{tag}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(format!("Detail Tenant {tag}"))
+        .bind(format!("tpd-{tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed tenant");
+
+        let operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+
+        // 1. The loader binds the tenant + the ACTIVE catalog, and the SAME
+        //    render path emits the plan select with the current plan
+        //    preselected (this is exactly what GET /cp/tenants/{id} serves).
+        let data = crate::routes::web::data::load_page_data(
+            &app,
+            "control-plane",
+            &format!("/cp/tenants/{tenant}"),
+            None,
+            Some(&operator),
+        )
+        .await;
+        let detail = data
+            .tenant_detail
+            .as_ref()
+            .expect("the loader must bind the tenant detail");
+        assert!(
+            !detail.unavailable,
+            "a live tenant must not read unavailable"
+        );
+        assert_eq!(detail.plan, "free");
+        assert!(
+            detail.plans.iter().any(|plan| plan.name == plan_name),
+            "the seeded plan must appear in the select: {:?}",
+            detail.plans
+        );
+        let html = ui_foundation::axum_router::render_route_with_data(
+            "control-plane",
+            &format!("/cp/tenants/{tenant}"),
+            None,
+            Some(app.config.csrf_secret.as_str()),
+            &[],
+            Some(&data),
+        )
+        .expect("the CP render must return the tenant detail page");
+        assert!(
+            html.contains(&format!("action=\"/web/admin/tenants/{tenant}/plan\"")),
+            "the rendered page must post the plan change to the audited handler"
+        );
+        assert!(
+            html.contains(&format!("value=\"{plan_name}\"")),
+            "the select must offer the catalog plan"
+        );
+        assert!(
+            html.contains("value=\"free\" selected"),
+            "the tenant's current plan must be preselected"
+        );
+
+        // 2. A hand-crafted unknown plan is refused by NAME and nothing
+        //    changes (the handler validates against the same catalog).
+        let (headers, form) = signed_form(&app.config, &[("plan", "not-a-plan")]);
+        let response = form_admin_tenant_plan(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(tenant.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("not an active plan"),
+            "got {}",
+            flash_text(&response, &app.config)
+        );
+        let unchanged: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&app.db)
+            .await
+            .expect("tenant row");
+        assert_eq!(unchanged, "free");
+
+        // 3. The real change: 303 + success flash, the override AND the
+        //    column projection AND the audit row land together.
+        let (headers, form) = signed_form(&app.config, &[("plan", plan_name.as_str())]);
+        let response = form_admin_tenant_plan(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(tenant.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            flash_text(&response, &app.config).contains("Plan changed"),
+            "got {}",
+            flash_text(&response, &app.config)
+        );
+        let projected: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&app.db)
+            .await
+            .expect("tenant row");
+        assert_eq!(
+            projected, plan_name,
+            "the canonical column must be projected onto the new plan"
+        );
+        let (override_plan, override_admin, override_active): (String, String, bool) =
+            sqlx::query_as(
+                "SELECT plan, admin_id, active FROM plan_overrides WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&app.db)
+            .await
+            .expect("plan_overrides row");
+        assert_eq!(override_plan, plan_name);
+        assert_eq!(override_admin, operator.user_id.clone().unwrap());
+        assert!(override_active, "the override must be active");
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs \
+             WHERE action = 'control_plane.tenant.plan_changed' AND resource_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&app.db)
+        .await
+        .expect("audit rows");
+        assert_eq!(audits, 1, "the change must write exactly one audit row");
+        let snapshot = crate::entitlements::snapshot(&app, &tenant)
+            .await
+            .expect("entitlement snapshot");
+        assert_eq!(
+            snapshot.plan(),
+            plan_name,
+            "the new plan's entitlements must resolve immediately"
+        );
+
+        // 4. Re-selecting the now-effective plan is an honest no-op.
+        let (headers, form) = signed_form(&app.config, &[("plan", plan_name.as_str())]);
+        let response = form_admin_tenant_plan(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(tenant.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("already on"),
+            "got {}",
+            flash_text(&response, &app.config)
+        );
+
+        // Cleanup so the shared database keeps no phantom fixtures.
+        let _ = sqlx::query("DELETE FROM plan_overrides WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&app.db)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&app.db)
+            .await;
+        let _ = sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&app.db)
+            .await;
     }
 
     fn location_of(response: &Response) -> String {
@@ -23469,7 +23864,10 @@ mod residual_zero_tests {
         .await;
         assert!(flash_text(&response, &app.config).contains("Give the template a name"));
 
-        // Empty body.
+        // Blank body on update KEEPS the stored content: the editor
+        // prefills the field and promises this, and Preview already honors
+        // it. (Create still rejects a blank body — a blank create has no
+        // stored content to keep.)
         let (headers, form) = signed_form(
             &app.config,
             &[
@@ -23485,10 +23883,31 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
-        assert!(flash_text(&response, &app.config).contains("Add some HTML content"));
+        assert!(
+            !flash_text(&response, &app.config).contains("Add some HTML content"),
+            "a blank update body must keep the stored content, got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let (kept_body, kept_version): (String, i32) = sqlx::query_as(
+            "SELECT html_body, version FROM templates WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(&template_id)
+        .bind(&tenant)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            kept_body, "<p>hi</p>",
+            "blank update body must keep the stored content"
+        );
+        assert_eq!(
+            kept_version, 2,
+            "a blank-body update still versions the row"
+        );
 
         // Happy path with an explicit subject (the non-empty arm), saving
-        // as v2 with a version snapshot.
+        // as v3 (v2 was the blank-body update above) with a version
+        // snapshot.
         let (headers, form) = signed_form(
             &app.config,
             &[
@@ -23506,7 +23925,7 @@ mod residual_zero_tests {
         )
         .await;
         assert!(
-            flash_text(&response, &app.config).contains("Template saved as v2"),
+            flash_text(&response, &app.config).contains("Template saved as v3"),
             "got {:?}",
             flash_text(&response, &app.config)
         );

@@ -75,11 +75,7 @@ impl EngagementTrustService {
     /// the same cardinality the trust inputs use — and is tenant-scoped.
     /// `unknown` is returned when neither window has any engagement: it is
     /// an honest absence, not a fabricated "stable".
-    pub async fn trust_trend(
-        &self,
-        tenant_id: &str,
-        email: &str,
-    ) -> anyhow::Result<&'static str> {
+    pub async fn trust_trend(&self, tenant_id: &str, email: &str) -> anyhow::Result<&'static str> {
         let now = Utc::now();
         let recent_since = now - chrono::Duration::days(30);
         let prior_since = now - chrono::Duration::days(60);

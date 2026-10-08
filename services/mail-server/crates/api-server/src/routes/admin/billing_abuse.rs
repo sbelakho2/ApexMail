@@ -629,8 +629,8 @@ mod adversarial_tests {
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
-        let report_id = uuid::Uuid::parse_str(body["id"].as_str().expect("id"))
-            .expect("report id is a UUID");
+        let report_id =
+            uuid::Uuid::parse_str(body["id"].as_str().expect("id")).expect("report id is a UUID");
 
         // The exact 36-char actor a browser CP session carries (never the
         // short "system" fallback an API-key test env uses).

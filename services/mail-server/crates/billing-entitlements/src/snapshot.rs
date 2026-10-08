@@ -499,7 +499,9 @@ mod tests {
             .require_feature(FeatureKey::CustomTrackingDomain)
             .is_ok());
         assert!(snap.apply_override("time_travel_debugging", &json!(true)));
-        assert!(snap.require_feature(FeatureKey::TimeTravelDebugging).is_ok());
+        assert!(snap
+            .require_feature(FeatureKey::TimeTravelDebugging)
+            .is_ok());
     }
 
     #[test]

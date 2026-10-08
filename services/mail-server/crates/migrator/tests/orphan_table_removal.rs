@@ -26,12 +26,11 @@ async fn orphan_tables_are_dropped_and_the_live_dlq_remains() {
         "ip_provisioning_queue",
         "report_history",
     ] {
-        let exists: Option<Option<String>> =
-            sqlx::query_scalar("SELECT to_regclass($1)::text")
-                .bind(format!("public.{table}"))
-                .fetch_one(&pool)
-                .await
-                .expect("to_regclass probe");
+        let exists: Option<Option<String>> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(format!("public.{table}"))
+            .fetch_one(&pool)
+            .await
+            .expect("to_regclass probe");
         assert!(
             exists.flatten().is_none(),
             "{table} must be gone after migration 249 (schema orphan: no writer, no reader)"
@@ -39,10 +38,11 @@ async fn orphan_tables_are_dropped_and_the_live_dlq_remains() {
     }
 
     // The live dead-letter queue the MTA runbook now queries.
-    let live_dlq: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.email_dlq')::text")
-        .fetch_one(&pool)
-        .await
-        .expect("email_dlq probe");
+    let live_dlq: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.email_dlq')::text")
+            .fetch_one(&pool)
+            .await
+            .expect("email_dlq probe");
     assert!(
         live_dlq.is_some(),
         "email_dlq (migration 088) is the live dead-letter store and must remain"

@@ -2200,8 +2200,7 @@ mod tests {
     #[tokio::test]
     async fn store_message_with_unparseable_from_is_not_lost_to_the_check_constraint() {
         let Some(pool) =
-            crate::test_db::canonical_pool("store_message_with_unparseable_from_is_not_lost")
-                .await
+            crate::test_db::canonical_pool("store_message_with_unparseable_from_is_not_lost").await
         else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;

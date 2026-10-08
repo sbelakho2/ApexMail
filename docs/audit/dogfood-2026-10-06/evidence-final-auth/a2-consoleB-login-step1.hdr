@@ -1,0 +1,22 @@
+HTTP/1.1 303 See Other
+location: /login?mfa=1&email=fa-id-0996e745%40dogfood.test&return_to=%2Fdashboard
+set-cookie: apexmail_flash=v1.W3sia2luZCI6ImluZm8iLCJ0ZXh0IjoiRW50ZXIgdGhlIDYtZGlnaXQgY29kZSBmcm9tIHlvdXIgYXV0aGVudGljYXRvciBhcHAuIn1d.CXI1eO6CD8wamQbhKFzCOw5ZdMcA3A9X-AMa1_5LoPI; Path=/; Max-Age=60; HttpOnly; SameSite=Lax
+set-cookie: apexmail_login_challenge=1791489482.2Dp2bAvyU8trFFRkbslJzNFtrEQgzs90flq7MuHRUeI; Path=/; Max-Age=300; HttpOnly; SameSite=Lax
+x-ratelimit-limit: 20
+x-ratelimit-remaining: 19
+x-ratelimit-reset: 1791489240000
+x-api-version: v1
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+x-request-id: b50cf141-64e0-4046-bef2-dfb067711e5b
+x-correlation-id: corr-64b63501-fd8f-45d4-9fc0-352f6676e7a6
+vary: origin, access-control-request-method, access-control-request-headers
+transfer-encoding: chunked
+date: Thu, 08 Oct 2026 19:53:02 GMT
+

@@ -552,21 +552,42 @@ pub(crate) fn verify_password_or_log(
         ));
     }
 
+    // Invited-but-not-yet-activated accounts (CP operator invitations and
+    // team/member invites) carry the `!invited-pending-activation`
+    // placeholder that no password can ever verify. Routing it into the
+    // verifiers below answered every login attempt with a 500
+    // (`unknown password hash scheme`, live dogfood 2026-10-08: an invited
+    // operator's first sign-in returned INTERNAL_ERROR). Refuse with the
+    // honest, actionable 401 instead — the same shape as the SSO arm.
+    if hash.starts_with("!invited-") || hash.starts_with("!pending-") {
+        tracing::info!(
+            subject = %subject,
+            "password login refused for an unaccepted invitation (no password set yet)"
+        );
+        return Err(ApiError::Unauthorized(
+            "This invitation has not been accepted yet — use the password-setup link in your invitation email to set a password.".into(),
+        ));
+    }
+
     let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$")
     {
         bcrypt::verify(password, hash).map_err(|error| error.to_string())
     } else if hash.starts_with("$argon2") {
         apexmail_lib::verify_password(password, hash).map_err(|error| error.to_string())
     } else {
+        // A stored hash in no recognized scheme cannot verify ANY password:
+        // the truthful login answer is a refusal, never a 5xx. The loud log
+        // keeps the operability signal (a corrupted hash is a data problem
+        // to investigate) while the response stays on the auth contract.
         let prefix: String = hash.chars().take(10).collect();
         tracing::error!(
             hash_prefix = %prefix,
             subject = %subject,
-            "unknown password hash scheme — rejecting login"
+            "unknown password hash scheme — refusing login (never a 5xx)"
         );
-        return Err(ApiError::Internal(format!(
-            "unknown password hash scheme for user {subject}"
-        )));
+        return Err(ApiError::Unauthorized(
+            "This account cannot sign in with a password. Contact support.".into(),
+        ));
     };
 
     match result {
@@ -4688,13 +4709,12 @@ async fn logout(
             crate::middleware::auth::revoke_session_marker(&state, session_id, ttl).await?;
             if let Some(user_id) = auth_user.user_id.as_deref() {
                 // Accountability trail: the session row goes with the marker.
-                if let Err(error) = sqlx::query(
-                    "DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid",
-                )
-                .bind(session_id)
-                .bind(user_id)
-                .execute(&state.db)
-                .await
+                if let Err(error) =
+                    sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid")
+                        .bind(session_id)
+                        .bind(user_id)
+                        .execute(&state.db)
+                        .await
                 {
                     tracing::warn!(
                         error = %error,
@@ -5102,6 +5122,40 @@ mod tests {
         assert!(verify_password_or_log(password, &hash, "bcrypt-user@example.com").unwrap());
         assert!(
             !verify_password_or_log("WrongPassword1!", &hash, "bcrypt-user@example.com").unwrap()
+        );
+    }
+
+    /// Lane C C4 (live dogfood 2026-10-08): an invited operator's first
+    /// sign-in answered 500 `unknown password hash scheme` because the
+    /// `!invited-pending-activation` placeholder fell into the catch-all
+    /// `Internal` arm. The shared verifier must refuse placeholders and any
+    /// unrecognized scheme with a named 401 — never a 5xx (both login
+    /// surfaces route through this function).
+    #[test]
+    fn test_verify_password_or_log_refuses_placeholders_and_unknown_schemes_as_401() {
+        // The exact placeholder the CP operator / team invite writers store.
+        let error = verify_password_or_log(
+            "anything",
+            "!invited-pending-activation",
+            "invited-operator@example.com",
+        )
+        .expect_err("an invite placeholder must never verify a password");
+        match error {
+            ApiError::Unauthorized(message) => assert!(
+                message.contains("invitation"),
+                "the refusal must name the invitation state, got {message:?}"
+            ),
+            other => panic!("invite placeholder must refuse with 401, got {other:?}"),
+        }
+
+        // A corrupted/unknown stored scheme: loud log, safe 401 — the login
+        // endpoint must never surface a server error for it.
+        let error =
+            verify_password_or_log("anything", "definitely-not-a-hash", "corrupt@example.com")
+                .expect_err("an unrecognized scheme must never verify");
+        assert!(
+            matches!(error, ApiError::Unauthorized(_)),
+            "unknown schemes must refuse with 401, never Internal: {error:?}"
         );
     }
 

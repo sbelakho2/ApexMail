@@ -3419,15 +3419,21 @@ mod adversarial_handler_tests {
         );
 
         let (tenant_id, _key) =
-            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"]).await;
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
+                .await;
         // A base plan row with the free cap (limit 1), matching production
         // data: the OLD code read this row directly and ignored the override.
-        let base_plan = format!("dogfoodbase{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        sqlx::query("INSERT INTO plans (name, features) VALUES ($1, '{\"max_sending_domains\": 1}'::jsonb)")
-            .bind(&base_plan)
-            .execute(&pool)
-            .await
-            .expect("seed base plan");
+        let base_plan = format!(
+            "dogfoodbase{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        sqlx::query(
+            "INSERT INTO plans (name, features) VALUES ($1, '{\"max_sending_domains\": 1}'::jsonb)",
+        )
+        .bind(&base_plan)
+        .execute(&pool)
+        .await
+        .expect("seed base plan");
         sqlx::query("UPDATE tenants SET plan = $1 WHERE id = $2")
             .bind(&base_plan)
             .bind(&tenant_id)
@@ -3499,7 +3505,10 @@ mod adversarial_handler_tests {
             .execute(&pool)
             .await;
         match previous {
-            Some(value) => std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, value),
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
             None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
         }
         pool.close().await;

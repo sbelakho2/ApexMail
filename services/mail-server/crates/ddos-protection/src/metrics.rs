@@ -129,7 +129,9 @@ impl LabeledGauge<'_> {
     pub fn set(&self, value: f64) {
         let key = self.key();
         metrics::with_recorder(|recorder| {
-            recorder.register_gauge(&key, &metadata(self.name)).set(value);
+            recorder
+                .register_gauge(&key, &metadata(self.name))
+                .set(value);
         });
     }
 

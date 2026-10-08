@@ -156,7 +156,10 @@ async fn scheduler_pass_populates_the_calendar_idempotently() {
     .fetch_one(&pool)
     .await
     .expect("count outside horizon");
-    assert_eq!(outside, 0, "the pass must not invent far-past/far-future rows");
+    assert_eq!(
+        outside, 0,
+        "the pass must not invent far-past/far-future rows"
+    );
 
     pool.close().await;
 }

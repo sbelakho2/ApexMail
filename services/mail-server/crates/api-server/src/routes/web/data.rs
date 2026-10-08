@@ -1312,18 +1312,16 @@ async fn load_placement_detail(
     {
         Ok(rows) => rows
             .into_iter()
-            .map(
-                |(provider, tested, inbox, promotions, spam, absent)| {
-                    ui_foundation::view_data::PlacementProviderRow {
-                        provider,
-                        accounts_tested: tested,
-                        inbox,
-                        promotions,
-                        spam,
-                        absent,
-                    }
-                },
-            )
+            .map(|(provider, tested, inbox, promotions, spam, absent)| {
+                ui_foundation::view_data::PlacementProviderRow {
+                    provider,
+                    accounts_tested: tested,
+                    inbox,
+                    promotions,
+                    spam,
+                    absent,
+                }
+            })
             .collect(),
         Err(error) => {
             tracing::warn!(error = %error, "placement results lookup failed");
@@ -2707,6 +2705,8 @@ async fn web_api_keys(state: &AppState, tenant: &str, cid: &str) -> ListPageData
     };
     data.empty_title = "No API keys yet".into();
     data.empty_description = "Create a key to call the API programmatically.".into();
+    // Compose the create form WITH the live table (never replace it away).
+    data.action_form_html = ui_foundation::leptos_views::api_key_create_form_html();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "API keys", cid);
     }
@@ -2767,6 +2767,7 @@ async fn web_webhooks(state: &AppState, tenant: &str, cid: &str) -> ListPageData
     };
     data.empty_title = "No webhooks yet".into();
     data.empty_description = "Register an endpoint to receive delivery events.".into();
+    data.action_form_html = ui_foundation::leptos_views::webhook_register_form_html();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Webhooks", cid);
     }
@@ -2817,6 +2818,7 @@ async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
     };
     data.empty_title = "No team members yet".into();
     data.empty_description = "Invite teammates to collaborate on this workspace.".into();
+    data.action_form_html = ui_foundation::leptos_views::team_invite_form_html();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Team members", cid);
     }
@@ -2971,6 +2973,7 @@ async fn web_billing(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
     };
     data.empty_title = "No invoices yet".into();
     data.empty_description = "Invoices appear here once a paid plan is active.".into();
+    data.action_form_html = ui_foundation::leptos_views::billing_action_form_html();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Invoices", cid);
     }
@@ -3053,6 +3056,7 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPag
     };
     data.empty_title = "No dedicated IPs yet".into();
     data.empty_description = "Request an allocation — the provisioner completes it.".into();
+    data.action_form_html = ui_foundation::leptos_views::dedicated_ip_request_form_html();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Dedicated IPs", cid);
     }
@@ -3249,6 +3253,19 @@ async fn control_plane_route_data(
     } else {
         None
     };
+    // Lane C C1: `/tenants/{id}` and `/cp/tenants/{id}` carry the tenant
+    // detail + audited plan-change form. The create route above wins, so a
+    // literal `new` id is never treated as a tenant.
+    let tenant_detail = {
+        let id = path
+            .strip_prefix("/cp/tenants/")
+            .or_else(|| path.strip_prefix("/tenants/"))
+            .filter(|rest| !rest.is_empty() && !rest.contains('/'));
+        match id {
+            Some(id) => Some(cp_tenant_detail(state, id, cid).await),
+            None => None,
+        }
+    };
     // F13: the jobs page's retry/cancel controls need the real rows (ids and
     // statuses), not just the per-queue aggregate the list carries.
     let jobs = if path == "/jobs" {
@@ -3269,6 +3286,7 @@ async fn control_plane_route_data(
         ai_drafts,
         alert_rules,
         tenant_new,
+        tenant_detail,
         jobs,
         // The shell identity + impersonation banner are attached by the
         // api-server render pipeline (they need request headers).
@@ -4896,15 +4914,7 @@ async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
 async fn cp_tenant_new(state: &AppState) -> ui_foundation::view_data::TenantNewPageData {
     use ui_foundation::view_data::{TenantNewPageData, TenantPlanChoiceData};
 
-    let rows = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT name, COALESCE(display_name, name), COALESCE(email_limit, 0)::bigint \
-         FROM plans WHERE is_active = true \
-         ORDER BY price_cents ASC, created_at DESC, id LIMIT 50",
-    )
-    .fetch_all(&state.db)
-    .await;
-
-    match rows {
+    match active_plan_catalog(state).await {
         Ok(rows) => TenantNewPageData {
             plans: rows
                 .into_iter()
@@ -4926,6 +4936,155 @@ async fn cp_tenant_new(state: &AppState) -> ui_foundation::view_data::TenantNewP
                 unavailable: true,
             }
         }
+    }
+}
+
+/// The ACTIVE billing catalog, cheapest first with a deterministic tiebreak
+/// (parallel test runs seed their own catalog rows into the shared
+/// database). ONE query serves both catalog-bound selects — the create form
+/// (`/tenants/new`) and the tenant-detail plan change — so the two surfaces
+/// can never disagree about what is selectable.
+async fn active_plan_catalog(state: &AppState) -> Result<Vec<(String, String, i64)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT name, COALESCE(display_name, name), COALESCE(email_limit, 0)::bigint \
+         FROM plans WHERE is_active = true \
+         ORDER BY price_cents ASC, created_at DESC, id LIMIT 50",
+    )
+    .fetch_all(&state.db)
+    .await
+}
+
+/// `/tenants/{id}` detail data (lane C C1): the tenant row plus the ACTIVE
+/// plan catalog the plan-change handler validates against.
+///
+/// The preselected plan is the tenant's EFFECTIVE plan — an active
+/// `plan_overrides` row wins over `tenants.plan`, the same precedence the
+/// entitlement resolver applies — so the select shows the plan actually in
+/// force, not a stale column.
+async fn cp_tenant_detail(
+    state: &AppState,
+    id: &str,
+    cid: &str,
+) -> ui_foundation::view_data::TenantDetailPageData {
+    use ui_foundation::view_data::{TenantDetailPageData, TenantDetailPlanChoiceData};
+
+    // tenant ids are UUIDs (migration 052) but the route param is a string:
+    // a non-UUID id is simply "not found", never a database cast error.
+    let row: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = match sqlx::query_as(
+        "SELECT t.name, COALESCE(t.slug, ''), COALESCE(t.status, ''), \
+                    COALESCE(o.plan, t.plan, ''), \
+                    COALESCE(o.plan, '') AS override_plan, \
+                    t.created_at \
+             FROM tenants t \
+             LEFT JOIN plan_overrides o ON o.tenant_id = t.id AND o.active \
+                  AND (o.expires_at IS NULL OR o.expires_at > NOW()) \
+             WHERE t.id::text = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(error = %error, tenant = %id, "tenant detail query failed");
+            return TenantDetailPageData {
+                id: id.to_string(),
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+
+    let Some((name, slug, status, plan, override_plan, created)) = row else {
+        // An absent tenant is NOT a read failure: mark it `missing` so the
+        // page states "no such workspace" instead of blaming the service.
+        tracing::info!(tenant = %id, cid = %cid, "tenant detail: no such tenant");
+        return TenantDetailPageData {
+            id: id.to_string(),
+            unavailable: true,
+            missing: true,
+            ..Default::default()
+        };
+    };
+
+    let plans = match active_plan_catalog(state).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                tenant = %id,
+                cid = %cid,
+                "tenant detail: plan catalog query failed; the plan form renders unavailable"
+            );
+            Vec::new()
+        }
+    };
+
+    // The column is the effective plan; an active override wins (the same
+    // precedence the entitlement resolver applies).
+    let effective = if override_plan.is_empty() {
+        plan
+    } else {
+        override_plan
+    };
+
+    // The catalog select is bounded (LIMIT 50, cheapest first). On an
+    // installation with more active rows than the bound — or a shared
+    // database carrying other waves' fixtures — the tenant's own plan can
+    // fall outside the slice, leaving the select without its preselection.
+    // The plan the tenant is ON must always be selectable: read it directly
+    // and prepend it when the bounded catalog omitted it.
+    let mut plans = plans;
+    if !plans.iter().any(|(name, _, _)| name == &effective) {
+        match sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT name, COALESCE(display_name, name), COALESCE(email_limit, 0)::bigint \
+             FROM plans WHERE name = $1",
+        )
+        .bind(&effective)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(Some(row)) => plans.insert(0, row),
+            Ok(None) => {
+                // The tenant is on a plan token the catalog has no row for
+                // (historical/renamed): surface the token itself so the page
+                // shows the truth rather than an unselected select.
+                plans.insert(0, (effective.clone(), effective.clone(), 0));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, tenant = %id, "tenant detail: current-plan lookup failed");
+            }
+        }
+    }
+
+    TenantDetailPageData {
+        id: id.to_string(),
+        name,
+        slug,
+        plan: effective,
+        status,
+        created: created
+            .map(|ts| relative_time(Some(ts)))
+            .unwrap_or_else(|| "—".to_string()),
+        plans: plans
+            .into_iter()
+            .map(
+                |(name, display_name, email_limit)| TenantDetailPlanChoiceData {
+                    name,
+                    display_name,
+                    email_limit,
+                },
+            )
+            .collect(),
+        unavailable: false,
+        missing: false,
     }
 }
 
@@ -5205,11 +5364,8 @@ async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
                     .with_hint("7d send cohort"),
             );
             data.kpis.push(
-                KpiCardData::new(
-                    "P95 latency",
-                    format!("{:.0} ms", snapshot.latency.p95_ms),
-                )
-                .with_hint(&format!("{} attempts", snapshot.latency.sample_count)),
+                KpiCardData::new("P95 latency", format!("{:.0} ms", snapshot.latency.p95_ms))
+                    .with_hint(&format!("{} attempts", snapshot.latency.sample_count)),
             );
             data.kpis.push(
                 KpiCardData::new("Queue backlog", snapshot.queue_depth.to_string())
@@ -8750,11 +8906,10 @@ mod coverage_residual_tests {
 
         // The exact seeded cohort is observed through the SAME snapshot fn
         // the JSON endpoints serve.
-        let snapshot = crate::routes::admin::delivery_analytics::delivery_analytics_snapshot(
-            &app, "7d",
-        )
-        .await
-        .expect("delivery snapshot");
+        let snapshot =
+            crate::routes::admin::delivery_analytics::delivery_analytics_snapshot(&app, "7d")
+                .await
+                .expect("delivery snapshot");
         assert!(snapshot.total_sent >= 1, "{snapshot:?}");
         let ses = snapshot
             .delivery_by_provider

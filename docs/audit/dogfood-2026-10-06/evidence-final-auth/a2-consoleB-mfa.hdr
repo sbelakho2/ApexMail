@@ -1,0 +1,22 @@
+HTTP/1.1 303 See Other
+location: /dashboard
+set-cookie: apexmail_flash=v1.W3sia2luZCI6InN1Y2Nlc3MiLCJ0ZXh0IjoiU2lnbmVkIGluLiJ9XQ.muvbvO6abRjQerNrBgmHO1WYcCe7A9l9MIw_hU5bZlQ; Path=/; Max-Age=60; HttpOnly; SameSite=Lax
+set-cookie: am_session=eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI4ZTlkN2I4My1lZDI1LTQ3NmQtOWFiYi03NzdhNmY4NTQ2NmIiLCJ0ZW5hbnRfaWQiOiJ0bnRocmljaHRyMmlhaXptdDV3enRrMmZzZyIsInNjb3BlcyI6WyIqIl0sImV4cCI6MTc5MTU3NTU4MiwiaWF0IjoxNzkxNDg5MTgyLCJqdGkiOiIzZjI2MmE3Yy0wYTVmLTQ0MmQtOTY1Zi0xM2M1ZTlhYmZhOGQiLCJ0eXAiOiJzZXNzaW9uIn0.aq9GUPna3TaJLqS6Ux9OQomARIoZbD2xOCN3I56McogVe1w-wTyCXeQfkjdB2ht3MX8ud6Izg93-gqQAWcvwWLbX5XW2A7o_qGrTGjqjsG5PSBij5ddUmDDtkS2PQzQ5oQdMKZ-JyRvL-B55VRGIB4_Yc2PlIhB4RcUn_gAhvdUfaGrGpBhY8AiKLVmIramVYWCzNNH3OqKkA8q9Klg3BEOSA9nl2N8Sn4goTzycT00RgVsduSW48C8ZiVMGDz5eIKi98fUD0Tx5NgRmMXJLxgIsSzL0bxDv_CqK7NOvouclQQsaBcHpAdtOAgzut5S5g8fJ15fOl-kluw-cbklsnw; HttpOnly; Path=/; Max-Age=86400; SameSite=Strict
+x-ratelimit-limit: 20
+x-ratelimit-remaining: 19
+x-ratelimit-reset: 1791489240000
+x-api-version: v1
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+x-request-id: 19b67665-fe95-43f0-bfc3-e91ef3b4af2c
+x-correlation-id: corr-0c28ab82-c1be-4394-9a2d-b2a2378892c3
+vary: origin, access-control-request-method, access-control-request-headers
+transfer-encoding: chunked
+date: Thu, 08 Oct 2026 19:53:02 GMT
+

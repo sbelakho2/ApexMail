@@ -296,10 +296,16 @@ pub fn next_occurrence_utc(
         let date = (local_now + chrono::Duration::days(day_delta)).date();
         let naive = date.and_hms_opt(target_hour, 0, 0).expect("valid clock");
         // Local wall-clock → UTC: subtract the offset.
-        let local = offset.from_local_datetime(&naive).single().unwrap_or_else(|| {
-            // A fixed offset has no gaps/ambiguity; the fallback is defensive.
-            offset.from_local_datetime(&naive).earliest().expect("offset")
-        });
+        let local = offset
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap_or_else(|| {
+                // A fixed offset has no gaps/ambiguity; the fallback is defensive.
+                offset
+                    .from_local_datetime(&naive)
+                    .earliest()
+                    .expect("offset")
+            });
         local.with_timezone(&Utc)
     };
 

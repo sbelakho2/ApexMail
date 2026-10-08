@@ -1,0 +1,512 @@
+
+===== [19:49:12] C1 literal + variants =====
+$ curl -s -o /tmp/c1.html -w '%{http_code}' -H 'Host: admin.localhost' -b cp.jar http://127.0.0.1:8080/cp/tenants/t_demo
+-> 404 (len 677)
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Page Not Found — ApexMail</title><link rel="stylesheet" href="/assets/globals.css"></head><body class="antialiased bg-background text-surface-950"><main class="flex min-h-screen flex-col items-center justify-center bg-surface-950 text-surface-100"><div class="text-ce
+GET /cp/tenants -> 200 len=110946 loc=None
+GET /tenants -> 200 len=110906 loc=None
+GET /tenants/new -> 200 len=29204 loc=None
+GET /cp/tenants/t_demo/edit -> 404 len=677 loc=None
+GET /tenants/t_demo -> 404 len=677 loc=None
+plan select found: True
+<option value="payg">Pay As You Go</option><option value="free" selected>Free — 3K emails / mo</option><option value="starter">Developer — 50K emails / mo</option><option value="pro">Pro — 150K emails / mo</option><option value="growth">Growth — 500K emails / mo</option><option value="scale">Business — 2M emails / mo</option><option value="enterprise">Enterprise Cloud — 5M emails / mo</option>
+tenants list plan select: False
+plan label in header: True
+
+===== [19:50:23] C3 =====
+GET /v1/admin/jobs -> 200
+{"jobs":[{"id":"dd5b41e5-fa40-4129-ba3a-cc3972b46e77","queue":"w6a-stats-74453061-e3fa-4bfa-a162-5cdd42584f0c","status":"completed","attempts":1,"max_attempts":3,"error_message":null,"scheduled_at":"2026-10-08T03:59:57.838356Z","started_at":"2026-10-08T03:59:57.841656Z","completed_at":"2026-10-08T03:59:57.843886Z","failed_at":null,"updated_at":"2026-10-08T03:59:57.902002Z"},{"id":"6f8b3fc6-2002-4dc3-b413-f0523b9ad1b9","queue":"w6a-stats-74453061-e3fa-4bfa-a162-5cdd42584f0c","status":"processing"
+
+===== [19:50:23] C3 =====
+POST /web/admin/jobs/<pending>/pause -> 404 body='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Page Not Found — '
+
+===== [19:50:24] C3 =====
+POST /v1/admin/jobs/<pending>/pause -> 404 body='{"error":{"code":"NOT_FOUND","message":"the requested endpoint does not exist","requestId":"82155e94-2ee6-4c5b-bac0-432e8c442dc9"}}'
+
+===== [19:50:24] C3 =====
+DB before: ''
+POST /web/admin/jobs/<pending>/cancel -> 303 loc=/jobs
+DB rows after: '0'
+
+===== [19:50:24] C3 =====
+audit: control_plane.job.cancelled|deaf7e8c-a3a3-4e36-a3ae-c0e7e4d7a47d|d0550d60-c844-4e4c-be1c-1aa9454994b9
+
+===== [19:50:51] C3b =====
+fixture pending id=b9b96d1f-fa7b-4468-96c4-a9e3db4adc79: status=pending
+
+===== [19:50:51] C3b =====
+GET /jobs -> 200; job forms: ['/web/admin/jobs/b9b96d1f-fa7b-4468-96c4-a9e3db4adc79/cancel', '/web/admin/jobs/93ef850b-8b1e-401f-91e4-c4aff5b3122d/cancel']
+
+===== [19:50:51] C3b =====
+row context: ol" class="h-12 px-4">Queue</th><th scope="col" class="h-12 px-4">Status</th><th scope="col" class="h-12 px-4">Attempts</th><th scope="col" class="h-12 px-4">Last error</th><th scope="col" class="h-12 px-4">Last activity</th><th scope="col" class="h-12 px-4 text-right">Controls</th></tr></thead><tbody><tr class="border-b align-middle" data-job-id="b9b96d1f-fa7b-4468-96c4-a9e3db4adc79"><td class="p-4 apex-mono text-xs" title="b9b96d1f-fa7b-4468-96c4-a9e3db4adc79">b9b96d1f-fa7</td><td class="p-4 text-sm">vfui-lane-c</td><td class="p-4 text-sm">pending</td><td class="p-4 text-sm apex-metric-number">0/3</td><td class="p-4 text-xs text-surface-600 max-w-[28rem] truncate" title="">—</td><td class="p-4 text-xs text-surface-500 whitespace-nowrap">just now</td><td class="p-4 text-right"><form method="post" action="/web/admin/jobs/b9b96d1f-fa7b-4468-96c4-a9e3db4adc79/
+
+===== [19:50:51] C3b =====
+DB before: 'pending|0' | POST /web/admin/jobs/b9b96d1f-fa7b-4468-96c4-a9e3db4adc79/cancel -> 303 loc=/jobs | rows after: '0'
+
+===== [19:50:51] C3b =====
+audit: control_plane.job.cancelled|deaf7e8c-a3a3-4e36-a3ae-c0e7e4d7a47d|b9b96d1f-fa7b-4468-96c4-a9e3db4adc79
+
+===== [19:50:58] C3c =====
+fixture failed row: failed|2|t|smtp refused
+
+===== [19:50:58] C3c =====
+GET /jobs row context: 2 px-4">Last error</th><th scope="col" class="h-12 px-4">Last activity</th><th scope="col" class="h-12 px-4 text-right">Controls</th></tr></thead><tbody><tr class="border-b align-middle" data-job-id="4bbdc51a-4eaa-4855-88e2-ecd7a105a3ca"><td class="p-4 apex-mono text-xs" title="4bbdc51a-4eaa-4855-88e2-ecd7a105a3ca">4bbdc51a-4ea</td><td class="p-4 text-sm">vfui-lane-c</td><td class="p-4 text-sm">failed</td><td class="p-4 text-sm apex-metric-number">2/3</td><td class="p-4 text-xs text-surface-600 max-w-[28rem] truncate" title="smtp refused">smtp refused</td><td class="p-4 text-xs text-surface-500 whitespace-nowrap">just now</td><td class="p-4 text-right"><form method="post" action="/web/admin/jobs/4bbdc51a-4eaa-4855-88e2-ecd7a105a3ca/retry" class="inline"><input type="hidden" name="_csrf" value="MTc5MTQ4ODk0MjE3NDpjMjZlZjY4Yi0zODNjLTQ4MGUtOTNkMy1hMTRlNGRjYzBkYWI.cqidEnLXgbVDtupUaroO24ANKZWz8YVRfra3OApGIYk" /><button type="submit" class="apex-btn apex-btn--sm" title="Re-queue this terminal job (attempts reset, schedule now)">Retry</button></form></td></tr><tr class="border-b align-middl
+
+===== [19:50:59] C3c =====
+DB before (status|attempts|failed_at?|lease_null): 'failed|2|true|true'
+POST /web/admin/jobs/4bbdc51a-4eaa-4855-88e2-ecd7a105a3ca/retry -> 303 loc=/jobs
+DB after (status|attempts|failed_cleared|lease_null|scheduled_now): 'pending|0|true|true|true'
+
+===== [19:50:59] C3c =====
+audit: control_plane.job.retried|deaf7e8c-a3a3-4e36-a3ae-c0e7e4d7a47d
+
+===== [19:50:59] C3c =====
+retry a PENDING job -> 303 loc=/jobs
+
+===== [19:51:00] C3c =====
+JSON retry pending -> 409 {"error":{"code":"CONFLICT","message":"only dead-lettered (or failed) jobs can be retried; pending jobs are already scheduled, completed jobs are history, and processing jobs are in flight under a worker lease","requestId":"717fedb4-e49f-4cda-8668-68
+
+===== [19:51:00] C3c =====
+JSON cancel PROCESSING -> 409 {"error":{"code":"CONFLICT","message":"only pending (unclaimed) jobs can be cancelled; processing jobs are in flight under a worker lease, completed jobs are history, and dead-lettered jobs are retried or purged","requestId":"78407e27-06d2-463f-8215-
+
+===== [19:51:00] C3c =====
+JSON retry COMPLETED -> 409 {"error":{"code":"CONFLICT","message":"only dead-lettered (or failed) jobs can be retried; pending jobs are already scheduled, completed jobs are history, and processing jobs are in flight under a worker lease","requestId":"4e299f3e-2a17-4922-8baa-6b
+
+===== [19:51:01] C3c =====
+cleanup fixture rows: 0
+
+===== [19:51:59] C3-pause/resume =====
+POST /v1/contacts/import -> 200 {"error_details":[],"errors":0,"format":"csv","imported":0,"skipped":0}
+
+===== [19:51:59] C3-pause/resume =====
+contacts imported: 0
+
+===== [19:51:59] C3-pause/resume =====
+POST /v1/lists -> 201; lid=c74d441b-2f0d-425f-b115-54abe32d46ea
+
+===== [19:51:59] C3-pause/resume =====
+POST /v1/lists/c74d441b-2f0d-425f-b115-54abe32d46ea/subscribers -> 200 {"affected":0}
+
+===== [19:52:05] C3-pause/resume =====
+POST /v1/contacts/import (text/csv, 120 rows) -> 200 {"error_details":[],"errors":0,"format":"csv","imported":120,"skipped":0}
+
+===== [19:52:05] C3-pause/resume =====
+contacts imported: 120
+
+===== [19:52:05] C3-pause/resume =====
+POST /v1/lists -> 201; lid=077ab07d-15d6-44a3-a06e-949519c5df86
+
+===== [19:52:06] C3-pause/resume =====
+POST /v1/lists/077ab07d-15d6-44a3-a06e-949519c5df86/subscribers -> 200 {"affected":120}
+
+===== [19:52:06] C3-pause/resume =====
+consents: 120
+
+===== [19:52:06] C3-pause/resume =====
+POST /v1/campaigns -> 201; camp=247a5ff8-ed70-4218-842a-77ba46e5e3c3
+
+===== [19:52:07] C3-pause/resume =====
+POST /v1/campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3/send -> 200 {"id":"247a5ff8-ed70-4218-842a-77ba46e5e3c3","name":"VF pause campaign fd240a00","subject":"VF pause probe","template_id":null,"from_email":"noreply@dg-c12310.apexdogfood.test","from_name":null,"reply
+
+===== [19:52:07] C3-pause/resume =====
+after send: sending|120
+
+===== [19:52:11] C3-pause/resume =====
+camp=247a5ff8-ed70-4218-842a-77ba46e5e3c3 immediately: campaign_status=sending recips: queued|120
+
+===== [19:52:23] C4 =====
+POST /web/admin/operators {name,email=vfui-op-e0e37a29@dogfood.test} -> 303 loc=/operators
+
+===== [19:52:23] C4 =====
+DB row: vfui-op-e0e37a29@dogfood.test|admin|active|system_internal_tenant01|f|f
+
+===== [19:52:23] C4 =====
+metadata keys: invited_by
+password_reset_iat
+verification_expires
+password_reset_expires
+verification_token_hash
+password_reset_token_hash
+
+===== [19:52:25] C4 =====
+MAILPIT message: {
+"to": "vfui-op-e0e37a29@dogfood.test",
+"subject": "You have been invited to the ApexMail control plane",
+"id": "bnEasdRVhC5BGTcDmiArnx"
+}
+
+===== [19:52:31] C4 =====
+subject: You have been invited to the ApexMail control plane
+
+===== [19:52:31] C4 =====
+links: ["http://localhost:8080/reset-password?token=vfy_w9ja95p61mytq7wra0ze981vkzwsuqlu&email=vfui-op-e0e37a29%40dogfood.test", "http://localhost:8080/v1/auth/verify-email/vfy_or1lvz4pzvcp5zdca17nox06tq590ptc", "https://apexmail.ee", "http://127.0.0.1:3001/c/y_EmNe-xkhlA9X-xsXzvu6vjVpfcxppMUVSraIdvwozu_uPos-_Aq6N8KefdDbWS7N-ykxvg7EiLuFqnwFsm7mELhyapBKBmX9ZhXU-N_uwD9HT6YBB2w-BCw_fKu2ivczrLi7HjVR3EiF-fRBG8sv9dvW_M_vhp4Kgvw_Fq1oaX4wvpXzOwag7hx8mG3Pv71ko8McWn03upzsgaCyKinGaiO6kmBW3Z8u4dVbpaUGWx12Uy3PXrHVfPunI15UAC9gTbrSDRtS1rWqfDxsycfF-nMIZuPofd5WRitiREuRcbedDinWi755O9OTAOWxk5JV1PcaXhZVlV-wttrpXI1FxIK-UFHA4R-w", "http://127.0.0.1:3001/c/irDgtm6es6cwEh2pFKYx60kST-EtNWY65dt2Yh5bcoV92_UBt9E7PQPwLsA8tfDk3dRlrfPXNI0k-jwogztr4waeZCasKOq64NvSrLPepT6BixmfbfyGCvu2qKfdpok-yHNueOm0eGw8g1YVcuyk5t2fuJdQ1-FYTGpXnUVdCaZJLH8gj_P0WL9pzaZkNJtQ1eVajHUC4gW4rQy-cjwTgX1FG5385lWsCXW21mHN2xyBWLBuYz4mRFhvCjsLRdnNsWy51itUVBVVERMtWgn7xueYVOIF0DnRGK6mhEHrx5Zjsl0", "http://127.0.0.1:3001/c/tu5lCMgUV7Q0OXBUXqXFURVnjd5ssSx9dxXpCT9m1c0TS6Zo7kEzxeL4vJ34UQ4VxF6noy4YHbevAGCYWJiKBubT8-Q_l0wTDXfn8TZ_Em6Ou9seIB1RWPp8NCNluOHz0sAV_mAyG9k7JVtAeLw3MCzU8GPNM1lJK7S7cUasNbkbQnImepMDHUm6256TXwrUcxuAo1aXVRySl7ZJD-PuCyCKiksfQHw", "http://127.0.0.1:3001/o/KKF5dB8F0a7hnv-11q9EfeJ4Ug_lFfvV0vgaN5B3sYF7WG2ggafc4Xu1puyDk6JWcx4-7JhwdRQm_jTTQv83AGKkP6Fxjs87X1nrjJywjnGgvEf3ox83mVSsVghl4uwFOAXQ8SA-nYR2subBCiAWRMgO2mjOamwKhjCBNRc9"]
+
+===== [19:52:35] C4b =====
+GET /v1/auth/verify-email/vfy_or1lvz4pzvcp5zdca17nox06tq590ptc -> 200 <!DOCTYPE html><html lang="en" class="__variable_712c26 __variable_60443c"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Verify Email — ApexMail
+
+===== [19:52:35] C4b =====
+DB after verify: t|active|t
+
+===== [19:52:35] C4b =====
+POST /v1/auth/reset-password -> 422 Failed to deserialize the JSON body into the target type: missing field `email` at line 1 column 84
+
+===== [19:52:36] C4b =====
+POST /v1/auth/login -> 500 {"error":{"code":"INTERNAL_ERROR","message":"internal server error","requestId":"fab0289b-5da8-417f-8c19-cfbafa4370f1"}}
+
+===== [19:52:46] C3-pause/resume =====
+after ~35s (1 worker tick): campaign=sending recips: queued|20
+sent|100
+
+===== [19:52:46] C3-pause/resume =====
+GET /campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3 -> 200; pause form present: True; <form method="post" action="/web/campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3/pause" class="inline"><button type="submit" class="inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold te
+
+===== [19:52:47] C3-pause/resume =====
+POST /web/campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3/pause -> 303 loc=/campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3 | DB: paused
+
+===== [19:52:47] C3-pause/resume =====
+paused sample T0: 20 queued / 0 sending
+
+===== [19:53:00] C4c =====
+POST /v1/auth/reset-password (token+email+password) -> 200 {"success":true,"message":"Password updated successfully."}
+
+===== [19:53:00] C4c =====
+POST /v1/auth/login -> 202 {"status":"mfa_setup_required","challengeToken":"mfa_samtm1xegwxwyb1a9t0qa9","secret":"IUEMLEQKC6HKEHCSNIMA5PDFZXWAWQLC","otpauthUrl":"otpauth://totp/ApexMail%3Avfui-op-e0e37a29%40dogfood.test?secret=IUEMLEQKC6HKEHCSNIMA5PDFZXWAWQLC&issuer=ApexMail&algorithm=SHA256&digits=6&period=30"}
+
+===== [19:53:00] C4c =====
+DB: admin|active|t|f
+
+===== [19:53:11] C5 =====
+POST /v1/templates -> 201; id=d84np7r8qg5k4ama8zjkty6nme; DB version/html: 1 | <p>ORIGINAL CONTENT</p>
+
+===== [19:53:12] C5 =====
+GET /templates/d84np7r8qg5k4ama8zjkty6nme/edit -> 200 34109b
+
+===== [19:53:12] C5 =====
+form: <form class="space-y-6" method="post" action="/web/templates/update" data-form-id="template-update"><input type="hidden" name="_csrf" value="MTc5MTQ4ODg3ODQ3MzozM2ZkNjA3YS1hMTBhLTRlOGMtYTcyMi1kMmU2YzUyNGJmZGM.g_p6KPuStt1FLECH7qUm3QyS_Mb5TTdcRKQlg6rHmS0" /><input type="hidden" name="id" value="d84np7r8qg5k4ama8zjkty6nme" /><div class="space-y-2"><label class="text-sm font-medium leading-none" for="template-name">Template Name</label><input id="template-name" name="name" type="text" required value="VF tmpl 0e2d30df" class="flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[
+
+===== [19:53:12] C5 =====
+prefilled inputs: ["<input type=\"hidden\" name=\"_csrf\" value=\"MTc5MTQ4ODg3ODQ3MzozM2ZkNjA3YS1hMTBhLTRlOGMtYTcyMi1kMmU2YzUyNGJmZGM.g_p6KPuStt1FLECH7qUm3QyS_Mb5TTdcRKQlg6rHmS0\" />", "<input type=\"hidden\" name=\"id\" value=\"d84np7r8qg5k4ama8zjkty6nme\" />", "<input id=\"template-name\" name=\"name\" type=\"text\" required value=\"VF tmpl 0e2d30df\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 te", "<input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"VF subject\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]"]
+
+===== [19:53:12] C5 =====
+prefilled html_body: &lt;p&gt;ORIGINAL CONTENT&lt;/p&gt;
+
+===== [19:53:12] C5 =====
+hidden fields: {"_csrf": "MTc5MTQ4ODg3ODQ3MzozM2ZkNjA3YS1hMTBhLTRlOGMtYTcyMi1kMmU2YzUyNGJmZGM.g_p6KPuStt1FLECH7qUm3QyS_Mb5TTdcRKQlg6rHmS0", "id": "d84np7r8qg5k4ama8zjkty6nme"}
+
+===== [19:53:12] C5 =====
+POST /web/templates/update (blank html_body) -> 303 loc=/templates/d84np7r8qg5k4ama8zjkty6nme/edit
+
+===== [19:53:12] C5 =====
+flash: [{"kind": "success", "text": "Template saved as v2 \u2014 the previous version can be restored."}]
+
+===== [19:53:12] C5 =====
+DB after blank POST: 2 | html=<p>ORIGINAL CONTENT</p>
+
+===== [19:53:13] C5 =====
+flash2: [{"kind": "success", "text": "Template saved as v3 \u2014 the previous version can be restored."}]
+
+===== [19:53:13] C5 =====
+POST /web/templates/update (real content) -> 303 loc=/templates/d84np7r8qg5k4ama8zjkty6nme/edit
+
+===== [19:53:13] C5 =====
+DB after real POST: 3 | html=<p>UPDATED CONTENT</p>
+
+===== [19:53:27] C3-pause/resume =====
+paused sample T+40s (a worker tick passed): 20 queued / 0 sending | campaign still paused
+
+===== [19:53:27] C3-pause/resume =====
+POST /web/campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3/resume -> 303 loc=/campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3 | DB: sending
+
+===== [19:53:46] C6 =====
+A login jar: ["csrf_token", "apexmail_flash", "apexmail_login_challenge", "am_session"]
+
+===== [19:53:49] C6 =====
+B login jar: ["csrf_token", "apexmail_flash", "apexmail_login_challenge"]
+
+===== [19:53:49] C6 =====
+both sessions work: A /dashboard=200 B /dashboard=200
+
+===== [19:53:49] C6 =====
+A jti=5f7a9ffe-077f-439c-9889-9788c041f4f5 | sessions rows: 0
+
+===== [19:53:49] C6 =====
+POST /web/auth/logout (A, console form) -> 303 loc=/login set-cookie: apexmail_flash=v1.W3sia2luZCI6InN1Y2Nlc3MiLCJ0ZXh0IjoiU2lnbmVkIG91dC4ifV0.viqYkxwZzbYOVhA6uX9UlpTCvc8WVXrxMT6jLOH05F0; Path=/; Max-Age=60; HttpOnly; SameSite=Lax
+am_session=; HttpOnly; Path=/; Max-Age
+
+===== [19:53:49] C6 =====
+REPLAY A captured am_session on /dashboard -> 303 loc=/login?next=%2Fdashboard
+
+===== [19:53:50] C6 =====
+B (other cookie) /dashboard after A signed out -> 200
+
+===== [19:53:50] C6 =====
+A sessions row after: 0
+
+===== [19:54:02] C6b =====
+A: mfa -> 303 loc=/dashboard has_am_session=True
+
+===== [19:54:07] C3-pause/resume =====
+after resume +40s: campaign=sent recips: sent|120
+
+===== [19:54:07] C3-pause/resume =====
+final: campaign=sent recips: sent|120
+
+===== [19:54:07] C3-pause/resume =====
+messages logged for campaign: 120
+
+===== [19:54:15] C6b =====
+A: mfa -> 303 loc=/login?mfa=1&email=dg-owner-ca1e8136%40dogfood.test&return_to=%2Fdashboard has_am_session=False
+
+===== [19:54:16] C6b =====
+B: mfa -> 303 loc=/login?mfa=1&email=dg-owner-ca1e8136%40dogfood.test&return_to=%2Fdashboard has_am_session=False
+
+===== [19:54:17] C6b =====
+both live: A=303 B=303 (follow=False)
+
+===== [19:55:00] C6c =====
+A: SSR mfa code=104383 -> 303 loc=/dashboard am_session=True
+
+===== [19:55:01] C6c =====
+B: SSR mfa code=104383 -> 303 loc=/login?mfa=1&email=dg-owner-ca1e8136%40dogfood.test&return_to=%2Fdashboard am_session=False
+
+===== [19:55:01] C6c =====
+both live (follow=False): A=200 B=303
+
+===== [19:55:30] C6d =====
+A: SSR mfa code=947966 -> 303 loc=/dashboard am_session=True
+
+===== [19:56:01] C6d =====
+B: SSR mfa code=863022 -> 303 loc=/dashboard am_session=True
+
+===== [19:56:01] C6d =====
+both live (follow=False): A=200 B=200
+
+===== [19:56:01] C6d =====
+A jti=a07122fd-a98a-417d-9bc5-76155098e884 rows=0 | B jti=14efaf0d-08fc-496e-816d-fe6e561d8d6e rows=0
+
+===== [19:56:01] C6d =====
+POST /web/auth/logout (A console form) -> 303 loc=/login
+
+===== [19:56:31] C6e =====
+A: SSR mfa code=056036 -> 303 loc=/dashboard am_session=True
+
+===== [19:57:00] C6e =====
+B: SSR mfa code=820903 -> 303 loc=/dashboard am_session=True
+
+===== [19:57:01] C6e =====
+both live (follow=False): A=200 B=200
+
+===== [19:57:01] C6e =====
+A jti=bd3bf471-7de2-4c3a-8d19-4c58e455a2ac sessions-rows=0 | B jti=d5eb4327-167a-4893-96ca-4fe56b5c6a91 rows=0 | user rows=5
+
+===== [19:57:01] C6e =====
+POST /web/auth/logout (A console form, csrf as rendered) -> 303 loc=/login; set-cookie: apexmail_flash=v1.W3sia2luZCI6InN1Y2Nlc3MiLCJ0ZXh0IjoiU2lnbmVkIG91dC4ifV0.viqYkxwZzbYOVhA6uX9UlpTCvc8WVXrxMT6jLOH05F0; Path=/; Max-Age=60; HttpOnly; SameSite=La
+
+===== [19:57:01] C6e =====
+replay A captured am_session -> 303 loc=/login?next=%2Fdashboard
+
+===== [19:57:01] C6e =====
+B (other cookie) -> 200 loc=None
+
+===== [19:57:01] C6e =====
+redis apexmail:session_revoked:bd3bf471-7de2-4c3a-8d19-4c58e455a2ac='1' | B marker=''
+
+===== [19:57:17] C7 =====
+('console', '/dashboard', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/campaigns', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/templates', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/contacts', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/domains', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/reports/deliverability', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/settings/billing', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/settings', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/events', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/analytics', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/messages/6912243c-8a7a-4061-b3ab-6eb312bff0eb/timeline', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('console', '/templates/d84np7r8qg5k4ama8zjkty6nme/edit', 303, True, False, "default-src 'none'; frame-ancestors 'none'")
+('cp', '/alerts', 200, True, True, "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-s")
+('cp', '/alerts/rules', 200, True, True, "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-s")
+('cp', '/analytics', 200, True, True, "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-s")
+('cp', '/jobs', 200, True, True, "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-s")
+
+===== [19:57:44] C7-final =====
+console /dashboard                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /campaigns                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /templates                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /contacts                          -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /domains                           -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /reports/deliverability            -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /settings/billing                  -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /settings                          -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /events                            -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /analytics                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /messages/6912243c-8a7a-4061-b3ab-6eb312bff0eb/timeline -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /templates/d84np7r8qg5k4ama8zjkty6nme/edit -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /campaigns/247a5ff8-ed70-4218-842a-77ba46e5e3c3 -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /lists                             -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /inbox-placement                   -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+console /assistant                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+cp      /alerts                            -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+cp      /alerts/rules                      -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+cp      /analytics                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+cp      /jobs                              -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+cp      /tenants                           -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+cp      /operators                         -> 200 csp=yes stylesheet=yes | default-src 'none'; base-uri 'self'; frame-ancestors 'none';
+PASS 22/22
+
+===== [20:02:09] C8 =====
+POST /web/admin/alert-rules {tenant=system_internal_tenant01,name='VFUI rule 36fc4593'} -> 303 loc=/alerts/rules
+
+===== [20:02:09] C8 =====
+flash: [{"kind": "error", "text": "The threshold must be a whole number between 1 and 100."}]
+
+===== [20:02:09] C8 =====
+DB row: id='' | 
+
+===== [20:02:10] C8 =====
+GET /alerts/rules -> 200; rule listed on page: True
+
+===== [20:02:10] C8 =====
+page row: option><option value="t59f74ccf79de43ae82c92fea1">Test Tenant A</option></select></div><div class="apex-field"><label for="rule-name">Name</label><input id="rule-name" name="name" type="text" maxlength="80" required placeholder="Emails near plan limit" value="VFUI rule 36fc4593"></div><div class="apex-field"><label for="rule-metric">Metric</label><select id="rule-metric" name="metric"><option value="emails">Emails sent</option><option value="api_calls">API calls</option></select></div><div class="apex-field"><label
+
+===== [20:02:10] C8 =====
+GET /v1/admin/alerts/rules -> 200; API lists the rule: False
+
+===== [20:02:17] C8b =====
+POST /web/admin/alert-rules (fields tenant,name,metric=emails,threshold=80,channel=email,severity=warning,enabled=true) -> 303 loc=/alerts/rules flash=[{'kind': 'success', 'text': 'Alert rule "VFUI rule e3a364a0" created.'}]
+
+===== [20:02:17] C8b =====
+DB: id='0e1d9fa6-7b83-4409-a553-984e4b0791b8' system_internal_tenant01|emails|80|true|warning|email
+
+===== [20:02:18] C8b =====
+GET /alerts/rules -> 200; listed: True
+
+===== [20:02:18] C8b =====
+page row: unded-[12px_12px_8px_8px] border border-success-300 bg-success-50 text-success-900 px-4 py-3"><span aria-hidden="true" class="mt-0.5 font-bold">✓</span><p class="text-sm font-medium">Alert rule &quot;VFUI rule e3a364a0&quot; created.</p></div></div><a href="#app-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm 
+
+===== [20:02:18] C8b =====
+GET /v1/admin/alerts/rules -> 200 parse='list' object has no attribute 'get' body=[{"id":"0e1d9fa6-7b83-4409-a553-984e4b0791b8","tenantId":"system_internal_tenant01","name":"VFUI rule e3a364a0","metricType":"emails","thresholdPercent":80,"notificationChannel":"email","severity":"wa
+
+===== [20:02:18] C8b =====
+POST /web/admin/alert-rules/0e1d9fa6-7b83-4409-a553-984e4b0791b8/delete -> 303 loc=/alerts/rules | rows after: 0
+
+===== [20:02:19] C8b =====
+list after delete -> 200; name present: True
+
+===== [20:11:59] C1 tenant fixture =====
+POST /web/admin/tenants {name=Lane C Demo e44838, domain=lane-c-demo.test, plan=free} -> 303 tenant=v7ku2hg9n08nzy77577mh85qwr
+
+===== [20:12:16] C2 page-vs-DB =====
+GET /analytics (Host: admin.localhost) -> 200
+  KPI Sent (30d) = 1774 (hint: Fleet-wide)
+  KPI Delivered = 3 (hint: 0.2%)
+  KPI Bounced = 3 (hint: 0.2%)
+  KPI Complaints = 0 (hint: 0.0%)
+  KPI Delivery rate = 0.2% (hint: 7d send cohort)
+  KPI P95 latency = -1 ms (hint: 1731 attempts)
+  KPI Queue backlog = 6 (hint: Current snapshot)
+SQL: queue_backlog=6
+SQL latency: 1731 attempts, p95=-0.784
+SQL cohort: cohort sent=1774 delivered=3
+
+===== [20:12:28] C7 CSP sweep =====
+console /dashboard                           -> 200 csp=yes stylesheet=yes
+console /campaigns                           -> 200 csp=yes stylesheet=yes
+console /templates                           -> 200 csp=yes stylesheet=yes
+console /contacts                            -> 200 csp=yes stylesheet=yes
+console /domains                             -> 200 csp=yes stylesheet=yes
+console /reports/deliverability              -> 200 csp=yes stylesheet=yes
+console /settings/billing                    -> 200 csp=yes stylesheet=yes
+console /settings                            -> 200 csp=yes stylesheet=yes
+console /events                              -> 200 csp=yes stylesheet=yes
+console /analytics                           -> 200 csp=yes stylesheet=yes
+console /messages/6912243c-8a7a-4061-b3ab-6eb312bff0eb/timeline -> 200 csp=yes stylesheet=yes
+console /templates/d84np7r8qg5k4ama8zjkty6nme/edit -> 200 csp=yes stylesheet=yes
+console /lists                               -> 200 csp=yes stylesheet=yes
+console /inbox-placement                     -> 200 csp=yes stylesheet=yes
+console /assistant                           -> 200 csp=yes stylesheet=yes
+cp      /alerts                              -> 200 csp=yes stylesheet=yes
+cp      /alerts/rules                        -> 200 csp=yes stylesheet=yes
+cp      /analytics                           -> 200 csp=yes stylesheet=yes
+cp      /jobs                                -> 200 csp=yes stylesheet=yes
+cp      /tenants                             -> 200 csp=yes stylesheet=yes
+cp      /operators                           -> 200 csp=yes stylesheet=yes
+PASS 21/21 (200 + CSP + stylesheet)
+
+===== [20:15:52] C1 fail-after =====
+$ curl -s -H 'Host: admin.localhost' -b cp.jar 'http://127.0.0.1:8080/cp/tenants/v7ku2hg9n08nzy77577mh85qwr'  -> 200 (27876 bytes)
+
+===== [20:15:52] C1 fail-after =====
+SELECT FRAGMENT: <select id="tenant-plan" name="plan" required class="flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px]"><option value="payg">Pay As You Go</option><option value="free" selected>Free — 3K emails / mo</option><option value="starter">Developer — 50K emails / mo</option><option value="pro">Pro — 150K emails / mo</option><option value="growth">Growth — 500K emails / mo</option><option value="scale">Business — 2M emails / mo</option><option value="enterprise">Enterprise Cloud — 5M emails / mo</option></select>
+
+===== [20:15:52] C1 fail-after =====
+form action: <form class="apex-panel space-y-4" method="post" action="/web/admin/tenants/v7ku2hg9n08nzy77577mh85qwr/plan"
+
+===== [20:15:52] C1 fail-after =====
+DB before: free
+
+===== [20:15:52] C1 fail-after =====
+POST /web/admin/tenants/v7ku2hg9n08nzy77577mh85qwr/plan {plan=growth} -> 303 loc=/cp/tenants/v7ku2hg9n08nzy77577mh85qwr flash=[{'kind': 'success', 'text': 'Plan changed to “growth” — the new entitlements apply immediately.'}]
+
+===== [20:15:52] C1 fail-after =====
+DB after: growth
+
+===== [20:15:52] C1 fail-after =====
+plan_overrides: growth|deaf7e8c-a3a3-4e36-a3ae-c0e7e4d7a47d|true|Control-plane plan change: free → growth
+
+===== [20:15:52] C1 fail-after =====
+audit: control_plane.tenant.plan_changed|tenant|v7ku2hg9n08nzy77577mh85qwr|deaf7e8c-a3a3-4e36-a3ae-c0e7e4d7a47d
+
+===== [20:15:52] C1 fail-after =====
+detail page after change -> 200; selected option = growth
+
+===== [20:15:53] C1 fail-after =====
+POST .../plan {plan=free} (change back) -> 303 | DB: free
+
+===== [20:15:53] C1 fail-after =====
+detail page back -> 200; selected option = free
+
+===== [20:15:59] C4 fail-after =====
+POST /web/admin/operators {email=vfui-invite-229c0bb0@dogfood.test} -> 303 loc=/operators
+
+===== [20:15:59] C4 fail-after =====
+DB hash prefix: !invited-p | email_verified=false
+
+===== [20:15:59] C4 fail-after =====
+POST /v1/auth/login (invited operator, no password set) -> 401 {"error":{"code":"UNAUTHORIZED","message":"This invitation has not been accepted yet — use the password-setup link in your invitation email to set a password.","requestId":"061072a5-ff9e-4332-b5da-8db7dd09803e"}}
+
+===== [20:16:00] C4 fail-after =====
+POST /web/auth/login (SSR) -> 303 loc=/login flash=[{'kind': 'error', 'text': 'This invitation has not been accepted yet — use the password-setup link in your invitation email to set a password.'}]
+
+===== [20:16:39] post-fix regression =====
+C7 post-rebuild: 21/21 pages 200+CSP+stylesheet
+
+===== [20:16:39] post-fix regression =====
+C5 post-rebuild: GET edit -> 200; blank POST -> 303; DB: 2|<p>KEEP ME</p>; flash=[{'kind': 'success', 'text': 'Template saved as v2 — the previous version can be restored.'}]
+
+===== [20:16:40] post-fix regression =====
+C8 post-rebuild: create -> 303 id=ff937843-3cb1-4cfb-b1d1-14735ed35332; delete -> 303; rows after=0
+
+===== [20:16:41] post-fix regression =====
+C3 post-rebuild: GET /v1/admin/jobs -> 200; cancel processing -> 409 {"error":{"code":"CONFLICT","message":"only pending (unclaimed) jobs can be cancelled; processing jobs are in flight und
+
+===== [20:23:32] final live =====
+GET /cp/tenants/t_demo -> 200; 'Tenant not found' present: True; missing-copy present: True; 'service problem' present: False
+
+===== [20:23:32] final live =====
+fragment: ass="p-8 flex-1" id="app-main"><div class="max-w-7xl mx-auto"><div class="max-w-2xl space-y-6"><h1 class="text-2xl font-bold text-surface-950 tracking-tight">Tenant not found</h1><div class="apex-panel"><h2 class="apex-panel-title">Plan</h2><p class="text-sm">No tenant with this id exists in the control plane. It may have been deleted — the tenant list shows the current workspaces.</p></div><a class="text-sm font-medium underline" href=
+
+===== [20:23:32] final live =====
+GET /cp/tenants/v7ku2hg9n08nzy77577mh85qwr -> 200; select present: True; selected=free
+
+===== [20:23:33] final live =====
+final: POST /v1/auth/login (invited vfui-invite-229c0bb0@dogfood.test) -> 401 {"error":{"code":"UNAUTHORIZED","message":"This invitation has not been accepted yet — use the password-setup link in your invitation email to set a password.",
+
+===== [20:24:09] final regression =====
+final C7 sweep: 21/21 200+CSP+stylesheet; failures=[]
+
+===== [20:25:02] final regression =====
+final C6: A/B live=200/200; after A signout: replay A=303 loc=/login?next=%2Fdashboard, B=200
+
+===== [20:25:33] final labels =====
+GET /tenants /jobs /alerts (Host admin.localhost) -> 200 each; data-plan-label present on all three (CP header plan label, B-F10 live)

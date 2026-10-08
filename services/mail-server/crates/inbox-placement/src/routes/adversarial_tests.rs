@@ -447,7 +447,11 @@ async fn report_attaches_the_tenant_scoped_analytics_summary() {
     let (status, body) = get_placement_test(st.clone(), tenant.clone(), test_id).await;
     assert_eq!(status, StatusCode::OK);
     let analytics = &body.0["analytics"];
-    assert!(analytics.is_object(), "analytics summary attached: {}", body.0);
+    assert!(
+        analytics.is_object(),
+        "analytics summary attached: {}",
+        body.0
+    );
     assert_eq!(analytics["measured"]["inbox"], 2, "{}", body.0);
     assert_eq!(analytics["measured"]["spam"], 1, "{}", body.0);
     assert_eq!(

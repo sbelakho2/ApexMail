@@ -133,10 +133,7 @@ impl ChurnPredictionEngine {
     /// per-subscriber [`Self::predict`] applies — complaint / bounce /
     /// inactivity / decay, weighted by the constants above — over the tenant's
     /// active contacts, so the route's factors are real counts.
-    pub async fn tenant_overview(
-        &self,
-        tenant_id: &str,
-    ) -> anyhow::Result<TenantChurnOverview> {
+    pub async fn tenant_overview(&self, tenant_id: &str) -> anyhow::Result<TenantChurnOverview> {
         // One aggregate pass; every sub-select is tenant-scoped. `at_risk` is
         // the route's original definition: an active contact with no open or
         // click in 90 days (cold-start contacts count as at risk).
@@ -237,8 +234,7 @@ impl ChurnPredictionEngine {
         let mut recommendations = Vec::new();
         if totals.complained_contacts > 0 {
             recommendations.push(
-                "Review the complaint sources and pause the campaign(s) they came from"
-                    .to_string(),
+                "Review the complaint sources and pause the campaign(s) they came from".to_string(),
             );
         }
         if totals.bounced_contacts > 0 {
@@ -248,9 +244,8 @@ impl ChurnPredictionEngine {
             );
         }
         if at_risk_contacts > 0 {
-            recommendations.push(
-                "Send a re-engagement campaign to the inactive segment".to_string(),
-            );
+            recommendations
+                .push("Send a re-engagement campaign to the inactive segment".to_string());
         }
         if totals.decaying_contacts > 0 {
             recommendations.push(
@@ -259,9 +254,8 @@ impl ChurnPredictionEngine {
             );
         }
         if recommendations.is_empty() {
-            recommendations.push(
-                "No churn signals in the last 90 days — no action needed".to_string(),
-            );
+            recommendations
+                .push("No churn signals in the last 90 days — no action needed".to_string());
         }
 
         let churn_probability = if active_contacts > 0 {

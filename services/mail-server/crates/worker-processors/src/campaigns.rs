@@ -985,7 +985,9 @@ impl CampaignExecutor {
                     .get("timezone")
                     .and_then(|v| v.as_str())
                     .filter(|tz| tz.parse::<chrono_tz::Tz>().is_ok())
-                    .map(|_| analytics::send_time_optimizer::utc_offset_minutes_from_settings(&settings));
+                    .map(|_| {
+                        analytics::send_time_optimizer::utc_offset_minutes_from_settings(&settings)
+                    });
 
                 contexts.insert(
                     id,
@@ -2872,9 +2874,9 @@ mod tests {
     ) -> Vec<(Uuid, String)> {
         // Deterministic per (label, index): the SAME label yields the same
         // ids (reproducible splits), different labels never collide.
-        let label_bits = label
-            .bytes()
-            .fold(0u128, |acc, byte| acc.wrapping_mul(131).wrapping_add(byte.into()));
+        let label_bits = label.bytes().fold(0u128, |acc, byte| {
+            acc.wrapping_mul(131).wrapping_add(byte.into())
+        });
         let mut contacts = Vec::new();
         for index in 0..count {
             let id = Uuid::from_u128(
@@ -2969,7 +2971,8 @@ mod tests {
         let rows = ab_assignments(&pool, campaign).await;
         assert_eq!(rows.len(), RECIPIENTS);
         assert!(
-            rows.iter().all(|(_, phase, _)| phase == "test" || phase == "holdout"),
+            rows.iter()
+                .all(|(_, phase, _)| phase == "test" || phase == "holdout"),
             "every recipient is phased"
         );
         let test_count = rows.iter().filter(|(_, phase, _)| phase == "test").count();
@@ -3162,9 +3165,9 @@ mod tests {
                 .expect("message metadata");
         assert_eq!(metas.len(), test_count);
         assert!(
-            metas.iter().all(|metadata| {
-                metadata["ab_phase"] == "test" && metadata["ab_arm"].is_i64()
-            }),
+            metas
+                .iter()
+                .all(|metadata| { metadata["ab_phase"] == "test" && metadata["ab_arm"].is_i64() }),
             "every test send carries its arm"
         );
 
@@ -3349,7 +3352,9 @@ mod tests {
         .expect("holdout phases");
         assert_eq!(promoted.len(), 6);
         assert!(
-            promoted.iter().all(|(phase, arm)| phase == "winner" && *arm == 0),
+            promoted
+                .iter()
+                .all(|(phase, arm)| phase == "winner" && *arm == 0),
             "the holdout is promoted onto the winning arm: {promoted:?}"
         );
         pool.close().await;
@@ -3418,16 +3423,16 @@ mod tests {
         let exec = executor(&pool, backend)
             .with_send_time_optimizer(SendTimeOptimizer::without_cache(pool.clone()));
 
-        let email = format!("sto-{}@example.test", &Uuid::new_v4().simple().to_string()[..8]);
+        let email = format!(
+            "sto-{}@example.test",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
 
         // The recipient's profile under its own tenant: 8 opens at 14:00 UTC
         // on a Tuesday (2026-06-16). The SAME address under another tenant
         // carries 20 opens at 09:00 — a leak would make 09:00 dominant, so
         // the 14:00 assertion below doubles as the tenant-scoping proof.
-        for (tenant_id, hour, count) in [
-            (&tenant, 14, 8u32),
-            (&other_tenant, 9, 20u32),
-        ] {
+        for (tenant_id, hour, count) in [(&tenant, 14, 8u32), (&other_tenant, 9, 20u32)] {
             for _ in 0..count {
                 sqlx::query(
                     "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp) \
@@ -3463,8 +3468,10 @@ mod tests {
         .expect("attach STO settings");
 
         // Control campaign WITHOUT the setting → immediate scheduling.
-        let plain_email =
-            format!("plain-{}@example.test", &Uuid::new_v4().simple().to_string()[..8]);
+        let plain_email = format!(
+            "plain-{}@example.test",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
         let plain_campaign =
             insert_ready_campaign(&pool, &tenant, "scheduled", Some(Utc::now())).await;
         let plain_list = insert_list(&pool, &tenant).await;

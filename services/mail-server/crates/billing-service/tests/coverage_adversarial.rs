@@ -1728,14 +1728,13 @@ db_test!(reconcile_repairs_drifted_capability_flags, |h| {
         ("scale", "template_approval_workflow"),
         ("enterprise", "subaccounts"),
     ] {
-        let stored: bool = sqlx::query_scalar(
-            "SELECT (features->>$1)::bool FROM plans WHERE name = $2",
-        )
-        .bind(flag)
-        .bind(name)
-        .fetch_one(&h.pool)
-        .await
-        .expect("read converged flag");
+        let stored: bool =
+            sqlx::query_scalar("SELECT (features->>$1)::bool FROM plans WHERE name = $2")
+                .bind(flag)
+                .bind(name)
+                .fetch_one(&h.pool)
+                .await
+                .expect("read converged flag");
         assert!(stored, "{name}.{flag} must converge to the seed's grant");
     }
 

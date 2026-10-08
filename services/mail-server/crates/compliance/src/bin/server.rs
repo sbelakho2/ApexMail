@@ -66,6 +66,13 @@ struct Cli {
     /// Override port (default from COMPLIANCE_PORT or 3011)
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// Run the DSR queue + expiry sweep ONCE against the live database, print
+    /// the counts and exit (one-shot ops entrypoint; the cron ticks are
+    /// otherwise the only trigger — parity with the billing-service
+    /// `--sweep-overage-only` flag, live dogfood 2026-10-08).
+    #[arg(long, env = "COMPLIANCE_SWEEP_ONCE", default_value_t = false)]
+    sweep_once: bool,
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -121,6 +128,36 @@ async fn main() -> anyhow::Result<()> {
         awaiting_legal_input = seeds.awaiting_legal_input,
         "Compliance services bootstrapped"
     );
+
+    // On-demand DSR sweep: the exact production path cron jobs 1 (queue
+    // recovery + batch) and 3 (request/DOI expiry + statutory-overdue count)
+    // run, triggered once and reported on stdout. Exits 0 with a
+    // machine-readable report line; any failed step exits non-zero AFTER
+    // printing it, so an ops wrapper can alert on the exit code alone
+    // (live dogfood 2026-10-08: the periodic ticks were the only trigger,
+    // mirroring the billing-service `--sweep-overage-only` pattern).
+    if cli.sweep_once {
+        let queue = dsr_queue_tick(&state).await;
+        let expiry = dsr_expiry_tick(&state).await;
+        println!(
+            "dsr sweep: recovered={} processed={} expired_requests={} expired_tokens={} \
+             statutory_overdue={} failed_steps={}",
+            queue.recovered,
+            queue.processed,
+            expiry.expired_requests,
+            expiry.expired_tokens,
+            expiry.statutory_overdue,
+            queue.failed + expiry.failed,
+        );
+        state.db.close().await;
+        if queue.failed + expiry.failed > 0 {
+            anyhow::bail!(
+                "dsr sweep finished with {} failed step(s) — see the log lines above",
+                queue.failed + expiry.failed
+            );
+        }
+        return Ok(());
+    }
 
     // Build router with middleware
     let cors = if config.cors_origin == "*" {
@@ -209,6 +246,100 @@ async fn wait_for_shutdown_signal(
     info!("Shutdown signal received");
 }
 
+/// Counts + failures from one DSR queue tick (cron job 1), shared by the 30s
+/// cron arm and the `--sweep-once` CLI.
+#[derive(Debug, Default, Clone, Copy)]
+struct DsrQueueTick {
+    recovered: usize,
+    processed: usize,
+    failed: usize,
+}
+
+/// F: recover entries stranded in the processing list by crashed workers
+/// (older than 5 minutes) before processing a new batch. Logs the same lines
+/// the cron arm always logged; returns the counts for the one-shot report.
+async fn dsr_queue_tick(state: &AppState) -> DsrQueueTick {
+    let mut tick = DsrQueueTick::default();
+    match state.gdpr.recover_stuck_processing(300).await {
+        Ok(n) if n > 0 => {
+            info!(count = n, "Recovered stuck GDPR queue entries");
+            tick.recovered = n;
+        }
+        Err(e) => {
+            error!(error = %e, "GDPR queue recovery sweep failed");
+            tick.failed += 1;
+        }
+        _ => {}
+    }
+    match state.gdpr.process_queue_batch(10).await {
+        Ok(results) if !results.is_empty() => {
+            info!(count = results.len(), "Processed GDPR queue batch");
+            tick.processed = results.len();
+        }
+        Err(e) => {
+            error!(error = %e, "GDPR queue processing failed");
+            tick.failed += 1;
+        }
+        _ => {}
+    }
+    tick
+}
+
+/// Counts + failures from one DSR expiry tick (cron job 3), shared by the 5min
+/// cron arm and the `--sweep-once` CLI.
+#[derive(Debug, Default, Clone, Copy)]
+struct DsrExpiryTick {
+    expired_requests: u64,
+    expired_tokens: u64,
+    statutory_overdue: u64,
+    failed: usize,
+}
+
+/// Expire overdue GDPR requests and stale double-opt-in tokens, then flag OPEN
+/// requests past their statutory (or extended) Art. 12(3) deadline. The
+/// E-DSR-SLA check is warn-level so it surfaces in the deployed container's
+/// logs; /gdpr/stats carries the same count.
+async fn dsr_expiry_tick(state: &AppState) -> DsrExpiryTick {
+    let mut tick = DsrExpiryTick::default();
+    match state.gdpr.expire_overdue_requests().await {
+        Ok(n) if n > 0 => {
+            info!(count = n, "Expired overdue GDPR requests");
+            tick.expired_requests = n;
+        }
+        Err(e) => {
+            error!(error = %e, "GDPR expiry check failed");
+            tick.failed += 1;
+        }
+        _ => {}
+    }
+    match state.gdpr.expire_stale_opt_in_tokens().await {
+        Ok(n) if n > 0 => {
+            info!(count = n, "Expired stale DOI tokens");
+            tick.expired_tokens = n;
+        }
+        Err(e) => {
+            error!(error = %e, "DOI token expiry failed");
+            tick.failed += 1;
+        }
+        _ => {}
+    }
+    match state.gdpr.count_statutorily_overdue(None).await {
+        Ok(n) if n > 0 => {
+            warn!(
+                overdue = n,
+                "GDPR DSR(s) past the statutory response deadline — SLA breach open"
+            );
+            tick.statutory_overdue = n;
+        }
+        Err(e) => {
+            error!(error = %e, "GDPR statutory-overdue check failed");
+            tick.failed += 1;
+        }
+        _ => {}
+    }
+    tick
+}
+
 /// 9 background cron jobs:
 /// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
@@ -278,187 +409,153 @@ async fn run_cron_jobs_with_intervals(
 
     loop {
         tokio::select! {
-                    _ = gdpr_ticker.tick() => {
-                        // F: recover entries stranded in the processing list
-                        // by crashed workers (older than 5 minutes) before
-                        // processing a new batch.
-                        match state.gdpr.recover_stuck_processing(300).await {
-                            Ok(n) if n > 0 => info!(count = n, "Recovered stuck GDPR queue entries"),
-                            Err(e) => error!(error = %e, "GDPR queue recovery sweep failed"),
-                            _ => {}
-                        }
-                        match state.gdpr.process_queue_batch(10).await {
-                            Ok(results) if !results.is_empty() => {
-                                info!(count = results.len(), "Processed GDPR queue batch");
-                            }
-                            Err(e) => error!(error = %e, "GDPR queue processing failed"),
-                            _ => {}
-                        }
+            _ = gdpr_ticker.tick() => {
+                // Shared with the `--sweep-once` CLI: one code path,
+                // same logs and counts either way.
+                let _ = dsr_queue_tick(&state).await;
+            }
+            _ = rotation_ticker.tick() => {
+                match state.secret_manager.process_auto_rotations().await {
+                    Ok(result) if !result.rotated.is_empty() => {
+                        info!(count = result.rotated.len(), "Auto-rotated secrets");
                     }
-                    _ = rotation_ticker.tick() => {
-                        match state.secret_manager.process_auto_rotations().await {
-                            Ok(result) if !result.rotated.is_empty() => {
-                                info!(count = result.rotated.len(), "Auto-rotated secrets");
-                            }
-                            Err(e) => error!(error = %e, "Secret auto-rotation failed"),
-                            _ => {}
-                        }
-                    }
-                    _ = expiry_ticker.tick() => {
-        // Expire overdue GDPR requests
-                        match state.gdpr.expire_overdue_requests().await {
-                            Ok(n) if n > 0 => info!(count = n, "Expired overdue GDPR requests"),
-                            Err(e) => error!(error = %e, "GDPR expiry check failed"),
-                            _ => {}
-                        }
-        // Expire stale double-opt-in tokens
-                        match state.gdpr.expire_stale_opt_in_tokens().await {
-                            Ok(n) if n > 0 => info!(count = n, "Expired stale DOI tokens"),
-                            Err(e) => error!(error = %e, "DOI token expiry failed"),
-                            _ => {}
-                        }
-        // E-DSR-SLA: flag OPEN requests past their statutory (or extended)
-        // Art. 12(3) deadline. This tick used to never look at due dates —
-        // the canonical predicate had zero production callers, so a breach
-        // was invisible to operators. Warn-level so it surfaces in the
-        // deployed container's logs; /gdpr/stats carries the same count.
-                        match state.gdpr.count_statutorily_overdue(None).await {
-                            Ok(n) if n > 0 => warn!(
-                                overdue = n,
-                                "GDPR DSR(s) past the statutory response deadline — SLA breach open"
-                            ),
-                            Err(e) => error!(error = %e, "GDPR statutory-overdue check failed"),
-                            _ => {}
-                        }
-                    }
-                    _ = archive_ticker.tick() => {
-                        let older_than = chrono::Utc::now() - chrono::Duration::days(state.config.audit.retention_days);
-                        match state.audit_logger.archive(older_than).await {
-                            Ok(n) if n > 0 => info!(count = n, "Archived old audit logs"),
-                            Err(e) => error!(error = %e, "Audit archival failed"),
-                            _ => {}
-                        }
-                    }
-                    _ = retention_ticker.tick() => {
-                        match state.gdpr.enforce_retention().await {
-                            Ok((c, e)) if c > 0 || e > 0 => {
-                                info!(consents = c, exports = e, "Retention enforcement completed");
-                            }
-                            Err(e) => error!(error = %e, "Retention enforcement failed"),
-                            _ => {}
-                        }
-                    }
-                    _ = outbox_flush_ticker.tick() => {
-                        // D: drain pending dsr_verification_outbox rows into
-                        // email_queue under the system sender. Bounded batch;
-                        // failures retry next tick until the attempts cap.
-                        match outbox_flusher.flush_once().await {
-                            Ok(summary) if summary.queued > 0 || summary.failed > 0 => {
-                                info!(
-                                    queued = summary.queued,
-                                    failed = summary.failed,
-                                    "DSR verification outbox flush completed"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => error!(error = %e, "DSR verification outbox flush failed"),
-                        }
-                    }
-                    _ = sweep_ticker.tick() => {
-                        // H-6: enforce the RET-001..023 registry durations for
-                        // the stores this crate owns (event tables, gdpr_exports,
-                        // audit_logs via archive(), dsr outbox), advance the
-                        // legally-restricted archive through expiry → deletion,
-                        // and persist a retention_report row.
-                        match state.retention_sweeper.run_sweep(&state.audit_logger).await {
-                            Ok(report) => {
-                                let deleted: i64 =
-                                    report.categories.iter().map(|c| c.deleted).sum();
-                                let held: i64 = report
-                                    .categories
-                                    .iter()
-                                    .map(|c| c.skipped_legal_hold)
-                                    .sum();
-                                info!(
-                                    deleted,
-                                    skipped_legal_hold = held,
-                                    exports = report.gdpr_exports_deleted,
-                                    outbox_purged = report.dsr_outbox_purged,
-                                    audit_archived = report.audit_logs_archived,
-                                    archive_expired = report.archive_expired,
-                                    archive_deleted = report.archive_deleted,
-                                    archive_sources_deleted = report.archive_source_records_deleted,
-                                    "Retention sweep completed — retention_report row written"
-                                );
-                            }
-                            Err(e) => error!(error = %e, "Retention sweep failed"),
-                        }
-                    }
-                    _ = ledger_ticker.tick() => {
-                        // Payroll/expense/bank statement adapters post every
-                        // unposted source row idempotently (SKIP LOCKED claim
-                        // + post in one transaction). Bank lines are written
-                        // by POST /accounting/bank-statements/import; payroll
-                        // and expense writers remain future features, and any
-                        // row they (or psql) create is posted the same way.
-                        // Reported whenever the tick did anything at all —
-                        // including unpostable rows, which are RETAINED and
-                        // must be visible to an operator.
-                        match compliance::ledger_sweep::sweep_ledger_sources(&state.db).await {
-                            Ok(report) if !report.is_idle() => {
-                                info!(
-                                    payroll_claimed = report.payroll.claimed,
-                                    payroll_posted = report.payroll.posted,
-                                    payroll_failed = report.payroll.failed,
-                                    payroll_unpostable = report.payroll.unpostable,
-                                    expenses_claimed = report.expenses.claimed,
-                                    expenses_posted = report.expenses.posted,
-                                    expenses_failed = report.expenses.failed,
-                                    expenses_source_table_missing =
-                                        report.expenses.source_table_missing,
-                                    bank_claimed = report.bank_statement_lines.claimed,
-                                    bank_posted = report.bank_statement_lines.posted,
-                                    bank_already_posted =
-                                        report.bank_statement_lines.already_posted,
-                                    bank_failed = report.bank_statement_lines.failed,
-                                    bank_unpostable = report.bank_statement_lines.unpostable,
-                                    invoices_claimed = report.invoices.claimed,
-                                    invoices_posted = report.invoices.posted,
-                                    invoices_failed = report.invoices.failed,
-                                    invoices_unpostable = report.invoices.unpostable,
-                                    allocations_claimed = report.payment_allocations.claimed,
-                                    allocations_posted = report.payment_allocations.posted,
-                                    allocations_failed = report.payment_allocations.failed,
-                                    allocations_unpostable = report.payment_allocations.unpostable,
-                                    credit_notes_claimed = report.credit_notes.claimed,
-                                    credit_notes_posted = report.credit_notes.posted,
-                                    credit_notes_failed = report.credit_notes.failed,
-                                    credit_notes_unpostable = report.credit_notes.unpostable,
-                                    "Statutory ledger sweep ran"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => error!(error = %e, "Statutory ledger sweep failed"),
-                        }
-                    }
-                    _ = obligations_ticker.tick() => {
-                        // 9: derive/upsert every legal entity's statutory
-                        // filing obligations (KMD/TSD/VD/OSS/annual report)
-                        // over the forward year and mark pending-but-past-due
-                        // rows overdue. Idempotent; the upsert only touches
-                        // pending rows.
-                        let today = chrono::Utc::now().date_naive();
-                        match compliance::obligations::sync_all_obligations(&state.db, today).await {
-                            Ok(run) => info!(
-                                entities = run.entities,
-                                upserted = run.upserted,
-                                marked_overdue = run.marked_overdue,
-                                "Statutory obligation sync completed"
-                            ),
-                            Err(e) => error!(error = %e, "Statutory obligation sync failed"),
-                        }
-                    }
+                    Err(e) => error!(error = %e, "Secret auto-rotation failed"),
+                    _ => {}
                 }
+            }
+            _ = expiry_ticker.tick() => {
+                // Shared with the `--sweep-once` CLI: one code path,
+                // same logs and counts either way.
+                let _ = dsr_expiry_tick(&state).await;
+            }
+            _ = archive_ticker.tick() => {
+                let older_than = chrono::Utc::now() - chrono::Duration::days(state.config.audit.retention_days);
+                match state.audit_logger.archive(older_than).await {
+                    Ok(n) if n > 0 => info!(count = n, "Archived old audit logs"),
+                    Err(e) => error!(error = %e, "Audit archival failed"),
+                    _ => {}
+                }
+            }
+            _ = retention_ticker.tick() => {
+                match state.gdpr.enforce_retention().await {
+                    Ok((c, e)) if c > 0 || e > 0 => {
+                        info!(consents = c, exports = e, "Retention enforcement completed");
+                    }
+                    Err(e) => error!(error = %e, "Retention enforcement failed"),
+                    _ => {}
+                }
+            }
+            _ = outbox_flush_ticker.tick() => {
+                // D: drain pending dsr_verification_outbox rows into
+                // email_queue under the system sender. Bounded batch;
+                // failures retry next tick until the attempts cap.
+                match outbox_flusher.flush_once().await {
+                    Ok(summary) if summary.queued > 0 || summary.failed > 0 => {
+                        info!(
+                            queued = summary.queued,
+                            failed = summary.failed,
+                            "DSR verification outbox flush completed"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => error!(error = %e, "DSR verification outbox flush failed"),
+                }
+            }
+            _ = sweep_ticker.tick() => {
+                // H-6: enforce the RET-001..023 registry durations for
+                // the stores this crate owns (event tables, gdpr_exports,
+                // audit_logs via archive(), dsr outbox), advance the
+                // legally-restricted archive through expiry → deletion,
+                // and persist a retention_report row.
+                match state.retention_sweeper.run_sweep(&state.audit_logger).await {
+                    Ok(report) => {
+                        let deleted: i64 =
+                            report.categories.iter().map(|c| c.deleted).sum();
+                        let held: i64 = report
+                            .categories
+                            .iter()
+                            .map(|c| c.skipped_legal_hold)
+                            .sum();
+                        info!(
+                            deleted,
+                            skipped_legal_hold = held,
+                            exports = report.gdpr_exports_deleted,
+                            outbox_purged = report.dsr_outbox_purged,
+                            audit_archived = report.audit_logs_archived,
+                            archive_expired = report.archive_expired,
+                            archive_deleted = report.archive_deleted,
+                            archive_sources_deleted = report.archive_source_records_deleted,
+                            "Retention sweep completed — retention_report row written"
+                        );
+                    }
+                    Err(e) => error!(error = %e, "Retention sweep failed"),
+                }
+            }
+            _ = ledger_ticker.tick() => {
+                // Payroll/expense/bank statement adapters post every
+                // unposted source row idempotently (SKIP LOCKED claim
+                // + post in one transaction). Bank lines are written
+                // by POST /accounting/bank-statements/import; payroll
+                // and expense writers remain future features, and any
+                // row they (or psql) create is posted the same way.
+                // Reported whenever the tick did anything at all —
+                // including unpostable rows, which are RETAINED and
+                // must be visible to an operator.
+                match compliance::ledger_sweep::sweep_ledger_sources(&state.db).await {
+                    Ok(report) if !report.is_idle() => {
+                        info!(
+                            payroll_claimed = report.payroll.claimed,
+                            payroll_posted = report.payroll.posted,
+                            payroll_failed = report.payroll.failed,
+                            payroll_unpostable = report.payroll.unpostable,
+                            expenses_claimed = report.expenses.claimed,
+                            expenses_posted = report.expenses.posted,
+                            expenses_failed = report.expenses.failed,
+                            expenses_source_table_missing =
+                                report.expenses.source_table_missing,
+                            bank_claimed = report.bank_statement_lines.claimed,
+                            bank_posted = report.bank_statement_lines.posted,
+                            bank_already_posted =
+                                report.bank_statement_lines.already_posted,
+                            bank_failed = report.bank_statement_lines.failed,
+                            bank_unpostable = report.bank_statement_lines.unpostable,
+                            invoices_claimed = report.invoices.claimed,
+                            invoices_posted = report.invoices.posted,
+                            invoices_failed = report.invoices.failed,
+                            invoices_unpostable = report.invoices.unpostable,
+                            allocations_claimed = report.payment_allocations.claimed,
+                            allocations_posted = report.payment_allocations.posted,
+                            allocations_failed = report.payment_allocations.failed,
+                            allocations_unpostable = report.payment_allocations.unpostable,
+                            credit_notes_claimed = report.credit_notes.claimed,
+                            credit_notes_posted = report.credit_notes.posted,
+                            credit_notes_failed = report.credit_notes.failed,
+                            credit_notes_unpostable = report.credit_notes.unpostable,
+                            "Statutory ledger sweep ran"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => error!(error = %e, "Statutory ledger sweep failed"),
+                }
+            }
+            _ = obligations_ticker.tick() => {
+                // 9: derive/upsert every legal entity's statutory
+                // filing obligations (KMD/TSD/VD/OSS/annual report)
+                // over the forward year and mark pending-but-past-due
+                // rows overdue. Idempotent; the upsert only touches
+                // pending rows.
+                let today = chrono::Utc::now().date_naive();
+                match compliance::obligations::sync_all_obligations(&state.db, today).await {
+                    Ok(run) => info!(
+                        entities = run.entities,
+                        upserted = run.upserted,
+                        marked_overdue = run.marked_overdue,
+                        "Statutory obligation sync completed"
+                    ),
+                    Err(e) => error!(error = %e, "Statutory obligation sync failed"),
+                }
+            }
+        }
     }
 }
 
@@ -540,6 +637,143 @@ mod tests {
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
         task.abort();
+        let _ = state.db.close().await;
+    }
+
+    /// The `--sweep-once` entrypoint's shared ticks (live dogfood 2026-10-08:
+    /// the periodic ticks were the only DSR trigger). The expiry tick must
+    /// expire an overdue request + a stale DOI token and report the open
+    /// statutory breach; a second run proves the expiries are idempotent and
+    /// the breach stays visible; the queue tick must run the same claim path
+    /// the cron arm uses without erroring. The queue counts themselves are
+    /// NOT asserted: the test Redis is shared across concurrent test
+    /// processes, and the queue's processing semantics are covered by the
+    /// gdpr_automation suite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dsr_sweep_ticks_process_overdue_state_and_report_counts() {
+        let Some((state, _config)) = boot_state("sweep_once").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = "t-sweep-once-bin";
+
+        // The per-test clone is REUSED across runs (fresh_canonical_db keeps
+        // an existing clone), so clear this test's fixed-id fixtures first or
+        // a re-run dies on the primary key.
+        for id in ["REQ-sweep-exp", "REQ-sweep-over"] {
+            sqlx::query("DELETE FROM data_subject_requests WHERE id = $1")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .expect("clear prior request fixture");
+        }
+        sqlx::query("DELETE FROM double_opt_in_tokens WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&state.db)
+            .await
+            .expect("clear prior DOI fixture");
+
+        // An unverified request past its verification window: expires.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, received_at, statutory_due_at, expires_at)
+             VALUES ('REQ-sweep-exp', $1, 'erasure', 'exp@example.test', 'hash', false,
+                     'pending_verification', NOW() - INTERVAL '40 days', NOW() - INTERVAL '40 days',
+                     NOW() + INTERVAL '10 days', NOW() - INTERVAL '1 hour')",
+        )
+        .bind(tenant)
+        .execute(&state.db)
+        .await
+        .expect("expired-window request");
+
+        // An OPEN request past its statutory deadline (future expiry window):
+        // must be COUNTED as a breach, never silently expired.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, received_at, statutory_due_at, expires_at)
+             VALUES ('REQ-sweep-over', $1, 'access', 'over@example.test', 'hash', true,
+                     'verified', NOW() - INTERVAL '40 days', NOW() - INTERVAL '40 days',
+                     NOW() - INTERVAL '2 days', NOW() + INTERVAL '30 days')",
+        )
+        .bind(tenant)
+        .execute(&state.db)
+        .await
+        .expect("statutorily overdue request");
+
+        // A stale double-opt-in token: deleted by the expiry tick.
+        sqlx::query(
+            "INSERT INTO double_opt_in_tokens
+               (tenant_id, subscriber_id, consent_type, email, token_hash, expires_at, created_at)
+             VALUES ($1, 'sweep-gone', 'marketing', 'sweep@example.test', 'h',
+                     NOW() - INTERVAL '1 hour', NOW())",
+        )
+        .bind(tenant)
+        .execute(&state.db)
+        .await
+        .expect("stale DOI token");
+
+        let tick = dsr_expiry_tick(&state).await;
+        assert_eq!(tick.failed, 0, "no expiry step may fail: {tick:?}");
+        assert!(
+            tick.expired_requests >= 1,
+            "the overdue window must expire: {tick:?}"
+        );
+        assert!(
+            tick.expired_tokens >= 1,
+            "the stale DOI token must be deleted: {tick:?}"
+        );
+        assert!(
+            tick.statutory_overdue >= 1,
+            "the backdated open request must be reported as a breach: {tick:?}"
+        );
+
+        let expired: String = sqlx::query_scalar(
+            "SELECT status FROM data_subject_requests WHERE id = 'REQ-sweep-exp'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .expect("expired row");
+        assert_eq!(expired, "expired");
+        let kept: String = sqlx::query_scalar(
+            "SELECT status FROM data_subject_requests WHERE id = 'REQ-sweep-over'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .expect("open row");
+        assert_eq!(
+            kept, "verified",
+            "an open in-window request is never expired"
+        );
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM double_opt_in_tokens WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&state.db)
+        .await
+        .expect("remaining tokens");
+        assert_eq!(remaining, 0, "the stale token must be gone");
+
+        // Second run: expiries are idempotent; the breach stays visible.
+        let again = dsr_expiry_tick(&state).await;
+        assert_eq!(
+            (again.expired_requests, again.expired_tokens, again.failed),
+            (0, 0, 0),
+            "{again:?}"
+        );
+        assert!(
+            again.statutory_overdue >= 1,
+            "an open breach stays reported until resolved: {again:?}"
+        );
+
+        // The queue arm of the same CLI: the claim path runs without error.
+        let queue = dsr_queue_tick(&state).await;
+        assert_eq!(
+            queue.failed, 0,
+            "the queue claim path must not fail: {queue:?}"
+        );
+
         let _ = state.db.close().await;
     }
 

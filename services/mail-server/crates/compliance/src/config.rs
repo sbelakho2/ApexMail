@@ -342,8 +342,14 @@ impl ComplianceConfig {
                 // GET /gdpr/exports/{id} route, not a third-party bucket.
                 // Both URLs must ALWAYS be absolute: an empty env value
                 // (compose default) falls back to the documented default.
-                export_base_url: env_or_nonempty("GDPR_EXPORT_BASE_URL", "https://gdpr.apexmail.ee"),
-                verify_base_url: env_or_nonempty("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
+                export_base_url: env_or_nonempty(
+                    "GDPR_EXPORT_BASE_URL",
+                    "https://gdpr.apexmail.ee",
+                ),
+                verify_base_url: env_or_nonempty(
+                    "GDPR_VERIFY_BASE_URL",
+                    "https://gdpr.apexmail.ee",
+                ),
                 consent_signing_key: env_or("CONSENT_SIGNING_KEY", ""),
                 access_request_max_messages: env_i64("GDPR_ACCESS_MAX_MESSAGES", 10_000),
                 system_from_address: env_or("COMPLIANCE_SYSTEM_FROM", "noreply@apexmail.ee"),

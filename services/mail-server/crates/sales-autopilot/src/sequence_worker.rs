@@ -5923,11 +5923,11 @@ mod tests {
         let Some(fx) = fixture("email_stack_auth", "allowed", "EE").await else {
             return;
         };
-        let handler = fx
-            .handler()
-            .with_email_stack_observer(Arc::new(ScriptedEmailStackObserver {
-                observations: authenticated_stack(),
-            }));
+        let handler =
+            fx.handler()
+                .with_email_stack_observer(Arc::new(ScriptedEmailStackObserver {
+                    observations: authenticated_stack(),
+                }));
         let ctx = handler
             .load_context(fx.step_execution)
             .await
@@ -6023,7 +6023,10 @@ mod tests {
              VALUES ($1, 'Other tenant', $2, 'free', 'active')",
         )
         .bind(&other_tenant)
-        .bind(format!("other-{}", &Uuid::new_v4().simple().to_string()[..8]))
+        .bind(format!(
+            "other-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        ))
         .execute(&fx.db)
         .await
         .expect("insert other tenant");

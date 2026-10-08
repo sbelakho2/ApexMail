@@ -742,33 +742,35 @@ fn cp_row_actions(
     let mut collected_forms: Vec<String> = Vec::new();
     // Helper: (form, button) pair. Forms go to the sibling collector; only
     // the button lands in the row cell.
-    let make_action =
-        |forms: &mut Vec<String>, label: &str, target: &str, destructive: bool| {
-            let classes = if destructive {
-                "rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10"
-            } else {
-                "rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent"
-            };
-            let form_id = format!(
-                "cp-row-{}-{}",
-                html_escape(&row.id),
-                html_escape(&target.trim_start_matches('/').replace('/', "-"))
-            );
-            forms.push(format!(
+    let make_action = |forms: &mut Vec<String>, label: &str, target: &str, destructive: bool| {
+        let classes = if destructive {
+            "rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10"
+        } else {
+            "rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent"
+        };
+        let form_id = format!(
+            "cp-row-{}-{}",
+            html_escape(&row.id),
+            html_escape(&target.trim_start_matches('/').replace('/', "-"))
+        );
+        forms.push(format!(
                 "<form method=\"post\" action=\"{target}\" id=\"{form_id}\"><input type=\"hidden\" name=\"id\" value=\"{id}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /></form>",
                 form_id = form_id,
                 target = html_escape(target),
                 id = html_escape(&row.id),
                 base = html_escape(base_path),
             ));
-            format!(
+        format!(
                 "<button type=\"submit\" form=\"{form_id}\" class=\"inline-flex items-center justify-center whitespace-nowrap {classes} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
                 form_id = form_id,
                 classes = classes,
                 label = html_escape(label),
             )
-        };
-    let push_confirm_delete = |forms: &mut Vec<String>, buttons: &mut Vec<String>, intent: &str, return_to: &str| {
+    };
+    let push_confirm_delete = |forms: &mut Vec<String>,
+                               buttons: &mut Vec<String>,
+                               intent: &str,
+                               return_to: &str| {
         let form_id = format!("row-delete-{}", html_escape(&row.id));
         forms.push(format!(
             "<form method=\"get\" action=\"/confirm\" id=\"{form_id}\"><input type=\"hidden\" name=\"intent\" value=\"{intent}\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"{return_to}\"></form>",
@@ -869,7 +871,12 @@ fn cp_row_actions(
                 ));
             }
             if matches!(status.as_str(), "pending" | "active" | "suspended") {
-                push_confirm_delete(&mut collected_forms, &mut buttons, "delete-tenant", "/tenants");
+                push_confirm_delete(
+                    &mut collected_forms,
+                    &mut buttons,
+                    "delete-tenant",
+                    "/tenants",
+                );
             }
             if buttons.is_empty() {
                 None
@@ -1231,7 +1238,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     };
 
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div>{eyebrow}<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div>{primary_action}</div>{kpis}{filters}{table_section}</div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div>{eyebrow}<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div>{primary_action}</div>{kpis}{filters}{action_form}{table_section}</div>",
         breadcrumbs = breadcrumbs,
         eyebrow = eyebrow,
         title = html_escape(&data.title),
@@ -1239,6 +1246,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         primary_action = primary_action,
         kpis = kpi_cards,
         filters = filters_html,
+        action_form = data.action_form_html,
         table_section = table_section,
     )
 }
@@ -1263,6 +1271,7 @@ fn render_campaign_editor_page(
     breadcrumb_label: &str,
     return_href: &str,
     primary_action_label: &str,
+    campaign_id: Option<&str>,
 ) -> String {
     render_campaign_editor_page_with_data(
         title,
@@ -1270,7 +1279,7 @@ fn render_campaign_editor_page(
         return_href,
         primary_action_label,
         &Default::default(),
-        None,
+        campaign_id,
     )
 }
 
@@ -1407,7 +1416,12 @@ fn render_campaign_editor_page_with_data(
     let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{}</button>", primary_action_label);
 
     let hidden_id = campaign_id
-        .map(|id| format!("<input type=\"hidden\" name=\"id\" value=\"{}\" />", html_escape(id)))
+        .map(|id| {
+            format!(
+                "<input type=\"hidden\" name=\"id\" value=\"{}\" />",
+                html_escape(id)
+            )
+        })
         .unwrap_or_default();
     // Identity-preserving saves: edit mode POSTs to the update handler so the
     // existing row is updated instead of silently creating a duplicate.
@@ -3585,13 +3599,28 @@ pub fn web_message_timeline_page() -> String {
         .to_string()
 }
 
-/// Campaign edit page.
+/// Campaign edit page. When `campaign_id` is present the form POSTs to
+/// `/web/campaigns/update` (identity-preserving save); without an id it is
+/// the create-shaped fallback and POSTs to `/web/campaigns`.
 pub fn web_campaign_edit_page() -> String {
     render_campaign_editor_page(
         "Edit Campaign",
         "Edit Campaign",
         CAMPAIGNS_RETURN_HREF,
         "Save Changes",
+        None,
+    )
+}
+
+/// Campaign edit page bound to a known row id (extracted from the route
+/// path when full editor data is not loaded).
+pub fn web_campaign_edit_page_for_id(campaign_id: &str) -> String {
+    render_campaign_editor_page(
+        "Edit Campaign",
+        "Edit Campaign",
+        CAMPAIGNS_RETURN_HREF,
+        "Save Changes",
+        Some(campaign_id),
     )
 }
 
@@ -5198,6 +5227,57 @@ pub fn web_settings_api_keys_page() -> String {
     )
 }
 
+/// API-key creation form, composed beside the live keys table so a
+/// data-backed page never drops the create affordance.
+pub fn api_key_create_form_html() -> String {
+    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/api-keys\">\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"api-key-name\">Key name</label>\
+<input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"Production sender\" /></div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Create API Key</button>\
+</form>"
+        .to_string()
+}
+
+/// Team invitation form, composed beside the live membership table.
+pub fn team_invite_form_html() -> String {
+    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/team/invite\">\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"team-invite-email\">Email</label>\
+<input id=\"team-invite-email\" name=\"email\" type=\"email\" required class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"colleague@company.com\" /></div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Send invitation</button>\
+<p class=\"text-xs text-muted-foreground\">Submitting creates an invitation record and sends an activation email.</p>\
+</form>"
+        .to_string()
+}
+
+/// Webhook registration form, composed beside the live endpoint table.
+pub fn webhook_register_form_html() -> String {
+    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/webhooks\">\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"webhook-url\">Endpoint URL</label>\
+<input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Register endpoint</button>\
+</form>"
+        .to_string()
+}
+
+/// Dedicated-IP request form, composed beside the live IP table.
+pub fn dedicated_ip_request_form_html() -> String {
+    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/dedicated-ips/request\">\
+<p class=\"text-sm text-muted-foreground\">Request a dedicated IP. Eligibility depends on plan and sending volume; provisioning is confirmed by support.</p>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Request dedicated IP</button>\
+</form>"
+        .to_string()
+}
+
+/// Billing action form: plan-change / invoice request affordance kept
+/// beside live billing rows.
+pub fn billing_action_form_html() -> String {
+    "<div class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-3\">\
+<p class=\"text-sm text-muted-foreground\">Plan changes and invoice downloads are completed through the billing portal. Submitting logs a request — it does not charge the account.</p>\
+<a href=\"/settings/billing/portal\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Open billing portal</a>\
+</div>"
+        .to_string()
+}
+
 /// Team settings page.
 pub fn web_settings_team_page() -> String {
     let table = Table {
@@ -5704,18 +5784,15 @@ pub fn control_plane_tenants_new_page_with_data(
     // `None` (no data) and `Some(unavailable)` share the honest failure
     // render; an empty catalog is equally unusable — a create would have no
     // verifiable plan to land on.
-    let catalog_usable = matches!(data, Some(TenantNewPageData { unavailable: false, plans }) if !plans.is_empty());
+    let catalog_usable =
+        matches!(data, Some(TenantNewPageData { unavailable: false, plans }) if !plans.is_empty());
     let (plan_field, submit) = if catalog_usable {
         let plans = data.map(|d| d.plans.as_slice()).unwrap_or(&[]);
         let options = plans
             .iter()
             .map(|plan| {
                 let label = format_plan_option_label(&plan.display_name, plan.email_limit);
-                let selected = if plan.name == "free" {
-                    " selected"
-                } else {
-                    ""
-                };
+                let selected = if plan.name == "free" { " selected" } else { "" };
                 format!(
                     "<option value=\"{}\"{}>{}</option>",
                     html_escape(&plan.name),
@@ -5809,6 +5886,146 @@ pub fn control_plane_tenants_new_page_with_data(
         .render_html(),
         plan_field = plan_field,
         submit = submit,
+    )
+}
+
+/// `/tenants/{id}` — the control-plane tenant detail page with the audited
+/// plan-change form (lane C C1: the plan change had NO SSR surface; the CP
+/// could only read the plan column).
+///
+/// The select binds to the ACTIVE billing catalog and preselects the
+/// tenant's EFFECTIVE plan (an active `plan_overrides` row wins — the same
+/// precedence the entitlement resolver applies). The POST performs the
+/// audited plan-override upsert plus the `tenants.plan` projection, so the
+/// change is both immediately effective and visible in the canonical column.
+///
+/// `None`/`unavailable` renders the honest read-failure state: no select,
+/// no submit — never a form whose POST could not be validated.
+pub fn control_plane_tenant_detail_page_with_data(
+    data: Option<&crate::view_data::TenantDetailPageData>,
+) -> String {
+    use crate::view_data::TenantDetailPageData;
+
+    let usable = matches!(
+        data,
+        Some(TenantDetailPageData {
+            unavailable: false,
+            ..
+        })
+    );
+
+    let (identity, plan_form) = match data.filter(|_| usable) {
+        Some(tenant) => {
+            // A readable tenant with an UNREADABLE catalog must not submit an
+            // unverifiable plan: render the honest unavailable state (the
+            // tenant's current plan as a read-only line, no select, no
+            // button) — the same shape the create form uses.
+            let catalog_usable = !tenant.plans.is_empty();
+            let mut options = tenant
+                .plans
+                .iter()
+                .map(|plan| {
+                    let label = format_plan_option_label(&plan.display_name, plan.email_limit);
+                    format!(
+                        "<option value=\"{}\"{}>{}</option>",
+                        html_escape(&plan.name),
+                        if plan.name == tenant.plan {
+                            " selected"
+                        } else {
+                            ""
+                        },
+                        html_escape(&label),
+                    )
+                })
+                .collect::<String>();
+            // The effective plan must always be the selected option: a
+            // bounded/partial catalog that omits it would otherwise render an
+            // unselected select that misstates what the tenant is on. The
+            // loader prepends it in every normal case; this arm keeps the
+            // invariant even for a caller that passes a partial list.
+            if catalog_usable
+                && !tenant.plan.is_empty()
+                && !tenant.plans.iter().any(|plan| plan.name == tenant.plan)
+            {
+                options = format!(
+                    "<option value=\"{}\" selected>{}</option>{}",
+                    html_escape(&tenant.plan),
+                    html_escape(&tenant.plan),
+                    options,
+                );
+            }
+            let plan_field = if catalog_usable {
+                format!(
+                    "<div class=\"apex-field\"><label for=\"tenant-plan\">Plan</label><select id=\"tenant-plan\" name=\"plan\" required class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px]\">{options}</select><p class=\"text-xs text-surface-600\">Changing the plan applies its entitlements immediately and writes an audited plan override.</p></div>"
+                )
+            } else {
+                format!(
+                    "<div class=\"apex-field\"><p class=\"text-sm\"><span class=\"apex-cp-stat-label\">Current plan</span> <span class=\"apex-mono text-xs\">{current}</span></p><select id=\"tenant-plan\" name=\"plan\" disabled class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] opacity-60\"><option>Plan catalog unavailable</option></select><p class=\"text-xs text-surface-600\">The billing plan catalog could not be read, so the plan cannot be changed right now.</p></div>",
+                    current = html_escape(&tenant.plan),
+                )
+            };
+            let submit = if catalog_usable {
+                Button {
+                    variant: "default",
+                    size: "default",
+                    label: "Change Plan",
+                    disabled: false,
+                    loading: false,
+                    left_icon: None,
+                    right_icon: None,
+                    submit: true,
+                }
+                .render_html()
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "<dl class=\"grid gap-2 text-sm\"><div class=\"flex gap-2\"><dt class=\"apex-cp-stat-label\">Slug</dt><dd class=\"apex-mono text-xs\">{slug}</dd></div><div class=\"flex gap-2\"><dt class=\"apex-cp-stat-label\">Status</dt><dd>{status}</dd></div><div class=\"flex gap-2\"><dt class=\"apex-cp-stat-label\">Created</dt><dd>{created}</dd></div></dl>",
+                    slug = html_escape(&tenant.slug),
+                    status = html_escape(&tenant.status),
+                    created = html_escape(&tenant.created),
+                ),
+                format!(
+                    "<form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/tenants/{id}/plan\" data-form-id=\"tenant-plan\"><h2 class=\"apex-panel-title\">Plan</h2>{plan_field}<div class=\"flex gap-3\">{submit}</div></form>",
+                    id = html_escape(&tenant.id),
+                ),
+            )
+        }
+        None => {
+            // Two distinct honest states: an ABSENT tenant is not a service
+            // problem, a failed read is — the copy must not swap them.
+            let missing = data.is_some_and(|tenant| tenant.missing);
+            let note = if missing {
+                "<p class=\"text-sm\">No tenant with this id exists in the control plane. It may have been deleted — the tenant list shows the current workspaces.</p>"
+            } else {
+                "<p class=\"text-sm\">The tenant could not be read, so the plan cannot be shown or changed right now. This is a service problem, not a missing tenant — try again shortly.</p>"
+            };
+            (
+                String::new(),
+                format!("<div class=\"apex-panel\"><h2 class=\"apex-panel-title\">Plan</h2>{note}</div>"),
+            )
+        }
+    };
+
+    let heading = match data.filter(|_| usable) {
+        Some(tenant) => html_escape(&tenant.name),
+        None => {
+            if data.is_some_and(|tenant| tenant.missing) {
+                "Tenant not found".to_string()
+            } else {
+                "Tenant".to_string()
+            }
+        }
+    };
+
+    format!(
+        "<div class=\"max-w-2xl space-y-6\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{heading}</h1>\
+{identity}\
+{plan_form}\
+<a class=\"text-sm font-medium underline\" href=\"/tenants\">&larr; All tenants</a>\
+</div>"
     )
 }
 
@@ -8769,10 +8986,14 @@ mod tests {
         };
         let html = control_plane_jobs_page_with_data(Some(&data));
         // Retry exists for the dead-lettered row only.
-        assert!(html.contains("action=\"/web/admin/jobs/11111111-1111-1111-1111-111111111111/retry\""));
+        assert!(
+            html.contains("action=\"/web/admin/jobs/11111111-1111-1111-1111-111111111111/retry\"")
+        );
         assert!(!html.contains("22222222-2222-2222-2222-222222222222/retry"));
         // Cancel exists for the unclaimed pending row only.
-        assert!(html.contains("action=\"/web/admin/jobs/22222222-2222-2222-2222-222222222222/cancel\""));
+        assert!(
+            html.contains("action=\"/web/admin/jobs/22222222-2222-2222-2222-222222222222/cancel\"")
+        );
         assert!(!html.contains("11111111-1111-1111-1111-111111111111/cancel"));
         // In-flight and terminal rows carry an explicit, non-actionable note.
         assert!(html.contains("In flight"));
@@ -8811,6 +9032,111 @@ mod tests {
         assert!(html.contains("could not be read"));
         assert!(!html.contains("/retry"));
         assert!(!html.contains("/cancel"));
+    }
+
+    /// Lane C C1 (final live-verification wave, 2026-10-08): the tenant
+    /// detail page must bind the catalog plan select with the tenant's
+    /// effective plan preselected, and must render NO select/submit when the
+    /// tenant or the catalog could not be read.
+    #[test]
+    fn cp_tenant_detail_renders_the_catalog_plan_select() {
+        use crate::view_data::{TenantDetailPageData, TenantDetailPlanChoiceData};
+        let data = TenantDetailPageData {
+            id: "tenant_abc".into(),
+            name: "Acme Corp".into(),
+            slug: "acme".into(),
+            plan: "growth".into(),
+            status: "active".into(),
+            created: "2 days ago".into(),
+            plans: vec![
+                TenantDetailPlanChoiceData {
+                    name: "free".into(),
+                    display_name: "Free".into(),
+                    email_limit: 3_000,
+                },
+                TenantDetailPlanChoiceData {
+                    name: "growth".into(),
+                    display_name: "Growth".into(),
+                    email_limit: 500_000,
+                },
+                TenantDetailPlanChoiceData {
+                    name: "enterprise".into(),
+                    display_name: "Enterprise Cloud".into(),
+                    email_limit: 0,
+                },
+            ],
+            unavailable: false,
+            missing: false,
+        };
+        let html = control_plane_tenant_detail_page_with_data(Some(&data));
+        assert!(html.contains("action=\"/web/admin/tenants/tenant_abc/plan\""));
+        assert!(html.contains("Acme Corp"));
+        assert!(html.contains("value=\"free\""));
+        assert!(
+            html.contains("value=\"growth\" selected"),
+            "the EFFECTIVE plan must be the selected option"
+        );
+        assert!(html.contains("Growth — 500K emails / mo"));
+        // A non-positive limit means unlimited: no fabricated number.
+        assert!(html.contains(">Enterprise Cloud</option>"));
+        // The form is catalog-bound and submits the plan name token.
+        assert!(html.contains("name=\"plan\""));
+
+        // No data / unavailable: honest copy, NO select, NO submit, NO
+        // form action that could POST an unvalidated plan.
+        for empty in [
+            None,
+            Some(TenantDetailPageData {
+                unavailable: true,
+                ..Default::default()
+            }),
+        ] {
+            let html = control_plane_tenant_detail_page_with_data(empty.as_ref());
+            assert!(html.contains("could not be read"));
+            assert!(!html.contains("<select"));
+            assert!(!html.contains("/plan\""));
+            assert!(!html.contains("Change Plan"));
+        }
+
+        // A readable tenant with an unreadable catalog must not submit.
+        let no_catalog = TenantDetailPageData {
+            id: "tenant_abc".into(),
+            name: "<img src=x onerror=alert(1)>".into(),
+            slug: "acme".into(),
+            plan: "growth".into(),
+            status: "active".into(),
+            created: "now".into(),
+            plans: vec![],
+            unavailable: false,
+            missing: false,
+        };
+        let html = control_plane_tenant_detail_page_with_data(Some(&no_catalog));
+        assert!(!html.contains("<img src=x onerror=alert(1)>"));
+        assert!(html.contains("Plan catalog unavailable"));
+        assert!(!html.contains("Change Plan"));
+
+        // An ABSENT tenant must say so (never "service problem"); a failed
+        // read keeps the service copy.
+        let missing = TenantDetailPageData {
+            id: "tenant_gone".into(),
+            unavailable: true,
+            missing: true,
+            ..Default::default()
+        };
+        let html = control_plane_tenant_detail_page_with_data(Some(&missing));
+        assert!(html.contains("Tenant not found"));
+        assert!(html.contains("No tenant with this id exists"));
+        assert!(!html.contains("service problem"));
+        assert!(!html.contains("Change Plan"));
+
+        let failed = TenantDetailPageData {
+            id: "tenant_abc".into(),
+            unavailable: true,
+            ..Default::default()
+        };
+        let html = control_plane_tenant_detail_page_with_data(Some(&failed));
+        assert!(html.contains("service problem"));
+        assert!(!html.contains("No tenant with this id exists"));
     }
 
     #[test]

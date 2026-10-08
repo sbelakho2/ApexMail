@@ -23,8 +23,7 @@ fn corpus(name: &str) -> serde_json::Value {
     let path = eval_dir().join(name);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
 }
 
 fn string_set(value: &serde_json::Value, pointer: &str) -> BTreeSet<String> {
@@ -169,7 +168,9 @@ fn chat_corpus_covers_the_canonical_plan_facts() {
 
 /// `1,750`-style rendering of an integer for corpus comparison.
 fn format_number(value: &str) -> String {
-    let (sign, digits) = value.strip_prefix('-').map_or(("", value), |rest| ("-", rest));
+    let (sign, digits) = value
+        .strip_prefix('-')
+        .map_or(("", value), |rest| ("-", rest));
     let mut out = String::new();
     let chars: Vec<char> = digits.chars().collect();
     for (index, ch) in chars.iter().enumerate() {

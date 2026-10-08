@@ -124,8 +124,8 @@ async fn main() -> anyhow::Result<()> {
     // the inbound webhook transport secret is absent — the sweep itself
     // needs only Postgres plus the Redis pool.
     if cli.sweep_overage_only {
-        let redis = deadpool_redis::Config::from_url(&cli.redis_url)
-            .create_pool(Some(Runtime::Tokio1))?;
+        let redis =
+            deadpool_redis::Config::from_url(&cli.redis_url).create_pool(Some(Runtime::Tokio1))?;
         let config = BillingConfig {
             database_url: cli.database_url,
             redis_url: cli.redis_url,

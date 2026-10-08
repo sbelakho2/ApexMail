@@ -129,7 +129,10 @@ async fn build_return_package(
     .await
     .map_err(|error| {
         tracing::error!(error = %error, "filing return lookup failed");
-        err_json(StatusCode::INTERNAL_SERVER_ERROR, "failed to load the return")
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to load the return",
+        )
     })?;
     let Some(period) = period else {
         return Err(err_json(StatusCode::NOT_FOUND, "return not found"));
@@ -187,7 +190,9 @@ async fn verify_package(
         }
     };
     match filing_transport::verify_package_row(&state.db, package_id).await {
-        Ok(()) => Ok(ok_json(json!({ "packageId": package_id, "verified": true }))),
+        Ok(()) => Ok(ok_json(
+            json!({ "packageId": package_id, "verified": true }),
+        )),
         Err(error) => Err(err_json(StatusCode::UNPROCESSABLE_ENTITY, &error)),
     }
 }
@@ -261,7 +266,10 @@ async fn validate_kmd_inf_annex(
                 "submittable": false,
             })))
         }
-        Err(error) => Err(err_json(StatusCode::UNPROCESSABLE_ENTITY, &error.to_string())),
+        Err(error) => Err(err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &error.to_string(),
+        )),
     }
 }
 

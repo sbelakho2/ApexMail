@@ -722,10 +722,9 @@ async fn run_worker(
             // their optimal engagement window (documented Pro+ contract). The
             // engine reads the tenant-scoped `events` profile and caches
             // windows in Redis.
-            .with_send_time_optimizer(analytics::send_time_optimizer::SendTimeOptimizer::new(
-                db.clone(),
-                redis.clone(),
-            )),
+            .with_send_time_optimizer(
+                analytics::send_time_optimizer::SendTimeOptimizer::new(db.clone(), redis.clone()),
+            ),
         );
         let interval_secs = automation_tick_secs();
         info!(

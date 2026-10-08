@@ -177,10 +177,7 @@ pub enum AbVerdict {
     },
     /// The experiment cannot honestly name a winner yet. `code` is the
     /// stable machine reason; `reason` is the human sentence to surface.
-    Refused {
-        code: &'static str,
-        reason: String,
-    },
+    Refused { code: &'static str, reason: String },
 }
 
 impl AbVerdict {
@@ -373,8 +370,14 @@ mod tests {
 
     #[test]
     fn all_zero_or_all_one_successes_have_no_signal() {
-        assert_eq!(decide_winner(&[arm(0, 100, 0), arm(1, 100, 0)]).code(), "no_signal");
-        assert_eq!(decide_winner(&[arm(0, 100, 100), arm(1, 100, 100)]).code(), "no_signal");
+        assert_eq!(
+            decide_winner(&[arm(0, 100, 0), arm(1, 100, 0)]).code(),
+            "no_signal"
+        );
+        assert_eq!(
+            decide_winner(&[arm(0, 100, 100), arm(1, 100, 100)]).code(),
+            "no_signal"
+        );
     }
 
     #[test]

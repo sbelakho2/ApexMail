@@ -49,32 +49,61 @@ use uuid::Uuid;
 /// ("what does the DPA cover?") deliberately do NOT match: only an explicit
 /// request to exercise a right opens a statutory request.
 const ERASURE_TOKENS: &[&str] = &[
-    "article 17", "art. 17", "right to erasure", "right to be forgotten",
-    "erase my data", "erase my personal data", "delete my data",
-    "delete my personal data", "deletion of my personal data",
-    "remove all my personal data", "löschen sie meine daten",
-    "löschung meiner daten", "effacement de mes données",
-    "derecho al olvido", "borrado de mis datos",
+    "article 17",
+    "art. 17",
+    "right to erasure",
+    "right to be forgotten",
+    "erase my data",
+    "erase my personal data",
+    "delete my data",
+    "delete my personal data",
+    "deletion of my personal data",
+    "remove all my personal data",
+    "löschen sie meine daten",
+    "löschung meiner daten",
+    "effacement de mes données",
+    "derecho al olvido",
+    "borrado de mis datos",
 ];
 const PORTABILITY_TOKENS: &[&str] = &[
-    "article 20", "art. 20", "data portability", "portability of my data",
-    "portable copy of my data", "datenübertragbarkeit",
+    "article 20",
+    "art. 20",
+    "data portability",
+    "portability of my data",
+    "portable copy of my data",
+    "datenübertragbarkeit",
 ];
 const ACCESS_TOKENS: &[&str] = &[
-    "article 15", "art. 15", "subject access request", "data subject request",
-    "dsar", "access my data", "copy of my data", "copy of all my data",
-    "auskunftsersuchen", "demande d'accès",
+    "article 15",
+    "art. 15",
+    "subject access request",
+    "data subject request",
+    "dsar",
+    "access my data",
+    "copy of my data",
+    "copy of all my data",
+    "auskunftsersuchen",
+    "demande d'accès",
 ];
 const RECTIFICATION_TOKENS: &[&str] = &[
-    "article 16", "art. 16", "rectification", "correct my personal data",
+    "article 16",
+    "art. 16",
+    "rectification",
+    "correct my personal data",
     "berichtigung",
 ];
 const RESTRICTION_TOKENS: &[&str] = &[
-    "article 18", "art. 18", "restrict processing", "restriction of processing",
+    "article 18",
+    "art. 18",
+    "restrict processing",
+    "restriction of processing",
     "einschränkung der verarbeitung",
 ];
 const OBJECTION_TOKENS: &[&str] = &[
-    "article 21", "art. 21", "object to processing", "objection to processing",
+    "article 21",
+    "art. 21",
+    "object to processing",
+    "objection to processing",
     "widerspruch gegen die verarbeitung",
 ];
 
@@ -298,20 +327,47 @@ mod tests {
     #[test]
     fn detector_names_each_right_and_stays_narrow() {
         let cases = [
-            ("Re: my data", "Under GDPR Article 17 I request erasure of all personal data you hold about me.", "erasure"),
+            (
+                "Re: my data",
+                "Under GDPR Article 17 I request erasure of all personal data you hold about me.",
+                "erasure",
+            ),
             ("Re: GDPR", "Please delete my personal data.", "erasure"),
-            ("Re: data", "I request portability of my data under Article 20.", "portability"),
-            ("Re: GDPR", "This is a data subject request for a copy of my data.", "access"),
-            ("Re: my details", "I want rectification of my personal data.", "rectification"),
-            ("Re: processing", "I request restriction of processing under Art. 18.", "restriction"),
-            ("Re: marketing", "I object to processing under Article 21.", "objection"),
+            (
+                "Re: data",
+                "I request portability of my data under Article 20.",
+                "portability",
+            ),
+            (
+                "Re: GDPR",
+                "This is a data subject request for a copy of my data.",
+                "access",
+            ),
+            (
+                "Re: my details",
+                "I want rectification of my personal data.",
+                "rectification",
+            ),
+            (
+                "Re: processing",
+                "I request restriction of processing under Art. 18.",
+                "restriction",
+            ),
+            (
+                "Re: marketing",
+                "I object to processing under Article 21.",
+                "objection",
+            ),
         ];
         for (subject, body, expected) in cases {
             assert_eq!(detect(subject, body), Some(expected), "body: {body}");
         }
         // Ordinary customer-service mail must NOT open a statutory request.
         for (subject, body) in [
-            ("Re: pricing", "What does the DPA cover, and is GDPR compliance included?"),
+            (
+                "Re: pricing",
+                "What does the DPA cover, and is GDPR compliance included?",
+            ),
             ("Re: security", "Is my data encrypted at rest?"),
             ("Re: support", "How do I export a campaign report?"),
         ] {

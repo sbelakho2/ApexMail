@@ -1,0 +1,17 @@
+HTTP/1.1 303 See Other
+location: /login?next=%2Fdashboard
+x-api-version: v1
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-frame-options: DENY
+x-content-type-options: nosniff
+x-xss-protection: 0
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=()
+x-request-id: 07a236f3-607a-4ab6-9c05-87dac82aa9b1
+x-correlation-id: corr-ed2072ed-8850-49d4-947e-d41dc322450b
+vary: origin, access-control-request-method, access-control-request-headers
+transfer-encoding: chunked
+date: Thu, 08 Oct 2026 19:54:05 GMT
+

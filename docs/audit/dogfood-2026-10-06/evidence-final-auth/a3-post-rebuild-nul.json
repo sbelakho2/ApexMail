@@ -1,0 +1,1 @@
+{"error":{"code":"VALIDATION_ERROR","details":["template bodies must not contain NUL characters"],"message":"validation failed","requestId":"e4b1d5a7-c972-42a7-bfe7-752bf2a75716"}}

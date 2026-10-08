@@ -633,8 +633,9 @@ mod tests {
                 ),
             "the enterprise scrape job must carry the bearer authorization block:\n{job_block}"
         );
-        let token = std::fs::read_to_string(root.join("deploy/monitoring/enterprise_metrics_token"))
-            .expect("the dev credential file must be committed");
+        let token =
+            std::fs::read_to_string(root.join("deploy/monitoring/enterprise_metrics_token"))
+                .expect("the dev credential file must be committed");
         assert_eq!(
             token.trim(),
             "dev-enterprise-metrics-token-change-me",

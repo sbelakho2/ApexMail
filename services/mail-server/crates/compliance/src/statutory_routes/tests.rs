@@ -75,7 +75,10 @@ async fn seed_oss_return(pool: &sqlx::PgPool) -> Uuid {
          VALUES ($1, '2026-01', $2, 'tenant-1', 'DE', 'DE', 10000, 24.0, 2400, 'EUR')",
     )
     .bind(registration_id)
-    .bind(format!("supply-{}", &Uuid::new_v4().simple().to_string()[..8]))
+    .bind(format!(
+        "supply-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+    ))
     .execute(pool)
     .await
     .expect("insert OSS supply entry");
@@ -90,14 +93,7 @@ async fn statutory_routes_are_mounted_and_gated() {
         return;
     };
 
-    let (status, _) = send(
-        &app,
-        "GET",
-        "/statutory/filings/human-tasks",
-        None,
-        None,
-    )
-    .await;
+    let (status, _) = send(&app, "GET", "/statutory/filings/human-tasks", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     let (status, body) = send(
@@ -439,8 +435,8 @@ async fn kmd_inf_validation_route_exercises_the_builder() {
     assert_eq!(body["data"]["submittable"], false, "{body}");
     let gaps = body["data"]["namedGaps"].as_array().expect("named gaps");
     assert!(
-        gaps.iter().any(|gap| gap["field"]
-            == crate::filing_package::KMD_INF_DERIVATION_GAP),
+        gaps.iter()
+            .any(|gap| gap["field"] == crate::filing_package::KMD_INF_DERIVATION_GAP),
         "the derivation gap must be stated: {body}"
     );
     assert!(body["data"]["package"]["payload"].is_object(), "{body}");

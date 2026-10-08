@@ -2505,10 +2505,7 @@ mod tests {
             .oneshot(json_request_with_headers(
                 "/admin/chat/history",
                 serde_json::json!({ "limit": 50 }),
-                &[
-                    ("x-api-key", "test-key"),
-                    ("x-apexmail-tenant-id", &tenant),
-                ],
+                &[("x-api-key", "test-key"), ("x-apexmail-tenant-id", &tenant)],
             ))
             .await
             .unwrap();

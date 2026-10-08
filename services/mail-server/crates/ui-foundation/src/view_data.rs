@@ -179,6 +179,10 @@ pub struct ListPageData {
     /// Honest empty state copy.
     pub empty_title: String,
     pub empty_description: String,
+    /// Creation/invitation action form composed WITH the live table (so a
+    /// data-backed page never drops the create affordance the handwritten
+    /// counterpart has). Empty ⇒ no extra form.
+    pub action_form_html: String,
 }
 
 impl ListPageData {
@@ -589,6 +593,52 @@ pub struct TenantPlanChoiceData {
 pub struct TenantNewPageData {
     pub plans: Vec<TenantPlanChoiceData>,
     pub unavailable: bool,
+}
+
+/// One selectable plan on the `/tenants/{id}` detail plan select. The value
+/// is the catalog `plans.name` — the exact token the plan-change handler
+/// validates against — so the select can only submit plans that resolve
+/// entitlements.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantDetailPlanChoiceData {
+    pub name: String,
+    /// Human catalog name (`plans.display_name`).
+    pub display_name: String,
+    /// Included monthly email volume (`plans.email_limit`); 0/negative means
+    /// unlimited — the option label then carries no number.
+    pub email_limit: i64,
+}
+
+/// `/tenants/{id}` control-plane detail page (lane C C1): the tenant's
+/// identity plus the catalog-bound plan-change form.
+///
+/// The plan select's preselection is the tenant's EFFECTIVE plan: an active
+/// `plan_overrides` row takes precedence over `tenants.plan`, matching the
+/// precedence the entitlement resolver applies, so the form shows the plan
+/// actually in force.
+///
+/// `unavailable` is the honest read-failure state: the page then renders the
+/// unavailable note and NO select/submit (never a form whose POST could not
+/// be validated against the catalog).
+///
+/// `missing` distinguishes an ABSENT tenant (the id resolved to no row) from
+/// a failed read — the two states carry different copy, because "no such
+/// workspace" is not a service problem.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TenantDetailPageData {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    /// The tenant's effective plan (`plan_overrides` when active, else
+    /// `tenants.plan`).
+    pub plan: String,
+    pub status: String,
+    /// Preformatted created-at line (same shape the list rows render).
+    pub created: String,
+    pub plans: Vec<TenantDetailPlanChoiceData>,
+    pub unavailable: bool,
+    /// The id resolved to no tenant row (as opposed to a read failure).
+    pub missing: bool,
 }
 
 /// One row of the control-plane `/jobs` surface (F13): the canonical
