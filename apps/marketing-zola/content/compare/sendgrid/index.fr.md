@@ -29,8 +29,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DÉLIVRABILITÉ", rows = [
-    { feature = "Taux de livraison", apex = '<span class="text-brand-600 font-semibold">Élevé</span>', comp = '<span class="text-surface-600">Élevé</span>', winner = "none" },
-    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business</span>', comp = '<span class="text-surface-600">Pro : €82.75 (US$89.95)/mois ; IP dédiées sur demande</span>', winner = "none" },
+    { feature = "Taux de livraison", apex = '<span class="text-surface-600 font-semibold">Non directement comparable (mesure définie par le fournisseur)</span>', comp = '<span class="text-surface-600">Non directement comparable (mesure définie par le fournisseur)</span>', winner = "none" },
+    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business ; 3 sur Enterprise Cloud</span>', comp = '<span class="text-surface-600">Pro : €82.75 (US$89.95)/mois ; IP dédiées sur demande</span>', winner = "none" },
     { feature = "Réchauffement IP", apex = '<span class="text-brand-600 font-semibold">Automatique</span>', comp = '<span class="text-surface-600">Automatique</span>', winner = "tie" },
     { feature = "Rotation DKIM", apex = '<span class="text-brand-600 font-semibold">Automatique configurable</span>', comp = '<span class="text-surface-600">Manuelle</span>', winner = "none" },
     { feature = "Disjoncteur de réputation", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -52,7 +52,7 @@ comparison_sections = [
   ]},
   { title = "TARIFS", rows = [
     { feature = "Offre gratuite", apex = '<span class="text-brand-600 font-semibold">3 000 emails/mois + allocation de lancement unique de 30 000</span>', comp = '<span class="text-surface-600">100 emails/jour</span>', winner = "none" },
-    { feature = "100K emails/mois", apex = '<span class="text-brand-600 font-semibold">€65 (Pro : 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro ; Essentials à partir de €18.35 (US$19.95)</span>', winner = "apexmail" },
+    { feature = "100K emails/mois", apex = '<span class="text-brand-600 font-semibold">€89 (Pro : 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro ; Essentials à partir de €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO inclus", apex = '<span class="text-brand-600 font-semibold">Forfaits Business et Enterprise</span>', comp = '<span class="text-surface-600">Inclus sur Pro</span>', winner = "none" },
     { feature = "Revue de déploiement personnalisé", apex = '<span class="text-brand-600 font-semibold">Revue Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
@@ -63,6 +63,10 @@ comparison_sections = [
     { feature = "Analyse de contenu", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Classification uniquement</span>', winner = "apexmail" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Méthodologie :</strong> Les lignes de fonctionnalités résument le comportement de SendGrid documenté publiquement et les tarifs publiés ; les lignes de tarifs nomment les forfaits comparés (SendGrid Pro, Essentials) à 100 000 emails/mois. Prix et détails des forfaits vérifiés pour la dernière fois : 2026-10-04. Lorsqu’un chiffre concurrent n’est pas documenté publiquement, la ligne l’indique au lieu d’affirmer un nombre. Consultez notre <a href="/fr/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">méthodologie de comparaison</a>."""
 +++
 
 <!-- Comparison rows rendered from [extra].comparison_sections by partials/compare/table.html. -->

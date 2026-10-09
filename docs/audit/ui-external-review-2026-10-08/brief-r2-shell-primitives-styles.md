@@ -77,3 +77,26 @@ whether the vendored mirror is at the latest standalone release — do not edit 
 item in your scope, every §5.1/§5.2 row you own, §4.6-4.10; the artifact-only-rules inventory
 (before/after); zero-skips appendix with literal commands/outputs; "reported for other lanes"; final
 orchestrator paragraph.
+
+
+## ADDENDUM — additional filed items (from lanes R1/R5; implement these too)
+
+1. `axum_router.rs` ~2793: the stale assertion of removed copy (§4.2) — the campaigns bulk bar now
+   says "Select the rows you want to act on"; update the assertion to match (keep it asserting the
+   interaction, not the implementation).
+2. `primitives.rs::status_indicator_config`: add the MFA/secret vocabulary so badges (not plain
+   text) can render it: `"enabled" => ("Enabled", "success", DOT_SUCCESS)`,
+   `"not_configured" => ("Not configured", "secondary", DOT_OUTLINE)`. Report for R6/fold to switch
+   the two data.rs call sites to `DataCell::Status` afterwards.
+3. `explorer.rs::sandbox_shell`: the "Back to the API Explorer" link is relative (`/api-explorer`)
+   but the page is served from the API origin where that path does not exist — make it absolute
+   (`https://apexmail.ee/api-explorer`), same pattern the verify-email page uses.
+4. `tests/compare_pricing_parity_gate.rs`: missing python3 currently prints SKIP and returns green —
+   make missing required tooling FAIL (`assert!(python3_available(), …)`).
+5. Full-suite reds in your files: `axum_router::tests::marketing_routes_include_marketing_shell`
+   (re-check against the CURRENT marketing templates/build), and any golden mismatches caused by the
+   concurrent view edits — regenerate goldens as your LAST step (the normalizer is fixed now: the
+   stylesheet-version replacement no longer doubles the token) and re-run the suite green.
+6. Re-export the baseline fixtures (`crates/ui-foundation/baselines/**` via
+   `cargo run -p ui-foundation --bin export_visual_fixtures`) after all code changes; the
+   `docs/development/ui-baseline-manifest.json` hash must be consistent with what you ship.

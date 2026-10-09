@@ -40,11 +40,20 @@ pub fn glyph_markup(name: &str) -> Option<&'static str> {
     glyph_registry().get(name).map(String::as_str)
 }
 
+/// Render one glyph as an inline `<svg>`.
+///
+/// Stroke/scale contract (review §5.1 icons.rs: "retain one consistent icon
+/// stroke/scale contract"): every icon is a 24×24 viewBox stroked with
+/// `currentColor`, `stroke-width` from [`IconRenderOptions::stroke_width`]
+/// (default 2), round caps/joins, sized by `width`/`height` in CSS pixels,
+/// and `aria-hidden` (the accessible name belongs to the surrounding
+/// control). `class_name` is the caller's hook and is HTML-escaped at this
+/// boundary — a hostile value cannot break out of the attribute.
 pub fn render_icon(name: &str, options: IconRenderOptions<'_>) -> Option<String> {
     let markup = glyph_markup(name)?;
     let class_name = options
         .class_name
-        .map(|value| format!(" class=\"{}\"", value))
+        .map(|value| format!(" class=\"{}\"", crate::shell::html_escape(value)))
         .unwrap_or_default();
 
     Some(format!(
@@ -127,5 +136,30 @@ mod tests {
         assert!(large_svg.contains("class=\"size-lg\""));
         assert!(default_svg.contains("stroke-linecap=\"round\""));
         assert!(default_svg.contains("stroke-linejoin=\"round\""));
+    }
+
+    /// Review §5.1 icons.rs: the interpolated class attribute is escaped at
+    /// the render boundary, and the contract markers hold for every glyph.
+    #[test]
+    fn class_attribute_is_escaped_and_the_contract_holds() {
+        let hostile = render_icon(
+            "lock",
+            IconRenderOptions {
+                size: 18,
+                stroke_width: 2.0,
+                class_name: Some("h-4 w-4\"><script>alert(1)</script>"),
+            },
+        )
+        .unwrap();
+        assert!(!hostile.contains("<script>"), "{hostile}");
+        assert!(hostile.contains("&quot;&gt;&lt;script&gt;"), "{hostile}");
+        for glyph in glyph_names() {
+            let svg = render_icon(glyph, IconRenderOptions::default()).unwrap();
+            assert!(svg.contains("viewBox=\"0 0 24 24\""), "{glyph}");
+            assert!(svg.contains("stroke=\"currentColor\""), "{glyph}");
+            assert!(svg.contains("stroke-width=\"2\""), "{glyph}");
+            assert!(svg.contains("aria-hidden=\"true\""), "{glyph}");
+            assert!(svg.contains("width=\"20\" height=\"20\""), "{glyph}");
+        }
     }
 }

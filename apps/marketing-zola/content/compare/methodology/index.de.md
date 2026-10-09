@@ -45,6 +45,9 @@ Jede Zeile in einer Vergleichstabelle wird gestützt durch:
 | Prüfer | Ja |
 | Einschränkung (falls vorhanden) | Erforderlich, wenn die Aussage eingeschränkt ist |
 | Screenshot oder archivierte Evidenz | Intern aufbewahrt |
+| Inline-Quellenangaben mit URLs | Nur auf den Seiten [Amazon SES](/de/compare/amazon-ses/) und [Mailgun](/de/compare/mailgun/), die nummerierte Quellen pro Zeile tragen |
+Zeilen auf Seiten ohne Inline-Quellenangaben ([SendGrid](/de/compare/sendgrid/), [Postmark](/de/compare/postmark/), [Resend](/de/compare/resend/)) fassen öffentlich dokumentiertes Anbieterverhalten zum Prüfdatum der Seite zusammen, ohne Zitat pro Zeile. Lässt sich eine Wettbewerberangabe nicht verifizieren, sagt die Zelle das („nicht öffentlich dokumentiert“, „siehe Anbieterpreise“), statt eine Zahl zu behaupten.
+
 
 ## Regeln für Preisvergleiche
 

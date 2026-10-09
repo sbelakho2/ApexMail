@@ -7,9 +7,15 @@ rule is keyed so allowlist entries can target exactly one surface/route:
 
   html-lang       every document declares `<html … lang=…>`
   img-alt         every <img> has a non-empty alt, or alt="" AND aria-hidden
-  label-for       every visible id'd <input>/<select>/<textarea> is labelled
-                  (label[for] / aria-label / aria-labelledby — same logic as
-                  gate D, shared through tools/ui_html_rules.py)
+  label-for       every visible <input>/<select>/<textarea> is labelled
+                  (label[for] / wrapping <label> / aria-label /
+                  aria-labelledby — same logic as gate D, shared through
+                  tools/ui_html_rules.py)
+  control-label   the id-less subset of the above: a control with no id must
+                  be labelled by a wrapping <label> or an aria-label
+  error-association  every aria-describedby target must exist in the document
+                  (an invalid control must describe itself with a real
+                  element, not a dangling id)
   one-h1          exactly one <h1> per document
   viewport-meta   a `<meta name="viewport" …>` is present
   autocomplete    inputs with type email/password carry autocomplete
@@ -29,7 +35,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ui_html_rules import iter_documents, control_label_state  # noqa: E402
+from ui_html_rules import (  # noqa: E402
+    control_label_state,
+    describedby_missing_ids,
+    iter_documents,
+    require_fixture_coverage,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FIXTURES = ROOT / "services/mail-server/crates/ui-foundation/baselines/rust-ui"
@@ -83,13 +94,36 @@ def check_document(entry: dict, doc, allowlist: list[dict]) -> None:
         elif alt.strip() == "" and not aria_hidden:
             fail("img-alt", f"<img> line {img.line} has empty alt without aria-hidden")
 
-    # label-for ─ shared contract with the form-hygiene gate.
+    # label-for ─ shared contract with the form-hygiene gate. EVERY visible
+    # control is checked, including controls with NO id: an id-less control
+    # can only be labelled by a wrapping <label> or an aria-label, and the
+    # old `continue` let every id-less control skip the rule entirely.
     for control in doc.controls():
-        if not (control.attr("id") or "").strip():
-            continue
         labelled, detail = control_label_state(doc, control)
         if not labelled:
-            fail("label-for", f"<{control.tag} id={detail}> line {control.line} is unlabelled")
+            fail(
+                "label-for",
+                f"<{control.tag}> line {control.line} is unlabelled: {detail}",
+            )
+
+    # control-label ─ explicit report for the id-less case, so the finding
+    # names the actual defect (no id ⇒ no label[for] is even possible).
+    for control in doc.controls():
+        if (control.attr("id") or "").strip():
+            continue
+        labelled, _ = control_label_state(doc, control)
+        if not labelled:
+            fail(
+                "control-label",
+                f"<{control.tag}> line {control.line} "
+                f"({control.attr('name') or 'unnamed'}) has no id and no wrapping <label>",
+            )
+
+    # error-association ─ a control marked invalid must point its description
+    # at an element that exists: aria-invalid without a resolvable
+    # aria-describedby announces an error with no message.
+    for detail in describedby_missing_ids(doc):
+        fail("error-association", detail)
 
     # one-h1 ─ one document, one page title.
     h1_count = len(doc.by_tag("h1"))
@@ -139,6 +173,8 @@ def main(argv: list[str]) -> int:
               "--bin export_visual_fixtures -- <dir>  (from services/mail-server)")
         return 1
 
+    if require_fixture_coverage(fixtures):
+        return 1
     allowlist = load_allowlist(ALLOWLIST)
     print(f"fixtures: {fixtures}")
     print(f"a11y allowlist entries: {len(allowlist)}")

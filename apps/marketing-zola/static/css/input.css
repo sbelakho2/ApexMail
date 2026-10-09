@@ -2057,3 +2057,29 @@ table th .num, table td .num {
 /* ── Feature grid gap tightening ── */
 .ledger-feat { gap: 20px; }
 @media (max-width: 640px) { .ledger-feat { gap: 12px; } }
+
+/* ── Forced-colors: deliberate system-color treatment for the error chrome ──
+   Review §12.2 (404) as filed by R5/R3: the branded focus/forced-color
+   treatment was unmet — no forced-colors rule existed anywhere in the
+   marketing sheet, so in Windows High Contrast the CTA/secondary buttons
+   lost their affordance entirely. In forced-colors mode the OS replaces
+   author colors, so the buttons must draw their borders from system colors
+   and focus must use `Highlight` (the same contract 50x.html's inline
+   fallback already carries). Covers the 404/error chrome's button grammar
+   (.btn-primary / .btn-secondary and their --invert twins). */
+@media (forced-colors: active) {
+  .btn-primary,
+  .btn-secondary,
+  .btn-primary--invert,
+  .btn-secondary--invert {
+    border: 1px solid ButtonText;
+    color: ButtonText;
+    background: ButtonFace;
+  }
+  a:focus-visible,
+  button:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}

@@ -29,7 +29,7 @@ ApexMail fournit une infrastructure d'email transactionnel pour les plateformes 
 
 ## Infrastructure
 
-La configuration ApexMail fournie cible des régions de l'UE/EEE. Les emplacements actifs des données clients et de la télémétrie, ainsi que les garanties de transfert, sont confirmés pendant le déploiement ou dans l'accord applicable. Consultez notre [page Architecture](/architecture) pour les modèles de déploiement, l'architecture réseau et la matrice des responsabilités.
+La configuration ApexMail fournie cible des régions de l'UE/EEE. Les emplacements actifs des données clients et de la télémétrie, ainsi que les garanties de transfert, sont confirmés pendant le déploiement ou dans l'accord applicable. Consultez notre [page Architecture](/architecture) (en anglais) pour les modèles de déploiement, l'architecture réseau et la matrice des responsabilités.
 
 ## Contact
 

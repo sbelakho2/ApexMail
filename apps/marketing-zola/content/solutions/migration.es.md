@@ -43,6 +43,17 @@ La migración de proveedor de email es una operación de alto riesgo. Una caída
 7. Comience el envío en paralelo con un 10 % del volumen, incrementándolo gradualmente mientras supervisa las métricas de entrega.
 8. Tras el periodo de validación, enrute el 100 % a través de ApexMail y elimine la configuración del proveedor heredado.
 
+## Fases de migración con puertas de control
+
+Avance por estas fases en orden; cada una tiene un criterio de entrada, criterios de aceptación y un desencadenante de reversión.
+
+| Fase | Criterio de entrada | Criterios de aceptación | Desencadenante de reversión |
+|---|---|---|---|
+| 1. Preparación | Cuenta creada; dominio de envío añadido; plantillas inventariadas | Registros DNS emitidos y revisados; mapeo de plantillas documentado | Ninguno — aún no hay tráfico de producción |
+| 2. Validación en paralelo | DKIM y SPF de ApexMail conviven con el proveedor actual; DMARC en `p=none` | Los mensajes de prueba se entregan con autenticación válida; eventos de webhook recibidos y verificados por firma | Fallos de autenticación o desajustes de firma de webhook que persisten tras la corrección |
+| 3. Desplazar una parte del tráfico | Validación en paralelo completada; métricas de entrega medibles por proveedor | Las métricas de entrega igualan al proveedor anterior dentro de la tolerancia acordada en la ventana de observación | La tasa de rebote o de quejas supera los umbrales de la Política de uso aceptable (2 % rebote / 0,1 % quejas) |
+| 4. Corte definitivo | Aceptación sostenida en la proporción acordada | 100 % del tráfico por ApexMail; registros del proveedor anterior eliminados solo tras la ventana de retención | Degradación de entrega que no se recupera tras el presupuesto de reintentos y los ajustes de calentamiento |
+
 ## Endpoints de API relevantes
 
 | Endpoint | Descripción |
@@ -65,8 +76,8 @@ La migración de proveedor de email es una operación de alto riesgo. Una caída
 | Plan | IP dedicada | Soporte |
 |---|---|---|
 | Growth | 1 IP dedicada incluida | Soporte por email |
-| Scale | 3 IP dedicadas incluidas | Soporte prioritario |
-| Enterprise | 10 IP dedicadas incluidas | Soporte dedicado |
+| Business | 1 IP dedicada incluida | Soporte prioritario |
+| Enterprise Cloud | 3 IP dedicadas incluidas | Soporte dedicado |
 
 ## Consideraciones de seguridad
 

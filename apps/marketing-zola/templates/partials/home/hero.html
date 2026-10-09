@@ -45,19 +45,26 @@
         </p>
       </div>
 
-      {# ── The terminal: the real public HTTP contract, executable ── #}
+      {# ── The terminal: an EXAMPLE trace of the public HTTP contract, next to
+         the executable sandbox request. The shown payload mirrors the body
+         the form actually submits (the sandbox sender is fixed; no "from"
+         is sent), and the trace is labelled as an example — a sandbox run
+         against RFC 2606 reserved recipients proves queueing/handling, never
+         recipient-MX delivery. ── #}
       <div class="relative min-w-0 lg:mt-0 mt-10">
         <div class="term">
           <div class="term-bar">
             <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
             <b>POST /v1/messages</b>
+            <span class="ml-auto text-[10px] font-bold tracking-widest uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_example_label"] %}{{ i18n_data[l]["home"]["hero_example_label"] }}{% else %}Example trace{% endif %}</span>{# inherits .term-bar colour (#a1a1aa) — a dark-on-dark token failed AA on the fixed dark panel #}
           </div>
 <pre class="term-pre"><span class="term-k">curl</span> -X POST https://api.apexmail.ee/v1/messages \
   -H <span class="term-s">"X-API-Key: $APEXMAIL_API_KEY"</span> \
-  -d <span class="term-s">'{"from":"hello@yourcompany.com",
-       "to":["customer@example.com"]}'</span>
-<span class="term-c">&rarr; 202 accepted &middot; id msg_2f9a</span>
-<span class="term-c">&rarr; accepted by recipient MX &middot; 1.8s</span></pre>
+  -d <span class="term-s">'{"to":"customer@example.com",
+       "subject":"Hello from ApexMail",
+       "html":"&lt;h1&gt;Sent with control.&lt;/h1&gt;"}'</span>
+<span class="term-c">&rarr; 202 accepted &middot; id msg_2f9a (example)</span>
+<span class="term-c">&rarr; queued &middot; worker delivery attempt, timeline recorded</span></pre>
           {# The trace above, made real: a plain form POST to the Rust
              sandbox executor — the request really queues, the worker
              really attempts delivery, the result page shows the live

@@ -13,14 +13,14 @@ Enterprise ist ein vertragliches E-Mail-Versandangebot für Organisationen, die 
 
 ## Leistungsumfang laut Katalog
 
-| Position | Enterprise |
+| Position | Enterprise Cloud |
 |---|---|
 | Preis | ab €1.750/Monat unter einem Jahresvertrag |
 | Enthaltenes E-Mail-Volumen | 5.000.000 E-Mails/Monat |
 | API-Aufrufe | Unbegrenzt |
 | Domains und Teammitglieder | Unbegrenzt |
 | Aufbewahrung | 730 Tage |
-| Dedizierte IPs | 10 enthalten |
+| Dedizierte IPs | 3 enthalten |
 | Zugriffskontrollen | SAML SSO und Audit-Logs |
 | Support-Level | Dediziert |
 | Private Cloud / BYOIP | Vorbehaltlich Vertrags- und Technikprüfung |

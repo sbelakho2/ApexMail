@@ -80,7 +80,7 @@ Gemäß Artikel 16 lit. m) der Richtlinie 2011/83/EU besteht das Widerrufsrecht 
 
 ## 9. SLA
 
-Kunden des Scale- und Enterprise-Tarifs unterliegen unserer [Service Level Agreement](/de/sla/). Andere Tarife werden nach bestem Bemühen ohne garantierte Verfügbarkeitszusage bereitgestellt, sofern nicht schriftlich anders vereinbart.
+Kunden des Business- und Enterprise-Tarifs unterliegen unserer [Service Level Agreement](/de/sla/). Andere Tarife werden nach bestem Bemühen ohne garantierte Verfügbarkeitszusage bereitgestellt, sofern nicht schriftlich anders vereinbart.
 
 ## 10. Haftungsbeschränkung
 

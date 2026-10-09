@@ -216,6 +216,18 @@ impl DrawState {
 /// Encode `text` into a QR matrix (byte mode, ECC L). Returns `None` when
 /// the payload exceeds version-20 capacity.
 pub fn encode(text: &str) -> Option<QrMatrix> {
+    encode_impl(text, None)
+}
+
+/// Force one mask pattern instead of the penalty-chosen one. The ISO
+/// conformance check (review §3 P1-13) validates EVERY mask 0–7 with an
+/// independent decoder, so the tests build these matrices directly.
+#[cfg(test)]
+fn encode_with_mask(text: &str, forced_mask: u8) -> Option<QrMatrix> {
+    encode_impl(text, Some(forced_mask & 7))
+}
+
+fn encode_impl(text: &str, forced_mask: Option<u8>) -> Option<QrMatrix> {
     let bytes = utf8_bytes(text);
     let mut ver = 0usize;
     for candidate in 1..=MAX_VERSION {
@@ -266,14 +278,14 @@ pub fn encode(text: &str) -> Option<QrMatrix> {
     }
     let codewords = add_ecc_and_interleave(&data_codewords, ver);
 
-    Some(draw_matrix(&codewords, ver))
+    Some(draw_matrix_with_mask(&codewords, ver, forced_mask))
 }
 
 fn data_capacity_bits(ver: usize) -> usize {
     data_capacity_bytes(ver) * 8
 }
 
-fn draw_matrix(codewords: &[u8], ver: usize) -> QrMatrix {
+fn draw_matrix_with_mask(codewords: &[u8], ver: usize, forced_mask: Option<u8>) -> QrMatrix {
     let size = ver * 4 + 17;
     let mut state = DrawState {
         size,
@@ -355,18 +367,25 @@ fn draw_matrix(codewords: &[u8], ver: usize) -> QrMatrix {
         right -= 2;
     }
 
-    // Choose the mask with the lowest penalty (apply/undo via double XOR).
-    let mut best_mask = 0u8;
-    let mut min_penalty = u64::MAX;
-    for m in 0..8u8 {
-        apply_mask(&mut state, m);
-        let penalty = penalty_score(&state);
-        apply_mask(&mut state, m);
-        if penalty < min_penalty {
-            min_penalty = penalty;
-            best_mask = m;
+    // Choose the mask with the lowest penalty (apply/undo via double XOR),
+    // unless the caller forced one (ISO conformance checks every mask).
+    let best_mask = match forced_mask {
+        Some(m) => m & 7,
+        None => {
+            let mut best = 0u8;
+            let mut min_penalty = u64::MAX;
+            for m in 0..8u8 {
+                apply_mask(&mut state, m);
+                let penalty = penalty_score(&state);
+                apply_mask(&mut state, m);
+                if penalty < min_penalty {
+                    min_penalty = penalty;
+                    best = m;
+                }
+            }
+            best
         }
-    }
+    };
     apply_mask(&mut state, best_mask);
     draw_format(&mut state, best_mask);
 
@@ -786,6 +805,111 @@ mod tests {
     #[test]
     fn rejects_over_long_input_cleanly() {
         assert!(encode(&"a".repeat(900)).is_none());
+    }
+
+    /// Review §3 P1-13: every mask pattern 0–7 must produce an
+    /// interoperable symbol, and the proof must come from a decoder that
+    /// does NOT share this implementation. The cases below are forced-mask
+    /// matrices piped to `tools/verify_qr_interop.py`, a spec-written
+    /// decoder (Table 10 mask conditions in row/column form, Annex E
+    /// alignment table, BCH(15,5) format check, GF(2^8) RS syndromes) that
+    /// shares no code with this encoder or its in-module test decoder.
+    #[test]
+    fn every_mask_and_multiple_versions_verify_with_an_independent_decoder() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../tools/verify_qr_interop.py"
+        );
+        assert!(
+            std::path::Path::new(script).is_file(),
+            "independent QR decoder missing at {script}"
+        );
+
+        // Three capacity bands (versions 1, 3 and 5), every mask 0-7.
+        let payloads = [
+            "otpauth://totp/A",                                // 15 bytes -> version 1 (21x21)
+            "otpauth://totp/ApexMail?secret=JBSWY3DPEHPK3PXP", // 48 bytes -> version 3 (29x29)
+            "otpauth://totp/ApexMail:ops@apexmail.ee?secret=JBSWY3DPEHPK3PXP&issuer=ApexMail", // -> version 5
+        ];
+        let mut cases: Vec<QrMatrix> = Vec::new();
+        for payload in payloads {
+            for mask in 0..8u8 {
+                let qr = encode_with_mask(payload, mask)
+                    .unwrap_or_else(|| panic!("failed to encode {payload} with mask {mask}"));
+                assert_eq!(qr.mask, mask, "forced mask not honored for {payload}");
+                assert!(
+                    check_finder(&qr, 3, 3) && check_finder(&qr, qr.size - 4, 3),
+                    "finder patterns broken for mask {mask}"
+                );
+                cases.push(qr);
+            }
+        }
+        let versions: Vec<u8> = cases.iter().map(|qr| qr.version).collect();
+        let distinct: std::collections::BTreeSet<u8> = versions.iter().copied().collect();
+        assert!(
+            versions.contains(&1) && distinct.len() >= 2,
+            "the mask sweep must cover at least two versions, got {versions:?}"
+        );
+
+        let mut stream = String::from("CASES ");
+        stream.push_str(&cases.len().to_string());
+        stream.push('\n');
+        for (payload, qr) in payloads
+            .iter()
+            .flat_map(|payload| std::iter::repeat_n(*payload, 8))
+            .zip(cases.iter())
+        {
+            stream.push_str(&format!(
+                "CASE {} {} {} {}\n",
+                qr.version,
+                qr.mask,
+                qr.size,
+                payload.len()
+            ));
+            for byte in payload.as_bytes() {
+                stream.push_str(&format!("{byte:02x}"));
+            }
+            stream.push('\n');
+            for row in &qr.modules {
+                for &dark in row {
+                    stream.push(if dark { '1' } else { '0' });
+                }
+                stream.push('\n');
+            }
+        }
+
+        let mut child = std::process::Command::new("python3")
+            .arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("python3 must be available (the UI gate battery already requires it)");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(stream.as_bytes())
+                .expect("write case stream");
+        }
+        let out = child.wait_with_output().expect("decoder runs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "independent QR decode failed:\n{stdout}\n{stderr}"
+        );
+        assert_eq!(
+            stdout
+                .lines()
+                .filter(|line| line.starts_with("OK case"))
+                .count(),
+            cases.len(),
+            "every case must decode:\n{stdout}"
+        );
+        assert!(stdout.contains("OK all"), "{stdout}");
     }
 
     #[test]

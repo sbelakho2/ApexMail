@@ -8,6 +8,8 @@ template = "prose.html"
 
 Senden Sie anwendungsgenerierte E-Mails über die REST-API oder das SMTP-Relay von ApexMail. Jede Nachricht wird von der Annahme bis zur Zustellung mit Ereignisverlauf pro Nachricht verfolgt.
 
+**Start hier:** Senden Sie Ihre erste Nachricht in unter 10 Minuten mit dem [Schnellstart](/de/quickstart/) und verfolgen Sie dann jede Nachricht von der Annahme bis zur Empfänger-MX-Antwort in der [Zustelldiagnose](/email-logs/) (auf Englisch).
+
 ## Zielgruppe
 
 Entwicklungsteams, die Anwendungen mit automatisierten E-Mails bauen: Passwort-Resets, Konto-Verifizierungen, Kaufbestätigungen, Versandbenachrichtigungen, Sicherheitswarnungen und System-Status-Updates.
@@ -65,11 +67,11 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 | Tarif | Monatliches Volumen | Support |
 |---|---|---|
 | Free | 3.000 E-Mails | Community |
-| Starter | 50.000 E-Mails | E-Mail-Support |
+| Developer | 50.000 E-Mails | E-Mail-Support |
 | Pro | 150.000 E-Mails | E-Mail-Support |
 | Growth | 500.000 E-Mails | E-Mail-Support |
-| Scale | 2.000.000 E-Mails | Prioritäts-Support |
-| Enterprise | 5.000.000 E-Mails | Dedizierter Support |
+| Business | 2.000.000 E-Mails | Prioritäts-Support |
+| Enterprise Cloud | 5.000.000 E-Mails | Dedizierter Support |
 
 ## Sicherheitshinweise
 

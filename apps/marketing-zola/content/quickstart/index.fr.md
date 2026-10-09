@@ -12,6 +12,8 @@ Ce guide vous mène de zéro à un domaine d'envoi vérifié et à votre premier
 
 **Temps total estimé :** 8–10 minutes pour un développeur familier avec DNS et les API REST.
 
+**Note linguistique :** la documentation développeur (`/docs/`) et l'API Explorer liés dans ce guide ne sont disponibles qu'en anglais pour le moment.
+
 ---
 
 ## Étape 1 : Créer un compte
@@ -339,7 +341,7 @@ def verify_webhook(body: bytes, signature: str, timestamp: str, secret: str) -> 
 
 Avant de passer en production :
 
-1. **Passez du forfait Free** si vous dépassez 3 000 emails/mois récurrents (ou votre allocation de lancement unique de 30 000 emails). Voir [Tarifs](/pricing/).
+1. **Passez du forfait Free** si vous dépassez 3 000 emails/mois récurrents (ou votre allocation de lancement unique de 30 000 emails). Voir [Tarifs](/fr/pricing/).
 3. **Configurez DMARC** pour votre domaine d'envoi avec une politique d'au moins `p=none` initialement, puis `p=quarantine` ou `p=reject`.
 4. **Configurez l'alignement SPF** en vous assurant que votre domaine `Return-Path` correspond à votre domaine `From`.
 5. **Faites tourner les clés API** — créez des clés spécifiques à la production avec des scopes minimaux et des dates d'expiration.

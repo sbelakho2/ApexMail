@@ -45,6 +45,8 @@ La configuración proporcionada apunta a regiones del EEE para los datos princip
 
 No transferimos datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
 
+<span id="data-retention"></span>
+
 ## 5. Conservación de datos
 
 Conservamos los datos personales solo el tiempo necesario para los fines para los que fueron recopilados:
@@ -57,7 +59,7 @@ Conservamos los datos personales solo el tiempo necesario para los fines para lo
 | Registros de eventos (eventos de entrega, apertura y clic) | 30 días por defecto (7 días en el plan gratuito); según el plan, hasta 730 días en Enterprise |
 | Tickets de soporte | 2 años después de la resolución |
 
-Consulte nuestra [Política de conservación de datos](/compliance/#data-retention) para más detalles.
+Consulte nuestra [Política de conservación de datos](/es/compliance/#data-retention) para más detalles.
 
 ## 6. Sus derechos
 
@@ -72,7 +74,7 @@ Bajo el RGPD, tiene los siguientes derechos:
 
 Para ejercer estos derechos, contáctenos en **privacy@apexmail.ee**. Responderemos en un plazo de 30 días.
 
-Residentes de California: consulte nuestro aviso [Do Not Sell My Personal Information](/privacy/do-not-sell/) — ApexMail no vende información personal.
+Residentes de California: consulte nuestro aviso [Do Not Sell My Personal Information](/privacy/do-not-sell/) (en inglés) — ApexMail no vende información personal.
 
 ## 7. Reclamaciones
 

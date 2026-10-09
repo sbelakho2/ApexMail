@@ -26,14 +26,30 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         .map(|(_, v)| *v)
         .fold(0.0_f64, f64::max)
         .max(1.0);
+    let total: f64 = data.iter().map(|(_, v)| *v).sum();
     let padding_left = 48.0;
     let padding_top = 24.0;
     let padding_bottom = 36.0;
     let chart_w = f64::from(width) - padding_left - 16.0;
     let chart_h = f64::from(height) - padding_top - padding_bottom;
-    let bar_gap = 4.0;
-    let bar_w = ((chart_w - bar_gap * (n as f64 - 1.0)) / n as f64).clamp(6.0, 60.0);
+    // Large-dataset geometry: the slot width is what the chart can actually
+    // give each series, so bars stay INSIDE the viewBox however many points
+    // arrive (the old `clamp(6.0, 60.0)` pushed 40+ bars past the right
+    // edge, where the SVG silently clipped them).
+    let slot = chart_w / n as f64;
+    let bar_gap = 4.0_f64.min(slot * 0.3);
+    let bar_w = (slot - bar_gap).clamp(1.0, 60.0);
+    // Labels only fit where the slot does; thin them out instead of
+    // overprinting (review §5.1 charts.rs: "handle large datasets").
+    let label_every = ((26.0 / slot).ceil() as usize).max(1);
+    let show_value_labels = slot >= 18.0;
 
+    // The summary is the accessible alternative to the bars themselves.
+    let peak = data
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(label, value)| format!("{}, {}", label, format_y_axis(*value)))
+        .unwrap_or_default();
     let mut svg = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"");
     svg.push_str(&width.to_string());
     svg.push_str("\" height=\"");
@@ -42,7 +58,10 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     svg.push_str(&width.to_string());
     svg.push(' ');
     svg.push_str(&height.to_string());
-    svg.push_str(r##"" role="img" aria-label="Bar chart">"##);
+    svg.push_str(&format!(
+        r##"" role="img" aria-label="Bar chart: {n} categories, total {}, highest {peak}">"##,
+        format_y_axis(total),
+    ));
 
     svg.push_str(&build_svg_rect(width, height));
 
@@ -64,29 +83,45 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     }
 
     // Bars
-    for (i, (_label, val)) in data.iter().enumerate() {
-        let bar_h = (val / max_val * chart_h).max(2.0);
+    for (i, (label, val)) in data.iter().enumerate() {
+        // Zero-bar geometry: a zero value renders a short MUTED stub on the
+        // baseline (the series is present but empty) instead of a full-height
+        // series-coloured bar that reads as a real value. Non-zero values
+        // keep the 2px minimum so a tiny value stays visible.
+        let is_zero = *val <= 0.0;
+        let bar_h = if is_zero {
+            2.0
+        } else {
+            (val / max_val * chart_h).max(2.0)
+        };
         let x = padding_left + i as f64 * (bar_w + bar_gap);
         let y = padding_top + chart_h - bar_h;
-        let color = bar_color(i);
+        let color = if is_zero {
+            "rgb(var(--muted-foreground))"
+        } else {
+            bar_color(i)
+        };
         // `var()` never resolves in SVG presentation attributes — route
         // theme colors through a `style` attribute instead.
         svg.push_str(&format!(
-            r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" style="fill: {color}" rx="2" opacity="0.88"><title>{val}</title></rect>"##,
+            r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" style="fill: {color}" rx="2" opacity="0.88"><title>{title}</title></rect>"##,
+            title = html_escape_svg(&format!("{label}: {}", format_y_axis(*val))),
         ));
 
-        // Value label above bar
-        let vx = x + bar_w / 2.0;
-        let vy = y - 6.0;
-        let val_str = format_y_axis(*val);
-        svg.push_str(&build_svg_text_center(
-            vx,
-            vy,
-            10,
-            &val_str,
-            "rgb(var(--muted-foreground))",
-            "600",
-        ));
+        // Value label above bar (kept readable: only when the slot fits one)
+        if show_value_labels {
+            let vx = x + bar_w / 2.0;
+            let vy = y - 6.0;
+            let val_str = format_y_axis(*val);
+            svg.push_str(&build_svg_text_center(
+                vx,
+                vy,
+                10,
+                &val_str,
+                "rgb(var(--muted-foreground))",
+                "600",
+            ));
+        }
     }
 
     // X-axis line
@@ -96,8 +131,11 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         padding_top + chart_h,
     ));
 
-    // X-axis labels
+    // X-axis labels (thinned to the slot width; the last one always shows).
     for (i, (label, _)) in data.iter().enumerate() {
+        if i % label_every != 0 && i != n - 1 {
+            continue;
+        }
         let x = padding_left + i as f64 * (bar_w + bar_gap) + bar_w / 2.0;
         let display_label = truncate_label(label, 8);
         let ty = padding_top + chart_h + 18.0;
@@ -767,6 +805,40 @@ mod tests {
         assert!(svg.contains("<svg"));
         assert!(svg.contains("rect"));
         assert!(svg.contains("Feb"));
+    }
+
+    /// Review §5.1 charts.rs: zero bars read as empty (not as a value), the
+    /// accessible summary names the series, and a large dataset stays INSIDE
+    /// the SVG with thinned labels.
+    #[test]
+    fn bar_chart_handles_zero_and_large_datasets() {
+        // Zero: muted stub + a title that says zero.
+        let svg = render_bar_chart(&[("Jan".into(), 0.0), ("Feb".into(), 5.0)], 400, 250);
+        assert!(svg.contains("Jan: 0"), "{svg}");
+        assert!(svg.contains("rgb(var(--muted-foreground))"), "{svg}");
+        assert!(svg.contains("total 5"), "{svg}");
+        assert!(svg.contains("highest Feb, 5"), "{svg}");
+
+        // 60 categories at 400px: every bar rect stays within the viewBox.
+        let many: Vec<(String, f64)> = (0..60).map(|i| (format!("c{i}"), (i % 7) as f64)).collect();
+        let svg = render_bar_chart(&many, 400, 250);
+        let bars = svg.matches("<rect x=\"").count();
+        assert!(bars >= 60, "{bars}");
+        for cap in svg.split("<rect x=\"").skip(1) {
+            let x: f64 = cap
+                .split('"')
+                .next()
+                .and_then(|v| v.parse().ok())
+                .expect("rect x parses");
+            assert!(x < 400.0, "bar drawn outside the viewBox at x={x}");
+        }
+        // Labels thin out instead of overprinting; both ends still labelled.
+        let x_labels = svg.matches("font-weight=\"400\"").count();
+        assert!(x_labels < 60, "labels must thin out, got {x_labels}");
+        assert!(svg.contains(">c0<") || svg.contains("c0"), "{svg}");
+        assert!(svg.contains("c59"), "{svg}");
+        // The value labels are dropped where the slot cannot fit them.
+        assert!(!svg.contains("font-weight=\"600\""), "{svg}");
     }
 
     #[test]

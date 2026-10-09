@@ -33,7 +33,7 @@ ApexMail bietet Sicherheits- und Datenschutz-Workflows rund um die E-Mail-Zustel
 | Bereich | Aktuelle Position |
 |---|---|
 | Datenverarbeitungsdokumentation | AVV und Unterauftragsverarbeiter-Informationen stehen zur Prüfung bereit |
-| Identity- und Audit-Funktionen | Laufzeitfunktionen je Tarif; SAML SSO ab Scale |
+| Identity- und Audit-Funktionen | Laufzeitfunktionen je Tarif; SAML SSO ab Business |
 | Enterprise-Review | Vertragliche Sicherheits-, Bereitstellungs- und Betriebsprüfung |
 | HIPAA / BAA | Derzeit nicht angeboten |
 

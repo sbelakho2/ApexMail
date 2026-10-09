@@ -147,6 +147,49 @@ pub fn validate_route_coverage() -> Vec<String> {
     missing
 }
 
+/// Marketing routes extracted from the RENDERER SOURCE, not from the
+/// manifest: every `concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/…/index.html")`
+/// include site in `axum_router.rs` (the same scan `build.rs` performs to
+/// embed the built Zola pages). Returns route paths in the manifest's shape
+/// (`/docs/api`, with `/` for the home page).
+///
+/// Review §5.1 ssr.rs: "compare rendered coverage with independently
+/// extracted mounted routes; avoid deriving both sides of a coverage
+/// assertion from the same manifest." The manifest stays the coverage
+/// baseline; this set is the build's own record of what it ships.
+pub fn marketing_routes_from_source() -> Vec<String> {
+    const ROUTER_SRC: &str = include_str!("axum_router.rs");
+    const MARKER: &str = "env!(\"APX_MARKETING_PUBLIC_DIR\")";
+    let mut routes: Vec<String> = Vec::new();
+    let mut rest = ROUTER_SRC;
+    while let Some(pos) = rest.find(MARKER) {
+        let after = &rest[pos + MARKER.len()..];
+        let Some(start) = after.find('"') else { break };
+        let path_part = &after[start + 1..];
+        let Some(end) = path_part.find('"') else {
+            break;
+        };
+        let candidate = &path_part[..end];
+        // Only include-site literals (`/route/index.html`); a bare `env!`
+        // elsewhere in the file scans the next `"` and is skipped, exactly as
+        // in build.rs.
+        if let Some(rest_path) = candidate.strip_prefix('/') {
+            let Some(dir) = rest_path.strip_suffix("index.html") else {
+                rest = &path_part[end..];
+                continue;
+            };
+            let route = format!("/{}", dir.trim_end_matches('/'));
+            let route = if route == "/" { "/".to_string() } else { route };
+            if !routes.contains(&route) {
+                routes.push(route);
+            }
+        }
+        rest = &path_part[end..];
+    }
+    routes.sort();
+    routes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +212,49 @@ mod tests {
             missing.is_empty(),
             "Routes without SSR handlers:\n{}",
             missing.join("\n")
+        );
+    }
+
+    /// Review §5.1 ssr.rs: the rendered-coverage assertion must be crossed
+    /// with an INDEPENDENTLY extracted route inventory. The marketing routes
+    /// are extracted from the renderer source's include sites (what the
+    /// build actually embeds), and every marketing manifest route must be in
+    /// that set — a manifest entry that ships no built page fails here
+    /// instead of 404ing in production. The served set is deliberately larger
+    /// than the manifest (the manifest is the gate baseline, not the route
+    /// authority); the size difference is asserted so a build that suddenly
+    /// stops shipping pages cannot pass silently.
+    #[test]
+    fn marketing_manifest_routes_are_a_subset_of_the_source_inventory() {
+        let served = marketing_routes_from_source();
+        assert!(
+            served.len() >= 150,
+            "expected the built marketing inventory (150+ routes), got {}",
+            served.len()
+        );
+        // Two manifest routes are VIEW-rendered aliases with no built Zola
+        // document (the Rust API console shim and the demo viewer). They are
+        // named here rather than tolerated wholesale, so any OTHER missing
+        // route fails the gate.
+        const VIEW_RENDERED_ALIASES: [&str; 2] = ["/api-console", "/demo"];
+        for surface in ["marketing", "marketing-zola"] {
+            let missing: Vec<&str> = routing::surface_routes(surface)
+                .into_iter()
+                .map(|route| route.path)
+                .filter(|path| !served.iter().any(|served| served == path))
+                .filter(|path| !VIEW_RENDERED_ALIASES.contains(path))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "[{surface}] manifest routes served by no include site: {missing:?}"
+            );
+        }
+        let manifest_total = routing::surface_routes("marketing").len()
+            + routing::surface_routes("marketing-zola").len();
+        assert!(
+            served.len() > manifest_total,
+            "the served inventory ({}) must exceed the manifest baseline ({manifest_total})",
+            served.len()
         );
     }
 

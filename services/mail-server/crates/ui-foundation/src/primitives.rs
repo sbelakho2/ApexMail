@@ -1,3 +1,38 @@
+//! Design-system primitives for the zero-JavaScript SSR surfaces.
+//!
+//! # Usable primitives vs. inert legacy exports
+//!
+//! The console ships **no client-side JavaScript**, so a primitive is only
+//! "usable" when its behaviour works in a plain HTML document. Review §4.9 /
+//! §5.1 primitives.rs asks for that distinction to be explicit:
+//!
+//! **Usable (native, SSR-complete) — compose these:**
+//! * `Button`, `Label`, `Input`, `Textarea` (native `maxlength` when
+//!   `max_length` is set), `NativeSelect` (escaped at this boundary),
+//!   `NativeCheckbox`, `Badge`/`StatusIndicator`, `Card`, `EmptyState`,
+//!   `AsyncState`, `Table`, `Progress`,
+//!   `PaginationControls::render_html_with_links` (real `<a href>` links),
+//!   `Avatar`, `Skeleton`, `ChartLegendItem`.
+//!
+//! **Inert legacy exports (library risks, NOT proof that a page is broken)
+//! — prefer the native counterpart or a confirmation page:**
+//! * `Select` → `NativeSelect` (the combobox needs the hydration script).
+//! * `Checkbox` (button + `role="checkbox"`), `Switch`, `Slider`,
+//!   `RadioGroup` → `NativeCheckbox` / native `input[type=radio|range]`
+//!   inside a real `<form>`.
+//! * `Dialog`, `AlertDialog`, `Popover`, `DropdownMenu` → the typed
+//!   `/confirm` page or a `<details>` disclosure; these render open markup
+//!   with `data-*` hooks and no code to open, trap, or dismiss it.
+//! * `Tabs` → real links/query parameters where switching is
+//!   server-rendered. `Accordion` → native `<details>/<summary>`.
+//!   `Toast` → the flash banner (PRG feedback) — the disabled toast surface
+//!   stays disabled until its behaviour is real.
+//! * `PaginationControls::render_html` (inert buttons) →
+//!   `render_html_with_links`.
+//!
+//! The `*BehaviorContract` structs below document the behaviour each legacy
+//! widget *would* need; they are not evidence that it is implemented.
+
 use crate::icons::{render_icon, IconRenderOptions};
 
 /// Escape HTML special characters in attribute/text interpolation.
@@ -448,10 +483,19 @@ impl<'a> Textarea<'a> {
             .id
             .map(|value| format!(" id=\"{}\"", value))
             .unwrap_or_default();
+        // The limit is NATIVE: `maxlength` is enforced by the browser for
+        // typing and by the handler for pasted/scripted input, so the field
+        // never silently accepts more than it says (review §5.1 primitives.rs:
+        // "implement native textarea limits").
+        let maxlength_attr = self
+            .max_length
+            .map(|max| format!(" maxlength=\"{max}\""))
+            .unwrap_or_default();
         let textarea = format!(
-            "<textarea{}{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary apex-focus-ring disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea{}{}{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary apex-focus-ring disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
             id_attr,
             name_attr,
+            maxlength_attr,
             input_variant_class(self.variant),
             textarea_resize_class(self.resize),
             self.variant,
@@ -463,10 +507,16 @@ impl<'a> Textarea<'a> {
 
         if self.show_count {
             let count = self.value.chars().count();
-            let suffix = self
-                .max_length
-                .map(|max| format!("{count}/{max}"))
-                .unwrap_or_else(|| count.to_string());
+            // The SSR render ships no script, so this can never be a LIVE
+            // counter. It states the LIMIT and the value as rendered — a
+            // truthful helper instead of a counter that looks live and is
+            // not (review §5.1 primitives.rs: "remove misleading static
+            // counters" / "replace the SSR-only 'live' count with a truthful
+            // limit helper").
+            let suffix = match self.max_length {
+                Some(max) => format!("Limit {max} characters · {count} entered"),
+                None => format!("{count} characters entered"),
+            };
             return format!("<div class=\"relative\">{textarea}<span id=\"{}\" class=\"absolute bottom-2 right-2 text-xs text-muted-foreground\">{suffix}</span></div>", char_count_id);
         }
 
@@ -1698,7 +1748,20 @@ impl<'a> Table<'a> {
                 )
             })
             .unwrap_or_default();
-        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\"><table class=\"apex-table w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
+        // Review §4.8 / R2's filed item: a wide table scrolls horizontally at
+        // mobile, so the scroll container is a keyboard-reachable named
+        // region. One change here covers every data table the shared row
+        // renderer composes (the CSS `:focus-visible` ring on
+        // `.apex-table-wrap` was already in place). The caption names the
+        // region when present; otherwise the label stays generic rather than
+        // inventing a title.
+        let region_label = match self.caption {
+            Some(value) if !value.trim().is_empty() => {
+                format!("{} (scrollable table)", html_escape(value))
+            }
+            _ => "Scrollable data table".to_string(),
+        };
+        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"{region_label}\"><table class=\"apex-table w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
@@ -1718,6 +1781,14 @@ impl<'a> Toast<'a> {
 }
 
 impl PaginationControls {
+    /// DEPRECATED (review §5.2 "Pagination: retain the working link-based
+    /// renderer; deprecate inert button output"): this renders four
+    /// `<button>` elements with NO handler behind them — the console ships no
+    /// JavaScript, so nothing can ever respond. Use
+    /// [`PaginationControls::render_html_with_links`], which emits real
+    /// `<a href>` links that preserve the current filter query and keeps only
+    /// the disabled edges as non-interactive buttons.
+    #[deprecated(note = "inert buttons without a handler; use render_html_with_links instead")]
     pub fn render_html(&self) -> String {
         let safe_total_pages = self.total_pages.max(1);
         // Clamp the page counter so a zero/negative state renders "Page 1"
@@ -2170,6 +2241,11 @@ fn status_indicator_config(status: &str) -> (&str, &str, &str) {
         "new" => ("New", "secondary", DOT_OUTLINE),
         "qualified" => ("Qualified", "info", DOT_INFO),
         "proposal" => ("Proposal", "info", DOT_INFO),
+        // MFA/secret enrollment vocabulary (review §7 Operators: "Replace
+        // reused sent/draft MFA labels with Enabled/Not configured"). The
+        // values are the wire vocabulary the CP loaders emit.
+        "enabled" => ("Enabled", "success", DOT_SUCCESS),
+        "not_configured" => ("Not configured", "secondary", DOT_OUTLINE),
         _ => (status, "secondary", DOT_OUTLINE),
     }
 }
@@ -3078,7 +3154,8 @@ mod tests {
         .render_html();
 
         assert!(html.contains("resize-none"));
-        assert!(html.contains("3/10"));
+        assert!(html.contains("Limit 10 characters · 3 entered"));
+        assert!(html.contains("maxlength=\"10\""));
         assert!(html.contains("absolute bottom-2 right-2"));
     }
 
@@ -3596,6 +3673,9 @@ mod tests {
         );
     }
 
+    /// The DEPRECATED button renderer: kept tested only so its page-counter
+    /// clamping cannot regress while any caller still uses it.
+    #[allow(deprecated)]
     #[test]
     fn pagination_controls_render_navigation_states() {
         let html = PaginationControls {
@@ -3729,6 +3809,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)]
     #[test]
     fn pagination_clamps_page_counter() {
         let html = PaginationControls {
@@ -3865,6 +3946,44 @@ mod tests {
         assert!(html.contains("Delivered"));
         assert!(html.contains("overflow-x-auto"));
         assert!(html.contains("apex-metric-number"));
+    }
+
+    /// Review §4.8 / R2's filed item: the horizontally scrollable table
+    /// region is keyboard-reachable (`tabindex="0"`), announced as a region
+    /// (`role="region"`) and NAMED (the caption, or a generic label when the
+    /// table has no caption) — the stylesheet's `:focus-visible` ring was
+    /// already in place.
+    #[test]
+    fn table_scroll_region_is_keyboard_reachable_and_named() {
+        let captioned = Table {
+            columns: vec![TableColumn {
+                label: "Name",
+                align: "left",
+            }],
+            rows: vec![vec!["k"]],
+            caption: Some("API keys"),
+        }
+        .render_html();
+        assert!(
+            captioned.contains(
+                "class=\"apex-table-wrap relative w-full overflow-x-auto\" tabindex=\"0\" role=\"region\" aria-label=\"API keys (scrollable table)\""
+            ),
+            "captioned table region must carry its name: {captioned}"
+        );
+        let uncaptioned = Table {
+            columns: vec![TableColumn {
+                label: "Name",
+                align: "left",
+            }],
+            rows: vec![],
+            caption: None,
+        }
+        .render_html();
+        assert!(
+            uncaptioned.contains("role=\"region\" aria-label=\"Scrollable data table\"")
+                && uncaptioned.contains("tabindex=\"0\""),
+            "uncaptioned table region must still be reachable + named: {uncaptioned}"
+        );
     }
 
     #[test]
@@ -4696,5 +4815,52 @@ mod escaping_tests {
         .render_html();
         assert!(!checkbox.contains("<b>bold</b>"));
         assert!(checkbox.contains("&lt;b&gt;bold&lt;/b&gt;"));
+    }
+
+    /// Review §3 P1-8: tenant-controlled list/segment names are interpolated
+    /// into native `<option>` markup. The escape must happen AT the primitive
+    /// boundary — value, label, plus the select's own id/name — so no call
+    /// site has to remember it.
+    #[test]
+    fn native_select_escapes_hostile_value_label_id_and_name() {
+        let hostile = "\"><script>alert(1)</script>";
+        let id = format!("list{hostile}");
+        let name = format!("ids{hostile}");
+        let value = format!("v{hostile}");
+        let label = format!("L{hostile}");
+        let html = NativeSelect {
+            id: &id,
+            name: &name,
+            options: vec![SelectOption {
+                value: &value,
+                label: &label,
+                disabled: false,
+                selected: true,
+            }],
+            required: true,
+            multiple: false,
+            size: None,
+        }
+        .render_html();
+        for raw in [
+            "<script>",
+            "\"><script>",
+            "value=\"v\">",
+            "id=\"list\">",
+            "name=\"ids\">",
+        ] {
+            assert!(!html.contains(raw), "unescaped {raw:?} in {html}");
+        }
+        assert_eq!(html.matches("&lt;script&gt;").count(), 4, "{html}");
+        assert!(html.contains("&quot;&gt;"), "{html}");
+        // The option stays a single, well-formed element: exactly one
+        // value/selected pair and no attribute closed early.
+        assert_eq!(html.matches("<option ").count(), 1, "{html}");
+        assert_eq!(html.matches(" selected").count(), 1, "{html}");
+        assert!(
+            html.contains(" value=\"v&quot;&gt;&lt;script&gt;"),
+            "{html}"
+        );
+        assert!(html.ends_with("</select>"), "{html}");
     }
 }

@@ -1,31 +1,34 @@
 {# ── Pricing CTA ──────────────────────────────────────────────── #}
 {# Converted from pricing/PricingCTA.tsx                         #}
+{# Questions-oriented section: sales/help is the PRIMARY action. #}
+{# The calculator link uses the LOCAL anchor (#apexmail-calculator #
+{# on this page) instead of restarting the estimate journey on a  #
+{# separate page. #}
 
 <section class="py-20 lg:py-32 bg-surface-100">
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
     <div class="animate-in">
       <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-6 tracking-tight">
-        Still have questions?
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["questions_title"] %}{{ i18n_data[l]["pricing"]["questions_title"] }}{% else %}Still have questions?{% endif %}
       </h2>
       <p class="text-lg text-surface-500 mb-10 max-w-2xl mx-auto leading-relaxed">
-        Our team is here to help you find the perfect plan for your needs.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["questions_body"] %}{{ i18n_data[l]["pricing"]["questions_body"] }}{% else %}Talk to our team about procurement, annual contracts, migration, or which plan fits your volume.{% endif %}
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center">
-        {# Design audit item 10: the private "solid near-black" grammar is
-           absorbed as .btn-primary--invert; the white outline buttons are
-           plain .btn-secondary. #}
-        <a href="{{ config.extra.app_url }}/signup?source=pricing_cta_bottom&variant=free" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="free_signup" class="btn-primary--invert inline-flex items-center justify-center">
-          Start Free
-          <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        {# Sales/help is primary here — the reader arrived with questions, not
+           a plan decision. #}
+        <a href="{{ lp }}/contact/sales/?source=pricing_cta_bottom&variant=sales" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="sales" class="btn-primary inline-flex items-center justify-center">
+          <svg class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["talk_to_sales"] %}{{ i18n_data[l]["pricing"]["talk_to_sales"] }}{% else %}Talk to Sales{% endif %}
         </a>
-        <a href="{{ lp }}/pricing/calculator/?source=pricing_cta_bottom&variant=calculator" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="calculator" class="btn-secondary inline-flex items-center justify-center">
-          <svg class="w-4 h-4 mr-2 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="0"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="16" y1="14" x2="16" y2="18"/><line x1="8" y1="10" x2="8" y2="10.01"/><line x1="12" y1="10" x2="12" y2="10.01"/><line x1="16" y1="10" x2="16" y2="10.01"/><line x1="8" y1="14" x2="8" y2="14.01"/><line x1="12" y1="14" x2="12" y2="14.01"/><line x1="8" y1="18" x2="8" y2="18.01"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
-          Price Calculator
+        <a href="#apexmail-calculator" class="btn-secondary inline-flex items-center justify-center">
+          <svg class="w-4 h-4 mr-2 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="0"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="16" y1="14" x2="16" y2="18"/><line x1="8" y1="10" x2="8" y2="10.01"/><line x1="12" y1="10" x2="12" y2="10.01"/><line x1="16" y1="10" x2="16" y2="10.01"/><line x1="8" y1="14" x2="8" y2="14.01"/><line x1="12" y1="14" x2="12" y2="14.01"/><line x1="8" y1="18" x2="8" y2="18.01"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg>
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["calculator_hint"] %}{{ i18n_data[l]["pricing"]["calculator_hint"] }}{% else %}Use the calculator above{% endif %}
         </a>
-        <a href="{{ lp }}/contact/sales/?source=pricing_cta_bottom&variant=sales" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="sales" class="btn-secondary inline-flex items-center justify-center">
-          <svg class="w-4 h-4 mr-2 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          Talk to Sales
+        <a href="{{ config.extra.app_url }}/signup?source=pricing_cta_bottom&variant=free" data-conversion-experiment="pricing_cta_bottom_2026q2" data-conversion-variant="free_signup" class="btn-secondary inline-flex items-center justify-center">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
+          <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
       </div>
     </div>

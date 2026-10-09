@@ -9,6 +9,16 @@ last_updated = "2026-07-30"
 
 Esta Política de uso aceptable («PUA») define los usos prohibidos y aceptables de la infraestructura de correo electrónico de ApexMail. Su violación puede dar lugar a la suspensión o rescisión. Esta PUA distingue entre correos electrónicos de marketing y promocionales y correos electrónicos transaccionales y de servicio — cada categoría conlleva obligaciones diferentes de consentimiento, cancelación de suscripción y envío, como se describe a continuación.
 
+### Qué reglas se aplican a su mensaje
+
+| Si el mensaje es… | Categoría | Qué se aplica |
+|---|---|---|
+| principalmente promoción comercial o interacción (boletines, ofertas, anuncios) | Marketing y promocional | Consentimiento opt-in, baja funcional, identificación del remitente, sin listas compradas |
+| necesario para prestar un servicio solicitado por el destinatario o exigido por ley (recibos, restablecimiento de contraseña, alertas de seguridad) | Transaccional y de servicio | Identidad del remitente precisa, sin marketing encubierto, etiquetado correcto de categoría |
+| transaccional en su finalidad pero también contiene contenido promocional | Tratado como marketing (finalidad mixta) | Todo el mensaje debe cumplir los requisitos de marketing y promocional, incluida la baja |
+
+Clasifique con honestidad: incluir contenido de marketing en un mensaje o etiqueta transaccional infringe esta política.
+
 ## Correo electrónico de marketing y promocional
 
 El correo electrónico de marketing y promocional incluye boletines, anuncios de productos, ofertas, invitaciones a eventos y cualquier mensaje cuyo propósito principal sea la promoción comercial o la participación del cliente más allá del cumplimiento directo de un servicio.

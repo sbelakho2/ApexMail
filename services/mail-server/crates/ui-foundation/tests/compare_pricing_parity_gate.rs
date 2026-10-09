@@ -26,9 +26,12 @@ fn python3_available() -> bool {
         .unwrap_or(false)
 }
 
-/// The gate must pass on the tree as committed. Mirrors the CI convention
-/// (`ci/stages/ui.sh`): a missing python3 SKIPS the gate rather than failing
-/// it, but a python3 that reports violations is a hard test failure.
+/// The gate must pass on the tree as committed. A missing required tool is a
+/// FAILURE, not a green skip (review §14.1 `compare_pricing_parity_gate.rs`:
+/// "Missing required tooling in CI should fail, not appear as a successful
+/// skip") — a CI image without python3 used to report this gate as passing
+/// while nothing ran. python3 is already a hard requirement of the UI gate
+/// battery (`tools/check_ui_*.py`), so failing here is consistent.
 #[test]
 fn compare_pricing_parity_gate_passes_on_the_working_tree() {
     let script = repo_root().join("tools/check-compare-pricing-parity.py");
@@ -37,10 +40,12 @@ fn compare_pricing_parity_gate_passes_on_the_working_tree() {
         "parity gate script missing: {}",
         script.display()
     );
-    if !python3_available() {
-        eprintln!("SKIP: python3 not available — compare pricing-parity gate not run");
-        return;
-    }
+    assert!(
+        python3_available(),
+        "python3 is required to run the compare pricing-parity gate \
+         (tools/check-compare-pricing-parity.py); install python3 in the CI image \
+         instead of letting this gate report a green skip"
+    );
     let output = Command::new("python3")
         .arg(&script)
         .current_dir(repo_root())

@@ -39,7 +39,7 @@ comparison_sections = [
   ]},
   { title = "DEPLOYMENT MODELS", rows = [
     { feature = "Shared cloud", apex = 'Yes (all plans) — multi-tenant, EU-hosted', comp = 'Yes (all plans)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth, 3 on Business', comp = 'Available as add-on on Foundation plan and above<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud', comp = 'Available as add-on on Foundation plan and above<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},

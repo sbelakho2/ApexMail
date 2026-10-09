@@ -8,7 +8,7 @@
 
 {%- set pricing_data = load_data(path="data/pricing.json", format="json") -%}
 
-<section class="py-20 lg:py-32 bg-surface-50 relative overflow-hidden" id="apexmail-calculator" aria-labelledby="calculator-heading" data-pricing='{{ pricing_data | json_encode | escape }}'>
+<section class="scroll-mt-20 py-20 lg:py-32 bg-surface-50 relative overflow-hidden" id="apexmail-calculator" aria-labelledby="calculator-heading" data-pricing='{{ pricing_data | json_encode | escape }}'>
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
 
     <div class="text-center mb-12">
@@ -35,44 +35,43 @@
 
         <div>
           <label for="calc-volume" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">
-            Monthly email volume
+            Monthly email volume <span class="normal-case tracking-normal text-surface-400 font-medium">({% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["priced_factor"] %}{{ i18n_data[l]["calculator"]["priced_factor"] }}{% else %}priced factor{% endif %})</span>
           </label>
           {# One authoritative volume control: the number input is what the
              server reads. A disconnected range slider under no-JS would
-             silently ignore the dragged value. #}
+             silently ignore the dragged value; the slider tick labels that
+             remained under the field described a control that no longer
+             exists and were removed. #}
           <input type="number" id="calc-volume" name="volume" min="0" max="100000000" step="1000" value="50000"
                  class="input-text w-44"
                  aria-label="Monthly email volume" />
-          <div class="flex justify-between text-xs font-bold text-surface-400 mt-1.5 max-w-md" aria-hidden="true">
-            <span>0</span><span>2M</span><span>4M</span><span>6M</span><span>8M</span><span>10M</span>
-          </div>
         </div>
 
         <div>
           <label for="calc-peak-daily" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">
-            Peak daily volume
+            Peak daily volume <span class="normal-case tracking-normal text-surface-400 font-medium">({% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["context_only"] %}{{ i18n_data[l]["calculator"]["context_only"] }}{% else %}context only{% endif %})</span>
           </label>
           <input type="number" id="calc-peak-daily" name="peak_daily" min="0" max="50000000" step="1000" value="2500"
                  class="input-text w-44"
                  aria-label="Peak daily email volume" />
-          <p class="text-[11px] text-surface-400 mt-1 leading-relaxed">Used to estimate burst capacity needs. Typically monthly &divide; 20.</p>
+          <p class="text-[11px] text-surface-400 mt-1 leading-relaxed">Shown in the estimate for capacity context; it does not change the price. Typically monthly &divide; 20.</p>
         </div>
 
         <div class="grid sm:grid-cols-2 gap-6">
           <div>
-            <label for="calc-domains" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">Sending domains</label>
+            <label for="calc-domains" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">Sending domains <span class="normal-case tracking-normal text-surface-400 font-medium">({% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["context_only"] %}{{ i18n_data[l]["calculator"]["context_only"] }}{% else %}context only{% endif %})</span></label>
             <input type="number" id="calc-domains" name="domains" min="1" max="1000" step="1" value="2"
                    class="input-text w-32"
                    aria-label="Number of sending domains" />
           </div>
           <div>
-            <label for="calc-team-users" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">Team users</label>
+            <label for="calc-team-users" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">Team users <span class="normal-case tracking-normal text-surface-400 font-medium">({% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["context_only"] %}{{ i18n_data[l]["calculator"]["context_only"] }}{% else %}context only{% endif %})</span></label>
             <input type="number" id="calc-team-users" name="team_users" min="1" max="5000" step="1" value="3"
                    class="input-text w-32"
                    aria-label="Number of team users" />
           </div>
           <div>
-            <label for="calc-dedicated-ips" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">Dedicated IPs</label>
+            <label for="calc-dedicated-ips" class="block text-xs font-bold text-surface-950 tracking-[0.05em] uppercase mb-2">Dedicated IPs <span class="normal-case tracking-normal text-surface-400 font-medium">({% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["priced_factor"] %}{{ i18n_data[l]["calculator"]["priced_factor"] }}{% else %}priced factor{% endif %})</span></label>
             <input type="number" id="calc-dedicated-ips" name="dedicated_ips" min="0" max="100" step="1" value="0"
                    class="input-text w-32"
                    aria-label="Number of dedicated IPs" />
@@ -116,7 +115,7 @@
         <p class="text-xs text-surface-400 leading-relaxed">
           Plan boundaries are drawn from the active billing catalog: Free (3,000/mo), Developer (50K/mo), Pro (150K/mo), Growth (500K/mo), Business (2M/mo), Enterprise Cloud (5M/mo).
           Dedicated IPs are an add-on from €49/month (first) and €69/month (each additional) on Pro and above. Included entitlements: Growth 1 (after qualification), Business 1 (a second is assigned where traffic justifies it), Enterprise Cloud up to 3 based on architecture.
-          Annual subscriptions are billed at 10&times; the monthly price. Enterprise requires an annual contract. All totals exclude VAT and contractual services.
+          Annual subscriptions are billed at 10&times; the monthly price — {{ pricing_data.annual_savings_percent }}% less than twelve monthly payments. Enterprise requires an annual contract. All totals exclude VAT and contractual services. The next page shows the itemised estimate with the plan, included volume, overage and IP costs.
         </p>
       </div>
     </div>

@@ -23,7 +23,34 @@ struct FixtureManifestEntry {
 
 #[derive(Serialize)]
 struct FixtureManifest {
+    /// One asset authority: where the exported console stylesheet comes from
+    /// and which marketing build supplied the marketing assets.
+    asset_authority: String,
+    /// SHA-256 of the exported console stylesheet (`assets/globals.css`),
+    /// i.e. the renderer's canonical stylesheet content.
+    css_sha256: String,
+    /// SHA-256 of the exported marketing stylesheet (`css/styles.css`) — the
+    /// marketing build the fixtures were rendered against.
+    marketing_sha256: String,
+    /// SHA-256 over the ordered (id, html) stream of every exported fixture:
+    /// the renderer's exact output fingerprint.
+    renderer_sha256: String,
     fixtures: Vec<FixtureManifestEntry>,
+}
+
+/// SHA-256 hex digest of a byte slice.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn file_sha256(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(_) => "missing".to_string(),
+    }
 }
 
 const AUTH_FIXTURES: [(&str, &str, &str); 3] = [
@@ -436,6 +463,10 @@ fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_fixture_assets(out_dir)?;
 
     let mut manifest = FixtureManifest {
+        asset_authority: "console: ui-foundation GLOBALS_CSS -> assets/globals.css; marketing: apps/marketing-zola/public -> css/, fonts/, images/, root files".to_string(),
+        css_sha256: String::new(),
+        marketing_sha256: String::new(),
+        renderer_sha256: String::new(),
         fixtures: Vec::new(),
     };
 
@@ -446,11 +477,31 @@ fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         export_marketing_fixtures(out_dir, &mut manifest)?;
     }
 
+    // The three authorities the fixture set is derived from: the canonical
+    // console stylesheet, the marketing build's stylesheet, and the
+    // renderer's own output stream. A consumer comparing two fixture sets
+    // can tell exactly which authority moved.
+    manifest.css_sha256 = file_sha256(&out_dir.join("assets").join("globals.css"));
+    manifest.marketing_sha256 = file_sha256(&out_dir.join("css").join("styles.css"));
+    let mut stream: Vec<u8> = Vec::new();
+    for entry in &manifest.fixtures {
+        stream.extend_from_slice(entry.id.as_bytes());
+        stream.push(0);
+        if let Ok(html) = fs::read(out_dir.join(&entry.html_file)) {
+            stream.extend_from_slice(&html);
+        }
+        stream.push(0);
+    }
+    manifest.renderer_sha256 = sha256_hex(&stream);
+
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(out_dir.join("manifest.json"), manifest_json)?;
 
     tracing::info!(
         count = manifest.fixtures.len(),
+        css_sha256 = %manifest.css_sha256,
+        marketing_sha256 = %manifest.marketing_sha256,
+        renderer_sha256 = %manifest.renderer_sha256,
         out_dir = %out_dir.display(),
         "Exported visual fixtures"
     );
@@ -697,6 +748,10 @@ mod tests {
     fn export_auth_fixtures_writes_three_pages_and_manifest_entries() {
         let out = temp_dir("auth_out");
         let mut manifest = FixtureManifest {
+            asset_authority: String::new(),
+            css_sha256: String::new(),
+            marketing_sha256: String::new(),
+            renderer_sha256: String::new(),
             fixtures: Vec::new(),
         };
         export_auth_fixtures(&out, &mut manifest).expect("auth fixtures");
@@ -721,6 +776,10 @@ mod tests {
     fn export_marketing_fixtures_writes_every_route_for_both_viewports() {
         let out = temp_dir("marketing_out");
         let mut manifest = FixtureManifest {
+            asset_authority: String::new(),
+            css_sha256: String::new(),
+            marketing_sha256: String::new(),
+            renderer_sha256: String::new(),
             fixtures: Vec::new(),
         };
         export_marketing_fixtures(&out, &mut manifest).expect("marketing fixtures");
@@ -807,6 +866,10 @@ mod tests {
     fn full_route_export_includes_every_bot_state_fixture() {
         let out = temp_dir("bot_state_out");
         let mut manifest = FixtureManifest {
+            asset_authority: String::new(),
+            css_sha256: String::new(),
+            marketing_sha256: String::new(),
+            renderer_sha256: String::new(),
             fixtures: Vec::new(),
         };
         export_full_route_fixtures(&out, &mut manifest).expect("full export");

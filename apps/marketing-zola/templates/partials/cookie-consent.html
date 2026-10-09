@@ -79,36 +79,49 @@
     </div>
     <div class="cookie-consent-actions">
       {% if consent_choices | length > 0 %}
-        {% for choice in consent_choices %}
-          {# Map a configured choice to the /consent `choice` parameter.
-             Both "necessary" and "dismiss" record a necessary-only consent
-             (the deleted site.js treated dismiss as "store the choice,
-             enable nothing"), so both map to choice=necessary. #}
-          {% if choice.value == "all" %}
-            {% set consent_param = "all" %}
-          {% else %}
-            {% set consent_param = "necessary" %}
-          {% endif %}
+        {# Equivalent necessary-only choices are collapsed: config lists both
+           "necessary" and "dismiss", and both record the SAME necessary-only
+           consent (the deleted site.js treated dismiss as "store the choice,
+           enable nothing"). Rendering two buttons with identical outcomes
+           implied a tracking difference that does not exist. #}
+        {% set all_choices = consent_choices | filter(attribute="value", value="all") %}
+        {% set necessary_choices = consent_choices | filter(attribute="value", value="necessary") %}
+        {% set dismiss_choices = consent_choices | filter(attribute="value", value="dismiss") %}
+        {% if necessary_choices | length > 0 %}
+          {% set necessary_choice = necessary_choices[0] %}
           <a
-            href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice={{ consent_param }}&amp;return_to={{ consent_return_to }}"
+            href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=necessary&amp;return_to={{ consent_return_to }}"
             rel="nofollow"
             data-cookie-consent-choice
-            data-cookie-consent-value="{{ choice.value }}"
-            data-cookie-consent-analytics="{{ choice.analytics | default(value=false) }}"
-            class="cookie-consent-button
-              {%- if choice.primary | default(value=false) %} cookie-consent-button--primary
-              {%- else %} cookie-consent-button--secondary
-              {%- endif -%}"
+            data-cookie-consent-value="necessary"
+            data-cookie-consent-analytics="false"
+            class="cookie-consent-button cookie-consent-button--secondary"
           >
-            {%- if choice.value == "necessary" -%}
-              {{- consent_necessary -}}
-            {%- elif choice.value == "dismiss" -%}
-              {{- consent_dismiss -}}
-            {%- elif choice.value == "all" -%}
-              {{- consent_accept_all -}}
-            {%- else -%}
-              {{- choice.label | default(value=choice.value) -}}
-            {%- endif -%}
+            {{- consent_necessary -}}
+          </a>
+        {% elif dismiss_choices | length > 0 %}
+          {% set necessary_choice = dismiss_choices[0] %}
+          <a
+            href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=necessary&amp;return_to={{ consent_return_to }}"
+            rel="nofollow"
+            data-cookie-consent-choice
+            data-cookie-consent-value="necessary"
+            data-cookie-consent-analytics="false"
+            class="cookie-consent-button cookie-consent-button--secondary"
+          >
+            {{- consent_necessary -}}
+          </a>
+        {% endif %}
+        {% for choice in all_choices %}
+          <a
+            href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=all&amp;return_to={{ consent_return_to }}"
+            rel="nofollow"
+            data-cookie-consent-choice
+            data-cookie-consent-value="all"
+            data-cookie-consent-analytics="true"
+            class="cookie-consent-button{% if choice.primary | default(value=false) %} cookie-consent-button--primary{% else %} cookie-consent-button--secondary{% endif %}"
+          >
+            {{- consent_accept_all -}}
           </a>
         {% endfor %}
       {% else %}

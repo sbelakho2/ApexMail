@@ -150,6 +150,78 @@ mod tests {
         assert!(GLOBALS_CSS.contains(":root:not(.light) .bg-white"));
     }
 
+    /// Review §5.1 lib.rs: validate the light and dark token blocks
+    /// INDEPENDENTLY. Each block is parsed on its own (never by diffing one
+    /// against the other's text), and the two dark authorities — the `.dark`
+    /// class the toggle uses and the `:root:not(.light)` media twin the
+    /// zero-JS console takes — must agree exactly, so a theme cannot work on
+    /// only one of the two paths.
+    #[test]
+    fn light_and_dark_token_blocks_validate_independently() {
+        use crate::tokens::block_tokens;
+        let light = block_tokens(GLOBALS_INPUT_CSS, ":root");
+        let dark = block_tokens(GLOBALS_INPUT_CSS, ".dark");
+        let media = block_tokens(GLOBALS_INPUT_CSS, ":root:not(.light)");
+
+        assert!(light.len() >= 50, "light token block: {}", light.len());
+        assert!(dark.len() >= 15, "dark token block: {}", dark.len());
+        assert_eq!(media.len(), dark.len(), "the dark blocks are twins");
+
+        // 1. No dark token may be a name the light block does not define —
+        //    an unknown name would silently never apply.
+        for name in dark.keys().chain(media.keys()) {
+            assert!(
+                light.contains_key(name),
+                "{name} is defined only in a dark block"
+            );
+        }
+        // 2. The class twin and the media twin carry the SAME values.
+        for (name, value) in &dark {
+            assert_eq!(media.get(name), Some(value), "{name} differs between twins");
+        }
+        // 3. The core surface tokens are present in every block (a gutted
+        //    dark block would otherwise satisfy the equality check above).
+        for core in [
+            "--background",
+            "--foreground",
+            "--card",
+            "--border",
+            "--muted-foreground",
+            "--surface-100",
+        ] {
+            assert!(light.contains_key(core), "light missing {core}");
+            assert!(dark.contains_key(core), "dark missing {core}");
+            assert!(media.contains_key(core), "media twin missing {core}");
+        }
+        // 4. The compiled artifact carries the same light authority.
+        let artifact_light = block_tokens(GLOBALS_CSS, ":root");
+        for (name, value) in &light {
+            assert_eq!(
+                artifact_light.get(name),
+                Some(value),
+                "{name} artifact drift"
+            );
+        }
+    }
+
+    /// Review §5.2 tailwind.config.js: every authoritative renderer that can
+    /// emit a console/CP class is in the content scan (a renderer outside it
+    /// ships undefined classes that render as nothing).
+    #[test]
+    fn tailwind_content_scan_covers_every_class_emitting_renderer() {
+        let config = include_str!("../tailwind.config.js");
+        for required in [
+            "'./src/**/*.rs'",
+            "'./assets/globals.input.css'",
+            "'../../api-server/src/**/*.rs'",
+        ] {
+            assert!(
+                config.contains(required),
+                "tailwind.config.js content scan must include {required}"
+            );
+        }
+    }
+
     // ─── Brand palette pins (red & black) ─────────────────────────────
     //
     // Regression guard for the 2026-08 palette regressions:

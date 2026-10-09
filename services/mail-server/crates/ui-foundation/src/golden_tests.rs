@@ -97,11 +97,16 @@ pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
     // The stylesheet link carries a content hash: normalize the VERSION so a
     // CSS change does not rewrite every golden (the hash is asserted by the
     // class-integrity/lib tests, not by 100+ golden files).
+    //
+    // `replace_until` keeps the needle in the prefix, so the replacement is
+    // the BARE value — passing a needle-including string doubled the token in
+    // every golden (`?v=/assets/globals.css?v=…`, review §14.1: the golden
+    // normalizer was broken; regenerating goldens never hid it).
     replace_until(
         &mut normalized,
         "/assets/globals.css?v=",
         &['"'],
-        "/assets/globals.css?v=<css-version>",
+        "<css-version>",
     );
     // The double-submit contract embeds the token in name="_csrf" hidden
     // inputs (auth forms, sidebar sign-out, the injected form token).

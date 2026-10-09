@@ -40,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
     { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — verwaltet, Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Konten) — standardmäßig gemeinsamer IP-Pool<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business', comp = 'Ja — €22.95 (US$24.95)/Monat pro dedizierter IP; IP-Pool-Verwaltung verfügbar<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud', comp = 'Ja — €22.95 (US$24.95)/Monat pro dedizierter IP; IP-Pool-Verwaltung verfügbar<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Selbst verwaltet — der Kunde plant dedizierte Tenancy auf AWS mit SES als Dienstkomponente<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Systemimmanent — der Kunde betreibt im eigenen AWS-Konto; SES ist ein AWS-Dienst<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
@@ -50,7 +50,7 @@ comparison_sections = [
     { feature = "HIPAA-Verfügbarkeit", apex = 'Derzeit nicht angeboten', comp = 'Ja — AWS-BAA verfügbar; SES ist ein HIPAA-fähiger Dienst<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},
   { title = "PREISE BEI 100K/MONAT (verifiziert 2026-07-29)", rows = [
-    { feature = "Verglichener Tarif", apex = 'Pro: €65/Monat (150.000 E-Mails enthalten, verwaltete Infrastruktur)', comp = 'Pay-as-you-go: ~€9.20 (US$10)/100K E-Mails (reiner Versand, ohne Verwaltung)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
+    { feature = "Verglichener Tarif", apex = 'Pro: €89/Monat (150.000 E-Mails enthalten, verwaltete Infrastruktur)', comp = 'Pay-as-you-go: ~€9.20 (US$10)/100K E-Mails (reiner Versand, ohne Verwaltung)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Unterschied beim Preismodell", apex = 'Verwaltete E-Mail-Infrastruktur: API, Ereignisspeicherung, Webhook-Zustellung, Support und Analytik inklusive', comp = 'Abrechnung roher Kapazität: IaaS — Zahlung pro Versand plus zusätzliche AWS-Kosten (EC2, S3, CloudWatch, SNS, Support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Kostenlose Stufe", apex = '3.000 E-Mails/Monat dauerhaft + einmaliges Startguthaben von 30.000 E-Mails (keine Kreditkarte)', comp = '62.000 E-Mails/Monat beim Versand von EC2 (erste 12 Monate); sonst 3.000/Monat<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},

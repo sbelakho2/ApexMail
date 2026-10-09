@@ -1,12 +1,14 @@
 {# Features Section #}
 <section class="py-20 lg:py-32 bg-surface-50">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="text-center mb-24">
+    <div class="text-center mb-12">
       <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["eyebrow"] %}{{ i18n_data[l]["home_features"]["eyebrow"] }}{% else %}Capabilities{% endif %}</span>
       <h2 class="text-surface-950 mb-6 tracking-tighter text-4xl lg:text-6xl">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["heading_1"] %}{{ i18n_data[l]["home_features"]["heading_1"] }}{% else %}Send, diagnose and operate email.{% endif %}<br /><span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["heading_2"] %}{{ i18n_data[l]["home_features"]["heading_2"] }}{% else %}Built for predictable delivery.{% endif %}</span></h2>
       <p class="text-surface-600 max-w-2xl mx-auto text-lg leading-[1.5]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["subtitle"] %}{{ i18n_data[l]["home_features"]["subtitle"] }}{% else %}Email infrastructure for developers who need predictable API behavior and delivery visibility.{% endif %}</p>
     </div>
-    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+    {# Balanced four-item arrangement: 1-up → 2×2 → 4-up (the previous
+       lg:grid-cols-3 left a three-plus-orphan row). #}
+    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
       <div class="card-dna">
         <div class="flex items-center justify-between mb-4"><span class="ix">01</span></div>
         <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_1_title"] %}{{ i18n_data[l]["home_features"]["card_1_title"] }}{% else %}Low-latency API{% endif %}</h3>

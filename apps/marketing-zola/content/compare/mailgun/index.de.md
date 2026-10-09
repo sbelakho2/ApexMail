@@ -40,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
     { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Tarife)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business', comp = 'Als Add-on verfügbar ab dem Foundation-Tarif und darüber<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud', comp = 'Als Add-on verfügbar ab dem Foundation-Tarif und darüber<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
@@ -50,7 +50,7 @@ comparison_sections = [
     { feature = "Audit-Logs", apex = 'Ab Growth-Tarif — Kontoaktivität, API-Schlüssel-Nutzung, Konfigurationsänderungen; durchsuchbar, exportierbar', comp = 'Ereignisprotokolle über die Events API zugänglich; Aufbewahrung je nach Tarif; kein zusammengeführter Audit-Trail auf Kontoebene<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
   { title = "PREISE BEI 100K/MONAT (verifiziert 2026-07-29)", rows = [
-    { feature = "Verglichener Tarif", apex = 'Pro: €65/Monat (150.000 E-Mails enthalten)', comp = 'Scale: €82.80 (US$90)/Monat (100.000 E-Mails enthalten)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
+    { feature = "Verglichener Tarif", apex = 'Pro: €89/Monat (150.000 E-Mails enthalten)', comp = 'Scale: €82.80 (US$90)/Monat (100.000 E-Mails enthalten)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Nutzungsbedingungen", apex = 'Siehe den aktuellen öffentlichen Katalog und Checkout für die anwendbaren Nutzungsbedingungen', comp = 'ab €1.20 (US$1.30)/1.000 bei Foundation-Überschreitung; Staffelraten ab Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Kostenlose Stufe", apex = '3.000 E-Mails/Monat + einmaliges Startguthaben von 30.000 E-Mails', comp = '100 E-Mails/Tag (Flex-Testphase — keine Kreditkarte)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},

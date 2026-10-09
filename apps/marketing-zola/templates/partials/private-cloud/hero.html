@@ -52,7 +52,7 @@
       {# Right: VPC Architecture Diagram #}
       <div class="animate-in delay-300 relative">
         <div class="bg-surface-50 border border-surface-200 rounded-lg p-6">
-          <div class="text-xs font-semibold text-surface-400 tracking-wider mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["architecture_label"] %}{{ i18n_data[l]["private_cloud"]["architecture_label"] }}{% else %}Reference Deployment Architecture{% endif %}</div>
+          <div class="text-xs font-semibold text-surface-400 tracking-wider mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["architecture_label"] %}{{ i18n_data[l]["private_cloud"]["architecture_label"] }}{% else %}Reference Deployment Architecture (illustrative){% endif %}</div>
 
           {# Region label #}
           <div class="border-2 border-dashed border-brand-200 rounded-sm p-4 relative">
@@ -62,7 +62,15 @@
             <div class="bg-surface-100 border border-surface-200 rounded-sm p-4 mb-3">
               <div class="text-xs font-semibold text-surface-500 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["private_subnet"] %}{{ i18n_data[l]["private_cloud"]["private_subnet"] }}{% else %}Private Subnet{% endif %}</div>
               <div class="grid grid-cols-3 gap-2">
-                {% set private_services = ["MTA Cluster", "Queue Workers", "Analytics DB"] %}
+                {# Diagram labels are localized via private_cloud.svc_* keys
+                   (English fallbacks; keys reported to R4). #}
+                {% set svc_mta = "MTA Cluster" %}
+                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_mta"] %}{% set svc_mta = i18n_data[l]["private_cloud"]["svc_mta"] %}{% endif %}
+                {% set svc_queue = "Queue Workers" %}
+                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_queue"] %}{% set svc_queue = i18n_data[l]["private_cloud"]["svc_queue"] %}{% endif %}
+                {% set svc_analytics = "Analytics DB" %}
+                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_analytics"] %}{% set svc_analytics = i18n_data[l]["private_cloud"]["svc_analytics"] %}{% endif %}
+                {% set private_services = [svc_mta, svc_queue, svc_analytics] %}
                 {% for svc in private_services %}
                 <div class="bg-surface-50 border border-surface-200 rounded-sm p-3 text-center">
                   <div class="w-8 h-8 rounded-sm bg-brand-100 flex items-center justify-center mx-auto mb-2">
@@ -78,7 +86,13 @@
             <div class="bg-brand-50/50 border border-brand-200 rounded-sm p-4">
               <div class="text-xs font-semibold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["public_subnet"] %}{{ i18n_data[l]["private_cloud"]["public_subnet"] }}{% else %}Public Subnet{% endif %}</div>
               <div class="grid grid-cols-3 gap-2">
-                {% set public_services = ["API Gateway", "Load Balancer", "DNS Resolver"] %}
+                {% set svc_api = "API Gateway" %}
+                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_api"] %}{% set svc_api = i18n_data[l]["private_cloud"]["svc_api"] %}{% endif %}
+                {% set svc_lb = "Load Balancer" %}
+                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_lb"] %}{% set svc_lb = i18n_data[l]["private_cloud"]["svc_lb"] %}{% endif %}
+                {% set svc_dns = "DNS Resolver" %}
+                {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["svc_dns"] %}{% set svc_dns = i18n_data[l]["private_cloud"]["svc_dns"] %}{% endif %}
+                {% set public_services = [svc_api, svc_lb, svc_dns] %}
                 {% for svc in public_services %}
                 <div class="bg-surface-50 border border-brand-200 rounded-sm p-3 text-center">
                   <div class="w-8 h-8 rounded-sm bg-brand-100 flex items-center justify-center mx-auto mb-2">
@@ -91,13 +105,16 @@
             </div>
           </div>
 
+          {# The strip above is an illustrative reference architecture, not a
+             provisioned deployment: the shown range is an RFC 5737 example
+             range, not a live ApexMail allocation. #}
           {# Dedicated IPs #}
           <div class="mt-4 flex items-center justify-between p-3 bg-success-50 border border-success-200 rounded-sm">
             <div class="flex items-center gap-2">
-              <div class="w-2 h-2 rounded-sm bg-success-500 animate-pulse"></div>
+              <div class="w-2 h-2 rounded-sm bg-success-500" aria-hidden="true"></div>
               <span class="text-sm font-medium text-success-700">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["dedicated_ip_pool"] %}{{ i18n_data[l]["private_cloud"]["dedicated_ip_pool"] }}{% else %}Dedicated IP Pool{% endif %}</span>
             </div>
-            <span class="text-xs text-success-600 font-mono">192.168.x.x/24</span>
+            <span class="text-xs text-success-600 font-mono">203.0.113.0/24 (example range)</span>
           </div>
         </div>
       </div>

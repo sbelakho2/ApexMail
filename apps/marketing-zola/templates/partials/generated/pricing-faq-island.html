@@ -1,75 +1,62 @@
 {# ── Pricing FAQ (pure HTML <details>/<summary>) ─────────────── #}
 {# Uses native HTML disclosure elements.                         #}
 {# CSS in no-js.css handles icon rotation on [open].              #}
+{#                                                               #}
+{# Localization: questions and answers are looked up from the     #}
+{# i18n_data pricing_faq section (q1..q6 / a1..a6) with the      #}
+{# English source strings as fallbacks; keys are reported to R4.  #}
+{# The annual answer keeps the canonical semantics: 10 monthly    #}
+{# payments = a 16.7% saving vs twelve monthly payments (the      #}
+{# catalog's `annual_savings_percent`, never "10%"), and the      #}
+{# overage answer quotes the catalog's €0.35/1,000 for every paid #}
+{# tier. Both fallback drifts (the "17%" rounding and the retired #}
+{# Enterprise overage range) were filed by R4: the EN source      #}
+{# strings must match data/pricing.json the way the translated    #}
+{# answers already do.                                           #}
 
-<section class="py-20 lg:py-32 bg-surface-50 border-t border-surface-100">
+{% set faq_questions = [
+  "How does ApexMail pricing work?",
+  "Is there a free tier?",
+  "What happens if I exceed my plan limit?",
+  "Do you offer annual billing?",
+  "Is HIPAA compliance included?",
+  "Can I switch plans at any time?"
+] %}
+{% set faq_answers = [
+  "We charge based on monthly email volume with clear plan limits. DKIM, SPF, DMARC, webhooks, and core analytics are included broadly; higher tiers add dedicated IPs, SSO, compliance workflows, and account coverage.",
+  "Yes. The free tier includes 3,000 emails per month, and every new account gets a one-time 30,000-email launch allowance for its first 30 days. No credit card required. You can upgrade at any time as your volume grows.",
+  "Extra volume beyond a paid plan is billed per plan: Developer €0.80, Pro €0.60, Growth/Business €0.35 per 1,000; Enterprise Cloud €0.35 per 1,000 (contractual). The Free plan has no automatic overage — upgrade instead. Usage, abuse, and payment controls continue to apply. Review your billing setup for the applicable limits and alerts.",
+  "Yes. Annual subscriptions are billed at 10 times the monthly price, which is a 16.7% saving versus twelve monthly payments. Enterprise annual contracts follow the signed order form.",
+  "HIPAA availability is not currently offered. Enterprise can support compliance workflow discussions, but a regulated use case may proceed only after written confirmation and any required agreement with our security and legal teams.",
+  "Paid-plan changes use secure Stripe Checkout or the Stripe billing portal. A plan does not change until Stripe confirms the billing event and ApexMail reconciles the verified Stripe webhook. Enterprise annual contracts follow the signed order form and service terms."
+] %}
+
+<section id="pricing-faq" class="scroll-mt-20 py-20 lg:py-32 bg-surface-50 border-t border-surface-100">
   <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
       <h2 class="text-3xl font-bold text-surface-950 tracking-tight">
-        Frequently Asked Questions
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"]["title"] %}{{ i18n_data[l]["pricing_faq"]["title"] }}{% else %}Frequently Asked Questions{% endif %}
       </h2>
     </div>
     <div class="space-y-0 divide-y divide-surface-100">
 
+      {% for question in faq_questions %}
+      {% set q_text = question %}
+      {% set a_text = faq_answers[loop.index0] %}
+      {% set q_key = "q" ~ loop.index %}
+      {% set a_key = "a" ~ loop.index %}
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"][q_key] %}{% set q_text = i18n_data[l]["pricing_faq"][q_key] %}{% endif %}
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing_faq"] and i18n_data[l]["pricing_faq"][a_key] %}{% set a_text = i18n_data[l]["pricing_faq"][a_key] %}{% endif %}
       <details class="faq-item">
         <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">How does ApexMail pricing work?</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">{{ q_text }}</span>
+          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
         </summary>
         <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">We charge based on monthly email volume with clear plan limits. DKIM, SPF, DMARC, webhooks, and core analytics are included broadly; higher tiers add dedicated IPs, SSO, compliance workflows, and account coverage.</p>
+          <p class="text-surface-600 leading-relaxed">{{ a_text | safe }}</p>
         </div>
       </details>
-
-      <details class="faq-item">
-        <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">Is there a free tier?</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-        </summary>
-        <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">Yes. The free tier includes 3,000 emails per month, and every new account gets a one-time 30,000-email launch allowance for its first 30 days. No credit card required. You can upgrade at any time as your volume grows.</p>
-        </div>
-      </details>
-
-      <details class="faq-item">
-        <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">What happens if I exceed my plan limit?</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-        </summary>
-        <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">Extra volume beyond a paid plan is billed per plan: Developer €0.80, Pro €0.60, Growth/Business €0.35 per 1,000; Enterprise Cloud €0.22–€0.35 contractual. The Free plan has no automatic overage — upgrade instead. Usage, abuse, and payment controls continue to apply. Review your billing setup for the applicable limits and alerts.</p>
-        </div>
-      </details>
-
-      <details class="faq-item">
-        <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">Do you offer annual billing?</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-        </summary>
-        <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">Yes. Annual subscriptions are billed at 10 times the monthly price, which is roughly a 17% discount versus twelve monthly payments. Enterprise annual contracts follow the signed order form.</p>
-        </div>
-      </details>
-
-      <details class="faq-item">
-        <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">Is HIPAA compliance included?</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-        </summary>
-        <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">HIPAA availability is not currently offered. Enterprise can support compliance workflow discussions, but a regulated use case may proceed only after written confirmation and any required agreement with our security and legal teams.</p>
-        </div>
-      </details>
-
-      <details class="faq-item">
-        <summary class="w-full flex items-center justify-between py-6 text-left group">
-          <span class="text-lg font-medium text-surface-950 group-hover:text-surface-950 transition-colors">Can I switch plans at any time?</span>
-          <svg class="faq-icon w-5 h-5 text-surface-400 transition-transform duration-200 flex-shrink-0 ml-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-        </summary>
-        <div class="pb-6 pr-12">
-          <p class="text-surface-600 leading-relaxed">Paid-plan changes use secure Stripe Checkout or the Stripe billing portal. A plan does not change until Stripe confirms the billing event and ApexMail reconciles the verified Stripe webhook. Enterprise annual contracts follow the signed order form and service terms.</p>
-        </div>
-      </details>
+      {% endfor %}
 
     </div>
   </div>

@@ -108,9 +108,9 @@ Source of truth: `docs/development/ui-baseline-manifest.json` (the pinned counts
 
 | Surface | routeCount | Routes listed |
 |---|---|---|
-| web | 39 | 39 |
+| web | 40 | 40 |
 | control-plane | 34 | 34 |
 | marketing | 19 | 19 |
 | marketing-zola | 38 | 38 |
 
-**Total: 130 routes.**
+**Total: 131 routes.**

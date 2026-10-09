@@ -241,9 +241,10 @@ impl ListPageData {
                 total = self.total_count
             );
         }
-        let end = ((start + rows_len.saturating_sub(1)) as i64)
-            .min(self.total_count)
-            .max(start);
+        // Clamp the range: an out-of-range page (rows present beyond the
+        // known total) must never render "Showing 41–40".
+        let total = self.total_count.max(0) as usize;
+        let end = (start + rows_len - 1).min(total).max(start);
         format!(
             "Showing {start}–{end} of {total} {plural}.",
             total = self.total_count
@@ -265,10 +266,6 @@ pub struct CampaignEditData {
     pub html_body: String,
     /// `datetime-local` value string (may be empty for drafts).
     pub scheduled_at: String,
-    /// The row's real lifecycle status (`draft` | `scheduled` | `sending` |
-    /// `paused` | `stopped` | `completed` | `failed`): the editor's badge
-    /// shows THIS, not an unconditional "Draft" (review §6.2).
-    pub status: String,
 }
 
 /// Prefilled template editor state for `/templates/{id}/edit` (loaded
@@ -315,6 +312,11 @@ pub struct PlacementProviderRow {
 pub struct CampaignEditorData {
     pub lists: Vec<(String, String)>,
     pub segments: Vec<(String, String)>,
+    /// The edited row's real lifecycle status (`draft` | `scheduled` |
+    /// `sending` | `paused` | `stopped` | `completed` | `failed`); empty in
+    /// create mode, where a new campaign is honestly a draft. The editor's
+    /// badge shows THIS, not an unconditional "Draft" (review §6.2).
+    pub status: String,
     /// A storage read failed: the editor renders a service-problem notice
     /// instead of pretending the workspace has no lists/audience (audit #16).
     pub unavailable: bool,
@@ -365,6 +367,10 @@ pub struct ContactEditData {
     pub name: String,
     /// One of `subscribed` / `unsubscribed` / `bounced`.
     pub status: String,
+    /// Names of the lists this contact belongs to (review §6.2: the editor
+    /// must show audience membership context, not imply the contact is
+    /// list-less). Membership itself is managed from the list pages.
+    pub lists: Vec<String>,
 }
 
 /// Server-loaded list detail state for `/lists/{id}`: the real list name
@@ -377,6 +383,35 @@ pub struct ListDetailData {
     pub subscribers: String,
     pub subscribed: String,
     pub unsubscribed: String,
+}
+
+/// One `/lists/{id}/members` row (review §6.2: the list detail's subscriber
+/// count must be inspectable). Readable identity first (the contact's name
+/// when recorded, else the address), the per-list membership status, and
+/// when the subscriber was added.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListMemberData {
+    /// Display identity: the contact's name when recorded, else the email.
+    pub identity: String,
+    pub email: String,
+    /// The `list_subscribers.status` value (`active`, `subscribed`, …).
+    pub status: String,
+    /// RFC 3339 UTC timestamp the contact joined this list.
+    pub added_at: Option<String>,
+}
+
+/// Server-loaded `/lists/{id}/members` state: the real list identity plus
+/// its subscribers, newest first. An empty `members` vector is the honest
+/// "no subscribers yet" state; the loader's `Ok(None)` (list not in this
+/// workspace) never reaches the view.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListMembersData {
+    pub id: String,
+    pub name: String,
+    /// The `list_subscribers` row count for this list (rendered verbatim;
+    /// the loader reads it in the same statement family as the rows).
+    pub total: String,
+    pub members: Vec<ListMemberData>,
 }
 
 /// Pending TOTP setup, carried from `POST /web/auth/mfa/setup` to the
@@ -918,6 +953,42 @@ mod tests {
         });
         assert_eq!(data.summary("campaign"), "Showing 11–20 of 42 campaigns.");
         assert_eq!(ListPageData::default().summary("tenant"), "No tenants yet.");
+
+        // An out-of-range page (no rows, total known) must never render an
+        // inverted range like "Showing 41–40".
+        let mut empty_page = ListPageData {
+            page: 5,
+            per_page: 10,
+            total_count: 42,
+            ..Default::default()
+        };
+        empty_page.table = Some(TableData {
+            columns: vec!["Name".into()],
+            rows: vec![],
+        });
+        assert_eq!(
+            empty_page.summary("campaign"),
+            "No campaigns on this page — 42 in total."
+        );
+
+        // A total smaller than the page offset still clamps the end bound.
+        let mut clamped = ListPageData {
+            page: 5,
+            per_page: 10,
+            total_count: 42,
+            ..Default::default()
+        };
+        clamped.table = Some(TableData {
+            columns: vec!["Name".into()],
+            rows: vec![DataRowData {
+                id: "r1".into(),
+                cells: vec![DataCell::text("row")],
+            }],
+        });
+        assert_eq!(
+            clamped.summary("campaign"),
+            "Showing 41–41 of 42 campaigns."
+        );
     }
 
     #[test]
@@ -1005,8 +1076,10 @@ mod deferred_view_data_tests {
             email: "a@b.c".into(),
             name: "A".into(),
             status: "bounced".into(),
+            lists: vec!["Newsletter".into()],
         };
         assert_eq!(contact.status, "bounced");
         assert_eq!(contact.email, "a@b.c");
+        assert_eq!(contact.lists, vec!["Newsletter".to_string()]);
     }
 }

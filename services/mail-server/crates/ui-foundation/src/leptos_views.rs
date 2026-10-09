@@ -204,9 +204,19 @@ pub fn control_plane_app_layout_with_role(
         current_path,
         csrf_token,
         user_role,
-        None,
-        None,
+        ControlPlaneSessionContext::default(),
     )
+}
+
+/// The optional session-derived context a control-plane page renders with:
+/// the authenticated session's identity (display name, email, plan label)
+/// and the active impersonation session's banner. Grouping the two keeps the
+/// public layout entry point inside clippy's argument budget while the
+/// pre-F10 "no session" case stays expressible as `::default()`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ControlPlaneSessionContext<'a> {
+    pub user_context: Option<crate::shell::UserContext<'a>>,
+    pub impersonation_banner: Option<crate::shell::ImpersonationBanner<'a>>,
 }
 
 /// [`control_plane_app_layout_with_role`] plus the active impersonation
@@ -214,10 +224,11 @@ pub fn control_plane_app_layout_with_role(
 /// impersonating keeps the banner and its Terminate form on every page
 /// (dogfood 2026-10-06 — the SSR request path never rendered it).
 ///
-/// `user_context` carries the authenticated session's identity (display
-/// name, email, tenant plan label) into the CP header. The render pipeline
-/// already loads it for BOTH console surfaces; before F10 only the web
-/// shell consumed it, so every CP page rendered without its real plan label.
+/// `session.user_context` carries the authenticated session's identity
+/// (display name, email, tenant plan label) into the CP header. The render
+/// pipeline already loads it for BOTH console surfaces; before F10 only the
+/// web shell consumed it, so every CP page rendered without its real plan
+/// label.
 pub fn control_plane_app_layout_with_session(
     child_html: &str,
     page_title: &str,
@@ -225,9 +236,12 @@ pub fn control_plane_app_layout_with_session(
     current_path: &str,
     csrf_token: &str,
     user_role: &str,
-    user_context: Option<&crate::shell::UserContext<'_>>,
-    impersonation_banner: Option<crate::shell::ImpersonationBanner<'_>>,
+    session: ControlPlaneSessionContext<'_>,
 ) -> String {
+    let ControlPlaneSessionContext {
+        user_context,
+        impersonation_banner,
+    } = session;
     let shell = ControlPlaneShell {
         mobile_menu_open: false,
         user_role: if user_role.is_empty() {
@@ -241,7 +255,7 @@ pub fn control_plane_app_layout_with_session(
         child_html,
         current_path,
         csrf_token,
-        user_context: user_context.cloned(),
+        user_context,
     };
     let page = shell.render_html();
     match impersonation_banner {
@@ -265,7 +279,7 @@ pub fn web_home_page() -> String {
 <p class=\"mt-5 max-w-2xl text-xl font-medium leading-8 text-surface-600\">Modern email infrastructure for developers</p>\
 <p class=\"mt-4 max-w-2xl text-sm leading-6 text-surface-500\">Open the product console to manage campaigns, domains, analytics, team access, and delivery operations from the same Rust-rendered surface used by the live app.</p>\
 <div class=\"mt-10 flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/campaigns\" class=\"apex-btn\">Go to Dashboard</a>\
+<a href=\"/dashboard\" class=\"apex-btn\">Go to Dashboard</a>\
 <a href=\"/login\" class=\"apex-btn apex-btn--secondary\">Sign In</a>\
 </div></div>\
 <div class=\"border border-surface-200 bg-card shadow-premium\">\
@@ -401,6 +415,11 @@ fn render_debounced_filter_bar(
 
 /// Native `<select>` filter control for the GET filter form (no combobox
 /// JS): submits with the surrounding form via the Apply button.
+///
+/// Every interpolation is escaped at this helper boundary (values, option
+/// text, id, name, label): the helper is private today and its callers pass
+/// literal option lists, but a primitive must not rely on that — the same
+/// rule `primitives::NativeSelect` enforces (review §3 P1-8 / §5.2).
 #[allow(clippy::too_many_arguments)]
 fn render_native_select(
     id: &str,
@@ -412,15 +431,27 @@ fn render_native_select(
         .iter()
         .map(|(value, text, selected)| {
             if *selected {
-                format!("<option value=\"{value}\" selected>{text}</option>")
+                format!(
+                    "<option value=\"{value}\" selected>{text}</option>",
+                    value = html_escape(value),
+                    text = html_escape(text),
+                )
             } else {
-                format!("<option value=\"{value}\">{text}</option>")
+                format!(
+                    "<option value=\"{value}\">{text}</option>",
+                    value = html_escape(value),
+                    text = html_escape(text),
+                )
             }
         })
         .collect::<Vec<_>>()
         .join("");
     format!(
-        "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{opts}</select></div>"
+        "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{opts}</select></div>",
+        id = html_escape(id),
+        label = html_escape(label),
+        name = html_escape(name),
+        opts = opts,
     )
 }
 
@@ -685,7 +716,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
         recipients = recipients_form.map(|form| format!(
             "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Audience</h2>{form}</div>",
             form = form
-        )).unwrap_or_else(|| "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Audience</h2><p class=\"text-sm text-muted-foreground\">No lists exist yet — create a list first, then wire this campaign's recipients.</p></div>".to_string()),
+        )).unwrap_or_else(|| "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Audience</h2><p class=\"text-sm text-muted-foreground\">No lists exist yet — create a list, then wire this campaign's recipients.</p><a href=\"/lists/new\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-10 px-4 py-2\">Create list</a></div>".to_string()),
     )
 }
 
@@ -1090,7 +1121,13 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             }
             Some(table) => {
                 let has_bulk = data.bulk_action.is_some();
-                let has_actions = data.detail_path_prefix.is_some() || data.delete_intent.is_some();
+                // The Actions column must appear for EVERY per-row
+                // affordance — including tables whose only action is the
+                // edit link (templates). Omitting `edit_path_prefix` here
+                // silently dropped the editor link (review §6.3).
+                let has_actions = data.detail_path_prefix.is_some()
+                    || data.delete_intent.is_some()
+                    || data.edit_path_prefix.is_some();
 
                 // Per-row CP actions land in an extra trailing column.
                 let row_actions: Vec<Option<(String, String, String)>> = table
@@ -1258,12 +1295,30 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
 
                 if has_bulk {
                     let bulk = data.bulk_action.as_ref().expect("checked above");
+                    // Bulk-bar secondary buttons (e.g. "Export selected"):
+                    // they stay INSIDE the bulk form so the checked rows
+                    // travel with the submit, and override formaction/method
+                    // instead of nesting a second form (review §4.1/§6.2).
+                    let bulk_secondary = data
+                        .bulk_secondary_actions
+                        .iter()
+                        .map(|action| {
+                            format!(
+                                "<button type=\"submit\" formaction=\"{action}\" formmethod=\"{method}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button>",
+                                action = html_escape(&action.action),
+                                method = if action.method.eq_ignore_ascii_case("post") { "post" } else { "get" },
+                                label = html_escape(&action.label),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
                     format!(
-                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the rows you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the rows you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\">{bulk_secondary}<button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
                     row_forms = row_forms_html,
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
                     label = html_escape(&bulk.button_label),
+                    bulk_secondary = bulk_secondary,
                     table = rendered_table,
                     summary = html_escape(&summary),
                     pagination = pagination,
@@ -1358,12 +1413,11 @@ fn render_campaign_editor_page_with_data(
     };
     // Review §6.2 (Draft badge honesty): edit mode shows the row's REAL
     // lifecycle status; only a genuinely new campaign is "Draft".
-    let editor_status = editor
-        .edit
-        .as_ref()
-        .map(|edit| edit.status.as_str())
-        .filter(|status| !status.is_empty())
-        .unwrap_or("draft");
+    let editor_status = if editor.status.is_empty() {
+        "draft"
+    } else {
+        editor.status.as_str()
+    };
     let status_badge = StatusIndicator {
         status: editor_status,
     }
@@ -1495,7 +1549,7 @@ fn render_campaign_editor_page_with_data(
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{preview_label}{preview_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{from_label}{from_input}</div><div class=\"space-y-2\">{from_name_label}{from_name_input}</div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Enter the send time in UTC. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Enter the send time in UTC. Scheduled campaigns start automatically at the selected time — saving a schedule authorizes that automatic send. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"text-xs text-muted-foreground\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"text-xs text-muted-foreground\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
 <div class=\"space-y-2\">{content_label}{content_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"text-xs text-muted-foreground\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"text-xs text-muted-foreground\">The unsubscribe link is always included.</p></div></div>\
@@ -1559,7 +1613,7 @@ fn render_campaign_editor_page_with_data(
 pub fn web_campaign_preview_page(html_body: &str) -> String {
     let safe_html = sanitize_preview_html(html_body);
     format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"font-apex antialiased bg-surface-50\"><header class=\"border-b border-surface-200 bg-card px-6 py-4\"><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-primary\">Campaign preview</p><p class=\"mt-1 text-sm text-muted-foreground\">Rendered server-side from your draft. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{safe_html}</div></main></body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"font-apex antialiased bg-surface-50\"><header class=\"border-b border-surface-200 bg-card px-6 py-4\"><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-primary\">Sanitized structural preview</p><p class=\"mt-1 text-sm text-muted-foreground\">Styles, scripts, and remote assets are removed, so this is the content structure — not how the email will look in a recipient's client. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{safe_html}</div></main></body></html>",
         globals_css = crate::globals_css_url(),
         safe_html = safe_html,
     )
@@ -2087,11 +2141,12 @@ pub fn control_plane_home_page() -> String {
 
 /// Pixel-identical reproduction of the control-plane not-found contract.
 pub fn control_plane_not_found_page() -> String {
+    // Review §7 (CP 404): the recovery destination is named explicitly.
     "<main class=\"flex min-h-screen flex-col items-center justify-center bg-surface-950 text-surface-100\">\
 <div class=\"text-center\">\
 <h1 class=\"text-6xl font-bold tracking-tighter\">404</h1>\
-<p class=\"mt-4 text-lg text-surface-500\">Page not found</p>\
-<a href=\"/\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Go Home</a>\
+<p class=\"mt-4 text-lg text-surface-500\">That control-plane page does not exist.</p>\
+<a href=\"/\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Control-plane home</a>\
 </div></main>"
         .to_string()
 }
@@ -2429,8 +2484,24 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
     } else {
         html_escape(decision.rationale.trim())
     };
+    // Review §7: a pending approval is decided HERE, as a native SSR form —
+    // not by an API client. The form mirrors the dead-letter replay control
+    // (same mount pattern: a real POST to `/web/admin/autopilot/…` with the
+    // signed `_csrf` input the render pass injects, plus a return path).
+    // Blocked decisions are hard-gate refusals, not approvals, so they
+    // carry no review form.
+    let review_control = if decision.blocked {
+        String::new()
+    } else {
+        let note_id = format!("decision-note-{}", decision.id);
+        format!(
+            r#"<form method="post" action="/web/admin/autopilot/decisions/{id}/review" class="mt-3 flex flex-wrap items-end gap-3"><div class="min-w-[12rem] flex-1 space-y-1"><label class="apex-klabel" for="{note_id}">Review note (recorded)</label><input id="{note_id}" name="note" type="text" maxlength="500" placeholder="Why this decision is approved or rejected" class="w-full rounded-sm border border-surface-200 bg-background px-3 py-2 text-sm text-surface-950 outline-none transition-all focus:border-primary" /></div><button type="submit" name="outcome" value="approved" class="apex-btn apex-btn--sm">Approve</button><button type="submit" name="outcome" value="rejected" class="inline-flex items-center justify-center whitespace-nowrap rounded-sm bg-destructive px-4 py-2 text-sm font-bold text-destructive-foreground transition-all hover:bg-destructive/90">Reject</button><input type="hidden" name="return_to" value="/sales" /></form><p class="mt-2 text-xs leading-5 text-surface-500">Approval re-runs every gate before releasing the linked action; a gate refusal records the rejection with its reasons. The note is kept on the decision.</p>"#,
+            id = html_escape(&decision.id),
+            note_id = html_escape(&note_id),
+        )
+    };
     format!(
-        r#"<li class="rounded-sm border {tone} p-4"><p class="text-[10px] font-bold uppercase tracking-[0.2em] {badge}">{heading} · {action}</p><p class="mt-2 text-sm font-bold text-foreground">{account} &rarr; {contact}</p>{reasons}<p class="mt-2 text-xs leading-5 text-surface-600">Rationale: {rationale}</p></li>"#,
+        r#"<li class="rounded-sm border {tone} p-4"><p class="text-[10px] font-bold uppercase tracking-[0.2em] {badge}">{heading} · {action}</p><p class="mt-2 text-sm font-bold text-foreground">{account} &rarr; {contact}</p>{reasons}<p class="mt-2 text-xs leading-5 text-surface-600">Rationale: {rationale}</p>{review_control}</li>"#,
         tone = tone,
         badge = badge,
         heading = heading,
@@ -2439,6 +2510,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
         contact = sales_value_or(decision.contact_id.as_deref(), "unidentified contact"),
         reasons = reasons,
         rationale = rationale,
+        review_control = review_control,
     )
 }
 
@@ -2548,9 +2620,7 @@ fn sales_hero(data: &SalesPageData) -> String {
 /// Revenue: outcomes30d.revenueEur, meetings booked, decisions in the window.
 fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
     let body = match overview {
-        None => sales_note(
-            "Revenue is temporarily unavailable. No figure is estimated.",
-        ),
+        None => sales_note("Revenue is temporarily unavailable. No figure is estimated."),
         Some(overview) => {
             let window = format!(
                 r#"<p class="mt-4 text-sm leading-6 text-surface-600">Meetings booked (30d): <span class="font-bold text-foreground">{meetings}</span> · Decisions in the window (24h): <span class="font-bold text-foreground">{decisions}</span> · Blocked by a hard gate (24h): <span class="font-bold text-foreground">{blocked}</span></p>"#,
@@ -2686,9 +2756,7 @@ fn sales_decision_stream_section(data: &SalesPageData) -> String {
 /// rationale.
 fn sales_decisions_section(data: &SalesPageData) -> String {
     let body = match data.decisions.as_ref() {
-        None => sales_note(
-            "Recent decisions are temporarily unavailable. No rows are shown.",
-        ),
+        None => sales_note("Recent decisions are temporarily unavailable. No rows are shown."),
         Some(decisions) if decisions.is_empty() => sales_note(
             "No decisions recorded yet — the engine has not produced a decision for this tenant.",
         ),
@@ -2727,7 +2795,10 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             parts.push(format!(r#"<ul class="mt-5 space-y-3">{items}</ul>"#));
         }
     }
-    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Approving or rejecting a decision with a note is not available in this console yet. Until it is, decisions can be reviewed through the sales-autopilot control API.</p>"#.to_string());
+    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Approve or reject a pending decision with the form on its row: the review records you, your note and the gate re-run in one transaction. Blocked decisions are hard-gate refusals with nothing to release.</p>"#.to_string());
+    // Review §4.2: the raw endpoint lesson belongs in expandable technical
+    // reference material, not in the operator's primary reading flow.
+    parts.push(r#"<details class="mt-2"><summary class="cursor-pointer text-xs font-medium text-surface-500">Technical reference</summary><p class="mt-2 text-xs leading-5 text-surface-500">The row forms post <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">outcome=approved|rejected</code> + <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">note</code> to <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /web/admin/autopilot/decisions/:id/review</code>; the JSON twin is <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/decisions/:id/review</code>.</p></details>"#.to_string());
     match data.dead_letters.as_ref() {
         None => parts.push(sales_note(
             "The dead-letter feed is temporarily unavailable.",
@@ -2762,9 +2833,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             "sales-actions",
             "Queue",
             "Action queue health",
-            &sales_note(
-                "Action queue stats are temporarily unavailable. No counts are estimated.",
-            ),
+            &sales_note("Action queue stats are temporarily unavailable. No counts are estimated."),
         );
     };
     let stats = &overview.action_stats;
@@ -2795,9 +2864,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
         )
     };
     let replay = match data.dead_letters.as_ref() {
-        None => sales_note(
-            "The dead-letter replay list is temporarily unavailable.",
-        ),
+        None => sales_note("The dead-letter replay list is temporarily unavailable."),
         Some(letters) if letters.is_empty() => {
             sales_note("No dead letters to replay — the queue has no exhausted action.")
         }
@@ -2812,9 +2879,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             )
         }
     };
-    let enrichment = format!(
-        r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><div class="space-y-2 text-sm"><label for="sales-enrich-sources" class="block text-surface-600">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="text-xs leading-5 text-surface-500">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#,
-    );
+    let enrichment = r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><div class="space-y-2 text-sm"><label for="sales-enrich-sources" class="block text-surface-600">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="text-xs leading-5 text-surface-500">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#;
     sales_panel(
         "sales-actions",
         "Queue",
@@ -2827,9 +2892,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
 /// table) plus the enrollment command form.
 fn sales_enrollments_section(data: &SalesPageData) -> String {
     let counts = match data.overview.as_ref() {
-        None => sales_note(
-            "Enrollment counts are temporarily unavailable.",
-        ),
+        None => sales_note("Enrollment counts are temporarily unavailable."),
         Some(overview) if overview.enrollments.is_empty() => {
             sales_note("No enrollments yet — no contact is currently enrolled in a sequence.")
         }
@@ -2851,9 +2914,7 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
             )
         }
     };
-    let form = format!(
-        r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><h3 class="text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Enroll contacts into a sequence</h3><div class="space-y-2 text-sm"><label for="sales-enroll-sequence" class="block text-surface-600">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-policy" class="block text-surface-600">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-contacts" class="block text-surface-600">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="text-xs leading-5 text-surface-500">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#,
-    );
+    let form = r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><h3 class="text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Enroll contacts into a sequence</h3><div class="space-y-2 text-sm"><label for="sales-enroll-sequence" class="block text-surface-600">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-policy" class="block text-surface-600">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-contacts" class="block text-surface-600">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="text-xs leading-5 text-surface-500">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#;
     sales_panel(
         "sales-enrollments",
         "Pipeline",
@@ -3240,7 +3301,6 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 </div>\
 {password_hint}\
 </div>\
-
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
@@ -3270,7 +3330,6 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
 <label class=\"apex-klabel\" for=\"reset-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
 <input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
-
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
@@ -3325,6 +3384,13 @@ pub fn web_reset_password_page_with_state(
     } else {
         " disabled aria-disabled=\"true\""
     };
+    // Review §6.1 (Reset password): the missing-link notice offers the direct
+    // recovery action instead of leaving the user to hunt for it.
+    let request_link = if token.is_some() {
+        String::new()
+    } else {
+        "<div class=\"text-center text-xs font-medium text-surface-500\">Need a fresh link? <a href=\"/forgot-password\" class=\"text-primary font-bold hover:underline\">Request another reset link</a></div>".to_string()
+    };
 
     let csrf = csrf_hidden_input(csrf_token);
     let password_hint = password_requirements_hint("new-password-hint");
@@ -3333,6 +3399,7 @@ pub fn web_reset_password_page_with_state(
 {csrf}\
 {token_input}{email_input}\
 {header_notice}\
+{request_link}\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"new-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>New password</label>\
 <div class=\"relative apex-pwd-wrap\">\
@@ -3346,7 +3413,6 @@ pub fn web_reset_password_page_with_state(
 <input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
-
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
@@ -3354,6 +3420,7 @@ pub fn web_reset_password_page_with_state(
         token_input = web_auth_hidden_input("token", token_value),
         email_input = web_auth_hidden_input("email", email_value),
         header_notice = header_notice,
+        request_link = request_link,
         submit_state = submit_state,
         arrow = web_auth_arrow_icon(),
         password_pattern = password_pattern(),
@@ -3474,11 +3541,33 @@ pub fn web_dashboard_page() -> String {
     // series — figures the static page cannot know. The data-backed
     // dashboard renders real KPIs; this no-data fallback now states that
     // delivery health is unavailable — not 100%, not zero.
-    let dna_block = "<div class=\"rounded-sm border border-surface-200 bg-surface-50 p-4\">\
-<p class=\"apex-klabel mb-1\">delivery · 30d</p>\
-<p class=\"text-lg font-bold text-surface-950 tracking-tight\">unavailable</p>\
-<p class=\"mt-1 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health and send-volume charts appear after your first send — an absent figure is not zero.</p>\
-</div>";
+    //
+    // Design DNA (the `dna_verify` gate's contract): the fallback still
+    // renders the dashboard's two mark elements — the 270° DIAL and the
+    // MONOLINE chart chassis. Both render their EMPTY state rather than a
+    // fabricated reading: the dial draws its track with no value arc and
+    // reads "—", the monoline draws no strokes. The elements are present,
+    // the data is honestly absent.
+    let delivery_dial = crate::charts::render_dial(0.0, "delivery · 30d", "—", false);
+    let volume_chart = format!(
+        // Mobile clipping fix (review §4.8 / R2's filed /dashboard flag): the
+        // fallback chart is the widest content in this card. The wrapper must
+        // be allowed to shrink (`min-w-0`) and the fixed-width SVG must scale
+        // down inside it (`max-w-full`), or the card's paragraph inherits the
+        // chart's 420px min-content width and spills past a 390px viewport.
+        "<div class=\"apex-chart-monoline flex min-w-0 items-center justify-center\">{}</div>",
+        crate::charts::render_monoline_bar_chart(&[], 420, 96).replacen(
+            "<svg ",
+            "<svg class=\"max-w-full\" ",
+            1
+        )
+    );
+    let dna_block = format!(
+        "<div class=\"max-w-full rounded-sm border border-surface-200 bg-surface-50 p-4\">\
+<div class=\"flex flex-col sm:flex-row items-center gap-6\">{delivery_dial}{volume_chart}</div>\
+<p class=\"mt-3 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health is unavailable and the chart has no strokes until your first send — an absent figure is not zero.</p>\
+</div>"
+    );
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
 <header class=\"flex flex-col gap-2\">\
@@ -3528,7 +3617,7 @@ pub fn web_dashboard_page() -> String {
 </article>\
 </div>\
 </section>
-</div>".to_string().replace("{DNA_DASH}", dna_block)
+</div>".to_string().replace("{DNA_DASH}", &dna_block)
 }
 
 /// Campaigns list page.
@@ -3620,7 +3709,7 @@ pub fn web_campaigns_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Search, filter, and batch-manage campaigns — every action is a plain form post rendered server-side.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Search, filter, and batch-manage campaigns and their audiences in one place.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -3878,9 +3967,26 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
         })
         .collect::<Vec<_>>()
         .join("");
+    let membership = if contact.lists.is_empty() {
+        "<p class=\"text-sm text-muted-foreground\">Not a member of any list yet.</p>".to_string()
+    } else {
+        format!(
+            "<p class=\"text-sm text-muted-foreground\">Member of {}</p>",
+            contact
+                .lists
+                .iter()
+                .map(|name| format!(
+                    "<span class=\"font-medium text-foreground\">{}</span>",
+                    html_escape(name)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     format!(
         "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Contact</h1><p class=\"text-sm text-muted-foreground\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to contacts</a></div>\
+<section class=\"rounded-sm border border-surface-200 bg-card/80 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Audience membership</p>{membership}<p class=\"mt-1 text-xs text-muted-foreground\">Membership is managed from each list's page — this editor changes identity and subscription status only.</p></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full rounded-sm border border-input bg-muted/40 px-3 text-[14px] text-surface-500\" /><p class=\"text-xs text-muted-foreground\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
@@ -3889,6 +3995,7 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Contact</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
+        membership = membership,
         id = html_escape(&contact.id),
         email = html_escape(&contact.email),
         name = html_escape(&contact.name),
@@ -3906,8 +4013,10 @@ pub fn web_contacts_new_page() -> String {
 <li><a href=\"/contacts\" class=\"hover:text-surface-900 transition-colors\">Contacts</a></li>\
 <li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Contact</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Add Contact</h1>\
+<p class=\"mt-1 mb-6 text-sm text-muted-foreground\">Add one address here, or use the CSV import below to add many at once.</p>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts\">\
+<h2 class=\"text-sm font-bold uppercase tracking-[0.18em] text-surface-500\">Single contact</h2>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
@@ -3932,7 +4041,7 @@ pub fn web_contacts_new_page() -> String {
         email_label = Label { html_for: Some("contact-email"), text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
         email_input = Input { id: Some("contact-email"), input_type: "email", autocomplete: Some("email"), variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, required: true, name: Some("email") }.render_html(),
         name_label = Label { html_for: Some("contact-name"), text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        name_input = Input { id: Some("contact-name"), input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
+        name_input = Input { id: Some("contact-name"), input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("name") }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Add Contact", disabled: false, loading: false, left_icon: None, right_icon: None, submit: true }.render_html(),
     )
 }
@@ -4033,7 +4142,7 @@ pub fn web_list_detail_page() -> String {
 <a href=\"/confirm?intent=delete-list&amp;id=l_launch&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><a href=\"/lists/l_launch/members\" class=\"mt-2 inline-flex items-center text-sm font-bold text-primary hover:underline\">Inspect members &rarr;</a></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
 </div></div>".to_string()
@@ -4167,7 +4276,7 @@ pub fn web_list_detail_page_with_values(detail: &crate::view_data::ListDetailDat
 <a href=\"/confirm?intent=delete-list&amp;id={id}&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribers}</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribers}</p><a href=\"/lists/{id}/members\" class=\"mt-2 inline-flex items-center text-sm font-bold text-primary hover:underline\">Inspect members &rarr;</a></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribed}</p></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{unsubscribed}</p></div>\
 </div></div>",
@@ -4179,13 +4288,91 @@ pub fn web_list_detail_page_with_values(detail: &crate::view_data::ListDetailDat
     )
 }
 
+/// `/lists/{id}/members` with server-loaded values (review §6.2): the list
+/// detail's subscriber count is now inspectable — readable identity,
+/// membership status and the date the contact was added, newest first. An
+/// empty list renders the honest empty state WITH the next action, never a
+/// fabricated row.
+pub fn web_list_members_page_with_values(members: &crate::view_data::ListMembersData) -> String {
+    let rows = members
+        .members
+        .iter()
+        .map(|member| {
+            let added = member
+                .added_at
+                .as_deref()
+                .and_then(rfc3339_utc_label)
+                .unwrap_or_else(|| "not recorded".to_string());
+            format!(
+                "<tr class=\"border-b border-surface-100\"><td class=\"px-4 py-3 font-medium text-surface-950\">{identity}</td><td class=\"px-4 py-3 font-mono text-xs text-surface-600\">{email}</td><td class=\"px-4 py-3\"><span class=\"inline-grid place-items-center rounded-sm border border-surface-300 bg-surface-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\">{status}</span></td><td class=\"px-4 py-3 text-surface-600\">{added}</td></tr>",
+                identity = html_escape(&member.identity),
+                email = html_escape(&member.email),
+                status = html_escape(&member.status),
+                added = html_escape(&added),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let body = if members.members.is_empty() {
+        "<div data-view-state=\"empty\" class=\"rounded-sm border border-surface-200 bg-card p-8 text-center shadow-premium\">\
+<h3 class=\"text-lg font-bold text-surface-950\">No subscribers on this list yet</h3>\
+<p class=\"mx-auto mt-2 max-w-md text-sm leading-6 text-surface-500\">Members are contacts you add to this list. Add the contacts you want to reach, then choose this list as a campaign audience.</p>\
+<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/contacts/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-all hover:bg-brand-700\">Add a contact</a><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 px-6 py-3 text-sm font-semibold text-surface-700 transition-all hover:bg-surface-50\">View contacts</a></div>\
+</div>".to_string()
+    } else {
+        format!(
+            "<div class=\"overflow-x-auto rounded-sm border border-surface-200 bg-card shadow-premium\"><table class=\"min-w-full divide-y divide-surface-100 text-left text-sm\"><caption class=\"sr-only\">Subscribers of {name}</caption><thead class=\"bg-surface-50 text-[10px] font-bold uppercase tracking-widest text-surface-500\"><tr><th scope=\"col\" class=\"px-4 py-3\">Member</th><th scope=\"col\" class=\"px-4 py-3\">Email</th><th scope=\"col\" class=\"px-4 py-3\">Status</th><th scope=\"col\" class=\"px-4 py-3\">Added</th></tr></thead><tbody>{rows}</tbody></table></div>",
+            name = html_escape(&members.name),
+            rows = rows,
+        )
+    };
+    format!(
+        "<div class=\"space-y-6\" data-page=\"list-members\">\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
+<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
+<li class=\"text-surface-500\">/</li>\
+<li><a href=\"/lists/{id}\" class=\"hover:text-surface-900 transition-colors\">{name}</a></li>\
+<li class=\"text-surface-500\">/</li>\
+<li class=\"text-surface-900 font-medium\" aria-current=\"page\">Members</li></ol></nav>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Members — {name}</h1>\
+<p class=\"text-sm text-muted-foreground\">{total} subscriber(s) on this list, newest first.</p></div>\
+<a href=\"/lists/{id}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 px-6 py-3 text-sm font-semibold text-surface-700 transition-all hover:bg-surface-50\">Back to list</a>\
+</div>\
+{body}\
+</div>",
+        id = html_escape(&members.id),
+        name = html_escape(&members.name),
+        total = html_escape(&members.total),
+        body = body,
+    )
+}
+
+/// `/lists/{id}/members` without loaded values: the route skeleton used by
+/// the render inventory and the no-data demo render. It states what the page
+/// will show — it never fabricates a member.
+pub fn web_list_members_page() -> String {
+    "<div class=\"space-y-6\" data-page=\"list-members\">\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
+<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
+<li class=\"text-surface-500\">/</li>\
+<li class=\"text-surface-900 font-medium\" aria-current=\"page\">Members</li></ol></nav>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">List members</h1>\
+<p class=\"text-sm text-muted-foreground\">Subscribers load with the list you open.</p>\
+<div data-view-state=\"empty\" class=\"rounded-sm border border-surface-200 bg-card p-8 text-center shadow-premium\">\
+<h3 class=\"text-lg font-bold text-surface-950\">Open a list to see its members</h3>\
+<p class=\"mx-auto mt-2 max-w-md text-sm leading-6 text-surface-500\">This route shows one list's subscribers. Pick a list first.</p>\
+<div class=\"mt-5 flex flex-wrap items-center justify-center gap-3\"><a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-all hover:bg-brand-700\">View lists</a></div>\
+</div></div>".to_string()
+}
+
 pub fn web_lists_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create List</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/lists\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
-<div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center\">{save_button}<a href=\"/lists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Cancel</a></div>\
 </form></div>",
         name_label = Label {
             html_for: Some("list-new-name"),
@@ -4259,13 +4446,15 @@ pub fn web_templates_page() -> String {
 pub fn web_templates_new_page() -> String {
     format!(
         "<div class=\"max-w-3xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create Template</h1>\
+<div class=\"mb-6\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Create Template</h1>\
+<p class=\"mt-1 text-sm text-muted-foreground\">Write or paste HTML directly — this is an HTML editor, not a visual builder.</p></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/templates\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
 <label class=\"text-sm font-medium leading-none\" for=\"template-new-content\">HTML Content</label>\
-<textarea id=\"template-new-content\" name=\"html_body\" class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"Paste your HTML template here...\"></textarea>\
+<textarea id=\"template-new-content\" name=\"html_body\" class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"&lt;h1&gt;Hello {{{{name}}}}&lt;/h1&gt;&#10;&lt;p&gt;Your message goes here.&lt;/p&gt;&#10;&lt;a href=&quot;{{{{cta_url}}}}&quot;&gt;Get started&lt;/a&gt;\"></textarea>\
+<p class=\"text-xs text-muted-foreground\">The placeholder above is a working starter — replace the text and keep the {{{{key}}}} variables you want to fill per campaign.</p>\
 </div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
@@ -4415,7 +4604,7 @@ pub fn web_inbox_placement_new_page() -> String {
 </div>",
         form = Card {
             title: "Test configuration",
-            body: "<form data-form=\"placement-test-create\" action=\"/web/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
+            body: "<form data-form-id=\"placement-test-create\" action=\"/web/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
 <div><label for=\"placement-name\" class=\"block text-sm font-medium text-surface-700\">Test name</label>\
 <input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
@@ -4783,9 +4972,10 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
                 "<div class=\"apex-callout apex-callout--success\" role=\"status\">\
                  <strong>Viewer link — shown once</strong>\
                  <span>Share this with the prospect. It is not stored in plaintext, so copy it now.</span>\
-                 <code class=\"apex-mono mt-2 block break-all\">{}</code>\
+                 <code class=\"apex-mono mt-2 block break-all\">{url}</code>\
+                 <a href=\"{url}\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open viewer</a>\
                  </div>",
-                html_escape(url)
+                url = html_escape(url)
             )
         })
         .unwrap_or_default();
@@ -4846,7 +5036,7 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
 <button type=\"submit\" class=\"apex-btn\">Create demo session</button>\
 </form>\
 <h2 class=\"apex-panel-title\">Sessions</h2>\
-<div class=\"apex-table-wrap\"><table class=\"apex-table\"><thead><tr>\
+<div class=\"apex-table-wrap\" tabindex=\"0\" role=\"region\" aria-label=\"Demo sessions (scrollable table)\"><table class=\"apex-table\"><thead><tr>\
 <th scope=\"col\">Session</th>\
 <th scope=\"col\">Script</th>\
 <th scope=\"col\">State</th>\
@@ -5037,7 +5227,7 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
     format!(
         "<div class=\"max-w-3xl space-y-6\">
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Assistant</h1>\
-<p class=\"text-sm text-surface-600\">Grounded in the published ApexMail documentation. The assistant never guesses: unverifiable questions are escalated to a human.</p>\
+<p class=\"text-sm text-surface-600\">Grounded in the published ApexMail documentation. Answers cite their sources, and anything the assistant cannot verify is escalated to a human instead of being answered from memory.</p>\
 {transcript}\
 {ask}\
 </div>",
@@ -5158,18 +5348,29 @@ pub fn web_domains_new_page() -> String {
 
 /// Settings overview page.
 pub fn web_settings_page() -> String {
-    "<div class=\"space-y-6\">\
-<section data-view-state=\"ready\" class=\"space-y-6\">\
+    // Review §6.4: settings destinations are grouped by what they govern
+    // (identity/access, sending infrastructure, billing) instead of one
+    // undifferentiated grid.
+    "<div class=\"space-y-8\">\
+<section data-view-state=\"ready\" class=\"space-y-8\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
-<nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your API keys</p></a>\
-<a href=\"/settings/team\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Team</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage team members and roles</p></a>\
-<a href=\"/settings/billing\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Billing</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your subscription and payments</p></a>\
-<a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
-<a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
-<a href=\"/settings/suppressions\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Suppressions</h3><p class=\"text-sm text-muted-foreground mt-1\">Addresses withheld from sending</p></a>\
-<a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
-</nav></section></div>".to_string()
+<div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Identity and access</h2>\
+<nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
+<a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Machine credentials for this workspace</p></a>\
+<a href=\"/settings/team\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Team</h3><p class=\"text-sm text-muted-foreground mt-1\">Members and their roles</p></a>\
+<a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your identity, password, and MFA</p></a>\
+</nav></div>\
+<div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Sending infrastructure</h2>\
+<nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
+<a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Sending IPs reserved for this workspace</p></a>\
+<a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Event delivery to your endpoints</p></a>\
+<a href=\"/settings/suppressions\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Suppressions</h3><p class=\"text-sm text-muted-foreground mt-1\">Addresses that never receive campaign mail</p></a>\
+</nav></div>\
+<div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Billing</h2>\
+<nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
+<a href=\"/settings/billing\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Billing</h3><p class=\"text-sm text-muted-foreground mt-1\">Plan, invoices, and payment arrangements</p></a>\
+</nav></div>\
+</section></div>".to_string()
 }
 
 /// Suppressions settings page (deferred-feature 4) — the static fallback the
@@ -5200,7 +5401,7 @@ pub fn web_settings_suppressions_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Suppressions</h1><p class=\"text-sm text-muted-foreground\">Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.</p></div></div>\
-<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">Read-only by design</p><p class=\"mt-1 text-xs text-muted-foreground\">Compliance flows own suppression writes; this page reports what is withheld and why. Suppressed addresses are excluded from every send.</p></section>\
+<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">Why this list is read-only</p><p class=\"mt-1 text-xs text-muted-foreground\">Addresses land here automatically when they bounce, complain, or unsubscribe, and they never receive campaign mail while listed. That makes the list a safety record rather than something to edit — a contact who wants mail again resubscribes through your signup path.</p></section>\
 {table}</div>",
         table = table.render_html(),
     )
@@ -5265,7 +5466,12 @@ pub fn api_key_create_form_html() -> String {
         (
             "Templates & campaigns",
             "Create and update reusable content and campaigns.",
-            &["templates:read", "templates:write", "campaigns:read", "campaigns:write"],
+            &[
+                "templates:read",
+                "templates:write",
+                "campaigns:read",
+                "campaigns:write",
+            ],
         ),
         (
             "Domains & webhooks",
@@ -5302,7 +5508,7 @@ pub fn api_key_create_form_html() -> String {
         .join("");
 
     format!(
-        "<form class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-6\" method=\"post\" action=\"/web/api-keys\">\
+        "<form class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-6\" method=\"post\" action=\"/web/api-keys\" data-form-id=\"api-key-create\">\
 <div class=\"space-y-1\"><h2 class=\"text-base font-semibold text-surface-950\">Create an API key</h2>\
 <p class=\"text-sm text-muted-foreground\">Pick only the scopes this integration needs. The secret appears once after creation.</p></div>\
 <div class=\"grid gap-4 sm:grid-cols-2\">\
@@ -5332,7 +5538,7 @@ pub fn team_invite_form_html() -> String {
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"team-invite-email\">Email</label>\
 <input id=\"team-invite-email\" name=\"email\" type=\"email\" required class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"colleague@company.com\" /></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Send invitation</button>\
-<p class=\"text-xs text-muted-foreground\">Submitting creates an invitation record and sends an activation email.</p>\
+<p class=\"text-xs text-muted-foreground\">Submitting creates an invitation record and adds the address as <strong>invited</strong>. No invitation email is sent from this page yet — the record alone does not sign anyone in.</p>\
 </form>"
         .to_string()
 }
@@ -5482,7 +5688,7 @@ pub fn web_settings_webhooks_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1></div>\
-<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/webhooks\">\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/webhooks\" data-form-id=\"webhook-create\">\
 <div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"webhook-url\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Endpoint URL</label>\
 <input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
 <label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"rounded border-surface-300\" /> Sent</label>\
@@ -5651,7 +5857,12 @@ pub fn control_plane_dashboard_page() -> String {
     <!-- Unified design language (2026-09-05): the service-slot ribbon —
          platform services as flip-cells, the all-nominal cell solid. The
          CP surface of the same motif that renders the marketing hero
-         ribbon and the console quota meters. -->
+         ribbon and the console quota meters. The solid cell's white ink is
+         the theme's monochrome success-500 (#52525b): 7.3:1, AA/AAA on
+         every theme (the 2026-09-05 contrast fix moved the OLD green
+         palette's white ink to the token-safe solid; `--success-500` is
+         grey in this design system, so `bg-success-500 text-white` is the
+         contrast-corrected pair, not the superseded green one). -->
     <section aria-label="Platform services" class="flex items-center gap-2 flex-wrap font-mono text-[10px] font-bold tracking-[0.08em] select-none">
         <span class="apex-klabel mr-1"><svg class="apex-arc" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>services</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">api</span>
@@ -5660,7 +5871,7 @@ pub fn control_plane_dashboard_page() -> String {
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">worker</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">queue</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">billing</span>
-        <span class="apex-pill apex-pill--success" style="color:rgb(var(--foreground))">all nominal</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500 text-white">all nominal</span>
     </section>
 
     <!-- WINDING receipt (mark DNA): the platform's proof line under the
@@ -6415,25 +6626,31 @@ pub fn control_plane_jobs_page() -> String {
 
 /// Infrastructure page.
 pub fn control_plane_infrastructure_page() -> String {
+    // Review §7: the labels match what the destinations actually show —
+    // /infrastructure/nodes is the outbound sending IP-pool inventory, not
+    // a cluster-node list.
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Infrastructure</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/infrastructure/nodes\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Nodes</h3><p class=\"text-sm text-muted-foreground mt-1\">View cluster nodes and health</p></a>\
-<a href=\"/infrastructure/queues\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Queues</h3><p class=\"text-sm text-muted-foreground mt-1\">Monitor message queues</p></a>\
+<a href=\"/infrastructure/nodes\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Outbound IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Sending addresses, warmup progress, and pool health</p></a>\
+<a href=\"/infrastructure/queues\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Queues</h3><p class=\"text-sm text-muted-foreground mt-1\">Backlog depth and oldest-pending age</p></a>\
 </nav></div>".to_string()
 }
 
 /// Nodes page.
 pub fn control_plane_nodes_page() -> String {
+    // Review §7 (Nodes/IP pool): the surface is the outbound sending IP
+    // inventory; the historical "cluster nodes/CPU/memory" framing described
+    // a different product. The static fallback now matches the live loader.
     let table = Table {
-        caption: Some("Cluster nodes"),
+        caption: Some("Outbound sending IPs"),
         columns: vec![
             TableColumn {
-                label: "Node",
+                label: "Address",
                 align: "left",
             },
             TableColumn {
-                label: "Role",
+                label: "Pool",
                 align: "left",
             },
             TableColumn {
@@ -6441,27 +6658,23 @@ pub fn control_plane_nodes_page() -> String {
                 align: "left",
             },
             TableColumn {
-                label: "CPU",
-                align: "right",
-            },
-            TableColumn {
-                label: "Memory",
+                label: "Warmup",
                 align: "right",
             },
         ],
         rows: vec![],
     };
     render_cp_collection_page(
-        "Nodes",
-        "Review cluster capacity, node roles, and health before customer traffic moves.",
+        "Outbound IPs",
+        "Outbound sending addresses, warmup progress, and pool health.",
         None,
         table,
-        "No nodes registered",
-        "Cluster nodes will appear after infrastructure enrollment and health reporting start.",
+        "No sending IPs registered",
+        "Outbound sending addresses appear here as the pool provisions them.",
         &[
-            ("Ready", "0", "Nodes passing health checks."),
-            ("Draining", "0", "Nodes being removed."),
-            ("Capacity", "Ready", "Provisioning lane available."),
+            ("Provisioned", "0", "Addresses currently sending."),
+            ("Warming", "0", "Addresses in warmup."),
+            ("Pools", "—", "Distinct outbound pools."),
         ],
     )
 }
@@ -6831,7 +7044,7 @@ pub fn control_plane_alert_rules_page(data: Option<&AlertRulesPageData>) -> Stri
 {edit_form}\
 {create_form}\
 <h2 class=\"apex-panel-title\">Rules</h2>\
-<div class=\"apex-table-wrap\"><table class=\"apex-table\"><thead><tr>\
+<div class=\"apex-table-wrap\" tabindex=\"0\" role=\"region\" aria-label=\"Alert rules (scrollable table)\"><table class=\"apex-table\"><thead><tr>\
 <th scope=\"col\">Rule</th>\
 <th scope=\"col\">Tenant</th>\
 <th scope=\"col\">Condition</th>\
@@ -6870,10 +7083,12 @@ fn alert_rule_channel_label(channel: &str) -> &'static str {
 
 /// CP settings page.
 pub fn control_plane_settings_page() -> String {
+    // Review §7 (Settings): a compact single destination instead of one
+    // card floating in a half-empty grid.
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
-<nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/settings/security\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Security</h3><p class=\"text-sm text-muted-foreground mt-1\">Authentication and access control</p></a>\
+<nav class=\"grid max-w-md gap-4\">\
+<a href=\"/settings/security\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Security</h3><p class=\"text-sm text-muted-foreground mt-1\">Your operator sign-in, MFA enrollment, and recovery codes.</p></a>\
 </nav></div>".to_string()
 }
 
@@ -7062,7 +7277,6 @@ pub fn marketing_compliance_page() -> String {
 <h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Compliance</h1>\
 <p class=\"text-lg text-surface-600 mb-8\">Compliance workflow support for regulated email operations.</p>\
 <div class=\"space-y-8\">\
-
 <div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">GDPR Workflows</h3><p class=\"text-sm text-surface-500 mt-2\">DSR, consent, DPA, and EU-hosted data workflows.</p></div>\
 <div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">HIPAA BAA</h3><p class=\"text-sm text-surface-500 mt-2\">Enterprise BAA lifecycle workflow for healthcare implementation review.</p></div>\
 </div></div></section>".to_string()
@@ -7117,7 +7331,6 @@ pub fn marketing_compare_page(competitor: &str) -> String {
 <th class=\"p-4 text-center font-bold\">{display}</th>\
 </tr></thead><tbody>\
 <tr class=\"border-b\"><td class=\"p-4\">Dedicated IPs</td><td class=\"p-4 text-center\">Included</td><td class=\"p-4 text-center\">Limited</td></tr>\
-
 <tr class=\"border-b\"><td class=\"p-4\">Private Cloud</td><td class=\"p-4 text-center\">Available</td><td class=\"p-4 text-center\">Not standard</td></tr>\
 </tbody></table></div></div></section>",
     )
@@ -7289,7 +7502,6 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
 </div>\
 <a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
 </div>\
-
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 </form>",
@@ -7419,7 +7631,6 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 <input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
-
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign in</span>{arrow}</button>\
 </form>",
         csrf = csrf,
@@ -7430,7 +7641,9 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
         "Operator access",
         "Sign in to the ApexMail control plane",
         &form_html,
-        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Operator console restricted to authorized administrators.</p></div>",
+        // Review §7 (Operator login): a concise access-recovery contact, so
+        // a locked-out operator is not stranded on the login card.
+        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Operator console restricted to authorized administrators. Locked out? Ask your workspace owner to reset your access, or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact ApexMail support</a>.</p></div>",
     )
 }
 
@@ -7678,7 +7891,9 @@ mod tests {
         assert!(html.contains("Workspace Snapshot"));
         assert!(html.contains("Campaign workbench"));
         assert!(html.contains("Modern email infrastructure for developers"));
-        assert!(html.contains("href=\"/campaigns\""));
+        // Review §6.1: the CTA label promises the dashboard, so it must lead
+        // to the actual dashboard route (it used to open /campaigns).
+        assert!(html.contains("href=\"/dashboard\""));
         assert!(html.contains("Go to Dashboard"));
         // The CTA composes the canonical recipe now — `apex-btn` carries the
         // primary fill, so assert the recipe rather than the raw utility.
@@ -7908,6 +8123,49 @@ mod tests {
             .map(|offset| offset + marker.len())
             .unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// Review §7: a pending-approval exception carries the native
+    /// approve/reject form — the console decides the review, with no API
+    /// client (R6). A blocked decision is a hard-gate refusal with nothing
+    /// to release, so it carries no review control.
+    #[test]
+    fn sales_pending_approval_rows_carry_the_native_review_form() {
+        let blocked = sales_page_data_fixture()
+            .exceptions
+            .expect("fixture exceptions")
+            .into_iter()
+            .next()
+            .expect("the fixture's blocked exception");
+        assert!(blocked.blocked, "fixture premise: the row is blocked");
+        let mut data = sales_page_data_fixture();
+        data.exceptions = Some(vec![
+            SalesDecisionData {
+                id: "d-pending".to_string(),
+                account_id: Some("acme-gmbh".to_string()),
+                contact_id: Some("cto".to_string()),
+                action: "CONTACT".to_string(),
+                rationale: "requires a human approval under the current policy".to_string(),
+                blocked: false,
+                ..Default::default()
+            },
+            blocked,
+        ]);
+        let html = control_plane_sales_page_with_data(&data);
+        assert!(
+            html.contains("action=\"/web/admin/autopilot/decisions/d-pending/review\""),
+            "the pending-approval row must post its review to the mounted console route"
+        );
+        assert!(html.contains("name=\"outcome\" value=\"approved\""));
+        assert!(html.contains("name=\"outcome\" value=\"rejected\""));
+        assert!(html.contains("name=\"note\""));
+        assert!(html.contains("name=\"return_to\" value=\"/sales\""));
+        assert!(
+            !html.contains("decisions/d-2/review"),
+            "a blocked decision has nothing to release and must carry no review form"
+        );
+        // The old "not available in this console yet" dead-end copy is gone.
+        assert!(!html.contains("not available in this console yet"));
     }
 
     /// Audit §30 adversarial: the sales surface must never regress into
@@ -8157,7 +8415,11 @@ mod tests {
         );
         for action in &actions {
             assert!(
-                action.starts_with("/web/admin/sales/") || action.starts_with("/v1/admin/"),
+                action.starts_with("/web/admin/sales/")
+                    || action.starts_with("/v1/admin/")
+                    // The dead-letter Replay control's native SSR handler
+                    // (review §7) is mounted at /web/admin/autopilot.
+                    || action.starts_with("/web/admin/autopilot/"),
                 "form action `{action}` is outside the owner-provided SSR/control prefixes"
             );
         }
@@ -8783,6 +9045,63 @@ mod tests {
         assert!(detail.contains("Results appear once the test completes"));
     }
 
+    /// P2-1 (review register): the placement detail data path renders the
+    /// REAL per-provider results and an explicit lifecycle state, never the
+    /// static waiting view.
+    #[test]
+    fn placement_detail_with_data_shows_results_and_lifecycle() {
+        let with_providers = crate::view_data::PlacementDetailData {
+            id: "11111111-1111-1111-1111-111111111111".into(),
+            name: "Q4 probe".into(),
+            status: "completed".into(),
+            total_accounts: 40,
+            completed_accounts: 40,
+            created_at: "2026-10-01T09:00:00Z".into(),
+            completed_at: "2026-10-01T09:20:00Z".into(),
+            providers: vec![crate::view_data::PlacementProviderRow {
+                provider: "Gmail".into(),
+                accounts_tested: 20,
+                inbox: 18,
+                promotions: 1,
+                spam: 1,
+                absent: 0,
+            }],
+        };
+        let html = web_inbox_placement_detail_page_with_data(&with_providers);
+        assert!(html.contains(">Completed</div>"), "{html}");
+        assert!(html.contains("Per-provider results"), "{html}");
+        assert!(html.contains(">Gmail<"), "{html}");
+        assert!(html.contains("40 of 40 seed accounts reported"), "{html}");
+
+        let running = crate::view_data::PlacementDetailData {
+            status: "running".into(),
+            ..with_providers.clone()
+        };
+        let html = web_inbox_placement_detail_page_with_data(&running);
+        assert!(html.contains(">Running</div>"), "{html}");
+        assert!(
+            html.contains("Results appear once the test completes"),
+            "{html}"
+        );
+
+        let failed = crate::view_data::PlacementDetailData {
+            status: "failed".into(),
+            providers: vec![],
+            ..with_providers.clone()
+        };
+        let html = web_inbox_placement_detail_page_with_data(&failed);
+        assert!(html.contains(">Failed</div>"), "{html}");
+        assert!(html.contains("This test failed"), "{html}");
+
+        let completed_empty = crate::view_data::PlacementDetailData {
+            status: "completed".into(),
+            providers: vec![],
+            ..with_providers
+        };
+        let html = web_inbox_placement_detail_page_with_data(&completed_empty);
+        assert!(html.contains("no recorded results"), "{html}");
+    }
+
     /// Item 19 (sample purge): the CP dashboard fallback no longer ships
     /// unbadged fabricated numbers, and the sales surface ships neither the
     /// retired lead pager nor a sample-data badge.
@@ -8851,7 +9170,10 @@ mod tests {
         assert!(html.contains("name=\"ids\""));
         assert!(html.contains("action=\"/web/contacts/delete-bulk\""));
         assert!(html.contains("formaction=\"/web/contacts/export.csv\""));
-        assert!(html.contains("no select-all without scripts"));
+        // Review §4.2: interaction guidance, not the old implementation
+        // lesson ("no select-all without scripts").
+        assert!(html.contains("Select the contacts you want to act on, then choose an action."));
+        assert!(!html.contains("without scripts"));
     }
 
     #[test]
@@ -9789,6 +10111,42 @@ mod tests {
 mod deferred_feature_view_tests {
     use super::*;
 
+    /// Review §3 P1-8 / §5.2: the private native-select helper escapes every
+    /// interpolation at the primitive boundary. A hostile value/text/id/name/
+    /// label must not close an attribute or inject markup.
+    #[test]
+    fn native_select_helper_escapes_every_interpolation() {
+        let html = render_native_select(
+            "filter\"><script>alert(1)</script>",
+            "Label \"><script>alert(2)</script>",
+            "name\"><script>alert(3)</script>",
+            &[
+                (
+                    "v\"><script>alert(4)</script>",
+                    "Text <script>alert(5)</script>",
+                    true,
+                ),
+                ("plain", "Plain", false),
+            ],
+        );
+        // No raw script tag survives from any of the five hostile inputs.
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("<script>alert(2)</script>"));
+        assert!(!html.contains("<script>alert(3)</script>"));
+        assert!(!html.contains("<script>alert(4)</script>"));
+        assert!(!html.contains("<script>alert(5)</script>"));
+        assert!(!html.contains("\"><script")); // no attribute was closed early
+                                               // The escaped forms did render: id ×2 (for= + select id=), label,
+                                               // name, option value, option text.
+        assert_eq!(html.matches("&lt;script&gt;").count(), 6);
+        assert!(html.contains("for=\"filter&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
+        assert!(
+            html.contains("<select id=\"filter&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\"")
+        );
+        assert!(html.contains("&lt;script&gt;alert(5)&lt;/script&gt;"));
+        assert!(html.contains("<option value=\"plain\">Plain</option>"));
+    }
+
     // ── Feature 1: MFA challenge recovery-code path ────────────────
 
     #[test]
@@ -9840,9 +10198,13 @@ mod deferred_feature_view_tests {
             email: "alice@example.com".into(),
             name: "Alice".into(),
             status: "subscribed".into(),
+            lists: vec!["Newsletter".into()],
         });
         assert!(page.contains("action=\"/web/contacts/update\""));
         assert!(page.contains("name=\"id\" value=\"c-123\""));
+        // Review §6.2: audience membership context is visible on the editor.
+        assert!(page.contains("Member of"), "{page}");
+        assert!(page.contains("Newsletter"), "{page}");
         // The address is identity, not an editable field.
         assert!(page.contains("value=\"alice@example.com\" readonly disabled"));
         assert!(page.contains("name=\"name\""));
@@ -9875,6 +10237,129 @@ mod deferred_feature_view_tests {
         assert!(!html.contains("href=\"/contacts/row-1\" class"));
     }
 
+    /// Review §6.3: a table whose ONLY per-row action is the editor link
+    /// (templates) must still render the Actions column — the edit-only
+    /// branch must not depend on a delete/detail affordance.
+    #[test]
+    fn data_list_page_renders_edit_link_when_it_is_the_only_action() {
+        let mut data = crate::view_data::ListPageData {
+            title: "Templates".into(),
+            base_path: "/templates".into(),
+            edit_path_prefix: Some("/templates/".into()),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Name".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "tpl-1".into(),
+                cells: vec![crate::view_data::DataCell::text("Welcome")],
+            }],
+        });
+        let html = data_list_page(&data, "template");
+        assert!(html.contains(">Actions</th>"), "{html}");
+        assert!(html.contains("href=\"/templates/tpl-1/edit\""), "{html}");
+    }
+
+    // ── Review register R1: live composition + §4.2 copy ───────────
+
+    #[test]
+    fn data_list_page_renders_secondary_actions_and_readable_row_labels() {
+        let mut data = crate::view_data::ListPageData {
+            title: "Contacts".into(),
+            base_path: "/contacts".into(),
+            bulk_action: Some(crate::view_data::BulkActionData {
+                action: "/web/contacts/delete-bulk".into(),
+                button_label: "Delete selected".into(),
+            }),
+            primary_action: Some(("Add Contact".into(), "/contacts/new".into())),
+            ..Default::default()
+        };
+        data.secondary_actions = vec![crate::view_data::SecondaryActionData::get(
+            "Export CSV",
+            "/web/contacts/export.csv",
+        )];
+        data.bulk_secondary_actions = vec![crate::view_data::SecondaryActionData::get(
+            "Export selected",
+            "/web/contacts/export.csv",
+        )];
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Email".into(), "Name".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "uuid-1".into(),
+                cells: vec![
+                    crate::view_data::DataCell::text("alice@example.com"),
+                    crate::view_data::DataCell::text("Alice"),
+                ],
+            }],
+        });
+        let html = data_list_page(&data, "contact");
+        // Export rides the live header and the bulk bar (review §6.2).
+        assert!(html.contains("href=\"/web/contacts/export.csv\""), "{html}");
+        assert!(
+            html.contains("formaction=\"/web/contacts/export.csv\""),
+            "{html}"
+        );
+        // Row selection names the readable identity, not only the uuid.
+        assert!(
+            html.contains("aria-label=\"Select alice@example.com\""),
+            "{html}"
+        );
+        assert!(!html.contains("Select row uuid-1"), "{html}");
+        // Interaction guidance, not an implementation lesson (review §4.2).
+        assert!(
+            html.contains("Select the rows you want to act on"),
+            "{html}"
+        );
+        assert!(!html.contains("without scripts"), "{html}");
+    }
+
+    #[test]
+    fn campaign_editor_shows_real_status_and_schedule_consent() {
+        let mut editor = crate::view_data::CampaignEditorData {
+            status: "scheduled".into(),
+            ..Default::default()
+        };
+        editor.edit = Some(crate::view_data::CampaignEditData {
+            id: "c_1".into(),
+            name: "Launch".into(),
+            subject: "Hi".into(),
+            html_body: "<p>x</p>".into(),
+            scheduled_at: "2026-12-01T10:00".into(),
+        });
+        let html = web_campaign_edit_page_with_data(&editor);
+        // The badge is the row's real lifecycle status, not "Draft".
+        assert!(html.contains(">Scheduled</div>"), "{html}");
+        assert!(!html.contains(">Draft</div>"), "{html}");
+        // §4.11: the schedule is explicit about UTC and the consequence of
+        // saving, and save-as-draft is a distinct authorization-free submit.
+        assert!(html.contains("Schedule (optional, UTC)"), "{html}");
+        assert!(
+            html.contains("scheduled delivery will begin automatically at that time (UTC)"),
+            "{html}"
+        );
+        assert!(html.contains("name=\"as_draft\" value=\"1\""), "{html}");
+        assert!(!html.contains("plain form post"), "{html}");
+    }
+
+    #[test]
+    fn campaign_preview_discloses_sanitized_structural_nature() {
+        let html = web_campaign_preview_page("<p>Hello</p>");
+        assert!(html.contains("Sanitized structural preview"), "{html}");
+        assert!(
+            html.contains("not how the email will look in a recipient&#x27;s client")
+                || html.contains("not how the email will look in a recipient's client"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn settings_hub_groups_destinations_without_implementation_copy() {
+        let hub = web_settings_page();
+        assert!(hub.contains("Identity and access"), "{hub}");
+        assert!(hub.contains("Sending infrastructure"), "{hub}");
+        assert!(hub.contains("Billing"), "{hub}");
+    }
+
     // ── Feature 4: suppressions page ───────────────────────────────
 
     #[test]
@@ -9882,8 +10367,8 @@ mod deferred_feature_view_tests {
         let page = web_settings_suppressions_page();
         assert!(page.contains("<h1"));
         assert!(page.contains("Suppressions"));
-        assert!(page.contains("Read-only by design"));
-        assert!(page.contains("Compliance flows own suppression writes"));
+        assert!(page.contains("Why this list is read-only"));
+        assert!(page.contains("never receive campaign mail"));
         // The empty table renders — never demo rows.
         assert!(page.contains("apex-table"));
         assert!(!page.contains("example.com"));

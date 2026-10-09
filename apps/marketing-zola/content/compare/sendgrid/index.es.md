@@ -29,8 +29,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
-    { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "none" },
-    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mes; IP dedicadas a petición</span>', winner = "none" },
+    { feature = "Tasa de entrega", apex = '<span class="text-surface-600 font-semibold">No directamente comparable (métrica definida por el proveedor)</span>', comp = '<span class="text-surface-600">No directamente comparable (métrica definida por el proveedor)</span>', winner = "none" },
+    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth y Business; 3 en Enterprise Cloud</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mes; IP dedicadas a petición</span>', winner = "none" },
     { feature = "Calentamiento de IP", apex = '<span class="text-brand-600 font-semibold">Automático</span>', comp = '<span class="text-surface-600">Automático</span>', winner = "tie" },
     { feature = "Rotación DKIM", apex = '<span class="text-brand-600 font-semibold">Automática y configurable</span>', comp = '<span class="text-surface-600">Manual</span>', winner = "none" },
     { feature = "Circuit breaker de reputación", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -63,6 +63,10 @@ comparison_sections = [
     { feature = "Análisis de contenido", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Solo clasificación</span>', winner = "apexmail" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Metodología:</strong> Las filas de funciones resumen el comportamiento de SendGrid documentado públicamente y los precios publicados; las filas de precios nombran los planes comparados (SendGrid Pro, Essentials) con 100.000 emails/mes. Precios y detalles de los planes revisados por última vez: 2026-10-04. Cuando una cifra del competidor no está documentada públicamente, la fila lo indica en lugar de afirmar un número. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a>."""
 +++
 
 <!-- Comparison rows rendered from [extra].comparison_sections by partials/compare/table.html. -->

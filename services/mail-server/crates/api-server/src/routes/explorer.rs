@@ -871,7 +871,7 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
         // the flat legacy 40-millicent wrapper understated Pro by 33% and
         // disagreed with the invoice sweep's ladder.
         let overage =
-            billing_service::plans::calculate_plan_overage_cost(&plan.name, f.volume, limit);
+            billing_service::plans::calculate_plan_overage_cost(plan.name, f.volume, limit);
         rows.push((
             format!("Plan — {}", title(plan.name)),
             format!("€{:.2}", base as f64 / 100.0),

@@ -13,6 +13,17 @@ ApexMail liefert Transaktions-E-Mail-Infrastruktur mit EU/EWR-orientierten Berei
 
 ---
 
+## Nach Ziel auswählen
+
+| Ihr Ziel | Startpunkt | Nächster Schritt |
+|---|---|---|
+| Anwendungs-E-Mails senden (Resets, Belege, Warnungen) | [Transaktions-E-Mail](transactional-email/) | [Schnellstart](/de/quickstart/) durchführen |
+| Mandantenfähigen E-Mail-Versand für Ihre eigenen Kunden betreiben | [SaaS-Plattformen](saas-platforms/) | Mandanten- und Domain-Isolation prüfen |
+| Versand unter einem regulierten oder auditierten Rahmen aufrechterhalten | [Regulierte Branchen](regulated-industries/) | Datenresidenz-Umfang und AVV im Security-Review bestätigen |
+| Von einem anderen Anbieter wechseln | [Migration](migration/) | Migrationsbewertung anfordern und die gekoppelten Phasen durchlaufen |
+| Millionen E-Mails pro Monat senden | [Massenversand](high-volume-sending/) | Warm-up, Durchsatz und Dedizierte-IP-Eligibility prüfen |
+| Dedizierte oder private Infrastruktur bereitstellen | [Enterprise](enterprise/) | Architektur-Review buchen |
+
 ## Lösungen nach Anwendungsfall
 
 - **[Transaktions-E-Mails](transactional-email/)** — Anwendungsgesteuerte E-Mails: Passwort-Resets, Bestellbestätigungen, Benachrichtigungen, Konto-Warnmeldungen. REST-API und SMTP-Relay mit signierten Webhooks, Idempotenz und Konfiguration je Anwendungsfall.

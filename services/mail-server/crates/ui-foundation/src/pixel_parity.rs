@@ -325,6 +325,82 @@ mod tests {
         );
     }
 
+    // ─── Independent-baseline parity ────────────────────────
+
+    /// Parity against an INDEPENDENT baseline: a page rendered now must carry
+    /// the same class / aria / data-attribute skeleton as the committed
+    /// fixture exported earlier by `export_visual_fixtures`.
+    ///
+    /// Rendering the same engine twice (the tests below) proves determinism —
+    /// never parity. The committed fixture is an artifact this test did not
+    /// produce, so a drifted renderer fails here.
+    ///
+    /// The comparison is structural (classes, ARIA, data attributes) rather
+    /// than byte-level on purpose: the exporter normalizes asset URLs
+    /// (`assets/globals.css?v=<hash>` → the local copy) and mints its own CSRF
+    /// secret, while the structure the console's behavior depends on must be
+    /// identical.
+    #[test]
+    fn rendered_pages_match_the_committed_visual_baseline_skeleton() {
+        use std::path::Path;
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("baselines/rust-ui");
+        let manifest_path = dir.join("manifest.json");
+        let manifest_text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
+            panic!(
+                "the committed visual baseline manifest is required ({error});                  run APEX_EXPORT_ALL_UI_ROUTES=1 cargo run -p ui-foundation                  --bin export_visual_fixtures -- {}",
+                dir.display()
+            )
+        });
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_text).expect("baseline manifest must parse");
+
+        let mut checked = 0usize;
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for entry in manifest["fixtures"].as_array().expect("fixtures array") {
+            let surface = entry["surface"].as_str().unwrap_or_default();
+            if surface != "web" && surface != "control-plane" {
+                continue;
+            }
+            let route = entry["route"].as_str().unwrap_or_default();
+            if !route.starts_with('/') || !seen.insert((surface.to_string(), route.to_string())) {
+                continue;
+            }
+            let Some(fresh) = crate::axum_router::render_route(surface, route) else {
+                continue;
+            };
+            let html_file = entry["htmlFile"]
+                .as_str()
+                .or_else(|| entry["html_file"].as_str())
+                .unwrap_or_default();
+            let baseline = std::fs::read_to_string(dir.join(html_file))
+                .unwrap_or_else(|error| panic!("baseline {html_file} must be readable: {error}"));
+
+            let class_diffs = compare_classes(&baseline, &fresh);
+            assert!(
+                class_diffs.is_empty(),
+                "[{surface}] {route} drifted from the committed baseline {html_file}:\n{}",
+                class_diffs.join("\n"),
+            );
+            assert_eq!(
+                extract_aria_attrs(&baseline),
+                extract_aria_attrs(&fresh),
+                "[{surface}] {route} ARIA attributes drifted from {html_file}",
+            );
+            assert_eq!(
+                extract_data_attrs(&baseline),
+                extract_data_attrs(&fresh),
+                "[{surface}] {route} data attributes drifted from {html_file}",
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no baseline fixture was comparable — the baseline set would be vacuous",
+        );
+    }
+
     // ─── Self-consistency tests ─────────────────────────────
     // These verify that the SAME rendering engine produces
     // identical output when called twice (determinism baseline).

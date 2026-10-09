@@ -588,8 +588,11 @@ pub(crate) fn time_cell(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> Dat
 /// MFA enrollment state for people tables (Operators, Team). Review §7:
 /// the reused sent/draft campaign vocabulary must become
 /// Enabled/Not configured — a person's second factor is not a message.
+/// The wire vocabulary (`enabled` / `not_configured`) renders through the
+/// shared status badge (`primitives::status_indicator_config`), so people
+/// tables get the same indicator treatment as every other status column.
 pub(crate) fn mfa_state_cell(enabled: bool) -> DataCell {
-    DataCell::text(if enabled { "Enabled" } else { "Not configured" })
+    DataCell::Status(if enabled { "enabled" } else { "not_configured" }.to_string())
 }
 
 /// Entry point: build the [`RouteData`] for a GET render of `path`.
@@ -1236,7 +1239,7 @@ async fn load_list_edit(
 
 /// Load `/templates/{id}/edit` values from the templates row so the editor
 /// round-trips real content instead of starting blank.
-async fn load_template_edit(
+pub(crate) async fn load_template_edit(
     state: &AppState,
     tenant: &str,
     id: &str,
@@ -1468,7 +1471,7 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
 
     let mut data = base_list(
         "Campaigns",
-        "Search, filter, and batch-manage campaigns — every action is a plain form post rendered server-side.",
+        "Search, filter, and batch-manage campaigns and their audiences in one place.",
         "/campaigns",
     );
     data.search_label = "Search campaigns".into();
@@ -1706,6 +1709,7 @@ async fn load_campaign_editor(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     editor.variables = String::new();
+    editor.status = status;
     editor.edit = Some(ui_foundation::view_data::CampaignEditData {
         id,
         name,
@@ -1714,7 +1718,6 @@ async fn load_campaign_editor(
         scheduled_at: scheduled_at
             .map(|ts| ts.format("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default(),
-        status,
     });
     editor
 }
@@ -1734,24 +1737,13 @@ async fn load_campaign_edit_legacy(
     tenant: &str,
     id: &str,
 ) -> Option<ui_foundation::view_data::CampaignEditData> {
-    let row: Option<(
-        String,
-        String,
-        Option<String>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-    )> = match sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            Option<chrono::DateTime<chrono::Utc>>,
-            Option<String>,
-        ),
+    let row: Option<(String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
+        match sqlx::query_as::<
+            _,
+            (String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>),
         // campaigns.id is a UUID in both schema lineages: cast it to text for
         // the String row shape (and cast the bound id back for the comparison).
-        >("SELECT id::text, name, subject, scheduled_at, status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
+        >("SELECT id::text, name, subject, scheduled_at FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
             .bind(id)
             .bind(tenant)
             .fetch_optional(&state.db)
@@ -1763,7 +1755,7 @@ async fn load_campaign_edit_legacy(
                 return None;
             }
         };
-    let (id, name, subject, scheduled_at, status) = row?;
+    let (id, name, subject, scheduled_at) = row?;
     Some(ui_foundation::view_data::CampaignEditData {
         id,
         name,
@@ -1772,7 +1764,6 @@ async fn load_campaign_edit_legacy(
         scheduled_at: scheduled_at
             .map(|ts| ts.format("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default(),
-        status: status.unwrap_or_default(),
     })
 }
 
@@ -1870,7 +1861,10 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) 
     // Review §6.2: the CSV export lives in the live header again, and the
     // bulk bar keeps the export-selected affordance the handwritten page
     // had — the export handler was always mounted.
-    data.secondary_actions = vec![SecondaryActionData::get("Export CSV", "/web/contacts/export.csv")];
+    data.secondary_actions = vec![SecondaryActionData::get(
+        "Export CSV",
+        "/web/contacts/export.csv",
+    )];
     data.bulk_secondary_actions = vec![SecondaryActionData::get(
         "Export selected",
         "/web/contacts/export.csv",
@@ -2053,6 +2047,9 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("New Template".into(), "/templates/new".into()));
+    // Review §6.3: live rows carry the actual editor navigation — the
+    // editor route exists and round-trips, so the list must link to it.
+    data.edit_path_prefix = Some("/templates/".into());
     data.empty_title = "No templates yet".into();
     data.empty_description = "Create a template to reuse email content across campaigns.".into();
     if rows_unavailable {
@@ -5369,15 +5366,19 @@ async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
     .await;
 
     let mut data = base_list(
-        "Service Discovery",
-        "Registered lead sources and routing state.",
+        // Review §7: this surface lists the canonical leads and their
+        // sources — "Lead Sources" is the honest name ("service discovery"
+        // is a different concept).
+        "Lead Sources",
+        "Canonical leads and the source that registered them.",
         "/discovery",
     );
     data.kpis = vec![KpiCardData::new("Leads", total.kpi_value()).with_hint("All sources")];
-    data.empty_title = "No discovery sources reporting".into();
-    data.empty_description = "Discovery runs register their sources here as they execute.".into();
+    data.empty_title = "No leads registered yet".into();
+    data.empty_description =
+        "Lead sources appear here as discovery and enrichment runs register leads.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Discovery sources", cid);
+        mark_rows_unavailable(&mut data, "Lead sources", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Source".into(), "Leads".into()],
@@ -5941,6 +5942,70 @@ pub(crate) async fn load_list_detail(
         subscribers,
         subscribed,
         unsubscribed,
+    }))
+}
+
+/// Load `/lists/{id}/members` (review §6.2): the list identity plus every
+/// subscriber with a readable identity, membership status and added date.
+/// `Ok(None)` when the LIST does not exist in this workspace (the handler
+/// flashes the honest not-found); an existing list with no subscribers
+/// returns an empty `members` vector — the view's honest empty state, never
+/// a fabricated row. Storage failures are RETURNED, exactly like
+/// [`load_list_detail`]: an outage must not read as "list not found".
+pub(crate) async fn load_list_members(
+    db: &sqlx::PgPool,
+    tenant: &str,
+    id: &str,
+) -> Result<Option<ui_foundation::view_data::ListMembersData>, sqlx::Error> {
+    use ui_foundation::view_data::{ListMemberData, ListMembersData};
+
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT id::text, name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await?;
+    let Some((id, name)) = row else {
+        return Ok(None);
+    };
+
+    // Readable identity first: the contact's name when recorded, else the
+    // address. `contacts.id` is UUID and `list_subscribers.contact_id`
+    // references it (migration 068 lineage) — the join keeps list and
+    // contact ownership in one statement.
+    let rows: Vec<(
+        Option<String>,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT c.name, c.email, ls.status, ls.created_at
+         FROM list_subscribers ls
+         JOIN contacts c ON c.id = ls.contact_id
+         WHERE ls.list_id = $1::uuid
+         ORDER BY ls.created_at DESC, c.email ASC",
+    )
+    .bind(&id)
+    .fetch_all(db)
+    .await?;
+    let total = rows.len().to_string();
+    let members = rows
+        .into_iter()
+        .map(|(contact_name, email, status, created_at)| ListMemberData {
+            identity: contact_name
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| email.clone()),
+            email,
+            status,
+            added_at: Some(created_at.to_rfc3339()),
+        })
+        .collect();
+    Ok(Some(ListMembersData {
+        id,
+        name,
+        total,
+        members,
     }))
 }
 
@@ -7232,6 +7297,50 @@ mod tests {
             assert_eq!(row.created_at, Some(shared_row.created_at.to_rfc3339()));
         }
     }
+
+    /// R6 (review §7): the LIVE control-plane sales page renders the native
+    /// approve/reject form for a pending-approval decision — posting to the
+    /// mounted console route with the seeded decision id, not to an API
+    /// client. The dead-end "not available in this console yet" copy is
+    /// gone.
+    #[tokio::test]
+    async fn sales_page_renders_the_native_review_form_for_pending_approvals() {
+        let Some(pool) = crate::test_db::canonical_pool("cp_sales_review_form").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let decision_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_decisions \
+                 (id, tenant_id, action, expected_value_eur, confidence, score_total, \
+                  evidence_ids, autonomy_mode, rationale, blocked, block_reasons, \
+                  enforcement, review_status, created_at) \
+             VALUES ($1, 'system', 'contact', 1.5, 0.5, 2.5, '{}'::uuid[], 'assisted', \
+                     'r6 native review form fixture', false, '[]'::jsonb, 'await_approval', \
+                     'pending', NOW())",
+        )
+        .bind(decision_id)
+        .execute(&pool)
+        .await
+        .expect("seed pending decision");
+
+        let data = cp_sales_autopilot(&state).await;
+        let html = ui_foundation::leptos_views::control_plane_sales_page_with_data(&data);
+        assert!(
+            html.contains(&format!(
+                "action=\"/web/admin/autopilot/decisions/{decision_id}/review\""
+            )),
+            "the live sales page must carry the native review form for the pending decision"
+        );
+        assert!(html.contains("name=\"outcome\" value=\"approved\""));
+        assert!(html.contains("name=\"outcome\" value=\"rejected\""));
+        assert!(!html.contains("not available in this console yet"));
+
+        let _ = sqlx::query("DELETE FROM sales_decisions WHERE id = $1")
+            .bind(decision_id)
+            .execute(&pool)
+            .await;
+    }
 }
 
 // ─── Adversarial SSR coverage harness (shared with web.rs tests) ───
@@ -7879,6 +7988,7 @@ pub(crate) mod coverage_support {
 mod coverage_loader_tests {
     use super::coverage_support::*;
     use super::*;
+    use crate::routes::web::{cp_data_page, web_data_page};
 
     fn kpi<'a>(data: &'a ListPageData, label: &str) -> &'a str {
         data.kpis
@@ -8512,6 +8622,198 @@ mod coverage_loader_tests {
             .sales
             .expect("sales alias page data");
         assert!(format!("{sales_alias:?}").contains(&tag));
+    }
+
+    /// Review register R1: the live composition must not lose the
+    /// handwritten affordances/labels — exports in the live header, the
+    /// editor navigation on template rows, the Scheduled filter, MFA labels,
+    /// the filter-preserving audit export, and the Lead Sources naming.
+    #[tokio::test]
+    async fn live_loaders_keep_exports_filters_and_honest_labels() {
+        let Some(app) = state("cov_r1_live_composition").await else {
+            eprintln!("skipping live_loaders_keep_exports_filters_and_honest_labels");
+            return;
+        };
+        let (tenant, tag) = tenant_pair("r1c");
+        seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = user(&tenant);
+
+        // Contacts: CSV export in the live header AND in the bulk bar
+        // (review §6.2 / P1-5).
+        let contacts = web(&app, "/contacts", None, &caller).await;
+        let export = contacts
+            .secondary_actions
+            .iter()
+            .find(|action| action.action == "/web/contacts/export.csv")
+            .expect("contacts header export");
+        assert_eq!(export.method, "get");
+        assert!(
+            contacts
+                .bulk_secondary_actions
+                .iter()
+                .any(|action| action.label == "Export selected"),
+            "{contacts:?}"
+        );
+
+        // Templates: live rows carry the real editor route (review §6.3).
+        let templates = web(&app, "/templates", None, &caller).await;
+        assert_eq!(templates.edit_path_prefix.as_deref(), Some("/templates/"));
+
+        // Campaign list: Scheduled is a first-class filter and it applies
+        // (review §6.2).
+        let scheduled_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO campaigns (id, tenant_id, name, subject, status, scheduled_at, sent_count, created_at, updated_at) \
+             VALUES ($1::uuid, $2, $3, 'Scheduled subject', 'scheduled', NOW() + interval '1 day', 0, NOW(), NOW())",
+        )
+        .bind(&scheduled_id)
+        .bind(&tenant)
+        .bind(format!("Scheduled {tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed scheduled campaign");
+        let campaigns = web(&app, "/campaigns", None, &caller).await;
+        let status_filter = campaigns
+            .filters
+            .iter()
+            .find(|filter| filter.name == "status")
+            .expect("status filter");
+        assert!(
+            status_filter
+                .options
+                .iter()
+                .any(|(value, label, _)| value == "scheduled" && label == "Scheduled"),
+            "{status_filter:?}"
+        );
+        let scheduled = web(&app, "/campaigns", Some("status=scheduled"), &caller).await;
+        assert_eq!(scheduled.total_count, 1, "{scheduled:?}");
+        assert!(has(&scheduled, &format!("Scheduled {tag}")));
+
+        // Team and Operators state MFA as Enabled / Not configured — never
+        // the reused campaign sent/draft vocabulary (review §7). The cells
+        // are status badges now (wire vocabulary `enabled`/`not_configured`),
+        // so the human label is pinned through the shared badge renderer.
+        let team = web(&app, "/settings/team", None, &caller).await;
+        assert!(has(&team, "not_configured"), "{team:?}");
+        assert!(
+            ui_foundation::view_data::render_data_cell(&DataCell::Status("not_configured".into()))
+                .contains("Not configured"),
+            "the MFA status cell must render the human label"
+        );
+        let team_cells: Vec<&str> = team
+            .table
+            .as_ref()
+            .map(|table| {
+                table
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.cells.iter())
+                    .filter_map(|cell| match cell {
+                        DataCell::Text(value) => Some(value.as_str()),
+                        DataCell::Status(value) => Some(value.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !team_cells
+                .iter()
+                .any(|value| *value == "sent" || *value == "draft"),
+            "the team table must not label MFA with sent/draft: {team_cells:?}"
+        );
+        let operator = user("system");
+        let operators = cp(&app, "/operators", Some(&format!("query={tag}")), &operator).await;
+        assert!(has(&operators, "not_configured"), "{operators:?}");
+
+        // CP audit: the export link exists and preserves the active filters.
+        let audit = cp(
+            &app,
+            "/cp/audit",
+            Some(&format!("query={tag}&days=30")),
+            &operator,
+        )
+        .await;
+        let audit_export = audit
+            .secondary_actions
+            .iter()
+            .find(|action| action.action.starts_with("/web/admin/audit/export"))
+            .expect("audit export action");
+        assert!(
+            audit_export.action.contains(&format!("query={tag}")),
+            "{}",
+            audit_export.action
+        );
+        assert!(
+            audit_export.action.contains("days=30"),
+            "{}",
+            audit_export.action
+        );
+
+        // Discovery names the surface for what it lists (review §7).
+        let discovery = cp(&app, "/discovery", None, &operator).await;
+        assert_eq!(discovery.title, "Lead Sources");
+
+        // P1-4: every POPULATED bulk table renders its row forms as siblings
+        // of the bulk form — never nested (browsers drop the inner form).
+        let operator_all = user("system");
+        for (surface, path, list) in [
+            (
+                "web",
+                "/contacts",
+                web(&app, "/contacts", None, &caller).await,
+            ),
+            (
+                "web",
+                "/campaigns",
+                web(&app, "/campaigns", None, &caller).await,
+            ),
+            (
+                "control-plane",
+                "/cp/audit",
+                cp(&app, "/cp/audit", None, &operator_all).await,
+            ),
+            (
+                "control-plane",
+                "/alerts",
+                cp(&app, "/alerts", None, &operator_all).await,
+            ),
+        ] {
+            let html = if surface == "web" {
+                web_data_page(path, &list, "row", &[], "csrf-test")
+            } else {
+                cp_data_page(path, &list, "row", &[], "csrf-test")
+            };
+            assert!(
+                list.table
+                    .as_ref()
+                    .is_some_and(|table| !table.rows.is_empty()),
+                "{path} must be populated for this check"
+            );
+            assert_no_nested_forms(path, &html);
+        }
+    }
+
+    /// Depth scan over the rendered form events: a depth > 1 means one form
+    /// opened inside another (review P1-4).
+    fn assert_no_nested_forms(path: &str, html: &str) {
+        let mut depth = 0usize;
+        let mut rest = html;
+        while let Some(index) = rest.find('<') {
+            rest = &rest[index..];
+            let lowered = rest.to_ascii_lowercase();
+            if lowered.starts_with("<form") {
+                depth += 1;
+                assert!(
+                    depth <= 1,
+                    "{path} nests a <form> inside another <form> at depth {depth}"
+                );
+            } else if lowered.starts_with("</form") {
+                depth = depth.saturating_sub(1);
+            }
+            rest = &rest[1..];
+        }
+        assert_eq!(depth, 0, "{path} left an unclosed form");
     }
 
     #[tokio::test]

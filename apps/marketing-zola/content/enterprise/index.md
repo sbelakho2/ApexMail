@@ -13,14 +13,14 @@ Enterprise is a contractual email-delivery offering for organizations that need 
 
 ## Catalog Entitlement
 
-| Item | Enterprise |
+| Item | Enterprise Cloud |
 |---|---|
 | Price | from €1,750/month under an annual contract |
 | Included email volume | 5,000,000 emails/month |
 | API calls | Unlimited |
 | Domains and team members | Unlimited |
 | Event retention | 730 days |
-| Dedicated IPs | 10 included |
+| Dedicated IPs | 3 included |
 | Access controls | SAML SSO and audit logs |
 | Support level | Dedicated |
 | Private Cloud / BYOIP | Subject to contract and technical review |

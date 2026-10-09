@@ -26,7 +26,7 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 
 ## La solution ApexMail
 
-- **IP dédiées** — Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Scale et 10 sur Enterprise. Les options de déploiement contractualisées sont revues séparément.
+- **IP dédiées** — Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business, et 3 sur Enterprise Cloud. Les options de déploiement contractualisées sont revues séparément.
 - **Réchauffement automatisé** — Montée en charge progressive selon des calendriers propres à chaque fournisseur. Supervisé au regard des signaux de réputation. Override manuel disponible.
 - **Priorisation des files** — Le trafic transactionnel est traité en priorité devant les envois massifs en période de charge. Objectifs de temps jusqu'à la boîte de réception supervisés.
 - **API par lots** (`POST /v1/messages/batch`) — Soumettez jusqu'à 100 messages par requête. Surcoût par message inférieur aux appels API individuels.
@@ -57,8 +57,8 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 | Forfait | Volume mensuel | IP dédiées | Limite de débit | Support |
 |---|---|---|---|---|
 | Growth | 500 000 emails | 1 incluse | Selon forfait | Support par email |
-| Scale | 2 000 000 emails | 3 incluses | Selon forfait | Support prioritaire |
-| Enterprise | 5 000 000 emails | 10 incluses | Défini au contrat | Support dédié |
+| Business | 2 000 000 emails | 1 incluse | Selon forfait | Support prioritaire |
+| Enterprise Cloud | 5 000 000 emails | 3 incluses | Défini au contrat | Support dédié |
 
 ## Considérations de sécurité
 

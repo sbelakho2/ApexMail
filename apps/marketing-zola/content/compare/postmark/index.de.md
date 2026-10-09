@@ -22,7 +22,7 @@ comparison_sections = [
   { title = "ZUSTELLBARKEIT", rows = [
     { feature = "Zustellrate", apex = '<span class="text-brand-600 font-semibold">Hoch</span>', comp = '<span class="text-surface-600">Hoch</span>', winner = "none" },
     { feature = "P95-Annahme bis zum ersten Zustellversuch", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">Nicht öffentlich dokumentiert</span>', winner = "none" },
-    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
+    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
     { feature = "Automatisches IP-Warm-up", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatisch (von Postmark verwaltet)</span>', winner = "none" },
     { feature = "BIMI-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "MTA-STS-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }
@@ -59,7 +59,7 @@ comparison_sections = [
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.
 methodology_note = """\
-<strong>Methodik:</strong> Funktionsvergleiche basieren auf öffentlich verfügbarer Dokumentation, Preisseiten und offiziellen Quellen. Verglichene Tarife: ApexMail-Self-Service-Stufen und Postmark-Standardtarife. Preis-Snapshot-Datum: 2026-05-09. Zuletzt verifiziert: 2026-07-30. Daten können sich ändern; prüfen Sie die aktuelle Dokumentation der jeweiligen Anbieter. Siehe unsere <a href="/de/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">Vergleichsmethodik</a> für Details zur Quellenauswahl."""
+<strong>Methodik:</strong> Funktionsvergleiche basieren auf öffentlich verfügbarer Dokumentation, Preisseiten und offiziellen Quellen. Verglichene Tarife: ApexMail-Self-Service-Stufen und Postmark-Standardtarife. Preise und Tarifdetails zuletzt geprüft: 2026-08-19. Daten können sich ändern; prüfen Sie die aktuelle Dokumentation der jeweiligen Anbieter. Siehe unsere <a href="/de/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">Vergleichsmethodik</a> für Details zur Quellenauswahl."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

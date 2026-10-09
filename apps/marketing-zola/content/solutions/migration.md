@@ -43,6 +43,17 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 7. Begin parallel sending at 10% volume, increasing incrementally while monitoring delivery metrics.
 8. After validation period, route 100% through ApexMail and remove legacy provider configuration.
 
+## Gated Migration Phases
+
+Move through these phases in order; each has an explicit entry gate, acceptance criteria, and rollback trigger.
+
+| Phase | Entry criteria | Acceptance criteria | Rollback trigger |
+|---|---|---|---|
+| 1. Prepare | Account created; sending domain added; templates inventoried | DNS records issued and reviewed; template mapping documented | None — no production traffic yet |
+| 2. Validate in parallel | ApexMail DKIM and SPF coexist with the current provider; DMARC at `p=none` | Test messages deliver with valid authentication; webhook events received and signature-verified | Authentication failures or webhook signature mismatches that persist after correction |
+| 3. Shift a share of traffic | Parallel validation complete; delivery metrics measurable per provider | Delivery metrics match the incumbent within the agreed tolerance for the observation window | Bounce or complaint rate breaches the AUP thresholds (2% bounce / 0.1% complaint) |
+| 4. Cut over | Sustained acceptance at the agreed share | 100% of traffic through ApexMail; legacy provider records removed only after the retention window | Delivery degradation that does not recover after the retry budget and warm-up adjustments |
+
 ## Relevant API Endpoints
 
 | Endpoint | Description |
@@ -65,8 +76,8 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 | Plan | Dedicated IP | Support |
 |---|---|---|
 | Growth | 1 included dedicated IP | Email support |
-| Scale | 3 included dedicated IPs | Priority support |
-| Enterprise | 10 included dedicated IPs | Dedicated support |
+| Business | 1 included dedicated IP | Priority support |
+| Enterprise Cloud | 3 included dedicated IPs | Dedicated support |
 
 ## Security Considerations
 

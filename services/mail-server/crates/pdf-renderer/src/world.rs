@@ -180,7 +180,8 @@ pub struct TypstWorld {
 }
 
 fn project_file(path: &str) -> Result<FileId, WorldError> {
-    let vpath = VirtualPath::new(path).map_err(|e| WorldError::InvalidPath(format!("{path}: {e}")))?;
+    let vpath =
+        VirtualPath::new(path).map_err(|e| WorldError::InvalidPath(format!("{path}: {e}")))?;
     Ok(RootedPath::new(VirtualRoot::Project, vpath).intern())
 }
 
@@ -224,15 +225,15 @@ impl TypstWorld {
     fn external_file(&self, id: FileId) -> FileResult<Vec<u8>> {
         let Some(dir) = &self.external_dir else {
             return Err(FileError::NotFound(
-                Path::new(id.vpath().as_rootless_path()).to_path_buf(),
+                Path::new(id.vpath().get_without_slash()).to_path_buf(),
             ));
         };
         if !matches!(id.root(), VirtualRoot::Project) {
             return Err(FileError::NotFound(
-                Path::new(id.vpath().as_rootless_path()).to_path_buf(),
+                Path::new(id.vpath().get_without_slash()).to_path_buf(),
             ));
         }
-        let real = dir.join(id.vpath().as_rootless_path());
+        let real = dir.join(id.vpath().get_without_slash());
         std::fs::read(&real).map_err(|_| FileError::NotFound(real))
     }
 
@@ -355,11 +356,11 @@ mod tests {
             .map(|font| font.info().family.as_str())
             .collect();
         assert!(
-            families.iter().any(|f| *f == "Noto Sans"),
+            families.contains(&"Noto Sans"),
             "Noto Sans must be embedded: {families:?}"
         );
         assert!(
-            families.iter().any(|f| *f == "Noto Sans SC"),
+            families.contains(&"Noto Sans SC"),
             "Noto Sans SC must be embedded: {families:?}"
         );
         assert!(
@@ -369,7 +370,7 @@ mod tests {
                     typst::text::FontVariant::new(
                         typst::text::FontStyle::Normal,
                         typst::text::FontWeight::REGULAR,
-                        typst::text::FontStretch::Normal,
+                        typst::text::FontStretch::NORMAL,
                     ),
                     "你",
                 )
@@ -396,6 +397,9 @@ mod tests {
     fn missing_external_files_are_refused_without_the_env_var() {
         let world = TypstWorld::new("invoice", "{}".to_string()).expect("world builds");
         let other = project_file("secrets.json").unwrap();
-        assert!(world.file(other).is_err(), "unlisted files must not resolve");
+        assert!(
+            world.file(other).is_err(),
+            "unlisted files must not resolve"
+        );
     }
 }

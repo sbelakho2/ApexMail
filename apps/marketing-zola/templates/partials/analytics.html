@@ -1,5 +1,15 @@
-{# ── Privacy-First Analytics ─────────────────────────────────── #}
+{# ── Privacy-First Analytics (comment-only partial) ──────────── #}
 {# Zero-JavaScript policy: the marketing site ships NO scripts.     #}
-{# Self-hosted, cookie-free analytics events are collected by the   #}
-{# server from access logs; nothing loads from a third party.       #}
+{# This partial intentionally renders nothing and performs NO       #}
+{# collection. Ownership of the actual collector and policy:        #}
+{#   * collector: the platform access-log pipeline (server-side;    #}
+{#     deployed and operated by ApexMail platform ops — the site    #}
+{#     itself never contacts a third party);                        #}
+{#   * policy authority: /cookies/ (and the cookie-consent banner   #}
+{#     choices), reviewed with the privacy policy;                  #}
+{#   * enable flag: config.extra.analytics_enabled (false in this   #}
+{#     export; no analytics host is loaded either way because the   #}
+{#     CSP sets script-src 'none').                                 #}
+{# If a future change adds a real collector, this comment and the    #}
+{# consent flow must be updated together.                            #}
 {# ──────────────────────────────────────────────────────────────── #}

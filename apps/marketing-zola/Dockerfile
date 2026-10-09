@@ -24,6 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Source revision stamped into the export and the image label (pass
+# --build-arg SOURCE_REVISION=$(git rev-parse HEAD) in CI). Defaults to
+# "unknown" so a local build still produces a coherent, self-describing export.
+ARG SOURCE_REVISION=unknown
+
 # Download the toolchain matching the BUILD target architecture. TARGETARCH
 # is provided automatically by the builder (amd64/arm64) — including under
 # buildx cross-builds — so local Apple Silicon and CI amd64 builds both get
@@ -65,6 +70,12 @@ RUN set -eux; \
         sed -i "s|url(/fonts/${base})|url(/fonts/${base}?h=${h})|g" static/css/styles.css; \
     done
 RUN zola build
+# Provenance: stamp what actually produced this export (source revision +
+# pinned toolchain versions). The api-server serves public/** as-is, so this
+# file is the deployment's own record of which HTML/CSS/assets it shipped.
+RUN set -eux; \
+    printf '{"source_revision":"%s","zola":"0.22.1","tailwindcss":"3.4.17","styled_sheet":"css/styles.css"}\n' \
+        "${SOURCE_REVISION}" > public/build-provenance.json
 
 # =============================================================================
 # Production Stage
@@ -100,7 +111,8 @@ EXPOSE 8080
 LABEL org.opencontainers.image.title="apexmail-marketing" \
     org.opencontainers.image.description="ApexMail marketing website" \
     org.opencontainers.image.source="https://apexmail.ee" \
-    org.opencontainers.image.licenses="PROPRIETARY"
+    org.opencontainers.image.licenses="PROPRIETARY" \
+    org.opencontainers.image.revision="${SOURCE_REVISION}"
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
     CMD ["curl", "-fsS", "http://127.0.0.1:8080/health"]

@@ -77,8 +77,8 @@ const RENDER_TIMEOUT_SECS: u64 = 10;
 /// compilation times out, the output is too large, or PDF export fails.
 pub async fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<u8>, RenderError> {
     // ---- 1. Input validation (O-14.1) ------------------------------------
-    let data_json = serde_json::to_string(data)
-        .map_err(|e| RenderError::Serialization(e.to_string()))?;
+    let data_json =
+        serde_json::to_string(data).map_err(|e| RenderError::Serialization(e.to_string()))?;
 
     if data_json.len() > MAX_DATA_JSON_BYTES {
         return Err(RenderError::Serialization(format!(
@@ -158,7 +158,11 @@ fn compile_and_export(world: &TypstWorld) -> Result<Vec<u8>, RenderError> {
 fn describe(world: &TypstWorld, diagnostic: &SourceDiagnostic) -> String {
     let location = world.range(diagnostic.span).and_then(|range| {
         let id = diagnostic.span.id()?;
-        Some(format!("{}:{}", id.vpath().get_without_slash(), range.start))
+        Some(format!(
+            "{}:{}",
+            id.vpath().get_without_slash(),
+            range.start
+        ))
     });
     match location {
         Some(location) => format!("{} at {}", diagnostic.message, location),
@@ -259,7 +263,10 @@ mod tests {
             bytes.windows(5).any(|w| w == b"%%EOF"),
             "missing EOF marker"
         );
-        assert!(!bytes.windows(8).any(|w| w == b"/Encrypt"), "must not encrypt");
+        assert!(
+            !bytes.windows(8).any(|w| w == b"/Encrypt"),
+            "must not encrypt"
+        );
     }
 
     #[tokio::test]
@@ -427,7 +434,10 @@ mod tests {
             .expect("unicode invoice renders");
         let text = crate::test_extract::extract_text(&pdf);
         assert!(text.contains("年度套餐"), "CJK must round-trip: {text}");
-        assert!(text.contains("Годовой план"), "Cyrillic must round-trip: {text}");
+        assert!(
+            text.contains("Годовой план"),
+            "Cyrillic must round-trip: {text}"
+        );
     }
 
     // ── Adversarial: hostile payload limits and hostile text ────────────

@@ -119,8 +119,14 @@ async fn claim_batch(db: &PgPool, batch: i64) -> Result<ClaimOutcome, ApiError> 
     })
 }
 
-/// The tenant's billing contact: its owner user.
-async fn owner_email(db: &PgPool, tenant_id: &str) -> Result<Option<String>, ApiError> {
+/// The tenant's billing contact: its owner user, plus the tenant's own name
+/// for the account context every notification carries.
+struct BillingContact {
+    email: String,
+    tenant_name: String,
+}
+
+async fn owner_email(db: &PgPool, tenant_id: &str) -> Result<Option<BillingContact>, ApiError> {
     let email: Option<String> = sqlx::query_scalar(
         "SELECT email FROM users \
           WHERE tenant_id = $1 AND role = 'owner' AND email <> '' \
@@ -129,7 +135,19 @@ async fn owner_email(db: &PgPool, tenant_id: &str) -> Result<Option<String>, Api
     .bind(tenant_id)
     .fetch_optional(db)
     .await?;
-    Ok(email)
+    let Some(email) = email else {
+        return Ok(None);
+    };
+    let tenant_name: Option<String> = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(Some(BillingContact {
+        email,
+        tenant_name: tenant_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| tenant_id.to_string()),
+    }))
 }
 
 /// A rendered platform notification.
@@ -157,12 +175,27 @@ fn payload_i64(payload: &serde_json::Value, key: &str) -> Option<i64> {
 }
 
 /// Render one notification. Known types get a product-specific message; any
-/// other type gets a generic rendering so a producer added later is never a
-/// silent drop (the payload travels verbatim).
+/// other type gets a generic rendering naming the type only — the raw payload
+/// stays in `notification_queue` (and the drainer's logs) for operators and is
+/// **never** the customer-facing presentation.
 fn render_notification(
     notification_type: &str,
     payload: &serde_json::Value,
+    account: &str,
 ) -> RenderedNotification {
+    // Money is rendered with the currency code the producer recorded; a
+    // payload without one is labeled explicitly rather than guessed.
+    let currency = payload_str(payload, "currency")
+        .map(|code| code.trim().to_uppercase())
+        .filter(|code| !code.is_empty());
+    let amount = |cents: i64| -> String {
+        let value = format!("{:.2}", cents as f64 / 100.0);
+        match &currency {
+            Some(code) => format!("{value} {code}"),
+            None => format!("{value} (currency not recorded)"),
+        }
+    };
+
     let (subject, body_lines) = match notification_type {
         "usage_alert" => {
             let metric = payload_str(payload, "metricType").unwrap_or("usage");
@@ -197,13 +230,13 @@ fn render_notification(
             )
         }
         "payment_failed" => {
-            let amount = payload_i64(payload, "amount")
-                .map(|cents| format!("{:.2}", cents as f64 / 100.0))
-                .unwrap_or_else(|| "?".into());
+            let amount_due = payload_i64(payload, "amount")
+                .map(amount)
+                .unwrap_or_else(|| "(amount not recorded)".into());
             (
                 "ApexMail payment failed".to_string(),
                 format!(
-                    "We could not collect the payment of {amount} for your latest invoice.\n\n\
+                    "We could not collect the payment of {amount_due} for your latest invoice.\n\n\
                      Update your payment method at https://app.apexmail.ee/billing to avoid \
                      service interruption."
                 ),
@@ -263,41 +296,41 @@ fn render_notification(
         other => (
             format!("ApexMail notification: {other}"),
             format!(
-                "This is an automated notification from ApexMail.\n\nType: {other}\n\
-                 Details: {}",
-                payload
+                "This is an automated notification from ApexMail.\n\nType: {other}\n\n\
+                 Open the billing area of the console for the details of this notification."
             ),
         ),
     };
 
     let html = format!(
         "<p>{}</p><hr><p style=\"color:#666;font-size:12px\">ApexMail · \
-         automated notification</p>",
-        escape_html(&body_lines).replace('\n', "<br>")
+         automated notification for the account {}</p>",
+        escape_html(&body_lines).replace('\n', "<br>"),
+        escape_html(account),
     );
     RenderedNotification {
         subject,
         html,
-        text: format!("{body_lines}\n\n— ApexMail (automated notification)"),
+        text: format!("{body_lines}\n\nAccount: {account}\n\n— ApexMail (automated notification)"),
     }
 }
 
 /// Deliver one claimed row. The queue-row transition and the queued platform
 /// message commit in the SAME transaction.
 async fn deliver_one(db: &PgPool, row: &ClaimedNotification) -> Result<Uuid, ApiError> {
-    let recipient = owner_email(db, &row.tenant_id).await?.ok_or_else(|| {
+    let contact = owner_email(db, &row.tenant_id).await?.ok_or_else(|| {
         ApiError::ServiceUnavailable(format!(
             "tenant {} has no owner email to notify",
             row.tenant_id
         ))
     })?;
 
-    let rendered = render_notification(&row.notification_type, &row.payload);
+    let rendered = render_notification(&row.notification_type, &row.payload, &contact.tenant_name);
 
     let mut tx = db.begin().await?;
     let message_id = crate::routes::system_sender::queue_system_email_in_transaction(
         &mut tx,
-        &recipient,
+        &contact.email,
         &rendered.subject,
         &rendered.html,
         &rendered.text,
@@ -703,13 +736,55 @@ mod tests {
     }
 
     /// Unknown notification types are still delivered (generic rendering) —
-    /// a producer added later must never be a silent drop.
+    /// a producer added later must never be a silent drop — but the raw
+    /// payload is NOT the customer presentation: the reader is pointed at
+    /// the console, and the payload stays in `notification_queue` for
+    /// operators.
     #[test]
-    fn unknown_type_renders_a_generic_message_with_the_payload() {
-        let rendered = render_notification("brand_new_alert", &serde_json::json!({"foo": "bar"}));
+    fn unknown_type_renders_a_generic_message_without_dumping_the_payload() {
+        let rendered = render_notification(
+            "brand_new_alert",
+            &serde_json::json!({"foo": "bar", "internal_ref": "secret-ish"}),
+            "Notification Drain Co",
+        );
         assert!(rendered.subject.contains("brand_new_alert"));
         assert!(rendered.text.contains("brand_new_alert"));
-        assert!(rendered.text.contains("bar"));
+        assert!(
+            !rendered.text.contains("bar") && !rendered.html.contains("bar"),
+            "the raw payload must not appear in the customer presentation: {}",
+            rendered.text
+        );
+        assert!(rendered.text.contains("console"), "{}", rendered.text);
+    }
+
+    /// Every rendered notification carries the account context, and money is
+    /// rendered with the producer's currency code (an absent currency is
+    /// labeled, never silently dropped).
+    #[test]
+    fn rendered_notifications_carry_account_context_and_currency() {
+        let with_currency = render_notification(
+            "payment_failed",
+            &serde_json::json!({"amount": 4900, "currency": "usd"}),
+            "Acme Co",
+        );
+        assert!(
+            with_currency.text.contains("49.00 USD"),
+            "currency code must accompany the amount: {}",
+            with_currency.text
+        );
+        assert!(with_currency.text.contains("Account: Acme Co"));
+
+        let without_currency = render_notification(
+            "payment_failed",
+            &serde_json::json!({"amount": 4900}),
+            "Acme Co",
+        );
+        assert!(
+            without_currency.text.contains("currency not recorded"),
+            "a missing currency must be explicit: {}",
+            without_currency.text
+        );
+        assert!(!without_currency.text.contains("49.00 USD"));
     }
 
     /// HTML escaping: payload values never inject markup.
@@ -718,6 +793,7 @@ mod tests {
         let rendered = render_notification(
             "cost_alert",
             &serde_json::json!({"message": "<script>alert(1)</script>"}),
+            "Acme Co",
         );
         assert!(!rendered.html.contains("<script>"));
         assert!(rendered.html.contains("&lt;script&gt;"));

@@ -109,13 +109,70 @@ pub const FLASH_MAX_AGE_SECS: i64 = 60;
 /// Default validity window for confirmation signatures.
 pub const CONFIRMATION_DEFAULT_TTL_SECS: i64 = 15 * 60;
 
+/// Browser-safe budget for the flash cookie's VALUE. Browsers enforce a
+/// ~4 KiB limit per cookie (name + value + attributes): a value past it is
+/// silently DROPPED, taking the user's feedback with it. 3072 bytes leaves
+/// room for the name, the signature and the attribute list.
+pub const FLASH_COOKIE_VALUE_BUDGET: usize = 3072;
+
+/// Longest single flash text kept verbatim; longer texts are truncated with
+/// an ellipsis so one pathological field error cannot evict every other
+/// message (review §5.1 flash.rs: "bound feedback payloads to a
+/// browser-safe cookie budget").
+pub const FLASH_MESSAGE_MAX_CHARS: usize = 512;
+
+fn truncate_flash_text(text: &str) -> String {
+    if text.chars().count() <= FLASH_MESSAGE_MAX_CHARS {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(FLASH_MESSAGE_MAX_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
 /// Serialize + sign the flash messages for a `Set-Cookie` value.
+///
+/// The value is ALWAYS within [`FLASH_COOKIE_VALUE_BUDGET`]: texts are
+/// truncated per message and, if that is still too long, messages are
+/// dropped from the end (the first message is the outcome of the submitted
+/// action and is kept). Truncation is announced with a trailing
+/// "[+N more]" info message when it fits.
 pub fn encode_flash_cookie(messages: &[FlashMessage], secret: &str) -> String {
-    let payload =
-        serde_json::to_vec(messages).expect("flash messages must serialize (plain strings)");
-    let payload_b64 = b64_encode(&payload);
-    let signature = sign(secret, payload_b64.as_bytes());
-    format!("v1.{payload_b64}.{signature}")
+    let encode = |list: &[FlashMessage]| {
+        let payload =
+            serde_json::to_vec(list).expect("flash messages must serialize (plain strings)");
+        let payload_b64 = b64_encode(&payload);
+        let signature = sign(secret, payload_b64.as_bytes());
+        format!("v1.{payload_b64}.{signature}")
+    };
+
+    let bounded: Vec<FlashMessage> = messages
+        .iter()
+        .map(|message| FlashMessage {
+            kind: message.kind,
+            text: truncate_flash_text(&message.text),
+        })
+        .collect();
+    let full = encode(&bounded);
+    if full.len() <= FLASH_COOKIE_VALUE_BUDGET {
+        return full;
+    }
+    // Drop from the end, keeping the first message, and try to announce the
+    // drop count. Fall back to the bare prefix when the trailer is too big.
+    for keep in (1..bounded.len()).rev() {
+        let dropped = bounded.len() - keep;
+        let mut candidate = bounded[..keep].to_vec();
+        candidate.push(FlashMessage::info(format!("[+{dropped} more]")));
+        let encoded = encode(&candidate);
+        if encoded.len() <= FLASH_COOKIE_VALUE_BUDGET {
+            return encoded;
+        }
+    }
+    let first = bounded
+        .first()
+        .cloned()
+        .unwrap_or_else(|| FlashMessage::info("This notification was too long to display."));
+    encode(&[first])
 }
 
 /// Verify + deserialize a flash cookie value. Returns `None` on any
@@ -256,10 +313,58 @@ mod tests {
     }
 
     #[test]
-    fn flash_cookie_rejects_oversized_payloads() {
-        let big = vec![FlashMessage::info("x".repeat(64 * 1024)); 1];
-        let cookie = encode_flash_cookie(&big, SECRET);
+    fn flash_cookie_decoder_rejects_oversized_payloads() {
+        // The ENCODER now bounds its own output (see the budget test); a
+        // hand-built oversized cookie — an older node, a hostile client —
+        // must still be refused before it is parsed.
+        let payload = serde_json::to_vec(&vec![FlashMessage::info("x".repeat(64 * 1024))])
+            .expect("serializes");
+        let payload_b64 = b64_encode(&payload);
+        let signature = sign(SECRET, payload_b64.as_bytes());
+        let cookie = format!("v1.{payload_b64}.{signature}");
+        assert!(cookie.len() > FLASH_COOKIE_VALUE_BUDGET);
         assert!(decode_flash_cookie(&cookie, SECRET).is_none());
+    }
+
+    /// Review §5.1 flash.rs: the encoder keeps the cookie inside a
+    /// browser-safe budget — a rejected cookie loses the user's feedback
+    /// entirely, so the payload is truncated instead.
+    #[test]
+    fn flash_cookie_stays_within_the_browser_budget() {
+        // One pathological message: truncated, still decodable, first
+        // characters preserved.
+        let long = encode_flash_cookie(&[FlashMessage::error("e".repeat(64 * 1024))], SECRET);
+        assert!(
+            long.len() <= FLASH_COOKIE_VALUE_BUDGET,
+            "value {} bytes > budget",
+            long.len()
+        );
+        let decoded = decode_flash_cookie(&long, SECRET).expect("truncated cookie decodes");
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].text.starts_with("eee"));
+        assert!(decoded[0].text.ends_with('…'));
+        assert_eq!(decoded[0].kind, FlashKind::Error);
+
+        // Many messages: the first survives, the loss is announced, and the
+        // cookie still fits.
+        let many: Vec<FlashMessage> = (0..200)
+            .map(|i| FlashMessage::info(format!("message {i} with some length to it")))
+            .collect();
+        let cookie = encode_flash_cookie(&many, SECRET);
+        assert!(
+            cookie.len() <= FLASH_COOKIE_VALUE_BUDGET,
+            "value {} bytes > budget",
+            cookie.len()
+        );
+        let decoded = decode_flash_cookie(&cookie, SECRET).expect("bounded cookie decodes");
+        assert!(decoded.len() < many.len());
+        assert_eq!(decoded[0].text, "message 0 with some length to it");
+        assert!(decoded.last().is_some_and(|m| m.text.starts_with("[+")));
+
+        // Small payloads are untouched (byte-identical round trip).
+        let small = vec![FlashMessage::success("Campaign created.")];
+        let cookie = encode_flash_cookie(&small, SECRET);
+        assert_eq!(decode_flash_cookie(&cookie, SECRET), Some(small));
     }
 
     #[test]

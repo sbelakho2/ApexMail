@@ -67,6 +67,12 @@ fn body_is_char_boundary(s: &str, idx: usize) -> bool {
     s.is_char_boundary(idx)
 }
 
+/// The marketing origin these sandbox pages belong to. They are served from
+/// the API origin (`api.apexmail.ee`), where none of the marketing paths
+/// exist — a relative "back" link 404s (review §5.1 explorer.rs: "use
+/// configured marketing-origin return links").
+const MARKETING_ORIGIN: &str = "https://apexmail.ee";
+
 /// The shared dark-panel shell for both sandbox response pages.
 fn sandbox_shell(title: &str, back_href: &str, back_label: &str, body: &str) -> String {
     format!(
@@ -81,7 +87,8 @@ fn sandbox_shell(title: &str, back_href: &str, back_label: &str, body: &str) -> 
 </head>
 <body class="min-h-screen" style="margin:0;background:#09090b;color:#fafafa;font-family:system-ui,-apple-system,sans-serif">
 <main style="max-width:64rem;margin:0 auto;padding:1.5rem 1rem 4rem">
-<p style="margin:0 0 1.25rem"><a href="{back_href}" style="color:#fafafa;text-decoration:underline;font-size:.875rem">&larr; {back_label}</a></p>
+<p style="margin:0 0 .75rem"><a href="{back_href}" style="color:#fafafa;text-decoration:underline;font-size:.875rem">&larr; {back_label}</a></p>
+<h1 style="margin:0 0 1.25rem;font-size:1.35rem;line-height:1.3;font-weight:700;letter-spacing:-.01em">{title}</h1>
 {body}
 </main>
 </body>
@@ -100,6 +107,11 @@ fn inline_fallback_css() -> String {
     // styles.css made the page render-blocking on another origin and
     // blank offline/intranet). Everything they need is embedded here; the
     // palette stays the pinned zinc-dark sandbox look on purpose.
+    // NOTE: single braces — these rules were written with the `{{`/`}}` of a
+    // `format!` template that no longer wraps them, so the three
+    // `.apx-status*` rules were invalid CSS and the status colour fell back
+    // to the body ink (review §5.1 explorer.rs: "repair invalid fallback
+    // CSS"; the whole point of the embedded sheet is that it cannot fail).
     ".apx-sb{border:1px solid #27272a;border-radius:2px;background:#09090b;overflow:hidden}
      .apx-sb-bar{background:#18181b;border-bottom:1px solid #27272a;padding:.9rem 1.1rem;display:flex;flex-wrap:wrap;gap:.7rem;align-items:center}
      .apx-chip{font-family:monospace;font-size:.7rem;font-weight:700;padding:.2rem .5rem;border-radius:2px;background:#dc2626;color:#fff}
@@ -108,8 +120,8 @@ fn inline_fallback_css() -> String {
      .apx-badge{border:1px solid #3f3f46;color:#a1a1aa;font-size:.7rem;font-weight:700;letter-spacing:.1em;padding:.15rem .5rem;border-radius:2px}
      .apx-pre{margin:0;padding:1rem;font-family:monospace;font-size:.75rem;line-height:1.55;background:#18181b;color:#e4e4e7;border-radius:2px;overflow:auto;white-space:pre-wrap;word-break:break-word}
      .apx-label{font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#71717a;margin:1.1rem 0 .5rem;text-transform:uppercase}
-     .apx-status{{font-family:monospace;font-size:.75rem;font-weight:700}}
-     .apx-status--2{{color:#4ade80}}.apx-status--4{{color:#fbbf24}}.apx-status--5{{color:#f87171}}
+     .apx-status{font-family:monospace;font-size:.75rem;font-weight:700}
+     .apx-status--2{color:#4ade80}.apx-status--4{color:#fbbf24}.apx-status--5{color:#f87171}
      code,pre{font-family:monospace}"
         .to_string()
 }
@@ -163,7 +175,7 @@ pub fn explorer_response_page(outcome: &ExplorerOutcome) -> String {
     );
     sandbox_shell(
         "Sandbox result",
-        "/api-explorer",
+        &format!("{MARKETING_ORIGIN}/api-explorer"),
         "Back to the API Explorer",
         &body,
     )
@@ -194,8 +206,16 @@ pub fn calculator_response_page(
     }
     let mut echoed = String::new();
     for (name, value) in inputs {
+        // Review §5.1 explorer.rs: distinguish the field that drives the
+        // price from the context-only inputs (the estimate is computed from
+        // the monthly volume alone; the rest shape eligibility notes).
+        let kind = if name == "volume" {
+            "priced factor"
+        } else {
+            "context only"
+        };
         echoed.push_str(&format!(
-            "<span class=\"apx-badge\" style=\"margin:0 .4rem .4rem 0;display:inline-block\">{name}: {value}</span>",
+            "<span class=\"apx-badge\" style=\"margin:0 .4rem .4rem 0;display:inline-block\">{name}: {value} &middot; {kind}</span>",
             name = esc(name),
             value = esc(value),
         ));
@@ -217,7 +237,7 @@ pub fn calculator_response_page(
     );
     sandbox_shell(
         "Pricing estimate",
-        "/pricing/calculator",
+        &format!("{MARKETING_ORIGIN}/pricing/calculator"),
         "Back to the calculator",
         &body,
     )
@@ -423,7 +443,7 @@ pub fn grader_response_page(result: &serde_json::Value) -> String {
     );
     sandbox_shell(
         "Deliverability grade",
-        "/",
+        MARKETING_ORIGIN,
         "Back to the deliverability check",
         &body,
     )
@@ -443,15 +463,21 @@ pub fn grader_error_page(domain: &str, code: &str, message: &str) -> String {
     <p style="margin:0;font-family:monospace;font-weight:700;color:#f87171">{code}</p>
     <p style="margin:.5rem 0 0;font-size:.95rem;color:#d4d4d8;line-height:1.6">{message}</p>
     <p style="font-size:.75rem;color:#71717a;margin-top:1rem">Enter a domain you send from — for example <span style="font-family:monospace">yourcompany.com</span>.</p>
+    <form method="POST" action="/explorer/grade" style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center">
+      <label for="grade-retry-domain" style="font-size:.75rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#71717a">Domain</label>
+      <input id="grade-retry-domain" type="text" name="domain" value="{domain_value}" required autocomplete="off" autocapitalize="none" spellcheck="false" style="flex:1 1 14rem;min-width:0;padding:.5rem .65rem;border:1px solid #3f3f46;border-radius:2px;background:#18181b;color:#fafafa;font-family:monospace;font-size:.8rem" />
+      <button type="submit" style="padding:.5rem .9rem;border:1px solid #dc2626;border-radius:2px;background:#dc2626;color:#fff;font-size:.8rem;font-weight:700;cursor:pointer">Try again</button>
+    </form>
   </div>
 </div>"#,
         domain = domain_part,
+        domain_value = domain_part,
         code = esc(code),
         message = esc(message),
     );
     sandbox_shell(
         "Grade error",
-        "/",
+        MARKETING_ORIGIN,
         "Back to the deliverability check",
         &body,
     )
@@ -586,6 +612,66 @@ mod tests {
         assert!(page.contains("INVALID_INPUT"));
         assert!(page.contains("</html>"));
         assert!(page.contains("Back to the deliverability check"));
+        // Review §5.1: revision/retry keeps the submitted input.
+        assert!(page.contains("id=\"grade-retry-domain\""), "{page}");
+        assert!(page.contains("value=\"evil&lt;b&gt;.com\""), "{page}");
+        assert!(page.contains("action=\"/explorer/grade\""), "{page}");
+    }
+
+    /// Review §5.1 explorer.rs: every return link is a marketing-origin
+    /// absolute URL (the pages are served from the API origin, where
+    /// `/api-explorer` and `/pricing/calculator` do not exist), each result
+    /// page carries a clear heading, and the embedded stylesheet is valid
+    /// CSS (the `.apx-status*` rules were emitted with doubled braces).
+    #[test]
+    fn sandbox_pages_use_absolute_marketing_links_headings_and_valid_css() {
+        let outcome = ExplorerOutcome {
+            method: "GET",
+            path: "/v1/plans",
+            status: 200,
+            latency_ms: 3,
+            body: serde_json::json!({"data": []}),
+            request_body: String::new(),
+        };
+        let pages = [
+            explorer_response_page(&outcome),
+            calculator_response_page(
+                &[("volume".into(), "50,000".into())],
+                &[CalculatorLine {
+                    label: "Total".into(),
+                    value: "€25".into(),
+                    emphasis: true,
+                }],
+                "note",
+            ),
+            grader_response_page(&sample_grader_result()),
+            grader_error_page("x.com", "E", "bad"),
+        ];
+        for page in &pages {
+            assert!(page.contains(MARKETING_ORIGIN), "{page}");
+            assert!(!page.contains("href=\"/api-explorer\""), "{page}");
+            assert!(!page.contains("href=\"/pricing/calculator\""), "{page}");
+            assert!(!page.contains("href=\"/\""), "{page}");
+            assert_eq!(page.matches("<h1").count(), 1, "one clear heading: {page}");
+            assert!(!page.contains("{{"), "valid fallback CSS: {page}");
+            assert!(!page.contains("}}"), "valid fallback CSS: {page}");
+        }
+        assert!(
+            pages[0].contains("https://apexmail.ee/api-explorer"),
+            "{}",
+            pages[0]
+        );
+        assert!(
+            pages[1].contains("https://apexmail.ee/pricing/calculator"),
+            "{}",
+            pages[1]
+        );
+        // Priced factor vs context-only inputs are distinguished.
+        assert!(
+            pages[1].contains("volume: 50,000 &middot; priced factor"),
+            "{}",
+            pages[1]
+        );
     }
 
     #[test]

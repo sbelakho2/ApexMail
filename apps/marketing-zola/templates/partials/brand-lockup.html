@@ -19,11 +19,17 @@
   {# The text-surface-950 on "Mail" is auto-inverted in dark mode by the  #}
   {# html.dark { --surface-950: ... } override in input.css (the project's  #}
   {# documented dark-mode mechanism — no Tailwind dark: variant needed).   #}
+  {# overflow="visible": the viewBox is sized for Inter at font-size 20; a
+     fallback face or enlarged text can be a few percent wider, and an SVG
+     clips to its viewport by default. Visible overflow keeps the wordmark
+     intact through font swap and zoom instead of cutting the final glyph. #}
   <svg
     class="apex-wordmark shrink-0"
     width="{{ mark_size * 3.125 }}"
     height="{{ mark_size * 1.25 }}"
     viewBox="0 0 100 40"
+    preserveAspectRatio="xMinYMid meet"
+    overflow="visible"
     aria-hidden="true"
     focusable="false"
   >

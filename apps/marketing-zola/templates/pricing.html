@@ -18,7 +18,7 @@
 
 {# In-page jump strip for the three decision anchors. Each target carries
    scroll-mt so the sticky header never covers the heading it jumps to. #}
-<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['pricing_jump'] %}{{ i18n_data[l]['a11y']['pricing_jump'] }}{% else %}Pricing sections{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 -mt-6 lg:-mt-8">
+<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['pricing_jump'] %}{{ i18n_data[l]['a11y']['pricing_jump'] }}{% else %}Pricing sections{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
   <div class="flex flex-wrap gap-2 justify-center">
     <a href="#plans" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["plan"] %}{{ i18n_data[l]["pricing"]["plan"] }}{% else %}Plans{% endif %}</a>
     <a href="#apexmail-calculator" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["hero_title"] %}{{ i18n_data[l]["calculator"]["hero_title"] }}{% else %}Calculator{% endif %}</a>

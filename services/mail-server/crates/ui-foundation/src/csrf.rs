@@ -73,4 +73,51 @@ mod tests {
 
         assert_ne!(token1, token2);
     }
+
+    /// Review §5.1 csrf.rs: extend the consumer/secret-binding coverage so a
+    /// malformed rendered token cannot silently break every workflow. The
+    /// token the views embed must be a genuine HMAC of its own nonce, with
+    /// the documented `<ms>:<uuid>` nonce — exactly what the api-server's
+    /// `validate_csrf_token` recomputes.
+    #[test]
+    fn generated_token_verifies_against_the_consumer_contract() {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let secret = "csrf-consumer-binding-secret";
+        let token = generate_csrf_token(secret);
+        let (nonce_b64, sig_b64) = token.split_once('.').expect("token has two parts");
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        // The api-server contract: signature == HMAC-SHA256(secret, nonce),
+        // base64url. Any placeholder or truncated token fails this check.
+        let verifies = |nonce_b64: &str, signature: &str, key: &str| {
+            let Ok(raw) = engine.decode(nonce_b64) else {
+                return false;
+            };
+            let mut mac = <Hmac<Sha256>>::new_from_slice(key.as_bytes()).expect("hmac key");
+            mac.update(&raw);
+            engine.encode(mac.finalize().into_bytes()) == signature
+        };
+        assert!(verifies(nonce_b64, sig_b64, secret), "embedded token");
+        assert!(
+            !verifies(nonce_b64, sig_b64, "another-secret"),
+            "secret binding"
+        );
+        assert!(!verifies("", sig_b64, secret), "empty nonce");
+        assert!(!verifies(nonce_b64, "", secret), "empty signature");
+        assert!(
+            !verifies(&engine.encode(b"1700000000000:other"), sig_b64, secret),
+            "signature is bound to this exact nonce"
+        );
+
+        // Documented nonce shape: "<unix-ms>:<uuid>".
+        let nonce = engine.decode(nonce_b64).expect("nonce is base64url");
+        let nonce = String::from_utf8(nonce).expect("nonce is utf8");
+        let (timestamp, uuid) = nonce.split_once(':').expect("nonce is ts:uuid");
+        let timestamp: i64 = timestamp.parse().expect("timestamp is millis");
+        assert!(timestamp > 1_700_000_000_000, "millisecond timestamp");
+        uuid::Uuid::parse_str(uuid).expect("uuid part");
+    }
 }

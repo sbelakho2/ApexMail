@@ -9,17 +9,78 @@
   <!-- NOTE: this file is copied verbatim by Zola (static/), so it cannot use
      Tera templating, and Tailwind utility classes are unavailable here
      (tailwind.config.js only scans templates/, content/, and static/js/).
-     It therefore uses the hand-written component classes from
-     static/css/input.css (.btn-primary, .btn-secondary--invert) plus inline
-     styles bound to the site's CSS variables (--surface-*, --brand-*,
-     --font-*) so it stays visually consistent without generated utilities. -->
+     It therefore carries its own FALLBACK styles inline: an external
+     stylesheet failure must not erase the presentation. The inline block
+     below comes BEFORE the stylesheet link, so the real design wins when
+     /css/styles.css loads and the fallback covers the page when it does not
+     (the variables mirror static/css/input.css's zinc/brand palette). -->
+  <style>
+    :root {
+      --font-apex: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+      --font-display: 'Fraunces Variable', ui-serif, Georgia, 'Times New Roman', serif;
+      --surface-50: 244 244 246;
+      --surface-100: 238 238 240;
+      --surface-300: 212 212 216;
+      --surface-500: 82 82 91;
+      --surface-700: 63 63 70;
+      --surface-800: 39 39 42;
+      --surface-900: 24 24 27;
+      --surface-950: 9 9 11;
+      --brand-300: 252 165 165;
+      --brand-700: 185 28 28;
+    }
+    /* Fallback buttons: the external stylesheet's component classes take
+       precedence when it loads; without it these keep both actions legible
+       and touchable (44px targets, visible borders). */
+    .btn-primary,
+    .btn-secondary--invert {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0.75rem 1.5rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      text-decoration: none;
+    }
+    .btn-primary {
+      background-color: rgb(var(--brand-700));
+      border: 1px solid rgb(var(--brand-700));
+      color: #fff;
+    }
+    .btn-primary:hover { filter: brightness(0.9); }
+    .btn-secondary--invert {
+      background-color: transparent;
+      border: 1px solid rgb(var(--surface-700));
+      color: rgb(var(--surface-100));
+    }
+    .btn-secondary--invert:hover {
+      background-color: rgb(var(--surface-900));
+      border-color: rgb(var(--surface-500));
+    }
+    a:focus-visible,
+    button:focus-visible {
+      outline: 2px solid rgb(var(--brand-300));
+      outline-offset: 2px;
+    }
+    /* Forced-colors: system colors only — the fallback must not depend on
+       author colors being honored. */
+    @media (forced-colors: active) {
+      body { background: Canvas; color: CanvasText; }
+      .btn-primary,
+      .btn-secondary--invert { border: 1px solid ButtonText; color: ButtonText; background: ButtonFace; }
+      a:focus-visible { outline: 2px solid Highlight; }
+    }
+  </style>
   <link rel="stylesheet" href="/css/styles.css" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
 </head>
-<body style="margin: 0; font-family: var(--font-apex), ui-sans-serif, system-ui, sans-serif; background: rgb(var(--surface-950)); min-height: 100vh; display: flex; align-items: center; justify-content: center; color: rgb(var(--surface-100));">
+<body style="margin: 0; font-family: var(--font-apex); background: rgb(var(--surface-950)); min-height: 100vh; display: flex; align-items: center; justify-content: center; color: rgb(var(--surface-100));">
   <main style="max-width: 40rem; padding: 5rem 1.5rem; text-align: left;">
     <p style="margin: 0 0 1rem; font-size: 0.875rem; font-weight: 700; letter-spacing: 0.3em; color: rgb(var(--brand-300));">50x</p>
-    <h1 style="margin: 0; font-family: var(--font-display), Georgia, serif; font-size: clamp(1.875rem, 4vw, 3rem); font-weight: 600; letter-spacing: -0.025em; color: rgb(var(--surface-50));">
+    <h1 style="margin: 0; font-family: var(--font-display); font-size: clamp(1.875rem, 4vw, 3rem); font-weight: 600; letter-spacing: -0.025em; color: rgb(var(--surface-50));">
       The site is temporarily unavailable.
     </h1>
     <p style="margin: 1.5rem 0 0; font-size: 1.125rem; line-height: 1.6; color: rgb(var(--surface-300)); max-width: 36rem;">

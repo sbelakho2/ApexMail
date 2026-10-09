@@ -1,5 +1,11 @@
 {# ── Calculator CTA ────────────────────────────────────────────── #}
 {# Converted from calculator/CalculatorCTA.tsx                    #}
+{# Free-tier facts derive from data/pricing.json; SDK availability #}
+{# matches docs/sdks (five first-party client libraries in        #}
+{# development, not yet published to public registries).          #}
+{% set pricing_data = load_data(path="data/pricing.json", format="json") %}
+{% set cta_free = pricing_data.plans[0] %}
+{% set cta_launch = pricing_data.free_launch_allowance %}
 
 <section class="py-20 lg:py-32 relative bg-surface-100">
   <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
@@ -13,7 +19,7 @@
         Ready to cut your email costs?
       </h2>
       <p class="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
-        Start free with 3,000 emails per month plus a one-time 30,000-email launch allowance &mdash; no credit card required.
+        Start free with {{ cta_free.included_volume_display }} emails per month plus a one-time {{ cta_launch.emails_display }}-email launch allowance for your first {{ cta_launch.window_days }} days &mdash; no credit card required.
         Scale up with transparent, predictable pricing.
       </p>
 
@@ -30,16 +36,16 @@
 
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-10 border-t border-surface-100">
         <div>
-          <div class="text-2xl font-bold text-surface-950 tabular-nums mb-1">3K</div>
+          <div class="text-2xl font-bold text-surface-950 tabular-nums mb-1">{{ cta_free.included_volume_display }}</div>
           <div class="text-xs font-medium text-surface-500 uppercase">Free emails/month</div>
         </div>
         <div>
-          <div class="text-2xl font-bold text-surface-950 tabular-nums mb-1">€0</div>
+          <div class="text-2xl font-bold text-surface-950 tabular-nums mb-1">€{{ cta_free.setup_fee }}</div>
           <div class="text-xs font-medium text-surface-500 uppercase">Setup fees</div>
         </div>
         <div>
           <div class="text-2xl font-bold text-surface-950 tabular-nums mb-1">5</div>
-          <div class="text-xs font-medium text-surface-500 uppercase">SDKs in development</div>
+          <div class="text-xs font-medium text-surface-500 uppercase">Client libraries <a href="/docs/sdks/" class="underline hover:text-brand-600">in development</a></div>
         </div>
       </div>
     </div>
@@ -49,6 +55,9 @@
       <a href="{{ lp }}/pricing/" class="text-surface-950 font-semibold hover:text-brand-700 transition-colors">Review pricing</a>
       or
       <a href="{{ lp }}/contact/" class="text-surface-950 font-semibold hover:text-brand-700 transition-colors">contact us</a>.
+    </p>
+    <p class="animate-in delay-300 text-center text-xs font-medium text-surface-400 mt-4">
+      Client libraries are in private preview — not yet published to public package registries; integrate against the HTTP API until release.
     </p>
   </div>
 </section>

@@ -43,6 +43,17 @@ La migration de fournisseur email est une opération à haut risque. Toute livra
 7. Démarrez l'envoi parallèle à 10 % du volume, en augmentant progressivement sous supervision des métriques de livraison.
 8. Après la période de validation, routez 100 % du trafic via ApexMail et retirez la configuration du fournisseur historique.
 
+## Phases de migration contrôlées
+
+Avancez dans ces phases dans l'ordre ; chacune a un critère d'entrée, des critères d'acceptation et un déclencheur de retour arrière explicites.
+
+| Phase | Critère d'entrée | Critères d'acceptation | Déclencheur de retour arrière |
+|---|---|---|---|
+| 1. Préparation | Compte créé ; domaine d'envoi ajouté ; modèles inventoriés | Enregistrements DNS émis et vérifiés ; correspondance des modèles documentée | Aucun — aucun trafic de production encore |
+| 2. Validation en parallèle | DKIM et SPF ApexMail coexistent avec le fournisseur actuel ; DMARC à `p=none` | Les messages de test sont livrés avec une authentification valide ; événements webhook reçus et signature vérifiée | Échecs d'authentification ou écarts de signature webhook qui persistent après correction |
+| 3. Basculer une part du trafic | Validation parallèle terminée ; métriques de livraison mesurables par fournisseur | Les métriques de livraison correspondent au fournisseur précédent dans la tolérance convenue sur la fenêtre d'observation | Le taux de rebond ou de plainte dépasse les seuils de la politique d'utilisation acceptable (2 % rebonds / 0,1 % plaintes) |
+| 4. Bascule complète | Acceptation soutenue à la part convenue | 100 % du trafic via ApexMail ; enregistrements de l'ancien fournisseur supprimés seulement après la fenêtre de conservation | Dégradation de la livraison qui ne se rétablit pas après le budget de nouvelles tentatives et les ajustements de chauffe |
+
 ## Points de terminaison API pertinents
 
 | Point de terminaison | Description |
@@ -65,8 +76,8 @@ La migration de fournisseur email est une opération à haut risque. Toute livra
 | Forfait | IP dédiée | Support |
 |---|---|---|
 | Growth | 1 IP dédiée incluse | Support par email |
-| Scale | 3 IP dédiées incluses | Support prioritaire |
-| Enterprise | 10 IP dédiées incluses | Support dédié |
+| Business | 1 IP dédiée incluse | Support prioritaire |
+| Enterprise Cloud | 3 IP dédiées incluses | Support dédié |
 
 ## Considérations de sécurité
 

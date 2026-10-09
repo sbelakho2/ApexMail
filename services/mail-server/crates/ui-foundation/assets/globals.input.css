@@ -74,13 +74,17 @@ summary {
        - panels/cards are pure white (#ffffff)
        - borders are zinc-200 (#e4e4e7)
        - muted text is zinc-400 (#71717a) */
-    --background: 255 255 255;
+    --background: 244 244 246;
     --foreground: 9 9 11;
     --card: 255 255 255;
     --card-foreground: 9 9 11;
     --popover: 255 255 255;
     --popover-foreground: 9 9 11;
-    --primary: 185 28 28; /* brand-700: AA as text on the light canvas */
+    /* Light-mode primary: the brand-700 step. The #dc2626 fill measured
+       4.40:1 as TEXT on the 244 244 246 canvas — just under AA (dogfood
+       2026-10-06). White on #b91c1c is 6.35:1, so one token serves both the
+       fill and text roles. Dark mode keeps the brand-400 emphasis step. */
+    --primary: 185 28 28;
     --primary-foreground: 255 255 255;
     --secondary: 244 244 245;
     --secondary-foreground: 9 9 11;
@@ -94,8 +98,8 @@ summary {
     --destructive: 220 38 38;
     --destructive-foreground: 255 255 255;
     --warning: 217 119 6;
-    --border: 228 228 231;
-    --input: 228 228 231;
+    --border: 209 209 213;
+    --input: 209 209 213;
     --ring: 220 38 38;
     --error: 220 38 38;
 
@@ -118,13 +122,20 @@ summary {
     --brand-400: 248 113 113;
     --brand-500: 220 38 38;
     --brand-600: 185 28 28;
-    /* Text-safe brand accent for .text-primary (wordmark + emphasis). */
+    /* Text-safe brand accent (used by .text-primary). Must be defined —
+       .text-primary previously referenced it while nothing set it, so every
+       "text-primary" red (including the ApexMail wordmark) rendered inherited
+       black and the two-tone logo collapsed. */
     --accent-text: 185 28 28;
     --brand-700: 153 27 27;
     --brand-800: 127 29 29;
     --brand-900: 69 10 10;
     --brand-950: 45 10 10;
 
+    /* "Success" is NEUTRAL INK, never green: the ApexMail palette is red +
+       near-black/neutral, and the emerald chips read as a foreign design
+       element (owner review 2026-10-06). Positive states render as ink; the
+       brand red stays reserved for primary actions and failures. */
     --success-50: 250 250 250;
     --success-100: 244 244 245;
     --success-200: 228 228 231;
@@ -293,7 +304,12 @@ summary {
 
 @layer components {
   .btn-primary {
-    @apply inline-flex items-center justify-center bg-primary px-5 py-2.5 text-sm font-semibold text-white transition-all duration-200 ease-premium;
+    @apply inline-flex items-center justify-center bg-primary px-5 py-2.5 text-sm font-semibold text-white duration-200 ease-premium;
+    /* Canonical timing ladder: 160ms control feedback, 180ms premium
+       surfaces, 200ms the reference card/button transition. Property lists
+       are always explicit — never `transition-all` (review §5.2
+       globals.input.css): layout/geometry must not animate. */
+    transition-property: color, background-color, border-color, box-shadow, transform;
     letter-spacing: 0;
     /* ARCH (mark DNA): the shackle crown on every primary action. */
     border-radius: var(--radius-arch-btn);
@@ -305,7 +321,8 @@ summary {
   }
 
   .apex-card {
-    @apply border border-surface-200 bg-white transition-all duration-200 ease-premium;
+    @apply border border-surface-200 bg-white duration-200 ease-premium;
+    transition-property: color, background-color, border-color, box-shadow, transform;
     border-radius: var(--radius-arch-lg); /* ARCH (mark DNA) */
   }
 
@@ -386,10 +403,378 @@ summary {
     border-right: 1px solid rgb(var(--border));
   }
 
+  /* ─── Definitions for classes the views rely on (GATE K) ──────────────────
+     These classes were used by rendered pages but never defined, so they
+     rendered as nothing (silent). Each one now carries the rule its call site
+     intended, written with flipping tokens. GATE K
+     (class_integrity_tests.rs) fails on any future class that has no rule. */
+
+  /* The responsive drawer shell (`<details class="apex-mobile-nav md:hidden …">`)
+     and its inner panel: off-canvas nav for narrow viewports. The OPEN state
+     owns every drawer dimension — background, border, width, height, scrolling
+     and stacking — so the CLOSED state cannot intercept the page behind it
+     (review §3 P1-3 / §4.8). */
+  .apex-mobile-nav[open] {
+    box-shadow: 0 24px 48px rgb(9 9 11 / 0.28);
+  }
+
+  .apex-mobile-nav[open] .apex-mobile-nav-panel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 50;
+    display: block;
+    background: rgb(var(--card));
+    border-right: 1px solid rgb(var(--border));
+    width: min(20rem, calc(100vw - 2rem));
+    height: 100vh;
+    overflow-y: auto;
+    padding-top: 4rem;
+  }
+
+  /* Closed state: the drawer contributes NO box of its own — no width, no
+     background, no border, no scrolling — so the summary control is the whole
+     closed drawer. The panel leaves the layout entirely (display:none) rather
+     than being merely transparent; the old `.apex-mobile-nav` rule sized the
+     closed details to 320px × 100vh and swallowed every click under it. */
+  .apex-mobile-nav:not([open]) {
+    width: auto;
+    height: auto;
+    background: transparent;
+    border: 0;
+    overflow: visible;
+  }
+
+  .apex-mobile-nav:not([open]) .apex-mobile-nav-panel {
+    display: none;
+  }
+
+  /* A flex-1 scroll region must be allowed to shrink, or it never scrolls. */
+  .cp-sidebar-nav {
+    min-height: 0;
+  }
+
+  /* Sidebar/header account avatar (the recipe lives on the element; this adds
+     the monogram face). */
+  .apex-avatar {
+    color: rgb(var(--primary));
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  /* Chart wrapper: positioned context for the SVG + value overlay. */
+  .apex-chart-frame {
+    position: relative;
+    display: block;
+  }
+
+  /* The console hero's decorative dot grid. */
+  .ui-dot-grid {
+    background-image: radial-gradient(rgb(var(--foreground)) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  /* Enter animations used by the marketing menu surfaces. Both are short,
+     one-shot and disabled under reduced-motion. */
+  .animate-in {
+    animation: apex-fade-in 160ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  }
+
+  .animate-in.fade-in {
+    animation-name: apex-fade-in;
+  }
+
+  .animate-in.zoom-in-95 {
+    animation-name: apex-zoom-in;
+  }
+
+  @keyframes apex-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes apex-zoom-in {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-in,
+    .animate-in.fade-in,
+    .animate-in.zoom-in-95 {
+      animation: none;
+    }
+  }
+
+  /* Plain utilities the views use. `min-h-12`, `text-foreground/60|70` and
+     `hover:border-white/40` are emitted by the class scanner; `mt-8` and
+     `resize-vertical` have no generated counterpart and are authored here. */
+  .mt-8 {
+    margin-top: 2rem;
+  }
+
+  .resize-vertical {
+    resize: vertical;
+  }
+
+  /* ─── Console component recipes (canonical, theme-safe) ────────────────────
+     These are the SHARED recipes every console/CP page composes from. They are
+     built from flipping tokens (`--card`, `--foreground`, `--border`,
+     `--primary`, `--surface-*`) so they are correct in both themes by
+     construction — no per-theme twins to keep in sync.
+     Dogfood 2026-10-06: hand-rolled page markup drifted (rounded-sm boxes with
+     no surface, min-h-[44px] buttons of three different sizes, green/amber
+     tint slabs, ad-hoc heading sizes). Pages must compose these classes
+     instead of inventing recipes. */
+
+  /* The concentric focus ring (inner solid ring + outer hairline, mark DNA).
+     One named class instead of an inlined arbitrary shadow, so the ring is
+     identical across inputs, textareas and file pickers and stays findable. */
+  .apex-focus-ring:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 1px rgb(var(--primary)),
+      0 0 0 4px rgb(var(--card)),
+      0 0 0 5px rgb(var(--border));
+  }
+
+  /* Panel: the console's surface for grouped content (form sections, tables,
+     list cards). Same recipe as the primitives' Card. */
+  .apex-panel {
+    background: rgb(var(--card));
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--radius-arch);
+    padding: 1.5rem;
+    box-shadow: 0 1px 2px rgb(9 9 11 / 0.04);
+  }
+
+  .apex-panel--flush {
+    padding: 0;
+  }
+
+  /* Heading scale inside panels — one source, so pages cannot drift. */
+  .apex-panel h2,
+  .apex-panel-title {
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: rgb(var(--foreground));
+    margin: 0;
+  }
+
+  .apex-panel h3,
+  .apex-panel-subtitle {
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgb(var(--surface-500));
+    margin: 0;
+  }
+
+  /* Buttons: ONE size, ONE radius, ONE type step (mirrors the Button
+     primitive). Variants change colour only. */
+  .apex-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    min-height: 2.75rem;
+    padding: 0.625rem 1.25rem;
+    border: 1px solid rgb(var(--primary));
+    border-radius: var(--radius-arch-btn);
+    background: rgb(var(--primary));
+    color: #fff;
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    transition: background-color 160ms ease, border-color 160ms ease;
+    cursor: pointer;
+  }
+
+  .apex-btn:hover {
+    background: rgb(var(--brand-700));
+    border-color: rgb(var(--brand-700));
+  }
+
+  .apex-btn:focus-visible {
+    outline: 2px solid rgb(var(--ring));
+    outline-offset: 2px;
+  }
+
+  .apex-btn--secondary {
+    background: rgb(var(--card));
+    border-color: rgb(var(--border));
+    color: rgb(var(--foreground));
+  }
+
+  .apex-btn--secondary:hover {
+    background: rgb(var(--muted));
+    border-color: rgb(var(--surface-300));
+  }
+
+  .apex-btn--sm {
+    min-height: 2.25rem;
+    padding: 0.375rem 0.875rem;
+    font-size: 0.75rem;
+  }
+
+  .apex-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Pill/badge: one size and shape for every status chip. */
+  .apex-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.125rem 0.625rem;
+    border: 1px solid rgb(var(--border));
+    border-radius: 999px;
+    background: rgb(var(--muted));
+    color: rgb(var(--foreground));
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .apex-pill--brand {
+    border-color: rgb(var(--primary));
+    background: transparent;
+    color: rgb(var(--primary));
+  }
+
+  .apex-pill--success {
+    border-color: rgb(var(--success-500) / 0.5);
+    background: transparent;
+    color: rgb(var(--success-700));
+  }
+
+  .apex-pill--warning {
+    border-color: rgb(var(--warning-500) / 0.5);
+    background: transparent;
+    color: rgb(var(--warning-700));
+  }
+
+  /* Callout: informational / warning / success blocks. A flat surface with a
+     coloured accent bar — never a tinted slab (the tint slabs clashed with the
+     palette and needed per-theme overrides). */
+  .apex-callout {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.875rem 1rem;
+    border: 1px solid rgb(var(--border));
+    border-left: 3px solid rgb(var(--primary));
+    border-radius: var(--radius-arch);
+    background: rgb(var(--card));
+    color: rgb(var(--foreground));
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+
+  .apex-callout strong {
+    font-weight: 700;
+  }
+
+  .apex-callout--warning {
+    border-left-color: rgb(var(--warning-500));
+  }
+
+  .apex-callout--success {
+    border-left-color: rgb(var(--success-500));
+  }
+
+  .apex-callout--error {
+    border-left-color: rgb(var(--primary));
+  }
+
+  /* Field: label + control stack with one rhythm. */
+  .apex-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    /* As a flex/grid item the field may shrink; the control below fills it. */
+    min-width: 0;
+  }
+
+  /* A field that shares a row with its button keeps the control at the same
+     height as the button so the baseline lines up. */
+  .apex-field + .apex-btn,
+  .apex-field + .apex-btn--secondary {
+    flex: 0 0 auto;
+  }
+
+  .apex-field > label {
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: rgb(var(--foreground));
+  }
+
+  .apex-field select,
+  .apex-field input[type="text"],
+  .apex-field input[type="email"],
+  .apex-field input[type="number"] {
+    min-height: 2.75rem;
+    width: 100%;
+    padding: 0.5rem 0.875rem;
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--radius-arch);
+    background: rgb(var(--background));
+    color: rgb(var(--foreground));
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+  }
+
+  .apex-field select:focus,
+  .apex-field input:focus {
+    outline: none;
+    border-color: rgb(var(--primary));
+    box-shadow: 0 0 0 2px rgb(var(--primary) / 0.25);
+  }
+
+  .apex-table {
+    width: 100%;
+    text-align: left;
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+  }
+
+  .apex-table td {
+    padding: 0.75rem;
+    color: rgb(var(--foreground));
+    border-bottom: 1px solid rgb(var(--border));
+  }
+
+  .apex-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  /* Long ids / hashes: the ONE place mono type is allowed. */
+  .apex-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.75rem;
+    color: rgb(var(--surface-600));
+  }
+
   .apex-logo-mark {
     background: rgb(var(--primary));
     color: #fff;
-    box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+    /* Classic red, flat — the inset black bevel is gone. */
   }
 
   .apex-sidebar-brand {
@@ -480,7 +865,7 @@ summary {
     display: inline-flex;
     align-items: center;
     gap: 0.75rem;
-    color: rgb(var(--primary));
+    color: rgb(var(--accent-text));
     font-size: 0.72rem;
     line-height: 1rem;
     font-weight: 700;
@@ -493,7 +878,7 @@ summary {
     display: inline-block;
     width: 0.5rem;
     height: 0.5rem;
-    background: rgb(var(--primary));
+    background: rgb(var(--accent-text));
     flex-shrink: 0;
   }
 
@@ -621,7 +1006,7 @@ summary {
   }
 
   .apex-page-heading .apex-eyebrow {
-    color: rgb(var(--primary));
+    color: rgb(var(--accent-text));
   }
 
   .apex-ops-board {
@@ -753,13 +1138,14 @@ summary {
       border-color 200ms ease-out;
   }
 
+  /* Noninteractive surfaces do NOT gain elevation on hover: the border
+     darkens a single step and the resting shadow stays (review §4.7 —
+     "noninteractive cards should not look clickable merely because their
+     shadow changes"). Only real links/buttons carry hover motion. */
   .apex-card.apex-card:hover,
   .apex-panel:hover,
   .apex-signal-card:hover {
     border-color: rgba(9, 9, 11, 0.16);
-    box-shadow:
-      0 1px 2px rgb(9 9 11 / 0.05),
-      0 10px 24px rgb(9 9 11 / 0.09);
   }
 
   .apex-signal-card {
@@ -892,7 +1278,7 @@ summary {
   }
 
   .apex-table tbody tr {
-    transition: background 140ms ease-out;
+    transition: background-color 160ms ease-out;
   }
 
   .apex-table tbody tr:hover {
@@ -964,9 +1350,7 @@ summary {
   /* Side panel is light (not dark) to match the reference design. */
   .apex-cp-hero-side {
     position: relative;
-    background:
-      radial-gradient(120% 100% at 100% 0%, rgb(var(--accent) / 0.6), transparent 55%),
-      rgb(var(--card));
+    background: rgb(var(--card));
     border-top: 1px solid rgb(var(--border));
   }
 
@@ -1019,12 +1403,9 @@ summary {
     opacity: 0.9;
   }
 
+  /* Informational tile: the hover affordance is the border step alone. */
   .apex-cp-stat-tile:hover {
-    transform: translateY(-1px);
     border-color: rgb(var(--surface-300));
-    box-shadow:
-      0 1px 2px rgb(9 9 11 / 0.04),
-      0 8px 18px rgb(9 9 11 / 0.07);
   }
 
   .apex-cp-stat-label {
@@ -1097,28 +1478,16 @@ summary {
   }
 
   /* ── Sales Cockpit / dark control-plane premium uplift ───────────────────── */
+  /* Flat surface in the active theme's card colour — white in light mode,
+     near-black in dark. The black-gradient-plus-red-glow "two-tone" panel
+     (and its blue counter-wash, 1px grid texture and inset hairline
+     highlights) is gone: the classic ApexMail red survives only as an ACCENT
+     (`.apex-eyebrow`, active nav, primary buttons). */
   .apex-cp-sales {
     position: relative;
-    background:
-      radial-gradient(120% 70% at 0% 0%, rgba(220, 38, 38, 0.10), transparent 55%),
-      radial-gradient(110% 65% at 100% 100%, rgba(59, 130, 246, 0.08), transparent 55%),
-      linear-gradient(180deg, #0a0a0c 0%, #050507 60%, #09090b 100%);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      inset 0 -1px 0 rgba(255, 255, 255, 0.03);
+    background: rgb(var(--card));
+    border: 1px solid rgb(var(--border));
     overflow: hidden;
-  }
-
-  .apex-cp-sales::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image:
-      linear-gradient(to right, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
-    background-size: 80px 80px;
-    pointer-events: none;
-    opacity: 0.7;
   }
 
   .apex-cp-sales > * {
@@ -1127,17 +1496,13 @@ summary {
 
   .apex-cp-dark-hero {
     position: relative;
-    background:
-      linear-gradient(135deg, rgba(220, 38, 38, 0.10) 0%, transparent 38%),
-      linear-gradient(180deg, rgba(0, 0, 0, 0.45) 0%, rgba(0, 0, 0, 0.30) 100%);
-    border-color: rgba(255, 255, 255, 0.08) !important;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.08),
-      0 24px 48px rgba(0, 0, 0, 0.45),
-      0 2px 6px rgba(0, 0, 0, 0.3);
+    background: rgb(var(--card));
+    border: 1px solid rgb(var(--border)) !important;
+    box-shadow: 0 1px 2px rgb(9 9 11 / 0.04), 0 6px 16px rgb(9 9 11 / 0.06);
     overflow: hidden;
   }
 
+  /* The classic ApexMail red, flat — no fade, no blend into black. */
   .apex-cp-dark-hero::before {
     content: "";
     position: absolute;
@@ -1145,29 +1510,18 @@ summary {
     right: 0;
     top: 0;
     height: 2px;
-    background: linear-gradient(90deg, rgb(var(--primary)) 0%, rgba(220, 38, 38, 0.45) 50%, transparent 100%);
+    background: rgb(var(--primary));
   }
 
   .apex-cp-dark-panel {
     position: relative;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.015) 100%),
-      linear-gradient(180deg, rgba(0, 0, 0, 0.20) 0%, rgba(0, 0, 0, 0.35) 100%);
-    border-color: rgba(255, 255, 255, 0.07) !important;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      0 12px 24px rgba(0, 0, 0, 0.35);
-    transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
-                box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
-                border-color 180ms cubic-bezier(0.23, 1, 0.32, 1);
+    background: rgb(var(--card));
+    border: 1px solid rgb(var(--border)) !important;
+    transition: border-color 160ms ease;
   }
 
   .apex-cp-dark-panel:hover {
-    transform: translateY(-1px);
-    border-color: rgba(255, 255, 255, 0.14) !important;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.10),
-      0 16px 32px rgba(0, 0, 0, 0.45);
+    border-color: rgb(var(--primary) / 0.35) !important;
   }
 
   .apex-cp-dark-panel--accent {
@@ -1181,69 +1535,47 @@ summary {
     right: 0;
     top: 0;
     height: 2px;
-    background: linear-gradient(90deg, rgb(var(--primary)) 0%, rgba(220, 38, 38, 0.4) 60%, transparent 100%);
+    background: rgb(var(--primary));
   }
 
-  /* Inner stat tiles inside sales dark panels — refine the generic black/25 cards. */
+  /* Inner tiles inside the sales surface follow the console's own card
+     recipe (surface + hairline). No black glass, no lift-on-hover. */
   .apex-cp-sales [class*="bg-black/25"],
   .apex-cp-sales [class*="bg-black/15"] {
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.25) 100%) !important;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.07) !important;
-    transition: border-color 160ms ease, transform 160ms ease;
+    background: rgb(var(--background)) !important;
+    border: 1px solid rgb(var(--border)) !important;
+    transition: border-color 160ms ease;
   }
 
   .apex-cp-sales [class*="bg-black/25"]:hover,
   .apex-cp-sales [class*="bg-black/15"]:hover {
-    border-color: rgba(255, 255, 255, 0.16) !important;
-    transform: translateY(-1px);
+    border-color: rgb(var(--primary) / 0.35) !important;
   }
 
-  /* Buttons inside dark sales surface get a richer hover. */
-  .apex-cp-sales button[type="button"][class*="border-white/15"] {
-    transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
-  }
-
-  .apex-cp-sales button[type="button"][class*="border-white/15"]:hover {
-    transform: translateY(-1px);
-  }
-
-  /* Inputs inside dark surfaces. */
-  .apex-cp-sales input,
-  .apex-cp-sales select {
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  }
-
+  /* Inputs inside the sales surface use the standard field recipe. */
   .apex-cp-sales input:focus,
   .apex-cp-sales select:focus {
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.04),
-      0 0 0 2px rgba(220, 38, 38, 0.35);
+    outline: none;
+    border-color: rgb(var(--primary));
+    box-shadow: 0 0 0 2px rgb(var(--primary) / 0.25);
   }
 
-  /* Tables inside dark sales surface. */
-  .apex-cp-sales table thead {
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.40) 100%);
-  }
-
+  /* Tables inside the sales surface share the console table recipe. */
   .apex-cp-sales table thead th {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    border-bottom: 1px solid rgb(var(--border));
     font-size: 0.65rem;
-    font-weight: 800;
-    letter-spacing: 0.18em;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.7);
+    color: rgb(var(--surface-500));
   }
 
   .apex-cp-sales table tbody tr {
-    transition: background-color 140ms ease;
+    transition: background-color 160ms ease;
   }
 
   .apex-cp-sales table tbody tr:hover {
-    background-color: rgba(255, 255, 255, 0.04);
+    background-color: rgb(var(--muted) / 0.6);
   }
 }
 
@@ -1265,6 +1597,21 @@ summary {
   .text-surface-500 { color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important; }
   .text-destructive { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
   .text-warning { color: rgb(146 64 14 / var(--tw-text-opacity, 1)) !important; }
+
+  /* The shared `transition-all` utility is REMAPPED to the approved property
+     list: colour, shadow, transform and opacity animate; layout/geometry
+     (width, height, margin, padding, inset) never does. Every markup use of
+     `transition-all` therefore inherits the one contract instead of animating
+     everything (review §5.2 globals.input.css). */
+  .transition-all {
+    transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;
+  }
+
+  /* Text, not fill: the emphasis step clears AA on the canvas in both themes
+     (fills keep --primary so white-on-red stays AA). */
+  .text-primary {
+    color: rgb(var(--accent-text) / var(--tw-text-opacity, 1));
+  }
 
   /* Permanently-dark surfaces (bg-surface-950/900/800 stay near-black in
      BOTH themes — sales cockpit panels, code chips): muted text on them
@@ -1372,6 +1719,15 @@ summary {
     color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
   }
 
+  /* R7 fold / contrast gate: the console/cp brand logotype's "Apex" is
+     text-brand-600 — 185 28 28 on the near-black dark surface is 2.74:1,
+     below AA (and below the 3:1 large-text floor), on EVERY console page in
+     both dark themes (188 gate findings). Step it to brand-400 like every
+     other 600-step red in dark (≈6.4:1 on 24 24 27). */
+  .dark .text-brand-600 {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+  }
+
   .dark .text-warning-700 {
     color: rgb(var(--warning-400) / var(--tw-text-opacity, 1));
   }
@@ -1397,17 +1753,17 @@ summary {
   /* Active nav pill and red-tinted chips: light brand-50/100 backgrounds
      become deep red in dark so brand-400 text keeps >= 6.5:1. */
   .dark .bg-brand-50 {
-    background-color: rgb(var(--brand-950) / var(--tw-bg-opacity, 1)) !important;
+    background-color: rgb(24 24 27 / 0.9) !important;
   }
 
   .dark .bg-brand-100 {
-    background-color: rgb(var(--brand-900) / var(--tw-bg-opacity, 1)) !important;
+    background-color: rgb(24 24 27 / 0.9) !important;
   }
 
   /* Success-tinted chips stay light green otherwise (1.7:1 with the light
      success-400 text mapped in dark) — map to the success-900 step blend. */
   .dark .bg-success-50 {
-    background-color: rgb(9 9 11 / 0.35) !important;
+    background-color: rgb(39 39 42 / 0.85) !important;
   }
 
   .dark .text-primary {
@@ -1455,7 +1811,7 @@ summary {
   .dark .apex-auth-notice[data-intent="success"] {
     color: rgb(244 244 245) !important;
     border-color: rgb(var(--success-400) / 0.5) !important;
-    background-color: rgb(9 9 11 / 0.28) !important;
+    background-color: rgb(39 39 42 / 0.85) !important;
   }
 
   .dark .apex-auth-notice[data-intent="warning"] {
@@ -1514,11 +1870,7 @@ summary {
 
   .dark .apex-console-main,
   .dark .apex-cp-main {
-    background-color: rgb(var(--background));
-    background-image:
-      radial-gradient(circle at top, rgb(var(--primary) / 0.12), transparent 38%),
-      linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background: rgb(var(--background));
     background-size: 100% 520px, 80px 80px, 80px 80px;
     background-attachment: scroll, local, local;
   }
@@ -1602,7 +1954,7 @@ summary {
   .dark .apex-table thead,
   .dark .apex-table thead tr,
   .dark .apex-table thead th {
-    background: linear-gradient(180deg, #18181b 0%, #0b0b0d 100%);
+    background: transparent;
   }
 
   .dark .apex-table th {
@@ -1619,61 +1971,25 @@ summary {
   }
 
   .dark .apex-inventory-head {
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
-      rgb(var(--card));
+    background: rgb(var(--card));
   }
 
+  .dark .apex-empty-state,
   .dark .apex-inventory-empty,
-  .dark .apex-chart-empty {
-    background:
-      radial-gradient(70% 70% at 50% 20%, rgb(var(--primary) / 0.08), transparent 70%);
-  }
-
-  .dark .apex-empty-state {
-    background:
-      radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.10), transparent 70%);
-    border-color: rgba(255, 255, 255, 0.16);
-  }
-
-  .dark .apex-chart-card {
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
-      rgb(var(--card));
-  }
-
-  .dark .apex-cp-hero {
-    border-color: rgba(255, 255, 255, 0.1);
-    background:
-      radial-gradient(120% 80% at 0% 0%, rgb(var(--primary) / 0.12), transparent 56%),
-      linear-gradient(180deg, #18181b 0%, #101012 100%);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.07),
-      0 24px 58px rgba(0, 0, 0, 0.42),
-      0 2px 8px rgba(0, 0, 0, 0.28);
-  }
-
-  .dark .apex-cp-hero-side {
-    border-color: rgba(255, 255, 255, 0.1);
-    background:
-      radial-gradient(120% 100% at 100% 0%, rgb(var(--primary) / 0.12), transparent 60%),
-      linear-gradient(135deg, #111114 0%, #09090b 66%, #050507 100%);
-  }
-
+  .dark .apex-chart-empty,
+  .dark .apex-chart-card,
+  .dark .apex-cp-hero,
+  .dark .apex-cp-hero-side,
   .dark .apex-cp-stat-tile,
   .dark .apex-cp-region-row {
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.018) 100%),
-      rgb(24 24 27);
-    border-color: rgba(255, 255, 255, 0.1);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    /* Flat near-black surfaces: the red-glow-on-black gradient washes are gone
+       from the whole console. Red stays an accent, never a background blend. */
+    background: rgb(var(--card));
+    border-color: rgb(var(--border));
   }
 
   .dark .apex-cp-stat-tile:hover {
-    border-color: rgba(255, 255, 255, 0.18);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.08),
-      0 12px 24px rgba(0, 0, 0, 0.28);
+    border-color: rgb(var(--primary) / 0.35);
   }
 
   .dark .apex-cp-stat-label,
@@ -1765,6 +2081,12 @@ summary {
       color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
     }
 
+    /* Brand logotype "Apex" AA fix — media-query twin of the .dark rule
+       above (the zero-JS console takes THIS path). */
+    :root:not(.light) .text-brand-600 {
+      color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+    }
+
     :root:not(.light) .text-warning-700 {
       color: rgb(var(--warning-400) / var(--tw-text-opacity, 1));
     }
@@ -1787,15 +2109,15 @@ summary {
     }
 
     :root:not(.light) .bg-brand-50 {
-      background-color: rgb(var(--brand-950) / var(--tw-bg-opacity, 1)) !important;
+      background-color: rgb(24 24 27 / 0.9) !important;
     }
 
     :root:not(.light) .bg-brand-100 {
-      background-color: rgb(var(--brand-900) / var(--tw-bg-opacity, 1)) !important;
+      background-color: rgb(24 24 27 / 0.9) !important;
     }
 
     :root:not(.light) .bg-success-50 {
-      background-color: rgb(9 9 11 / 0.35) !important;
+      background-color: rgb(39 39 42 / 0.85) !important;
     }
 
     :root:not(.light) .text-primary {
@@ -1836,7 +2158,7 @@ summary {
     :root:not(.light) .apex-auth-notice[data-intent="success"] {
       color: rgb(244 244 245) !important;
       border-color: rgb(var(--success-400) / 0.5) !important;
-      background-color: rgb(9 9 11 / 0.28) !important;
+      background-color: rgb(39 39 42 / 0.85) !important;
     }
 
     :root:not(.light) .apex-auth-notice[data-intent="warning"] {
@@ -1895,11 +2217,7 @@ summary {
 
     :root:not(.light) .apex-console-main,
     :root:not(.light) .apex-cp-main {
-      background-color: rgb(var(--background));
-      background-image:
-        radial-gradient(circle at top, rgb(var(--primary) / 0.12), transparent 38%),
-        linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+      background: rgb(var(--background));
       background-size: 100% 520px, 80px 80px, 80px 80px;
       background-attachment: scroll, local, local;
     }
@@ -1983,7 +2301,7 @@ summary {
     :root:not(.light) .apex-table thead,
     :root:not(.light) .apex-table thead tr,
     :root:not(.light) .apex-table thead th {
-      background: linear-gradient(180deg, #18181b 0%, #0b0b0d 100%);
+      background: transparent;
     }
 
     :root:not(.light) .apex-table th {
@@ -2000,61 +2318,25 @@ summary {
     }
 
     :root:not(.light) .apex-inventory-head {
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
-        rgb(var(--card));
+      background: rgb(var(--card));
     }
 
+    /* Flat near-black surfaces — media-query twin of the .dark block above
+       (the zero-JS console takes THIS path, not the .dark class). */
+    :root:not(.light) .apex-empty-state,
     :root:not(.light) .apex-inventory-empty,
-    :root:not(.light) .apex-chart-empty {
-      background:
-        radial-gradient(70% 70% at 50% 20%, rgb(var(--primary) / 0.08), transparent 70%);
-    }
-
-    :root:not(.light) .apex-empty-state {
-      background:
-        radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.10), transparent 70%);
-      border-color: rgba(255, 255, 255, 0.16);
-    }
-
-    :root:not(.light) .apex-chart-card {
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
-        rgb(var(--card));
-    }
-
-    :root:not(.light) .apex-cp-hero {
-      border-color: rgba(255, 255, 255, 0.1);
-      background:
-        radial-gradient(120% 80% at 0% 0%, rgb(var(--primary) / 0.12), transparent 56%),
-        linear-gradient(180deg, #18181b 0%, #101012 100%);
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.07),
-        0 24px 58px rgba(0, 0, 0, 0.42),
-        0 2px 8px rgba(0, 0, 0, 0.28);
-    }
-
-    :root:not(.light) .apex-cp-hero-side {
-      border-color: rgba(255, 255, 255, 0.1);
-      background:
-        radial-gradient(120% 100% at 100% 0%, rgb(var(--primary) / 0.12), transparent 60%),
-        linear-gradient(135deg, #111114 0%, #09090b 66%, #050507 100%);
-    }
-
+    :root:not(.light) .apex-chart-empty,
+    :root:not(.light) .apex-chart-card,
+    :root:not(.light) .apex-cp-hero,
+    :root:not(.light) .apex-cp-hero-side,
     :root:not(.light) .apex-cp-stat-tile,
     :root:not(.light) .apex-cp-region-row {
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.018) 100%),
-        rgb(24 24 27);
-      border-color: rgba(255, 255, 255, 0.1);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      background: rgb(var(--card));
+      border-color: rgb(var(--border));
     }
 
     :root:not(.light) .apex-cp-stat-tile:hover {
-      border-color: rgba(255, 255, 255, 0.18);
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        0 12px 24px rgba(0, 0, 0, 0.28);
+      border-color: rgb(var(--primary) / 0.35);
     }
 
     :root:not(.light) .apex-cp-stat-label,

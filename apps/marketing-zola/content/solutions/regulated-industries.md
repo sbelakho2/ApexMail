@@ -28,8 +28,21 @@ ApexMail can help a prospective customer review the current DPA, subprocessor in
 1. Confirm the intended data categories, retention requirements, and sending workflow.
 2. Review the current DPA, data-residency scope, and subprocessor information.
 3. Select a plan with the required runtime features and limits.
-4. For Scale or Enterprise, configure identity controls, audit review, and operational ownership as appropriate.
+4. For Business or Enterprise Cloud, configure identity controls, audit review, and operational ownership as appropriate.
 5. Complete any security or procurement review before production use.
+
+## Procurement Checklist
+
+| Item | Status |
+|---|---|
+| DPA and subprocessor register | Available for review |
+| Data-residency confirmation | Deployment- and agreement-specific; confirmed in writing |
+| HIPAA availability / BAA execution | **Not currently offered** |
+| Private Cloud / BYOIP | Contract-dependent; written approval and technical review required |
+| Security questionnaire responses (SIG/CAIQ/HECVAT or custom) | Enterprise review; NDA where required |
+| SLA and support commitments | Defined only in the signed agreement |
+
+Any feature, certification, or commitment is binding only once it is explicitly approved in writing.
 
 ## Important Limitations
 

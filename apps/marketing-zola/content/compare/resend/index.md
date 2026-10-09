@@ -26,8 +26,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
-    { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "tie" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
+    { feature = "Delivery Rate", apex = '<span class="text-surface-600 font-semibold">Not directly comparable — provider-defined measurement</span>', comp = '<span class="text-surface-600">Not directly comparable — provider-defined measurement</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic geometric</span>', comp = '<span class="text-surface-600">Automatic (managed)</span>', winner = "tie" },
     { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "ARC Signing", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -41,6 +41,10 @@ comparison_sections = [
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Methodology:</strong> Feature rows summarize publicly documented Resend behavior. Plans compared: ApexMail self-service tiers and Resend published plans; where a comparable published measurement does not exist (for example delivery rate), the row states that it is not directly comparable. Reviewed: 2026-10-04. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing standards."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

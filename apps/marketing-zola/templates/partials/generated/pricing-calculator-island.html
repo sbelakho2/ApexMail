@@ -1,8 +1,14 @@
-{# ── Pricing Calculator (static, zero JS) ────────────────────── #}
-{# Shows canonical pricing at multiple predefined volume tiers.     #}
-{# The interactive slider version required JS; this replaces it   #}
-{# with a clear comparison table. Users can sign up for exact     #}
-{# pricing via the CTA.                                            #}
+{# ── Pricing Calculator — CATALOG SNAPSHOT (dormant, static, zero JS) ── #}
+{# REVIEW DESIGNATION (2026-10-08): this island is NOT included by any ── #}
+{# template. It is retained explicitly as a static CATALOG SNAPSHOT of  ── #}
+{# the public subscription table — the live pricing surfaces are        ── #}
+{# partials/pricing/plans.html (derived from data/pricing.json) and     ── #}
+{# partials/pricing/calculator.html (server-submitted estimate).        ── #}
+{# tools/validate_pricing_drift.py pins the canonical price tokens in   ── #}
+{# this file, so it must stay consistent with data/pricing.json even    ── #}
+{# while dormant. Values below were corrected to the current catalog    ── #}
+{# (Free 3,000/mo recurring; the 30,000-email launch allowance is a     ── #}
+{# separate one-time grant, not a recurring quota).                      ── #}
 
 <section class="py-20 lg:py-32 bg-surface-100 relative overflow-hidden" id="pricing">
   <div class="absolute inset-0 pointer-events-none overflow-hidden">

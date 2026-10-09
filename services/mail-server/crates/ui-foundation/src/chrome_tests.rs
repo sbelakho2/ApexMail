@@ -126,6 +126,64 @@ fn assert_group_chrome_is_uniform(surface: &str, group: ChromeGroup, routes: &[S
     );
 }
 
+/// Every STATE of every document keeps the surface's shared chrome — the
+/// stateful PRG variants (verify/reset result pages, the MFA challenge, the
+/// destructive confirmation), the populated bot-state fixtures, and the CP
+/// `/cp…` alias routes. A state-only document that drops the single main
+/// landmark or the language declaration is exactly as broken as a manifest
+/// page that does.
+#[test]
+fn stateful_result_and_populated_documents_keep_the_shared_chrome() {
+    for surface in ["web", "control-plane"] {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
+            assert!(
+                html.contains("<html lang=\"en\""),
+                "[{surface}] {document} must declare lang=\"en\"",
+            );
+            let mains = opening_tags(&html, "main").len();
+            assert_eq!(
+                mains, 1,
+                "[{surface}] {document} must carry exactly one <main> landmark, found {mains}",
+            );
+            let footers = element_blocks(&html, "footer").len();
+            assert!(
+                footers <= 1,
+                "[{surface}] {document} must not stack footers, found {footers}",
+            );
+        }
+    }
+}
+
+/// The `/cp…` alias routes render the CONTROL-PLANE shell (not the web
+/// shell): each alias the control-plane manifest carries must render with
+/// the CP chrome — exactly one main landmark and the CP document language.
+#[test]
+fn cp_alias_routes_render_the_control_plane_shell() {
+    let mut checked = 0usize;
+    for route in routing::surface_routes("control-plane") {
+        if !route.path.starts_with("/cp") {
+            continue;
+        }
+        let html = render_with_secret("control-plane", route.path);
+        checked += 1;
+        assert_eq!(
+            opening_tags(&html, "main").len(),
+            1,
+            "control-plane alias {} must render one main landmark",
+            route.path,
+        );
+        assert!(
+            html.contains("<html lang=\"en\""),
+            "control-plane alias {} must declare lang=\"en\"",
+            route.path,
+        );
+    }
+    assert!(
+        checked > 0,
+        "no /cp alias route was found in the control-plane manifest — the alias sweep would be vacuous",
+    );
+}
+
 fn surface_chrome_groups(surface: &str) {
     let mut auth = Vec::new();
     let mut authenticated = Vec::new();

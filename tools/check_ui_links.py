@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ui_routes  # noqa: E402
-from ui_html_rules import iter_documents  # noqa: E402
+from ui_html_rules import iter_documents, require_fixture_coverage  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FIXTURES = ROOT / "services/mail-server/crates/ui-foundation/baselines/rust-ui"
@@ -55,8 +55,12 @@ EXPORTER_ASSETS = {
     "giallo.css", "icon.svg", "manifest.json", "robots.txt", "sitemap.xml",
 }
 
-_HREF_RE = re.compile(r'(?:href|action)=("([^"]*)"|([^\s">]+))', re.I)
+_HREF_RE = re.compile(
+    r'(?:href|action)=("([^"]*)"|\'([^\']*)\'|([^\s">]+))', re.I
+)
 _ID_SHAPE_RE = re.compile(r"^[a-z]{1,4}_[A-Za-z0-9_-]+$")
+_PARAM_RE = re.compile(r":[A-Za-z_][A-Za-z0-9_]*")
+_FRAGMENT_RE = re.compile(r'(?:id|name)=("([^"]+)"|\'([^\']+)\'|([^\s">]+))', re.I)
 
 
 def load_link_allowlist(path: Path) -> dict[str, str]:
@@ -93,12 +97,35 @@ def shape(path: str) -> str:
     return "/".join(de_id(s) for s in normalize(path).split("/") if s != "")
 
 
+def pattern_matches(route_pattern: str, path: str) -> bool:
+    """Does a concrete path match a parametrized route pattern?
+
+    `/web/admin/ai/drafts/:id/approve` must resolve
+    `/web/admin/ai/drafts/draft_dogfood_ui_visual_0001/approve`: the fixture
+    carries a REAL id where the route table carries `:id`, and a gate that
+    only compares literal strings declares every detail/action form dead.
+    """
+    pattern = _PARAM_RE.sub("[^/]+", route_pattern.rstrip("/") or "/")
+    return re.fullmatch(pattern, path.rstrip("/") or "/") is not None
+
+
+def document_ids(text: str) -> set[str]:
+    ids = set()
+    for m in _FRAGMENT_RE.finditer(text):
+        value = m.group(2) or m.group(3) or m.group(4) or ""
+        if value:
+            ids.add(value)
+    return ids
+
+
 class LinkResolver:
     def __init__(self) -> None:
         self.routes = ui_routes.extract_routes(WEB_RS.read_text())
         self.route_paths = {r["path"].rstrip("/") or "/" for r in self.routes}
+        self.param_patterns = sorted(p for p in self.route_paths if ":" in p)
         self.manifest = {p.rstrip("/") or "/" for p in ui_routes.manifest_route_paths()}
         self.manifest_shapes = {shape(p) for p in self.manifest}
+        self.manifest_patterns = sorted(p for p in self.manifest if ":" in p)
         self.tracking = set(ui_routes.tracking_paths())
         self.marketing_public = MARKETING_PUBLIC if MARKETING_PUBLIC.is_dir() else None
 
@@ -131,6 +158,13 @@ class LinkResolver:
             return True
         if shape(path) in self.manifest_shapes:
             return True
+        # Parametrized routes: a fixture's concrete id must match the
+        # route table's `:param` pattern (both the web.rs table and the
+        # manifest spell detail/action routes that way).
+        if any(pattern_matches(p, path) for p in self.param_patterns):
+            return True
+        if any(pattern_matches(p, path) for p in self.manifest_patterns):
+            return True
         return self.marketing_page_exists(path)
 
 
@@ -144,6 +178,8 @@ def main(argv: list[str]) -> int:
               "--bin export_visual_fixtures -- <dir>  (from services/mail-server)")
         return 1
 
+    if require_fixture_coverage(fixtures):
+        return 1
     resolver = LinkResolver()
     allowlist = load_link_allowlist(LINK_ALLOWLIST)
     print(f"fixtures: {fixtures}")
@@ -159,14 +195,32 @@ def main(argv: list[str]) -> int:
         return 1
 
     links_seen = 0
+    fragments_seen = 0
     for entry, doc in iter_documents(fixtures):
         surface = entry["surface"]
         route = entry["route"]
+        ids_in_document = document_ids(doc.text)
         for m in _HREF_RE.finditer(doc.text):
-            target = m.group(2) if m.group(2) is not None else m.group(3)
+            target = m.group(2) or m.group(3) or m.group(4) or ""
             if not target or target.startswith("data:"):
                 continue
+            # Escaped example markup (`placeholder="&lt;a href=&quot;…"`) and
+            # unresolved template placeholders are documentation, not links.
+            if any(token in target for token in ("&quot;", "&lt;", "&gt;", "{{", "}}")):
+                continue
             links_seen += 1
+            # Fragment validation: a same-document `#frag` must land on an
+            # element that actually carries that id/name.
+            _, _, fragment = target.partition("#")
+            if fragment and not target.startswith(("http://", "https://", "//")):
+                fragments_seen += 1
+                path_part = target.split("#", 1)[0]
+                if not path_part and fragment not in ids_in_document:
+                    line = doc.text.count("\n", 0, m.start()) + 1
+                    print(f"FAIL dead-fragment {surface}{route} → {target} "
+                          f"({entry['html_file']}:{line})")
+                    failures.append(f"dead-fragment {surface}{route} → {target}")
+                    continue
             if resolver.resolves(target):
                 continue
             if target in allowlist or normalize(target) in allowlist:
@@ -177,7 +231,7 @@ def main(argv: list[str]) -> int:
             failures.append(f"dead-link {surface}{route} → {target}")
 
     print()
-    print(f"checked {links_seen} href/action targets")
+    print(f"checked {links_seen} href/action targets, {fragments_seen} fragment targets")
     if failures:
         print(f"DEAD LINK FAILURES: {len(failures)}")
         for name in failures[:50]:

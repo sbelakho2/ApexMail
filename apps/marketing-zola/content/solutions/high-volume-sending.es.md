@@ -26,7 +26,7 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 
 ## Solución de ApexMail
 
-- **IP dedicadas** — Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale y 10 en Enterprise. Las opciones de despliegue de ámbito contractual se revisan por separado.
+- **IP dedicadas** — Complemento aprobado en Pro; 1 incluida en Growth y Business, y 3 en Enterprise Cloud. Las opciones de despliegue de ámbito contractual se revisan por separado.
 - **Calentamiento automatizado** — Ramp gradual de volumen según calendarios específicos de cada proveedor. Supervisado por señales de reputación. Anulación manual disponible.
 - **Priorización de colas** — El tráfico transaccional se prioriza por delante del masivo en momentos de carga. Objetivos de tiempo hasta bandeja supervisados.
 - **API por lotes** (`POST /v1/messages/batch`) — Envíe hasta 100 mensajes por solicitud. Menor sobrecoste por mensaje que las llamadas individuales a la API.
@@ -57,8 +57,8 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 | Plan | Volumen mensual | IP dedicadas | Límite de velocidad | Soporte |
 |---|---|---|---|---|
 | Growth | 500.000 emails | 1 incluida | Según plan | Soporte por email |
-| Scale | 2.000.000 de emails | 3 incluidas | Según plan | Soporte prioritario |
-| Enterprise | 5.000.000 de emails | 10 incluidas | Según contrato | Soporte dedicado |
+| Business | 2.000.000 de emails | 1 incluidas | Según plan | Soporte prioritario |
+| Enterprise Cloud | 5.000.000 de emails | 3 incluidas | Según contrato | Soporte dedicado |
 
 ## Consideraciones de seguridad
 

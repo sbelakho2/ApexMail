@@ -15,6 +15,7 @@
       <p class="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed font-medium">
         Every email you send with ApexMail includes delivery event tracking.
         Monitor delivery status, opens, clicks, and bounces through analytics and webhooks.
+        The timeline on this page is a static example; the API Explorer runs real requests against an isolated sandbox.
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
@@ -22,9 +23,11 @@
           Start Free
           <svg class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
+        {# Precise sandbox naming: the Explorer executes real sandbox requests;
+           the timeline above is a static example, not a live session. #}
         <a href="/api-explorer/" class="btn-secondary btn-secondary--lg inline-flex items-center">
-          <svg class="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-          Try Live Demo
+          <svg class="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          Run a request in the sandbox
         </a>
       </div>
 

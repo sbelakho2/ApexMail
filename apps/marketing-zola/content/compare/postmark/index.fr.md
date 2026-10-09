@@ -22,7 +22,7 @@ comparison_sections = [
   { title = "DÉLIVRABILITÉ", rows = [
     { feature = "Taux de livraison", apex = '<span class="text-brand-600 font-semibold">Élevé</span>', comp = '<span class="text-surface-600">Élevé</span>', winner = "none" },
     { feature = "Acceptation P95 jusqu’à la première tentative", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">Non documenté publiquement</span>', winner = "none" },
-    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business</span>', comp = '<span class="text-surface-600">Voir les tarifs du fournisseur</span>', winner = "none" },
+    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business ; 3 sur Enterprise Cloud</span>', comp = '<span class="text-surface-600">Voir les tarifs du fournisseur</span>', winner = "none" },
     { feature = "Réchauffement IP automatique", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatique (géré par Postmark)</span>', winner = "none" },
     { feature = "Support BIMI", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Support MTA-STS", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }
@@ -47,7 +47,7 @@ comparison_sections = [
   ]},
   { title = "TARIFS", rows = [
     { feature = "Offre gratuite", apex = '<span class="text-brand-600 font-semibold">3 000/mois + allocation de lancement unique de 30 000</span>', comp = '<span class="text-surface-600">100/mois</span>', winner = "none" },
-    { feature = "100K emails/mois", apex = '<span class="text-brand-600 font-semibold">€65 (Pro : 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro : €15.18 (US$16.50)/mois + 90K en dépassement à €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K emails/mois", apex = '<span class="text-brand-600 font-semibold">€89 (Pro : 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro : €15.18 (US$16.50)/mois + 90K en dépassement à €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Membres d’équipe illimités", apex = '<span class="text-brand-600 font-semibold">Forfait Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Conditions Enterprise personnalisées", apex = '<span class="text-brand-600 font-semibold">Contrats annuels</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]}
@@ -59,7 +59,7 @@ comparison_sections = [
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.
 methodology_note = """\
-<strong>Méthodologie :</strong> Les comparaisons de fonctionnalités reposent sur la documentation publiquement disponible, les pages tarifs et les sources officielles. Forfaits comparés : paliers self-service d’ApexMail et forfaits standard de Postmark. Date du relevé tarifaire : 2026-05-09. Dernière vérification : 2026-07-30. Les données peuvent changer ; vérifiez auprès de la documentation actuelle de chaque fournisseur. Consultez notre <a href="/fr/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">méthodologie de comparaison</a> pour le détail des sources."""
+<strong>Méthodologie :</strong> Les comparaisons de fonctionnalités reposent sur la documentation publiquement disponible, les pages tarifs et les sources officielles. Forfaits comparés : paliers self-service d’ApexMail et forfaits standard de Postmark. Prix et détails des forfaits vérifiés pour la dernière fois : 2026-08-19. Les données peuvent changer ; vérifiez auprès de la documentation actuelle de chaque fournisseur. Consultez notre <a href="/fr/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">méthodologie de comparaison</a> pour le détail des sources."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

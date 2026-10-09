@@ -13,7 +13,7 @@ ApexMail interdit strictement l'utilisation de sa plateforme pour envoyer du spa
 
 ## 2. Exigence de consentement
 
-Tous les destinataires d'emails envoyés via ApexMail doivent avoir donné un **consentement explicite, vérifiable et par opt-in** pour recevoir des emails de l'expéditeur. Ne constituent pas un consentement :
+Les emails marketing et promotionnels envoyés via ApexMail exigent un **consentement explicite, vérifiable et par opt-in** du destinataire. Les emails transactionnels et de service ne requièrent pas de consentement marketing, mais doivent respecter les règles de leur catégorie dans la [politique d'utilisation acceptable](/fr/acceptable-use/). Ne constituent pas un consentement pour les emails marketing :
 
 - Les listes d'emails achetées, récupérées par scraping ou louées.
 - Les adresses email récoltées sur des sites web publics.
@@ -22,13 +22,15 @@ Tous les destinataires d'emails envoyés via ApexMail doivent avoir donné un **
 
 ## 3. Obligations d'envoi
 
-Chaque email envoyé via ApexMail doit :
+Chaque email marketing et promotionnel envoyé via ApexMail doit :
 
 - Inclure un lien de désinscription fonctionnel qui traite les demandes sous 24 heures.
 - Identifier clairement le nom et l'adresse physique de l'expéditeur.
 - Utiliser un objet véridique et non trompeur.
 - Correspondre au contenu pour lequel le consentement a été donné (pas d'appât-switch).
 - Honorer les demandes de désinscription rapidement et de manière permanente.
+
+Les emails transactionnels et de service doivent satisfaire les exigences de catégorie de la politique d'utilisation acceptable : identité d'expéditeur exacte et aucun marketing déguisé. Les messages de sécurité, d'authentification et de compte ne requièrent pas de lien de désinscription lorsque la loi applicable ne l'exige pas.
 
 ## 4. Surveillance et application
 

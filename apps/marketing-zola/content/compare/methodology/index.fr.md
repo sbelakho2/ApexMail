@@ -45,6 +45,10 @@ Chaque ligne d'un tableau comparatif est adossée à :
 | Réviseur | Oui |
 | Qualification (le cas échéant) | Requise si l'affirmation est qualifiée |
 | Capture d'écran ou preuve archivée | Conservée en interne |
+| Références de sources en ligne avec URL | Uniquement sur les pages [Amazon SES](/fr/compare/amazon-ses/) et [Mailgun](/fr/compare/mailgun/), qui portent des sources numérotées par ligne |
+
+Les lignes des pages sans citations intégrées ([SendGrid](/fr/compare/sendgrid/), [Postmark](/fr/compare/postmark/), [Resend](/fr/compare/resend/)) résument le comportement du fournisseur documenté publiquement à la date de vérification de la page, sans citation par ligne. Lorsqu'un chiffre concurrent ne peut pas être vérifié, la cellule l'indique (« non documenté publiquement », « voir les tarifs du fournisseur ») au lieu d'affirmer un nombre.
+
 
 ## Règles de comparaison tarifaire
 

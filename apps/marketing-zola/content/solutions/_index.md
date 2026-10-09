@@ -13,6 +13,17 @@ ApexMail delivers transactional email infrastructure with EU/EEA-oriented deploy
 
 ---
 
+## Choose by Goal
+
+| Your goal | Start with | Next action |
+|---|---|---|
+| Send application email (resets, receipts, alerts) | [Transactional Email](transactional-email/) | Run the [Quickstart](/quickstart/) |
+| Run multi-tenant email for your own customers | [SaaS Platforms](saas-platforms/) | Review tenant isolation and domain isolation |
+| Keep sending under a regulated or audited framework | [Regulated Industries](regulated-industries/) | Confirm data-residency scope and DPA in a security review |
+| Move from another provider | [Migration](migration/) | Request a migration assessment and follow the gated phases |
+| Send millions of emails per month | [High-Volume Sending](high-volume-sending/) | Review warm-up, throughput, and dedicated-IP eligibility |
+| Deploy dedicated or private infrastructure | [Enterprise](enterprise/) | Book an architecture review |
+
 ## Solutions by Use Case
 
 - **[Transactional Email](transactional-email/)** — Application-driven email: password resets, receipts, notifications, account alerts. REST API and SMTP relay with signed webhooks, idempotency, and per-use-case configuration.

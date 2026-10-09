@@ -26,7 +26,7 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 
 ## Die ApexMail-Lösung
 
-- **Dedizierte IPs** — Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale, 10 ab Enterprise. Vertraglich vereinbarte Bereitstellungsoptionen werden separat geprüft.
+- **Dedizierte IPs** — Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business, 3 ab Enterprise Cloud. Vertraglich vereinbarte Bereitstellungsoptionen werden separat geprüft.
 - **Automatisches Warm-Up** — Allmählicher Volumenanstieg nach anbieterspezifischen Zeitplänen. Überwachung auf Reputationssignale. Manuelles Override verfügbar.
 - **Warteschlangen-Priorisierung** — Transaktionaler Verkehr wird bei Last vor Massensendungen priorisiert. Time-to-Inbox-Ziele werden überwacht.
 - **Batch-API** (`POST /v1/messages/batch`) — Reichen Sie bis zu 100 Nachrichten pro Anfrage ein. Geringerer Aufwand pro Nachricht als bei einzelnen API-Aufrufen.
@@ -57,8 +57,8 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 | Tarif | Monatliches Volumen | Dedizierte IPs | Ratenlimit | Support |
 |---|---|---|---|---|
 | Growth | 500.000 E-Mails | 1 enthalten | Je Tarif | E-Mail-Support |
-| Scale | 2.000.000 E-Mails | 3 enthalten | Je Tarif | Prioritäts-Support |
-| Enterprise | 5.000.000 E-Mails | 10 enthalten | Vertraglich vereinbart | Dedizierter Support |
+| Business | 2.000.000 E-Mails | 1 enthalten | Je Tarif | Prioritäts-Support |
+| Enterprise Cloud | 5.000.000 E-Mails | 3 enthalten | Vertraglich vereinbart | Dedizierter Support |
 
 ## Sicherheitshinweise
 

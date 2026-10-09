@@ -28,8 +28,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
-    { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mo; dedicated IPs on request</span>', winner = "none" },
+    { feature = "Delivery Rate", apex = '<span class="text-surface-600 font-semibold">Not directly comparable — provider-defined measurement</span>', comp = '<span class="text-surface-600">Not directly comparable — provider-defined measurement</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mo; dedicated IPs on request</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic</span>', comp = '<span class="text-surface-600">Automatic</span>', winner = "tie" },
     { feature = "DKIM Rotation", apex = '<span class="text-brand-600 font-semibold">Configurable automatic</span>', comp = '<span class="text-surface-600">Manual</span>', winner = "none" },
     { feature = "Reputation Circuit Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -62,6 +62,10 @@ comparison_sections = [
     { feature = "Content Analysis", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Classify only</span>', winner = "apexmail" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Methodology:</strong> Feature rows summarize publicly documented SendGrid behavior and published pricing; the pricing rows name the compared plans (SendGrid Pro, Essentials) at 100,000 emails/month. Pricing and plan details last reviewed: 2026-10-04. Where a competitor figure is not publicly documented, the row says so instead of asserting a number. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing and verification standards."""
 +++
 
 <!-- Comparison rows rendered from [extra].comparison_sections by partials/compare/table.html. -->

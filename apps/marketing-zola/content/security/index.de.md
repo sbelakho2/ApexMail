@@ -29,7 +29,7 @@ last_updated = "2026-10-02"
 
 - API-Schlüssel pro Umgebung (Live/Test) mit konfigurierbaren Berechtigungen.
 - Webhook-HMAC-Signaturen (SHA-256) für die Integrität von Ereignisnutzdaten.
-- SAML SSO für Scale- und Enterprise-Tarife; Bereitstellungszusagen werden im jeweiligen Vertrag bestätigt.
+- SAML SSO für Business- und Enterprise-Tarife; Bereitstellungszusagen werden im jeweiligen Vertrag bestätigt.
 - Rollenbasierte Zugriffskontrolle (RBAC) mit benutzerdefinierten Rollen im Enterprise-Tarif.
 - Multi-Faktor-Authentifizierung (TOTP) für den Dashboard-Zugriff.
 - Sitzungsverwaltung mit konfigurierbarem Timeout und IP-Bindung.
@@ -122,7 +122,7 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 ## Verwandte Themen
 
 - [Compliance Center](/de/compliance)
-- [Architekturübersicht](/architecture)
+- [Architekturübersicht](/architecture) (auf Englisch)
 - [Datenschutzerklärung](/de/privacy)
 - [Datenverarbeitungsvereinbarung](/de/dpa)
 - [Richtlinie zur akzeptablen Nutzung](/de/acceptable-use)

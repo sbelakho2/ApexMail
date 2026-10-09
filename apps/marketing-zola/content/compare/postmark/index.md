@@ -24,7 +24,7 @@ comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
     { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95) &mdash; internal engineering target, not an independently verified figure</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth and Business; 3 on Enterprise Cloud</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "Automatic IP Warming", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatic (Postmark-managed)</span>', winner = "none" },
     { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "MTA-STS Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }

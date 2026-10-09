@@ -64,48 +64,49 @@
       <div class="bg-surface-50 border border-surface-200 rounded-lg overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full">
+            <caption class="sr-only">Shared cloud vs private cloud deployment comparison.</caption>
             <thead>
               <tr class="bg-surface-100 border-b border-surface-200">
-                <th class="text-left py-3 px-6 text-xs font-semibold text-surface-500 tracking-wider">Feature</th>
-                <th class="text-center py-3 px-6 text-xs font-semibold text-surface-500 tracking-wider">Shared Cloud</th>
-                <th class="text-center py-3 px-6 text-xs font-semibold text-brand-700 tracking-wider bg-brand-50/50">Private Cloud</th>
+                <th scope="col" class="text-left py-3 px-6 text-xs font-semibold text-surface-500 tracking-wider">Feature</th>
+                <th scope="col" class="text-center py-3 px-6 text-xs font-semibold text-surface-500 tracking-wider">Shared Cloud (plan-scoped)</th>
+                <th scope="col" class="text-center py-3 px-6 text-xs font-semibold text-brand-700 tracking-wider bg-brand-50/50">Private Cloud (contracted)</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-surface-100">
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">Infrastructure</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">Infrastructure</th>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Multi-tenant</td>
                 <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Single-tenant</td>
               </tr>
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">IP Addresses</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">IP Addresses</th>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Shared pool</td>
                 <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Dedicated pool</td>
               </tr>
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">Data Location</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">Data Location</th>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Provider region</td>
                 <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Scoped region</td>
               </tr>
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">Encryption Keys</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">Encryption Keys</th>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Provider-managed</td>
                 <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Customer-managed option</td>
               </tr>
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">Network Access</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">Network Access</th>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Public endpoints</td>
                 <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Private network options</td>
               </tr>
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">Compliance</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">Compliance</th>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">GDPR</td>
                 <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Contractual GDPR and operational review</td>
               </tr>
               <tr class="hover:bg-surface-100/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-950">SLA</td>
-                <td class="py-3 px-6 text-center text-sm text-surface-500">99.9% uptime</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Custom SLA available</td>
+                <th scope="row" class="py-3 px-6 text-left text-sm font-medium text-surface-950">SLA</th>
+                <td class="py-3 px-6 text-center text-sm text-surface-500">99.9% target on Business and Enterprise Cloud; no SLA guarantee below that</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Custom SLA available under contract (Dedicated Tenant / BYOC)</td>
               </tr>
             </tbody>
           </table>

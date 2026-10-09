@@ -14,7 +14,10 @@ use std::net::SocketAddr;
 use crate::error::ApiError;
 use crate::middleware::rate_limiter::extract_public_client_ip;
 use crate::routes::csrf::validate_form_csrf;
-use crate::routes::system_sender::{ensure_system_sender_ready, queue_system_email_in_transaction};
+use crate::routes::system_sender::{
+    ensure_system_sender_ready, queue_system_email_in_transaction, render_transactional_email,
+    EmailAction, TransactionalEmail,
+};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -203,18 +206,22 @@ async fn forgot_password(
         // sensitive token exposure in server logs, referrer headers, and browser history.
         let reset_link = format!("{}/reset-password/{}", state.config.base_url, encoded_token,);
         let safe_email = html_escape(&email);
-        let safe_link = html_escape(&reset_link);
-        let html_body = format!(
-            r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>Reset your password — ApexMail</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
-<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Reset Your Password</h2>
-<p>We received a request to reset the password for <strong>{safe_email}</strong>.</p>
-<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Reset Password</a></p>
-<p style="font-size:13px;color:#71717a">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>
-<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
-<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999;text-decoration:none">apexmail.ee</a></p>
-</body></html>"#,
-        );
+        let html_body = render_transactional_email(&TransactionalEmail {
+            document_title: "Reset your password — ApexMail",
+            heading: "Reset Your Password",
+            body_html: &format!(
+                "<p>We received a request to reset the password for <strong>{safe_email}</strong>.</p>\n\
+                 <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>\n"
+            ),
+            // The shell renders the button AND the URL as visible text, so a
+            // client that strips links still shows where to go.
+            actions: &[EmailAction {
+                label: "Reset Password",
+                url: &reset_link,
+                secondary: false,
+            }],
+            footer_link: true,
+        });
         let text_body = format!(
             "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
         );
@@ -687,24 +694,47 @@ mod adversarial_tests {
             "legal footer marker missing"
         );
 
-        // Exactly ONE primary CTA: the second <a> is the apexmail.ee footer.
+        // Exactly ONE primary CTA anchor: the second <a> is the apexmail.ee
+        // footer. The CTA URL additionally appears as VISIBLE TEXT (the
+        // fallback line) — never as a second anchor — so a link-stripping
+        // client still shows the reader where to go.
         assert_eq!(
             html.matches("<a href=").count(),
             2,
             "exactly one CTA plus the footer link expected: {html}"
         );
         assert_eq!(
-            html.matches("/reset-password/").count(),
+            html.matches("href=\"http://localhost:3000/reset-password/")
+                .count(),
             1,
-            "exactly one reset action link expected: {html}"
+            "exactly one reset action anchor expected: {html}"
+        );
+        assert_eq!(
+            html.matches("http://localhost:3000/reset-password/").count(),
+            2,
+            "the reset URL appears once as the CTA href and once as the visible fallback text: {html}"
         );
         assert!(
-            html.contains("href=\"http://localhost:3000/reset-password/"),
-            "CTA must be absolute, derived from the configured action base: {html}"
+            html.contains("If the button does not work, copy this link into your browser:"),
+            "the visible HTML fallback URL line is missing: {html}"
         );
         assert!(
             !html.contains("token="),
             "the token must ride the path, never the query string (CWE-598)"
+        );
+
+        // Viewport/background resilience: the shell declares a viewport and
+        // an explicit background-color so a dark-mode client cannot invert
+        // the message into illegibility.
+        assert!(
+            html.contains(
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
+            ),
+            "viewport meta missing: {html}"
+        );
+        assert!(
+            html.contains("background-color:#ffffff"),
+            "explicit email background missing: {html}"
         );
 
         // Expiry + ignore copy.

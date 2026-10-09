@@ -43,8 +43,9 @@ Cada fila de una tabla comparativa está respaldada por:
 | Fecha de la fuente | Sí |
 | Fecha de verificación | Sí |
 | Revisor | Sí |
-| Matiz (si existe) | Obligatorio si la afirmación está matizada |
-| Captura o evidencia archivada | Conservada internamente |
+| Citas de fuentes integradas con URL | Solo en las páginas de [Amazon SES](/es/compare/amazon-ses/) y [Mailgun](/es/compare/mailgun/), que incluyen fuentes numeradas por fila |
+Las filas de las páginas sin citas integradas ([SendGrid](/es/compare/sendgrid/), [Postmark](/es/compare/postmark/), [Resend](/es/compare/resend/)) resumen el comportamiento del proveedor documentado públicamente en la fecha de revisión de la página, sin cita por fila. Cuando no se puede verificar una cifra del competidor, la celda lo indica («no documentado públicamente», «consulte los precios del proveedor») en lugar de afirmar un número.
+
 
 ## Reglas de comparación de precios
 

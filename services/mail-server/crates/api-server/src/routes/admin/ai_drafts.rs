@@ -376,12 +376,42 @@ pub(crate) async fn approve_draft_core(
     } else {
         crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT
     };
+    // R6 (review §12.1/R1 finding): the approval path previously enqueued
+    // with an EMPTY html_body. The queue layer stores presentation verbatim
+    // and refuses empty bodies (`system email refused: callers must supply
+    // a non-empty html_body and text_body`), so every approval answered 500
+    // and the draft could never leave the queue. The draft's own text is
+    // rendered through the SAME shared transactional shell every other
+    // platform mail uses (viewport, background/foreground pair, footer),
+    // escaped paragraph by paragraph: the AI reply is the message body,
+    // never dropped, never wrapped in a second, divergent shell.
+    let heading = if subject.trim().is_empty() {
+        "A message from the ApexMail sales team".to_string()
+    } else {
+        subject.clone()
+    };
+    let reply_html: String = crate::routes::helpers::html_escape(&reply)
+        .split("\n\n")
+        .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br/>")))
+        .collect();
+    let html_body = crate::routes::system_sender::render_transactional_email(
+        &crate::routes::system_sender::TransactionalEmail {
+            document_title: &heading,
+            heading: &heading,
+            body_html: &reply_html,
+            // A direct reply to someone who wrote in carries no action
+            // buttons — only the message.
+            actions: &[],
+            footer_link: true,
+        },
+    );
+    let text_body = reply.clone();
     let message_uuid = match crate::routes::system_sender::queue_system_email_in_transaction(
         &mut tx,
         &from_email,
         &subject,
-        "",
-        &reply,
+        &html_body,
+        &text_body,
         vec!["ai-draft-approval".to_string()],
         priority,
     )

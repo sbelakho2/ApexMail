@@ -3,14 +3,19 @@
 {% set plan_is_enterprise = plan_is_enterprise | default(value=false) %}
 {% set plan_enterprise_label = plan_enterprise_label | default(value="Enterprise") %}
 {% set plan_button_primary = plan_button_primary | default(value=false) %}
+{# Localized accessible name for the card region and the price. #}
+{% set plan_region_aria = plan_region_label | default(value="plan") %}
+{% set plan_price_aria = plan_price_aria_label | default(value="per month") %}
 
 {% if plan_is_popular %}
-<div class="apex-card flex flex-col p-8 !border-brand-500 shadow-premium relative" role="region" aria-label="{{ plan_name }} plan">
-  <div class="absolute -top-4 left-1/2 -translate-x-1/2">
-    <span class="inline-flex items-center px-4 py-1.5 bg-brand-600 text-white text-xs font-bold tracking-widest uppercase rounded-sm">{{ plan_popular_label }}</span>
+<div class="apex-card flex flex-col p-8 !border-brand-500 shadow-premium relative" role="region" aria-label="{{ plan_name }} {{ plan_region_aria }}">
+  {# Badge stays inside the card crown at every width: it may wrap and is
+     clamped to the available width instead of protruding past the edge. #}
+  <div class="absolute -top-4 left-1/2 -translate-x-1/2 max-w-[calc(100%-1.5rem)]">
+    <span class="inline-flex items-center justify-center text-center leading-tight px-4 py-1.5 bg-brand-600 text-white text-xs font-bold tracking-widest uppercase rounded-sm">{{ plan_popular_label }}</span>
   </div>
 {% elif plan_is_enterprise %}
-<div class="apex-card flex flex-col p-8 bg-surface-950 !border-surface-800 shadow-premium relative group" role="region" aria-label="{{ plan_name }} plan">
+<div class="apex-card flex flex-col p-8 bg-surface-950 !border-surface-800 shadow-premium relative group" role="region" aria-label="{{ plan_name }} {{ plan_region_aria }}">
   <div class="mb-4 flex items-center justify-between">
     <span class="inline-block px-3 py-1 bg-brand-500/10 text-brand-400 text-xs font-bold tracking-widest uppercase rounded-sm border border-brand-500/20">{{ plan_enterprise_label }}</span>
   </div>
@@ -24,7 +29,7 @@
      per-digit slot cells rendered "€ 2 9" and read as broken. The spaced
      APEXMAIL wordmark treatment never applies to numbers, prices,
      percentages or metrics. #}
-<span class="price-value{% if plan_is_popular %} price-value--brand{% endif %}" aria-label="{{ plan_price }} per month">{{ plan_price }}</span>
+<span class="price-value{% if plan_is_popular %} price-value--brand{% endif %}" aria-label="{{ plan_price }} {{ plan_price_aria }}">{{ plan_price }}</span>
       <span class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-xs font-bold tracking-widest">{{ plan_period }}</span>
     </div>
     <p class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-sm mt-4 leading-relaxed font-bold tracking-tight">{{ plan_description }}</p>

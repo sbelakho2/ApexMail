@@ -43,10 +43,22 @@
 // Symbols are presentation only; an unknown code always renders as the code
 // itself, never as a guessed symbol.
 #let currency = if "currency" in data and data.currency != none { upper(str(data.currency)) } else { "" }
+// Defensive bindings: a payload missing an optional field renders an
+// explicit placeholder instead of failing the whole document.
+#let invoice-number = str(data.at("invoice_number", default: "Not recorded"))
+#let status-value = lower(str(data.at("status", default: "unknown")))
+#let issued-at = str(data.at("issued_at", default: "—"))
+#let due-at = str(data.at("due_at", default: "—"))
+#let period-start = str(data.at("period_start", default: "—"))
+#let period-end = str(data.at("period_end", default: "—"))
+#let line-items = data.at("line_items", default: ())
+#let subtotal = data.at("subtotal", default: 0)
+#let vat-total = data.at("vat_total", default: 0)
+#let total = data.at("total", default: 0)
 #let currency-symbol = if currency == "EUR" { "€" } else if currency == "USD" { "$" } else if currency == "GBP" { "£" } else if currency == "CHF" { "CHF " } else if currency == "SEK" { "SEK " } else if currency == "NOK" { "NOK " } else if currency == "DKK" { "DKK " } else if currency == "PLN" { "PLN " } else if currency != "" { currency + " " } else { "" }
 
 #set document(
-  title: "Invoice " + data.invoice_number,
+  title: "Invoice " + invoice-number,
   author: "Bel Consulting OÜ (trading as ApexMail)",
 )
 
@@ -102,8 +114,8 @@
 /// Payment term in days, derived from the authoritative issue/due dates
 /// (`due_at - issued_at`). `none` when either date is unavailable.
 #let term-days = {
-  let issued = parse-date(if "issued_at" in data { data.issued_at } else { "" })
-  let due = parse-date(if "due_at" in data { data.due_at } else { "" })
+  let issued = parse-date(issued-at)
+  let due = parse-date(due-at)
   if issued == none or due == none { none } else { (due - issued).days() }
 }
 
@@ -132,11 +144,11 @@
       columns: (auto, auto),
       stroke: none,
       align: (left, right),
-      [*Invoice \#:*], [#data.invoice_number],
-      [*Status:*], [#upper(data.status)],
-      [*Issued:*], [#data.issued_at],
-      [*Due:*], [#data.due_at],
-      [*Period:*], [#data.period_start — #data.period_end],
+      [*Invoice \#:*], [#invoice-number],
+      [*Status:*], [#upper(status-value)],
+      [*Issued:*], [#issued-at],
+      [*Due:*], [#due-at],
+      [*Period:*], [#period-start — #period-end],
     )
   ],
 )
@@ -190,7 +202,7 @@
   // Header row
   [*Description*], [*Qty*], [*Unit Price*], [*VAT*], [*Amount*],
   // Data rows
-  ..for item in data.line_items {(
+  ..for item in line-items {(
     [#item.description],
     [#item.quantity],
     [#fmt-money(item.unit_price)],
@@ -212,9 +224,9 @@
       stroke: none,
       inset: 6pt,
       align: (left, right),
-      [Subtotal], [#fmt-money(data.subtotal)],
-      [VAT (#{ let seen = (); for item in data.line_items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
-      [#fmt-money(data.vat_total)],
+      [Subtotal], [#fmt-money(subtotal)],
+      [VAT (#{ let seen = (); for item in line-items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
+      [#fmt-money(vat-total)],
     )
     #line(length: 100%, stroke: 1.5pt + rgb("#000000"))
     #table(
@@ -222,7 +234,7 @@
       stroke: none,
       inset: 8pt,
       align: (left, right),
-      [*Total (#currency)*], [*#fmt-money(data.total)*],
+      [*Total (#currency)*], [*#fmt-money(total)*],
     )
   ]
 ]
@@ -256,9 +268,9 @@
       ],
       [
         *Payment Terms:* \
-        Payment due by #data.due_at#if term-days != none [ (Net #term-days days from the invoice date)].
+        Payment due by #due-at#if term-days != none [ (Net #term-days days from the invoice date)].
 
-        *Reference:* #data.invoice_number
+        *Reference:* #invoice-number
       ],
     )
   ]
@@ -272,13 +284,13 @@
     width: 100%,
   )[
     Payments are collected automatically via the configured payment provider. \
-    Payment due by #data.due_at#if term-days != none [ (Net #term-days days from the invoice date)].
+    Payment due by #due-at#if term-days != none [ (Net #term-days days from the invoice date)].
 
-    *Reference:* #data.invoice_number
+    *Reference:* #invoice-number
   ]
 ]
 
-#if data.status == "paid" [
+#if status-value == "paid" [
   #v(16pt)
   #align(center)[
     #block(
@@ -289,7 +301,7 @@
     )[
       #text(weight: "bold", size: 14pt, fill: rgb("#16a34a"))[
         ✓ PAID
-        #if "paid_at" in data and data.paid_at != none [ — #data.paid_at ]
+        #if "paid_at" in data and data.paid_at != none [ — #data.at("paid_at", default: "—") ]
       ]
     ]
   ]

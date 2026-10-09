@@ -14,7 +14,11 @@
     "api_documentation": "Same Markdown content/docs/ rendering",
     "responsive_breakpoints": "Same Tailwind config (sm:640, md:768, lg:1024, xl:1280)",
     "status_page": "Same status page template at /status/",
-    "form_validation": "Same server-rendered (zero-JS) forms — apexmail-site.js was deleted in the zero-JS rework"
+    "form_validation": "Same server-rendered (zero-JS) forms — apexmail-site.js was deleted in the zero-JS rework",
+    "asset_urls": "Same cachebusted asset URLs (?h= content hashes) resolved by the same path handling; bare and versioned paths must return the same bytes and cache headers",
+    "localized_bodies": "All de/fr/es Markdown bodies present, not just localized navigation/metadata",
+    "result_origin_returns": "Form result pages (grader, calculator, explorer, contact) return to the submitting origin/locale",
+    "consent_states": "Cookie-consent pending and recorded states both render correctly (server-side attribute flip, no script)"
   },
   "prohibited_shortcuts": {
     "placeholder_legal": false,

@@ -8,6 +8,8 @@ template = "prose.html"
 
 Send application-generated email through ApexMail's REST API or SMTP relay. Every message is tracked from acceptance to delivery with per-message event history.
 
+**Start here:** send your first message in under 10 minutes with the [Quickstart](/quickstart/), then follow each message from acceptance to recipient-MX response in [Delivery Diagnostics](/email-logs/).
+
 ## Audience
 
 Engineering teams building applications that send automated email: password resets, account verification, purchase receipts, shipping notifications, security alerts, and system status updates.
@@ -65,11 +67,11 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 | Plan | Monthly Volume | Support |
 |---|---|---|
 | Free | 3,000 emails | Community |
-| Starter | 50,000 emails | Email support |
+| Developer | 50,000 emails | Email support |
 | Pro | 150,000 emails | Email support |
 | Growth | 500,000 emails | Email support |
-| Scale | 2,000,000 emails | Priority support |
-| Enterprise | 5,000,000 emails | Dedicated support |
+| Business | 2,000,000 emails | Priority support |
+| Enterprise Cloud | 5,000,000 emails | Dedicated support |
 
 ## Security Considerations
 

@@ -885,25 +885,32 @@ fn migration_total_route_count() {
     );
 }
 
+/// The four visual-parity pages still RENDER (non-empty documents with
+/// their shell anchors).
+///
+/// This test used to WRITE the renders to a machine-specific absolute path
+/// (`/Users/.../reports/visual-parity/current_html`) on every normal test
+/// run — an unconditional side effect whose output silently rotted, and a
+/// path that cannot exist on any other checkout. File output is the explicit
+/// exporter's job (`export_visual_fixtures`, or the browser suite's
+/// screenshots); the parity ASSERTION stays here.
 #[test]
-fn dump_html_for_visual_parity() {
-    let out_dir = "/Users/sabelakhoua/IdeaProjects/ApexMail/reports/visual-parity/current_html";
-    std::fs::create_dir_all(out_dir).ok();
-
-    println!("Writing to: {out_dir:?}",);
-
-    let surfaces_and_paths = vec![
+fn visual_parity_pages_render() {
+    for (surface, path) in [
         ("web", "/login"),
         ("web", "/dashboard"),
         ("control-plane", "/login"),
         ("control-plane", "/dashboard"),
-    ];
-
-    for (surface, path) in surfaces_and_paths {
-        if let Some(html) = crate::axum_router::render_route(surface, path) {
-            let filename = format!("{}_{}.html", surface, path.replace('/', "_"));
-            let path = std::path::Path::new(out_dir).join(filename);
-            std::fs::write(path, html).expect("failed to write html");
-        }
+    ] {
+        let html = crate::axum_router::render_route(surface, path)
+            .unwrap_or_else(|| panic!("[{surface}] {path} must render"));
+        assert!(
+            html.contains("<html lang=\"en\""),
+            "[{surface}] {path} must render a full document",
+        );
+        assert!(
+            crate::gate_support::opening_tags(&html, "main").len() == 1,
+            "[{surface}] {path} must render exactly one main landmark",
+        );
     }
 }

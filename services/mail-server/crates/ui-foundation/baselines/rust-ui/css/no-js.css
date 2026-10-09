@@ -1,11 +1,11 @@
 /* ── CSS-only interactivity (zero client scripting) ─────────── */
 /* All interactive patterns use native HTML + CSS only:
-   - Desktop dropdowns: :focus-within
-   - Mobile menu: checkbox hack
+   - Desktop dropdowns: :focus-within on native <details>
+   - Mobile menu: native <details> disclosure
    - FAQ accordions: <details>/<summary>
    - Deployment tabs: radio buttons + :checked
    - Testimonials: scroll-snap
-   - Cookie consent: checkbox dismiss
+   - Cookie consent: server-side cookie map
    - Back-to-top: anchor + scroll-behavior
 */
 
@@ -60,9 +60,10 @@ textarea:focus-visible {
 }
 
 /* ── Header Dropdowns (<details> disclosure, design audit item 5) ──
-   Native disclosure widgets: click/Enter/Space toggles, Esc closes,
-   and the open state is real markup — no frozen aria-expanded, no
-   JS-kitchen-sink ARIA. The chevron rotates with the open state. */
+   Native disclosure widgets: click/Enter/Space toggles and the open state
+   is real markup — no frozen aria-expanded, no JS-kitchen-sink ARIA. (No
+   Escape promise: browsers do not consistently close <details> on Escape
+   without script.) The chevron rotates with the open state. */
 details[data-dropdown] > summary {
   cursor: pointer;
   list-style: none;
@@ -87,70 +88,42 @@ details[data-dropdown][open] > [data-dropdown-menu] {
    The old unconditional `display: block` overrode that, rendering
    EVERY dropdown panel simultaneously (overlapping text in the nav). */
 
-/* ── Mobile Menu (checkbox hack + grid-rows animation, item 17) ──
-   Off-screen positioning instead of clip-based sr-only to maintain
-   keyboard focusability (clip:rect can break Tab focus in some browsers).
-   The panel animates its grid-template-rows 0fr→1fr instead of a
-   display:none flip that can never animate. */
-.nav-toggle-input {
-  position: absolute;
-  left: -9999px;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  overflow: hidden;
-  pointer-events: none;
+/* ── Mobile Menu (native <details> disclosure) ──────────────────
+   The hamburger is the <summary> of #mobile-nav; the panel is a child of
+   the disclosure, so the closed state is genuinely hidden by the element
+   itself (and by the details:not([open]) rule at the end of this file).
+   The panel is absolutely positioned against the sticky #site-header so it
+   spans the viewport width even though the <details> sits in the header
+   row. Focusability and the expanded state are the element's own semantics
+   — no checkbox hack, no proxy focus ring. */
+#mobile-nav > summary {
+  list-style: none;
+  cursor: pointer;
 }
-/* Visible focus treatment (a11y audit): the checkbox itself is the
-   keyboard operative control, but its ring used to paint at
-   left:-9999px — keyboard users got NO focus indicator at all. The
-   checkbox precedes #site-header as a sibling, so its focus state can
-   ring the visible hamburger affordance (#mobile-menu-toggle label
-   inside the header) instead. */
-#nav-toggle:focus-visible ~ #site-header #mobile-menu-toggle {
+#mobile-nav > summary::-webkit-details-marker { display: none; }
+#mobile-nav > summary::marker { content: ""; }
+#mobile-nav > summary:focus-visible {
   outline: 2px solid rgb(var(--primary));
   outline-offset: 2px;
 }
-/* Ensure close icon is hidden by default (overrides header partial) */
+/* Ensure the close icon is hidden by default (overrides header partial) */
 #menu-icon-close { display: none; }
-#nav-toggle:checked ~ #site-header #menu-icon-open { display: none !important; }
-#nav-toggle:checked ~ #site-header #menu-icon-close { display: block !important; }
+#mobile-nav[open] #menu-icon-open { display: none !important; }
+#mobile-nav[open] #menu-icon-close { display: block !important; }
+#mobile-nav[open] > summary {
+  background: rgb(var(--surface-100));
+}
 
 @media (max-width: 1023.98px) {
-  #site-header #mobile-menu {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows 280ms cubic-bezier(0.23, 1, 0.32, 1);
-  }
-  #site-header #mobile-menu > .mobile-menu-inner {
-    overflow: hidden;
-    min-height: 0;
-    /* Collapsed menu links stayed tabbable (and screen-reader
-       traversable) behind the 0fr grid row — visibility:hidden takes
-       them out of the tab order AND the a11y tree while the grid
-       animation still plays. It flips to visible immediately on
-       expand, and only after the collapse animation finishes on the
-       way back. */
-    visibility: hidden;
-    transition: visibility 0ms linear 280ms;
-  }
-  #nav-toggle:checked ~ #site-header #mobile-menu {
-    grid-template-rows: 1fr;
-  }
-  #nav-toggle:checked ~ #site-header #mobile-menu > .mobile-menu-inner {
-    visibility: visible;
-    transition: visibility 0ms;
-  }
-}
-/* Open-state header styling: opaque surface + deepened border so the
-   expanded panel reads as one attached surface (item 17). */
-#nav-toggle:checked ~ #site-header {
-  background: rgb(var(--surface-50));
-  border-bottom-color: rgb(var(--surface-300));
-}
-@media (prefers-reduced-motion: reduce) {
-  #site-header #mobile-menu {
-    transition: none;
+  #mobile-nav[open] .mobile-nav-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    max-height: calc(100vh - 4rem);
+    overflow-y: auto;
+    border-top: 1px solid rgb(var(--surface-200));
+    box-shadow: 0 12px 24px rgb(9 9 11 / 0.06);
   }
 }
 
@@ -170,7 +143,21 @@ details.faq-item[open] .faq-icon {
 }
 
 /* ── Deployment Options (radio tabs) ────────────────────────── */
-.deploy-radio { display: none; }
+/* Visually hidden but FOCUSABLE: `display:none` removed the radios from
+   the tab order entirely, so keyboard users could never switch panels
+   (pointer-only labels). The clipped technique keeps them in the tab
+   order and the a11y tree; the ring is painted on the visible <label>. */
+.deploy-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .deploy-panel { display: none; }
 #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
 #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
@@ -179,6 +166,13 @@ details.faq-item[open] .faq-icon {
   background-color: rgb(var(--surface-900));
   color: white;
   box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
+}
+#deploy-shared:focus-visible ~ .deploy-tabs [for="deploy-shared"],
+#deploy-dedicated:focus-visible ~ .deploy-tabs [for="deploy-dedicated"],
+#deploy-private:focus-visible ~ .deploy-tabs [for="deploy-private"],
+#deploy-byoc:focus-visible ~ .deploy-tabs [for="deploy-byoc"] {
+  outline: 2px solid rgb(var(--primary));
+  outline-offset: 2px;
 }
 html.dark #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
 html.dark #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],

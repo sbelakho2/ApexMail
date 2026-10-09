@@ -8,14 +8,14 @@
     <div class="text-center mb-16">
       <div class="inline-flex items-center gap-2 px-4 py-2 rounded-sm bg-brand-100 text-brand-700 text-sm font-semibold mb-6 animate-in">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        System Status
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["title"] %}{{ i18n_data[l]["status"]["title"] }}{% else %}System Status{% endif %}
       </div>
       <h1 class="animate-in delay-100 text-4xl md:text-5xl lg:text-6xl font-bold text-surface-950 tracking-tight mb-6">
         ApexMail<br />
-        <span class="text-brand-500">System Status</span>
+        <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_title"] %}{{ i18n_data[l]["status"]["hero_title"] }}{% else %}System Status{% endif %}</span>
       </h1>
       <p class="animate-in delay-200 text-lg lg:text-xl text-surface-600 max-w-2xl mx-auto leading-relaxed">
-        Live incident updates, component health, and maintenance notices are maintained on the dedicated ApexMail status surface.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["hero_subtitle"] %}{{ i18n_data[l]["status"]["hero_subtitle"] }}{% else %}Live incident updates, component health, and maintenance notices are maintained on the dedicated ApexMail status surface.{% endif %}
       </p>
     </div>
 
@@ -30,30 +30,37 @@
           </a>
         </div>
 
-        {# Service list (static fallback) #}
-        {% set services = [
-          "Email API",
-          "SMTP Relay",
-          "Webhook Delivery",
-          "Web Dashboard",
-          "Analytics Pipeline",
-          "DNS & Authentication",
-          "Template Engine",
-          "Compliance Engine"
-        ] %}
-        <div class="mt-6 p-4 rounded-sm bg-warning-50 border border-warning-200 mb-6">
-          <p class="text-sm text-warning-800 font-medium">
-            <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            This page shows services <strong>tracked for monitoring</strong>, not live health. Visit <a href="{{ config.extra.status_url }}" class="font-semibold underline">status.apexmail.ee</a> for live status.
+        {# One neutral handoff replaces the stacked amber warning panels: the
+           static export names what it tracks and points at the live host. #}
+        <div class="p-5 rounded-lg border border-surface-200 bg-surface-50 mb-6">
+          <p class="text-sm text-surface-600 font-medium">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["status"] and i18n_data[l]["status"]["description"] %}{{ i18n_data[l]["status"]["description"] }}{% else %}This is a static export. It lists the services ApexMail tracks for monitoring — it does not assert
+            component health. Live health, incidents and maintenance notices are on{% endif %}
+            <a href="{{ config.extra.status_url }}" class="font-semibold text-surface-950 underline">status.apexmail.ee</a>.
           </p>
         </div>
 
-        <div class="p-6 rounded-lg bg-warning-500/10 border border-warning-500/20 text-center">
-          <p class="text-sm text-warning-600 font-medium">
-            <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            Live status data is available at <a href="{{ config.extra.status_url }}" class="font-semibold underline">status.apexmail.ee</a>. This static page does not assert component health.
-          </p>
+        {# The declared monitored-service list is rendered (it used to be set
+           in the template and never shown, while the copy claimed it was). #}
+        <div class="p-6 rounded-lg bg-surface-50 border border-surface-200">
+          <h2 class="text-sm font-bold uppercase tracking-widest text-surface-500 mb-4">Services tracked for monitoring</h2>
+          {% set services = [
+            "Email API",
+            "SMTP Relay",
+            "Webhook Delivery",
+            "Web Dashboard",
+            "Analytics Pipeline",
+            "DNS & Authentication",
+            "Template Engine",
+            "Compliance Engine"
+          ] %}
+          <ul class="flex flex-wrap gap-2" role="list">
+            {% for service in services %}
+            <li class="rounded-sm border border-surface-200 bg-surface-100 px-3 py-1.5 text-xs font-bold tracking-wide text-surface-700">{{ service }}</li>
+            {% endfor %}
+          </ul>
         </div>
+
       </div>
     </div>
   </div>

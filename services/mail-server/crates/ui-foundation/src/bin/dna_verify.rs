@@ -66,4 +66,11 @@ fn main() {
             || mfa.contains("text-xs font-bold text-surface-900")),
     );
     println!("\n{pass}/{total} rendered-output checks pass");
+    // The verifier's contract is executable: a failed check must exit
+    // non-zero. Printing "n/m pass" and exiting 0 made the binary useless in
+    // CI — a run with failures looked identical to a clean one.
+    if pass != total {
+        eprintln!("{} rendered-output check(s) FAILED", total - pass);
+        std::process::exit(1);
+    }
 }

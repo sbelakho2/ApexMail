@@ -7,6 +7,9 @@
   X-DNS-Prefetch-Control: on
   X-Frame-Options: SAMEORIGIN
   X-Content-Type-Options: nosniff
+  # "0" — deprecated header, pinned in lockstep with nginx.conf, .htaccess
+  # and the api-server (api-server/src/app.rs).
+  X-XSS-Protection: "0"
   Referrer-Policy: strict-origin-when-cross-origin
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   # CSP — keep in lockstep with the nginx marketing vhost
@@ -26,7 +29,38 @@
   Cache-Control: public, max-age=31536000, immutable
 
 /images/*
-  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+  Cache-Control: public, max-age=31536000, immutable
+
+# Build asset with a content-hash URL (?h=): immutable, like the /css tree it
+# complements (the nginx extension regex and the api-server tier agree).
+/giallo.css
+  Cache-Control: public, max-age=31536000, immutable
+
+/icon.svg
+  Cache-Control: public, max-age=3600
+
+/manifest.json
+  Cache-Control: public, max-age=3600
+
+/robots.txt
+  Cache-Control: public, max-age=3600
+
+/sitemap.xml
+  Cache-Control: public, max-age=3600
+
+/pgp-key.asc
+  Cache-Control: public, max-age=3600
+
+/pgp-key.txt
+  Cache-Control: public, max-age=3600
+
+/.well-known/*
+  Cache-Control: public, max-age=3600
+
+# Downloadable API contract: no-cache, matching the api-server's default tier
+# for /specs/ (not an immutable build asset).
+/specs/*
+  Cache-Control: no-cache
 
 # Error pages (404.html / 50x.html): Netlify and Cloudflare Pages serve
 # these automatically for matching error statuses — they must never be

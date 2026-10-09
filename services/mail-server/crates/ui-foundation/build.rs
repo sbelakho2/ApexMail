@@ -59,7 +59,16 @@ fn main() {
         let end = path_part
             .find('"')
             .unwrap_or_else(|| panic!("unterminated include path after marker in axum_router.rs"));
-        relpaths.push(path_part[..end].to_string());
+        let candidate = &path_part[..end];
+        // Every include-site literal is an absolute marketing path
+        // ("/route/index.html"). A bare `env!("…")` used elsewhere (the
+        // test-only `Path::new(env!(...))`) makes the scan see the next `"`
+        // in the file, which can be an empty string — skipping non-`/`
+        // candidates keeps the fallback tree and the completeness check
+        // honest instead of manufacturing an empty route.
+        if candidate.starts_with('/') {
+            relpaths.push(candidate.to_string());
+        }
         rest = &path_part[end..];
     }
     assert!(
@@ -83,12 +92,85 @@ fn main() {
         public_dir.join("index.html").display()
     );
 
-    if public_dir.join("index.html").is_file() {
-        // Real build output exists: embed the actual pages, exactly as before.
+    // COMPLETENESS, not merely "an index.html exists" (review §5.2 build.rs:
+    // "Require complete, provenance-stamped marketing output — not merely an
+    // existing homepage — to establish build freshness"). Every route the
+    // router includes must be present, otherwise the tree is treated as
+    // unbuilt and the OUT_DIR placeholders are embedded with a loud warning
+    // naming exactly what is missing.
+    let mut missing: Vec<String> = relpaths
+        .iter()
+        .filter(|relpath| !public_dir.join(relpath.trim_start_matches('/')).is_file())
+        .cloned()
+        .collect();
+    missing.sort();
+
+    // PROVENANCE: the Docker build stamps public/build-provenance.json with
+    // the source revision and pinned toolchain versions. When the stamp is
+    // present it must be well-formed and name a stylesheet the tree actually
+    // ships; a malformed stamp disqualifies the output. A missing stamp is a
+    // local `zola build` (nothing to claim) and is reported as `unstamped`
+    // through APX_MARKETING_PROVENANCE rather than silently trusted.
+    let provenance_path = public_dir.join("build-provenance.json");
+    println!("cargo:rerun-if-changed={}", provenance_path.display());
+    let mut provenance_note = String::from("unstamped");
+    if provenance_path.is_file() {
+        match fs::read_to_string(&provenance_path) {
+            Ok(raw) => {
+                let revision = json_field(&raw, "source_revision");
+                let zola = json_field(&raw, "zola");
+                let tailwind = json_field(&raw, "tailwindcss");
+                let sheet = json_field(&raw, "styled_sheet");
+                match (revision, sheet) {
+                    (Some(revision), Some(sheet)) if !sheet.is_empty() => {
+                        if public_dir.join(&sheet).is_file() {
+                            println!(
+                                "cargo:rustc-env=APX_MARKETING_PROVENANCE=revision={revision} zola={} tailwindcss={} styled_sheet={sheet}",
+                                zola.unwrap_or_default(),
+                                tailwind.unwrap_or_default(),
+                            );
+                            provenance_note = format!("stamped revision={revision}");
+                        } else {
+                            println!(
+                                "cargo:warning=marketing output rejected: build-provenance.json names styled_sheet {sheet:?} which the tree does not ship"
+                            );
+                            missing.push(
+                                "build-provenance.json (names a missing stylesheet)".to_string(),
+                            );
+                        }
+                    }
+                    _ => {
+                        println!(
+                            "cargo:warning=marketing output rejected: build-provenance.json is not a well-formed stamp (needs source_revision + styled_sheet)"
+                        );
+                        missing.push("build-provenance.json (malformed)".to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                println!("cargo:warning=marketing output rejected: cannot read build-provenance.json: {e}");
+                missing.push("build-provenance.json (unreadable)".to_string());
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        // Complete (and, when stamped, provenance-checked) build output:
+        // embed the actual pages, exactly as before.
         println!("cargo:rustc-cfg=marketing_public_built");
         println!("cargo:rustc-env={ENV_NAME}={}", public_dir.display());
+        println!(
+            "cargo:warning=marketing output embedded ({provenance_note}): {} routes",
+            relpaths.len()
+        );
         return;
     }
+    println!(
+        "cargo:warning=marketing output is INCOMPLETE: {} of {} included routes missing ({}) — embedding placeholders from OUT_DIR instead",
+        missing.len(),
+        relpaths.len(),
+        missing.join(", ")
+    );
 
     // Fresh checkout: generate a placeholder per included route under OUT_DIR.
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
@@ -120,6 +202,28 @@ fn main() {
         fs::write(&target, page)
             .unwrap_or_else(|e| panic!("failed to write {}: {e}", target.display()));
     }
-    println!("cargo:warning=apps/marketing-zola/public not built — embedding placeholder pages for {} marketing routes under OUT_DIR", relpaths.len());
+    println!("cargo:warning=apps/marketing-zola/public not built (or incomplete) — embedding placeholder pages for {} marketing routes under OUT_DIR", relpaths.len());
     println!("cargo:rustc-env={ENV_NAME}={}", fallback_root.display());
+}
+
+/// Extract a flat `"key": "value"` string from a small JSON object without a
+/// JSON dependency (build scripts have none): the first occurrence of the
+/// quoted key followed by a quoted scalar. Returns `None` when the key is
+/// absent or the value is not a plain string.
+fn json_field(raw: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let mut rest = raw;
+    while let Some(pos) = rest.find(&needle) {
+        let after = rest[pos + needle.len()..].trim_start();
+        if let Some(after) = after.strip_prefix(':') {
+            let after = after.trim_start();
+            if let Some(after) = after.strip_prefix('"') {
+                if let Some(end) = after.find('"') {
+                    return Some(after[..end].to_string());
+                }
+            }
+        }
+        rest = &rest[pos + needle.len()..];
+    }
+    None
 }

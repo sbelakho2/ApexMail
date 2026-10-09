@@ -13,7 +13,7 @@ ApexMail untersagt strikt die Nutzung seiner Plattform zum Versand von Spam oder
 
 ## 2. Einwilligungserfordernis
 
-Alle Empfänger von E-Mails, die über ApexMail gesendet werden, müssen dem Absender **explizit und nachweisbar per Opt-in** zugestimmt haben. Folgendes stellt keine Einwilligung dar:
+Marketing- und Werbe-E-Mails, die über ApexMail gesendet werden, erfordern eine **explizite, nachweisbare Opt-in-Einwilligung** des Empfängers. Transaktions- und Service-E-Mails benötigen keine Marketing-Einwilligung, müssen aber die kategoriespezifischen Regeln der [Richtlinie zur akzeptablen Nutzung](/de/acceptable-use/) einhalten. Folgendes stellt keine Einwilligung für Marketing-E-Mails dar:
 
 - Gekaufte, gescrapte oder gemietete E-Mail-Listen.
 - Von öffentlichen Websites zusammengetragene E-Mail-Adressen.
@@ -22,13 +22,15 @@ Alle Empfänger von E-Mails, die über ApexMail gesendet werden, müssen dem Abs
 
 ## 3. Versandpflichten
 
-Jede über ApexMail gesendete E-Mail muss:
+Jede Marketing- und Werbe-E-Mail, die über ApexMail gesendet wird, muss:
 
 - Einen funktionsfähigen Abmelde-Link enthalten, der Anfragen innerhalb von 24 Stunden verarbeitet.
 - Name und postalische Adresse des Absenders klar ausweisen.
 - Eine wahrheitsgemäße, nicht irreführende Betreffzeile verwenden.
 - Den Inhalt auf die gegebene Einwilligung abstimmen (kein Lock-Angebot-Mechanismus).
 - Abmeldeanfragen umgehend und dauerhaft beachten.
+
+Transaktions- und Service-E-Mails müssen stattdessen die Kategorieanforderungen der Richtlinie zur akzeptablen Nutzung erfüllen: korrekte Absenderidentität und kein getarntes Marketing. Sicherheits-, Authentifizierungs- und Konto-E-Mails benötigen keinen Abmelde-Link, sofern geltendes Recht keinen verlangt.
 
 ## 4. Überwachung und Durchsetzung
 

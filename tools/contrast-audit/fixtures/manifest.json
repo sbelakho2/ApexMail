@@ -1,4 +1,8 @@
 {
+  "asset_authority": "console: ui-foundation GLOBALS_CSS -> assets/globals.css; marketing: apps/marketing-zola/public -> css/, fonts/, images/, root files",
+  "css_sha256": "a9ce5227342b0bce6be9a6d9b178edfe96677c0277a0fe006ffec88e5b119930",
+  "marketing_sha256": "missing",
+  "renderer_sha256": "43ada6bd398aa26ac3214db14cabb46eb8313d792da17e83855ff7fce78b93e0",
   "fixtures": [
     {
       "id": "web-home-desktop",
@@ -369,6 +373,28 @@
       "route": "/lists/l_1/edit",
       "htmlFile": "web-lists-l_1-edit.html",
       "snapshotFile": "web-lists-l_1-edit-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-lists-l_1-members-desktop",
+      "surface": "web",
+      "route": "/lists/l_1/members",
+      "htmlFile": "web-lists-l_1-members.html",
+      "snapshotFile": "web-lists-l_1-members-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-lists-l_1-members-mobile",
+      "surface": "web",
+      "route": "/lists/l_1/members",
+      "htmlFile": "web-lists-l_1-members.html",
+      "snapshotFile": "web-lists-l_1-members-mobile.png",
       "viewport": {
         "width": 390,
         "height": 844
@@ -881,6 +907,28 @@
       }
     },
     {
+      "id": "control-plane-confirm-desktop",
+      "surface": "control-plane",
+      "route": "/confirm",
+      "htmlFile": "control-plane-confirm.html",
+      "snapshotFile": "control-plane-confirm-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-confirm-mobile",
+      "surface": "control-plane",
+      "route": "/confirm",
+      "htmlFile": "control-plane-confirm.html",
+      "snapshotFile": "control-plane-confirm-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
       "id": "control-plane-home-desktop",
       "surface": "control-plane",
       "route": "/",
@@ -963,6 +1011,28 @@
       "route": "/tenants/new",
       "htmlFile": "control-plane-tenants-new.html",
       "snapshotFile": "control-plane-tenants-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-tenants-t_1-desktop",
+      "surface": "control-plane",
+      "route": "/tenants/t_1",
+      "htmlFile": "control-plane-tenants-t_1.html",
+      "snapshotFile": "control-plane-tenants-t_1-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-tenants-t_1-mobile",
+      "surface": "control-plane",
+      "route": "/tenants/t_1",
+      "htmlFile": "control-plane-tenants-t_1.html",
+      "snapshotFile": "control-plane-tenants-t_1-mobile.png",
       "viewport": {
         "width": 390,
         "height": 844

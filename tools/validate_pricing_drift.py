@@ -741,16 +741,49 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
     for stale in ("SendGrid", "Mailchimp", "You Save"):
         check(stale not in island, f"generated pricing island contains stale token {stale!r}", errors)
 
+    # Annual-savings needle DERIVED from the marketing catalog: the FAQ must
+    # state the catalog's saving (annual_billing_months=10 ⇒ 16.7%), never the
+    # retired "roughly a 17% discount" rounding the EN fallback used to carry
+    # (R4 filed that fallback drift; the translated answers already matched).
+    savings_needle: str | None = None
+    try:
+        pricing_data = json.loads(read(MARKETING_PRICING_JSON))
+        months = int(pricing_data["annual_billing_months"])
+        savings = 100.0 * (12 - months) / 12
+        catalog_savings = float(pricing_data["annual_savings_percent"])
+        if abs(catalog_savings - savings) > 0.05:
+            errors.append(
+                f"pricing.json annual_savings_percent {catalog_savings} disagrees with "
+                f"annual_billing_months={months} ({savings:.1f}%)"
+            )
+        savings_needle = f"{savings:.1f}% saving"
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        errors.append(
+            f"apps/marketing-zola/data/pricing.json cannot yield the annual savings: {error}"
+        )
+
     for needle in (
         "€0.80, Pro €0.60, Growth/Business €0.35",
-        "roughly a 17% discount",
         "HIPAA availability is not currently offered",
         "Stripe billing portal",
         "verified Stripe webhook",
     ):
         check(needle in faq, f"pricing FAQ is missing {needle!r}", errors)
+    if savings_needle is not None:
+        check(
+            savings_needle in faq,
+            f"pricing FAQ is missing the catalog annual saving {savings_needle!r}",
+            errors,
+        )
     # 2026-09-08 §9: 0.80/0.60/0.35 are the CANONICAL per-plan rates now.
-    for stale in ("saves 10%", "upgraded or downgraded from the dashboard"):
+    # Annual billing: the retired "roughly a 17%" rounding and the retired
+    # Enterprise €0.22–€0.35 range must never come back (R4's fallback drift).
+    for stale in (
+        "saves 10%",
+        "upgraded or downgraded from the dashboard",
+        "roughly a 17% discount",
+        "€0.22–€0.35 contractual",
+    ):
         check(stale not in faq, f"pricing FAQ contains stale token {stale!r}", errors)
 
 
@@ -939,6 +972,12 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
     check("Operational authority" in authority, "pricing authority map is missing operational authority section", errors)
 
 
+# Locales the marketing build renders. The RENDERED locale pages are checked
+# explicitly: validating only the English page let a translated pricing page
+# keep stale prices with every gate green.
+BUILT_LOCALES = ("de", "fr", "es")
+
+
 def validate_built_output(errors: list[str]) -> None:
     if not GENERATED_MARKETING.is_dir():
         errors.append("apps/marketing-zola/public is missing; run zola build before pricing validation")
@@ -958,6 +997,32 @@ def validate_built_output(errors: list[str]) -> None:
     # Free 30k / Starter EUR25 / Pro 65 / Growth 150 / Scale 350 / Ent 3000).
     for stale in ("Starter", "Scale", "€25", "€65", "€150", "€350", "plan=developer", "plan=business"):
         check(stale not in output, f"generated marketing output contains stale token {stale!r}", errors)
+
+    # ── Rendered LOCALE pricing pages ─────────────────────────────────────
+    # Every localized pricing page is its own visible copy of the ladder:
+    # the same current prices must appear and no retired price may survive in
+    # a translation. Plan NAMES are translated, so the locale check pins the
+    # currency amounts (locale-independent) rather than English labels.
+    for locale in BUILT_LOCALES:
+        locale_page = GENERATED_MARKETING / locale / "pricing" / "index.html"
+        if not locale_page.is_file():
+            errors.append(
+                f"localized pricing page {locale}/pricing/index.html is missing from the build"
+            )
+            continue
+        locale_output = read(locale_page)
+        for needle in ("€29", "€89", "€229", "€699", "€1,750"):
+            check(
+                needle in locale_output,
+                f"rendered [{locale}] pricing page is missing the current price {needle!r}",
+                errors,
+            )
+        for stale in ("€25", "€65", "€150", "€350"):
+            check(
+                stale not in locale_output,
+                f"rendered [{locale}] pricing page still carries the retired price {stale!r}",
+                errors,
+            )
 
 
 

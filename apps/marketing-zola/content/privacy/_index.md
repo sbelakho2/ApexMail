@@ -45,6 +45,8 @@ The supplied configuration targets EEA regions for core email-service data and t
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 
+<span id="data-retention"></span>
+
 ## 5. Data Retention
 
 We retain personal data only as long as necessary for the purposes for which it was collected:

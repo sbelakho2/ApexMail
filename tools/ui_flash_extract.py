@@ -258,6 +258,19 @@ def comment_spans(text: str) -> list[tuple[int, int]]:
     while i < n:
         ch = text[i]
         two = text[i:i + 2]
+        if ch == "'":
+            # U-6 (found by the fold): a char literal containing a quote —
+            # `find('"')`, `ends_with(['"', '\''])` — used to open a PHANTOM
+            # string that swallowed the following quotes/comments and pushed
+            # masked brace depth permanently above zero, so `production_split`
+            # stopped removing the cfg(test) module and the gate flagged
+            # test-only literals. Char literals are opaque tokens: they can
+            # never open a string.
+            if m := _CHAR_LIT_RE.match(text, i):
+                i = m.end()  # ('"', '\'', '\n')
+            else:
+                i += 1  # lifetime tick
+            continue
         if ch == '"':
             i += 1
             while i < n:
@@ -307,7 +320,16 @@ def rust_string_literals(text: str) -> list[tuple[int, int, str]]:
 
     i = 0
     n = len(text)
+    comment_at = 0
     while i < n:
+        # Skip comment interiors outright: a lone `"` inside a comment used to
+        # be scanned as a string opener, which shifted every subsequent
+        # literal pairing (same U-6 class as the char-literal desync above).
+        while comment_at < len(comments) and comments[comment_at][1] <= i:
+            comment_at += 1
+        if comment_at < len(comments) and comments[comment_at][0] <= i < comments[comment_at][1]:
+            i = comments[comment_at][1]
+            continue
         ch = text[i]
         if ch == "r" and (m := _RAW_STR_OPEN_RE.match(text, i)) and \
                 (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):

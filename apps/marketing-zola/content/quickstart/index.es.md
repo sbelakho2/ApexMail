@@ -12,6 +12,8 @@ Esta guía lo lleva desde cero hasta un dominio de envío verificado y su primer
 
 **Tiempo total estimado:** 8–10 minutos para un desarrollador familiarizado con DNS y APIs REST.
 
+**Aviso de idioma:** La documentación para desarrolladores (`/docs/`) y el API Explorer enlazados en esta guía solo están disponibles en inglés por ahora.
+
 ---
 
 ## Paso 1: Crear una cuenta
@@ -339,7 +341,7 @@ def verify_webhook(body: bytes, signature: str, timestamp: str, secret: str) -> 
 
 Antes de pasar a producción:
 
-1. **Actualice desde el plan Free** si supera 3.000 emails/mes recurrentes (o su asignación de lanzamiento única de 30.000 emails). Vea [Precios](/pricing/).
+1. **Actualice desde el plan Free** si supera 3.000 emails/mes recurrentes (o su asignación de lanzamiento única de 30.000 emails). Vea [Precios](/es/pricing/).
 3. **Configure DMARC** para su dominio de envío con una política de al menos `p=none` inicialmente, avanzando a `p=quarantine` o `p=reject`.
 4. **Configure la alineación SPF** asegurando que su dominio `Return-Path` coincida con su dominio `From`.
 5. **Rote las claves API** — cree claves específicas de producción con scopes mínimos y fechas de caducidad.

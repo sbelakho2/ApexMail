@@ -418,10 +418,44 @@ impl<'a> ControlPlaneShell<'a> {
             ),
             None => String::new(),
         };
+        // Review §5.1 shell.rs / §4.8 ("keep account/workspace context
+        // discoverable on narrow screens"): below `sm` both the plan label
+        // and the identity block were hidden, so the operator's header showed
+        // the page title only. The compact line carries the SESSION-derived
+        // plan label (when resolved) and display name — never a fabricated
+        // one; with no session it renders nothing.
+        let compact_identity_block = match self.user_context.as_ref() {
+            Some(user) => {
+                let plan = if plan_label.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "<span class=\"text-[10px] font-bold uppercase tracking-wide text-surface-500\">{plan_label}</span>"
+                    )
+                };
+                format!(
+                    "<div class=\"flex sm:hidden items-center gap-2 min-w-0\" data-user-identity-compact>\
+                        {plan}\
+                        <span class=\"text-xs font-semibold text-surface-950 truncate max-w-[9rem]\">{display_name}</span>\
+                    </div>",
+                    display_name = html_escape(user.display_name),
+                )
+            }
+            None => String::new(),
+        };
+        // Same disclosure contract as the web console drawer above: the
+        // `<details>` is a plain `md:hidden` disclosure, the summary is the
+        // fixed trigger, and the panel's dimensions/background/scrolling come
+        // from `.apex-mobile-nav[open] .apex-mobile-nav-panel` in the
+        // stylesheet — never from always-on utilities, so the CLOSED drawer
+        // occupies only the summary control and cannot intercept page content
+        // (review §3 P1-3 / §4.8; the old `fixed inset-y-0 left-0 z-50` details
+        // plus a `h-screen w-full` panel sized the closed drawer as a 320px ×
+        // 100vh hit area).
         let mobile_sidebar = format!(
-            "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"control-plane-mobile-sidebar\">\
-            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
-            <div id=\"control-plane-mobile-panel\" class=\"h-screen w-full bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
+            "<details class=\"apex-mobile-nav md:hidden\" id=\"control-plane-mobile-sidebar\">\
+            <summary class=\"fixed left-4 top-3 z-50 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <div id=\"control-plane-mobile-panel\" class=\"apex-mobile-nav-panel\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
         );
@@ -434,12 +468,12 @@ impl<'a> ControlPlaneShell<'a> {
             {mobile_sidebar}\
             <div class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64\"{banner_offset}>\
                 {banner_markup}\
-                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\">\
+                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between pr-8 pl-14 md:px-8 sticky top-0 z-20\">\
                     <div class=\"flex items-baseline gap-3 min-w-0\">\
                         <p class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</p>\
                         <p class=\"hidden sm:block text-xs font-medium text-surface-500 truncate\">{page_description}</p>\
                     </div>\
-                    <div class=\"flex items-center gap-4 min-w-0\">{plan_label_block}{identity_block}</div>\
+                    <div class=\"flex items-center gap-4 min-w-0\">{plan_label_block}{identity_block}{compact_identity_block}</div>\
                 </header>\
                 <main class=\"p-8 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
@@ -466,6 +500,7 @@ impl<'a> ControlPlaneShell<'a> {
             child_html = self.child_html,
             plan_label_block = plan_label_block,
             identity_block = identity_block,
+            compact_identity_block = compact_identity_block,
         )
     }
 }
@@ -528,18 +563,57 @@ fn control_plane_banner_class(tone: &str) -> &'static str {
     }
 }
 
+/// `/cp/audit` and `/audit` address the same control-plane page (the operator
+/// host serves the bare alias and the `/cp/*` canonical path), so both sides
+/// of an active-state comparison are reduced to the bare form. `/cp` and `/`
+/// are the surface root, which the nav treats as the dashboard entry.
+fn cp_canonical_path(path: &str) -> &str {
+    let bare = path
+        .strip_prefix("/cp")
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .unwrap_or(path);
+    match bare {
+        "" | "/" => "/dashboard",
+        other => other,
+    }
+}
+
+/// Does `href` address `current_path`? Prefix matching happens at a path
+/// SEGMENT boundary, so `/settings` never matches `/settings-archive`.
+fn link_is_active(href: &str, current_path: &str) -> bool {
+    let href = cp_canonical_path(href);
+    let current = cp_canonical_path(current_path);
+    if href == current {
+        return true;
+    }
+    current
+        .strip_prefix(href)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The ONE href marked active out of `items`: the most specific (longest)
+/// match. The old per-item `starts_with` test marked BOTH `/settings` and
+/// `/settings/api-keys` active on the API-keys page (review §5.1 shell.rs:
+/// "single-most-specific active matching").
+fn active_href<'a>(items: &[(&'a str, &'a str, &'a str)], current_path: &str) -> Option<&'a str> {
+    items
+        .iter()
+        .filter(|(_, href, _)| link_is_active(href, current_path))
+        .map(|(_, href, _)| *href)
+        .max_by_key(|href| href.len())
+}
+
 fn render_sidebar_content(
     items: &[(&str, &str, &str)],
     _link_classes: &str,
     current_path: &str,
 ) -> String {
+    let active_for_path = active_href(items, current_path);
     let links = items
         .iter()
         .map(|(label, href, icon_name)| {
             let icon = shell_icon(icon_name, "h-4 w-4");
-            let is_active = current_path == *href
-                || (href != &"/" && current_path.starts_with(href))
-                || (href == &"/dashboard" && (current_path == "/" || current_path == "/cp" || current_path == "/dashboard"));
+            let is_active = active_for_path == Some(*href);
             let active_class = " aria-current=\"page\"";
 
             // CONCENTRIC (mark DNA): the active cell is solid + an outer
@@ -807,6 +881,45 @@ mod tests {
         assert_eq!(toast_store_global(), "__apexmailToastStore__");
         assert_eq!(toast_remove_delay_ms(), 5000);
         assert_eq!(header_shortcut_hint(), "Search");
+    }
+
+    /// Review §5.1 shell.rs: exactly ONE nav cell is active, and it is the
+    /// most specific match — `/settings/api-keys` may not light up
+    /// `/settings` as well, `/campaigns-archive` may not light up
+    /// `/campaigns`, and the `/cp` aliases resolve to the same cell as their
+    /// bare paths.
+    #[test]
+    fn sidebar_active_matching_is_single_and_most_specific() {
+        let items = [
+            ("Dashboard", "/dashboard", "home"),
+            ("Campaigns", "/campaigns", "mail"),
+            ("Settings", "/settings", "settings"),
+            ("API Keys", "/settings/api-keys", "key"),
+            ("Demos", "/cp/demos", "presentation"),
+        ];
+        let active_ids = |path: &str| {
+            let html = render_sidebar_content(&items, "", path);
+            html.matches("aria-current=\"page\"").count()
+        };
+        let active_href_for = |path: &str| active_href(&items, path).map(str::to_string);
+        assert_eq!(active_ids("/settings/api-keys"), 1);
+        assert_eq!(
+            active_href_for("/settings/api-keys").as_deref(),
+            Some("/settings/api-keys")
+        );
+        assert_eq!(active_href_for("/settings"), Some("/settings".to_string()));
+        assert_eq!(
+            active_href_for("/campaigns/c_1"),
+            Some("/campaigns".to_string())
+        );
+        // Segment boundary: a sibling path is NOT a match.
+        assert_eq!(active_href_for("/campaigns-archive"), None);
+        assert_eq!(active_ids("/campaigns-archive"), 0);
+        // `/cp` aliases resolve to the bare cell; the CP root is the dashboard.
+        assert_eq!(active_href_for("/cp/audit"), None); // no audit item in this fixture set
+        assert_eq!(active_href_for("/cp/demos"), Some("/cp/demos".to_string()));
+        assert_eq!(active_href_for("/cp"), Some("/dashboard".to_string()));
+        assert_eq!(active_href_for("/"), Some("/dashboard".to_string()));
     }
 
     #[test]
@@ -1343,12 +1456,14 @@ mod tests {
             "/tenants",
             "csrf-token",
             "owner",
-            Some(&UserContext {
-                display_name: "CP Dogfood",
-                email: "cp-dogfood@dogfood.test",
-                plan_label: "Scale Plan — 2M / mo",
-            }),
-            None,
+            crate::leptos_views::ControlPlaneSessionContext {
+                user_context: Some(UserContext {
+                    display_name: "CP Dogfood",
+                    email: "cp-dogfood@dogfood.test",
+                    plan_label: "Scale Plan — 2M / mo",
+                }),
+                impersonation_banner: None,
+            },
         );
         assert!(
             html.contains("data-plan-label"),
@@ -1373,12 +1488,14 @@ mod tests {
             "/tenants",
             "",
             "admin",
-            Some(&UserContext {
-                display_name: "\"><script>alert(1)</script>",
-                email: "op@example.test",
-                plan_label: "<img src=x onerror=alert(1)>",
-            }),
-            None,
+            crate::leptos_views::ControlPlaneSessionContext {
+                user_context: Some(UserContext {
+                    display_name: "\"><script>alert(1)</script>",
+                    email: "op@example.test",
+                    plan_label: "<img src=x onerror=alert(1)>",
+                }),
+                impersonation_banner: None,
+            },
         );
         assert!(!hostile.contains("<script>alert(1)</script>"));
         assert!(!hostile.contains("<img src=x onerror=alert(1)>"));

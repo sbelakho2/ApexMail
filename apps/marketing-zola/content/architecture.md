@@ -103,7 +103,7 @@ Shared EU Cloud customers send from ApexMail's shared IP pools:
 
 ### Dedicated IPs
 
-Available through the applicable runtime entitlement: an approved Pro add-on, Growth (one included), Scale (three included), and Enterprise (ten included). Private-deployment availability is contractual:
+Available through the applicable runtime entitlement: an approved Pro add-on; Growth and Business (one included); and Enterprise Cloud (three included). Private-deployment availability is contractual:
 
 - Exclusive IP addresses not shared with other customers.
 - Full control over sending reputation.

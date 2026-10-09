@@ -12,6 +12,8 @@ Diese Anleitung führt Sie von null bis zu einer verifizierten Absenderdomain un
 
 **Geschätzte Gesamtzeit:** 8–10 Minuten für Entwickler, die mit DNS und REST-APIs vertraut sind.
 
+**Sprachhinweis:** Die in dieser Anleitung verlinkte Entwicklerdokumentation (`/docs/`) und der API-Explorer sind derzeit nur auf Englisch verfügbar.
+
 ---
 
 ## Schritt 1: Konto erstellen
@@ -339,7 +341,7 @@ def verify_webhook(body: bytes, signature: str, timestamp: str, secret: str) -> 
 
 Bevor Sie in Produktion gehen:
 
-1. **Upgrade vom Free-Tarif**, wenn Sie 3.000 E-Mails/Monat dauerhaft (oder Ihr einmaliges Startguthaben von 30.000 E-Mails) überschreiten. Siehe [Preise](/pricing/).
+1. **Upgrade vom Free-Tarif**, wenn Sie 3.000 E-Mails/Monat dauerhaft (oder Ihr einmaliges Startguthaben von 30.000 E-Mails) überschreiten. Siehe [Preise](/de/pricing/).
 3. **DMARC konfigurieren** für Ihre Absenderdomain mit einer Policy von mindestens `p=none` zunächst, später `p=quarantine` oder `p=reject`.
 4. **SPF-Ausrichtung einrichten**, indem Ihre `Return-Path`-Domain mit Ihrer `From`-Domain übereinstimmt.
 5. **API-Schlüssel rotieren** — erstellen Sie produktions-spezifische Schlüssel mit minimalen Scopes und Ablaufdaten.

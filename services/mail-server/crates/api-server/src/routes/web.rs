@@ -67,6 +67,10 @@ use ui_foundation::tracking_domain::{TrackingDomainPanel, TrackingDomainPanelRow
 use crate::config::Config;
 use crate::middleware::auth::AuthUser;
 use crate::routes::csrf::validate_csrf_token;
+// The shared transactional-email shell (R5's review §12.1 fix): the browser
+// verification/reset mails render through the SAME builder as their API
+// twins, so both surfaces are structurally identical.
+use crate::routes::system_sender::{render_transactional_email, EmailAction, TransactionalEmail};
 use crate::state::AppState;
 
 /// Public (pre-auth) form routes. Mounted inside the rate-limited public
@@ -381,6 +385,11 @@ pub fn detail_router() -> Router<AppState> {
         // Batch-2 list-detail fix: /lists/{id} renders the real list (name,
         // subscriber counts, working Edit/Delete with the real id).
         .route("/lists/:id", get(web_list_detail))
+        // Review §6.2 (R1/R6): the list detail's subscriber count is
+        // inspectable — /lists/{id}/members lists every subscriber with a
+        // readable identity, status and added date, or the empty state with
+        // its next action. Same route style as the list-detail GET above.
+        .route("/lists/:id/members", get(web_list_members))
         // Deferred-feature 3: /contacts/{id}/edit renders the real contact
         // (name/status editor posting to /web/contacts/update).
         .route("/contacts/:id/edit", get(web_contact_edit))
@@ -503,6 +512,13 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         .route(
             "/web/admin/autopilot/actions/:id/replay",
             post(form_autopilot_action_replay),
+        )
+        // Review §7 (Sales decision review): the pending-approval rows on the
+        // owner-only sales page now decide their review here — the same
+        // transactional path as the JSON proxy, no API client required.
+        .route(
+            "/web/admin/autopilot/decisions/:id/review",
+            post(form_autopilot_decision_review),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -1177,6 +1193,15 @@ impl FormFieldMap {
         } else {
             self.values.push((name.to_string(), value.to_string()));
         }
+    }
+
+    /// Record one value of a MULTI-valued field (a checkbox group posting
+    /// repeated keys, e.g. the webhook `events` group). Unlike [`Self::set`]
+    /// this APPENDS, so the render pass sees the name carried more than once
+    /// and takes its grouped path — re-checking EVERY posted option instead
+    /// of only the last one (review §3 P1-12 / failed-POST replay).
+    pub fn add_value(&mut self, name: &str, value: &str) {
+        self.values.push((name.to_string(), value.to_string()));
     }
 
     /// Record a per-field error.
@@ -1860,7 +1885,7 @@ fn html_escape_text(value: &str) -> String {
 /// the view layer replaces this with a dedicated page function). The
 /// CSRF token is the caller-resolved double-submit token (audit F4) so
 /// the embedded `_csrf` inputs match the `csrf_token` cookie.
-fn web_data_page(
+pub(crate) fn web_data_page(
     path: &str,
     list: &ui_foundation::view_data::ListPageData,
     noun: &str,
@@ -1877,7 +1902,7 @@ fn web_data_page(
 }
 
 /// Compose a full control-plane page from list data (stub path).
-fn cp_data_page(
+pub(crate) fn cp_data_page(
     path: &str,
     list: &ui_foundation::view_data::ListPageData,
     noun: &str,
@@ -3046,14 +3071,36 @@ async fn form_signup(
             urlencode(&email),
         );
         // The address is attacker-controllable text interpolated into HTML
-        // (audit F9): valid_email permits `<>"`, so escape it for the HTML
-        // body — the link itself is URL-encoded already.
+        // (audit F9): `render_transactional_email` escapes the heading and
+        // title; the body_html is pre-escaped here — valid_email permits
+        // `<>"`, so escape the address (the link itself is URL-encoded
+        // already).
+        //
+        // R5 (review §12.1): this browser signup shell is the twin of the
+        // API signup's `auth::enqueue_verification_email` — it renders
+        // through the SAME shared transactional shell so both are
+        // structurally identical (viewport, background/foreground pair,
+        // visible fallback URL under the button, legal footer). Only the
+        // link semantics stay distinct: the browser page consumes
+        // `?token=&email=` on `/verify-email`, while the API twin emits the
+        // path-param JSON route.
         let email_html = html_escape_text(&email);
-        let html_body = format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Verify Your ApexMail Account</h2><p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p><p><a href=\"{verification_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Verify email</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours.</p></body></html>"
-        );
+        let html_body = render_transactional_email(&TransactionalEmail {
+            document_title: "Verify your email — ApexMail",
+            heading: "Verify Your ApexMail Account",
+            body_html: &format!(
+                "<p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p>\n\
+                 <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
+            ),
+            actions: &[EmailAction {
+                label: "Verify email",
+                url: &verification_link,
+                secondary: false,
+            }],
+            footer_link: true,
+        });
         let text_body = format!(
-            "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours."
+            "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee"
         );
         crate::routes::system_sender::queue_system_email_in_transaction(
             &mut tx,
@@ -3190,13 +3237,29 @@ async fn form_forgot_password(
                 urlencode(&email),
             );
             // Audit F9: same HTML escaping of the interpolated address as
-            // the signup verification body.
+            // the signup verification body. R5 (review §12.1): the browser
+            // reset shell is the twin of `forgot_password::forgot_password`
+            // and renders through the SAME shared transactional shell —
+            // only the link semantics stay distinct (the browser form page
+            // consumes `?token=&email=`, the API twin emits
+            // `/reset-password/{token}`).
             let email_html = html_escape_text(&email);
-            let html_body = format!(
-                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Reset Your Password</h2><p>We received a request to reset the password for <strong>{email_html}</strong>.</p><p><a href=\"{reset_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Reset Password</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p></body></html>"
-            );
+            let html_body = render_transactional_email(&TransactionalEmail {
+                document_title: "Reset your password — ApexMail",
+                heading: "Reset Your Password",
+                body_html: &format!(
+                    "<p>We received a request to reset the password for <strong>{email_html}</strong>.</p>\n\
+                     <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>\n"
+                ),
+                actions: &[EmailAction {
+                    label: "Reset Password",
+                    url: &reset_link,
+                    secondary: false,
+                }],
+                footer_link: true,
+            });
             let text_body = format!(
-                "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour."
+                "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee"
             );
             crate::routes::system_sender::queue_system_email_in_transaction(
                 &mut tx,
@@ -3396,17 +3459,32 @@ async fn form_resend_verification(
 
             // Same body the signup flow queues (audit F9: the address is
             // attacker-controllable text — escape it in the HTML body).
+            // R5 (review §12.1): the resend shell renders through the SAME
+            // shared transactional shell as every other verification mail;
+            // its link keeps the path-param JSON semantics this resend
+            // route already used.
             let verification_link = format!(
                 "{}/v1/auth/verify-email/{}",
                 state.config.base_url.trim_end_matches('/'),
                 urlencode(&token)
             );
             let email_html = html_escape_text(&email);
-            let html_body = format!(
-                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Verify Your ApexMail Account</h2><p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p><p><a href=\"{verification_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Verify email</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours.</p></body></html>"
-            );
+            let html_body = render_transactional_email(&TransactionalEmail {
+                document_title: "Verify your email — ApexMail",
+                heading: "Verify Your ApexMail Account",
+                body_html: &format!(
+                    "<p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p>\n\
+                     <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
+                ),
+                actions: &[EmailAction {
+                    label: "Verify email",
+                    url: &verification_link,
+                    secondary: false,
+                }],
+                footer_link: true,
+            });
             let text_body = format!(
-                "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours."
+                "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee"
             );
             crate::routes::system_sender::queue_system_email_in_transaction(
                 &mut tx,
@@ -3510,13 +3588,20 @@ async fn form_reset_password(
             &state.config,
         );
     };
-    if status != "active" {
+    if !matches!(status.as_str(), "active" | "invited") {
         return redirect_error(
             "This account is not active.",
             "/forgot-password",
             &state.config,
         );
     }
+    // R6 (review §12.1): a team invitation's password-setup link resolves to
+    // an `invited` row (the unusable `!invited-pending-activation` hash).
+    // Setting the password through this page IS the acceptance step, so the
+    // guarded UPDATE below promotes `invited` → `active`; without it the
+    // invitation link could never be completed (the old guard matched only
+    // `active` and refused the invitee with "This account is not active.").
+    let accepting_invitation = status == "invited";
     let valid_expiry = ["password_reset_expires", "password_reset_iat"]
         .iter()
         .all(|key| metadata.get(key).and_then(|v| v.as_str()).is_some())
@@ -3567,10 +3652,11 @@ async fn form_reset_password(
         let update = sqlx::query(
             "UPDATE users
              SET password_hash = $1,
+                 status = CASE WHEN status = 'invited' THEN 'active' ELSE status END,
                  metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
                  updated_at = NOW()
              WHERE id = $2::uuid
-               AND status = 'active'
+               AND status IN ('active', 'invited')
                AND metadata->>'password_reset_token_hash' = $3",
         )
         .bind(&new_hash)
@@ -3588,6 +3674,11 @@ async fn form_reset_password(
     }
     .await;
     match outcome {
+        Ok(()) if accepting_invitation => redirect_success(
+            "Invitation accepted — your password is set. Sign in with it, and confirm your email address with the verification link from the invitation if you have not already.",
+            "/login",
+            &state.config,
+        ),
         Ok(()) => redirect_success(
             "Your password has been reset. Sign in with your new password.",
             "/login",
@@ -4261,8 +4352,13 @@ async fn form_api_key_create(
     }
     let form_map: HashMap<String, String> = form.pairs.iter().cloned().collect();
     let name = field_truncated(&form_map, "name", 100);
-    if name.is_empty() {
-        return redirect_error("Give the key a name.", "/settings/api-keys", &state.config);
+    // Failed-POST replay (R2's filed item): the submitted form is recorded
+    // BEFORE any validation exit, and the `scopes` checkbox group appends
+    // one entry per selected value (the render pass' grouped path re-checks
+    // EVERY posted scope, not just the last one).
+    let mut fields = FormFieldMap::new("api-key-create");
+    if !name.is_empty() {
+        fields.set("name", &name);
     }
     // Supported expiry choice (F46): the form may post `expires_in_days`;
     // absent means the shared JSON default (90 days) — console-created keys
@@ -4270,20 +4366,9 @@ async fn form_api_key_create(
     // Out-of-range values surface the shared path's validation error as a
     // flash; a non-numeric value is rejected up front.
     let expires_raw = form.field("expires_in_days").trim().to_string();
-    let expires_in_days: Option<i64> = if expires_raw.is_empty() {
-        None
-    } else {
-        match expires_raw.parse::<i64>() {
-            Ok(days) => Some(days),
-            Err(_) => {
-                return redirect_error(
-                    "Expiry must be a number of days (1-365).",
-                    "/settings/api-keys",
-                    &state.config,
-                );
-            }
-        }
-    };
+    if !expires_raw.is_empty() {
+        fields.set("expires_in_days", &expires_raw);
+    }
     // Supported scope choices (F46): the form may post a `scopes` checkbox
     // group; every value is validated + authorized by the SHARED creation
     // path below (F17). Absent keeps the console's historical default.
@@ -4294,6 +4379,32 @@ async fn form_api_key_create(
         .filter(|scope| !scope.is_empty())
         .collect();
     scopes.dedup();
+    for scope in &scopes {
+        fields.add_value("scopes", scope);
+    }
+    if name.is_empty() {
+        return redirect_with_field_map(
+            &fields,
+            "Give the key a name.",
+            "/settings/api-keys",
+            &state.config,
+        );
+    }
+    let expires_in_days: Option<i64> = if expires_raw.is_empty() {
+        None
+    } else {
+        match expires_raw.parse::<i64>() {
+            Ok(days) => Some(days),
+            Err(_) => {
+                return redirect_with_field_map(
+                    &fields,
+                    "Expiry must be a number of days (1-365).",
+                    "/settings/api-keys",
+                    &state.config,
+                );
+            }
+        }
+    };
     if scopes.is_empty() {
         scopes = vec!["messages:send".into(), "messages:read".into()];
     }
@@ -4307,7 +4418,6 @@ async fn form_api_key_create(
             // Item N: the reveal-once secret travels as STRUCTURED data in
             // the signed field-map cookie (mono-renderable by the view),
             // with the prose flash kept for no-JS banner parity.
-            let mut fields = FormFieldMap::new("api-key-create");
             fields.set("name", &minted.name);
             fields.secret("API key secret (shown once)", &minted.raw_key);
             redirect_with_secret(
@@ -4321,11 +4431,18 @@ async fn form_api_key_create(
                 &state.config,
             )
         }
-        Err(crate::error::ApiError::Validation(details)) => {
-            redirect_error(&details.join(" "), "/settings/api-keys", &state.config)
-        }
+        // The scope-authorization / expiry refusals are caller-actionable
+        // validation defects: the flash carries the message AND the field
+        // map replays name/expiry/scope selections (a rejected scope no
+        // longer erases the whole form).
+        Err(crate::error::ApiError::Validation(details)) => redirect_with_field_map(
+            &fields,
+            &details.join(" "),
+            "/settings/api-keys",
+            &state.config,
+        ),
         Err(crate::error::ApiError::Forbidden(message)) => {
-            redirect_error(&message, "/settings/api-keys", &state.config)
+            redirect_with_field_map(&fields, &message, "/settings/api-keys", &state.config)
         }
         // FIX (outage-honesty audit #16): `mint_api_key` surfaces its
         // storage faults as an opaque `ApiError::Internal`, so the cause is
@@ -4394,6 +4511,15 @@ async fn form_webhook_create(
     let mut fields = FormFieldMap::new("webhook-create");
     let url = form.field("url").trim().to_string();
     fields.set("url", &url);
+    // Item E: bind the checkbox group — trim, dedupe, validate each name
+    // against KNOWN_WEBHOOK_EVENTS, store exactly what was chosen. The
+    // chosen set is recorded in the field map BEFORE validation so every
+    // failed-POST exit below replays the group (the map's multi-value path
+    // re-checks each posted option; R2's failed-POST replay item).
+    let events = normalize_webhook_events(form.get_all("events"));
+    for event in &events {
+        fields.add_value("events", event);
+    }
     // Same hardened validator as the JSON API (audit F): HTTPS-only,
     // private/reserved/link-local targets rejected — the old http(s)://
     // prefix check let `http://169.254.169.254/…` and `http://10.x/…`
@@ -4431,8 +4557,9 @@ async fn form_webhook_create(
         _ => {}
     }
     // Item E: bind the checkbox group — trim, dedupe, validate each name
-    // against KNOWN_WEBHOOK_EVENTS, store exactly what was chosen.
-    let events = normalize_webhook_events(form.get_all("events"));
+    // against KNOWN_WEBHOOK_EVENTS, store exactly what was chosen. (The
+    // posted group was recorded in the field map above, before any failure
+    // exit, so a typo'd group replays with the typo still visible.)
     if let Some(message) = validate_webhook_events(&events) {
         fields.error("events", &message);
         return redirect_with_field_map(&fields, &message, "/settings/webhooks", &state.config);
@@ -4514,9 +4641,11 @@ async fn form_webhook_create(
         // temporary-unavailable flash — never a bespoke "try again" copy.
         // A DUPLICATE URL is not an outage: the same endpoint is already
         // registered for this tenant (`uq_webhooks_tenant_url`), so the form
-        // says so instead of blaming storage.
+        // says so instead of blaming storage — and carries the field map so
+        // the posted URL + chosen event group replay (failed-POST replay).
         Err(error) if crate::routes::webhooks::is_unique_webhook_url_violation(&error) => {
-            redirect_error(
+            redirect_with_field_map(
+                &fields,
                 "A webhook with this URL already exists for this organization.",
                 "/settings/webhooks",
                 &state.config,
@@ -4543,6 +4672,89 @@ fn invite_role_rank(role: &str) -> i32 {
 
 /// Ceiling on outstanding (un-accepted) invitations per tenant.
 const MAX_OPEN_INVITATIONS_PER_TENANT: i64 = 50;
+
+/// The tenant team-invitation email: BOTH credentials an invited teammate
+/// needs in one message — the password-setup link (the invited row carries
+/// the unusable `!invited-pending-activation` placeholder, so no password
+/// can ever be set without it) and the email-verification link (proves
+/// mailbox ownership). Queued in the CALLER's transaction through the
+/// shared `queue_system_email_in_transaction`, so the invitation record and
+/// its deliverable message commit together or not at all (R6 finding: the
+/// handler used to mint no token, queue no mail, and still flash "Invitation
+/// created.").
+///
+/// This is the tenant twin of
+/// [`crate::routes::auth::enqueue_operator_invite_email`]: the same two-step
+/// acceptance contract and the same shared transactional shell, but
+/// workspace copy. Reusing the operator mail verbatim would tell a teammate
+/// they were invited "to the control plane" and must enroll control-plane
+/// MFA — false for a workspace member — so the two builders differ only in
+/// audience copy (the same reason every other mail has its own copy).
+async fn enqueue_team_invite_email(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    base_url: &str,
+    email: &str,
+    workspace: &str,
+    role: &str,
+    verification_token: &str,
+    password_setup_token: &str,
+) -> Result<(), crate::error::ApiError> {
+    let verification_link = format!(
+        "{}/verify-email?token={}&email={}",
+        base_url.trim_end_matches('/'),
+        urlencode(verification_token),
+        urlencode(email),
+    );
+    let setup_link = format!(
+        "{}/reset-password?token={}&email={}",
+        base_url.trim_end_matches('/'),
+        urlencode(password_setup_token),
+        urlencode(email),
+    );
+    // The address is attacker-controllable text (audit F9): escape every
+    // interpolation for the HTML body; the shell escapes the title/heading.
+    let safe_email = html_escape_text(email);
+    let safe_workspace = html_escape_text(workspace);
+    let safe_role = html_escape_text(role);
+    let html_body = render_transactional_email(&TransactionalEmail {
+        document_title: "You have been invited — ApexMail",
+        heading: "Your ApexMail Invitation",
+        body_html: &format!(
+            "<p>You have been invited to join the <strong>{safe_workspace}</strong> workspace on ApexMail as {safe_role}.</p>\n\
+             <p><strong>1. Set your password</strong></p>\n\
+             <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>\n\
+             <p><strong>2. Confirm this email address</strong></p>\n\
+             <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. The invitation was sent to <strong>{safe_email}</strong>.</p>\n"
+        ),
+        actions: &[
+            EmailAction {
+                label: "Set password",
+                url: &setup_link,
+                secondary: false,
+            },
+            EmailAction {
+                label: "Verify email",
+                url: &verification_link,
+                secondary: true,
+            },
+        ],
+        footer_link: true,
+    });
+    let text_body = format!(
+        "Your ApexMail Invitation\n\nYou have been invited to join the {workspace} workspace on ApexMail as {role}.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nIf you weren't expecting this invitation, you can safely ignore this email.\n\nApexMail — https://apexmail.ee"
+    );
+    crate::routes::system_sender::queue_system_email_in_transaction(
+        tx,
+        email,
+        "You have been invited to an ApexMail workspace",
+        &html_body,
+        &text_body,
+        vec!["system".into(), "team-invite".into()],
+        crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
+    )
+    .await
+    .map(|_| ())
+}
 
 async fn form_team_invite(
     State(state): State<AppState>,
@@ -4643,6 +4855,10 @@ async fn form_team_invite(
         Entitlement(crate::error::ApiError),
         Limit,
         Internal(sqlx::Error),
+        /// The invitation row exists but its deliverable mail could not be
+        /// queued: the whole transaction rolls back (nothing is created and
+        /// nothing is claimed delivered).
+        Mail(crate::error::ApiError),
     }
     let outcome: Result<(), InviteFailure> = async {
         let entitlement = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
@@ -4650,14 +4866,22 @@ async fn form_team_invite(
             Err(error) => return Err(InviteFailure::Entitlement(error)),
         };
         let mut tx = state.db.begin().await.map_err(InviteFailure::Internal)?;
-        if let Err(error) = sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
-            .bind(user.tenant_id.as_str())
-            .fetch_optional(&mut *tx)
-            .await
+        // The tenant row lock (serializes concurrent invites) now also reads
+        // the workspace name the invitation mail names.
+        let workspace: String = match sqlx::query_scalar::<_, String>(
+            "SELECT name FROM tenants WHERE id = $1 FOR UPDATE",
+        )
+        .bind(user.tenant_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
         {
-            tracing::error!(error = %error, "team invite tenant lock failed");
-            return Err(InviteFailure::Internal(error));
-        }
+            Ok(Some(name)) if !name.trim().is_empty() => name,
+            Ok(_) => "your team".to_string(),
+            Err(error) => {
+                tracing::error!(error = %error, "team invite tenant lock failed");
+                return Err(InviteFailure::Internal(error));
+            }
+        };
         let seat_count: i64 =
             match sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
                 .bind(user.tenant_id.as_str())
@@ -4697,10 +4921,22 @@ async fn form_team_invite(
         if open_invites >= MAX_OPEN_INVITATIONS_PER_TENANT {
             return Err(InviteFailure::Limit);
         }
+        // R6 (review §12.1, R5 finding): the invited row used to carry no
+        // tokens and no mail — the acceptance path did not exist, yet the
+        // flash claimed success. Mint BOTH credentials (email verification +
+        // password setup), store their HASHES (never the plaintext) in
+        // `users.metadata` exactly like the canonical operator path
+        // (`form_admin_operator_create`), and queue the combined invitation
+        // e-mail in this SAME transaction.
+        let verification_token = apexmail_lib::id::generate_verification_token();
+        let verification_token_hash = crate::routes::helpers::hash_token(&verification_token);
+        let setup_token = apexmail_lib::id::generate_verification_token();
+        let setup_token_hash = crate::routes::helpers::hash_token(&setup_token);
+        let now = Utc::now();
         let inserted = sqlx::query(
             "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
                                 email_verified, mfa_enabled, metadata, created_at, updated_at)
-             VALUES ($1, $2, $3, '', $4, $5, 'invited', false, false, '{}'::jsonb, NOW(), NOW())",
+             VALUES ($1, $2, $3, '', $4, $5, 'invited', false, false, $6::jsonb, NOW(), NOW())",
         )
         // users.id is a UUID column (migration 052) — bind a UUID, not a text
         // nanoid (the insert would fail with invalid uuid syntax).
@@ -4709,12 +4945,38 @@ async fn form_team_invite(
         .bind(&email)
         .bind("!invited-pending-activation") // cannot authenticate until they set a password
         .bind(&role)
+        .bind(json!({
+            "invited_by": caller_id,
+            "verification_token_hash": verification_token_hash,
+            "verification_expires": (now + chrono::Duration::hours(24)).to_rfc3339(),
+            "password_reset_token_hash": setup_token_hash,
+            "password_reset_expires": (now + chrono::Duration::hours(1)).to_rfc3339(),
+            "password_reset_iat": now.to_rfc3339(),
+        }))
         .execute(&mut *tx)
         .await;
         if let Err(error) = inserted {
             tracing::error!(error = %error, "team invite insert failed");
             let _ = tx.rollback().await;
             return Err(InviteFailure::Internal(error));
+        }
+        // The mail is queued in the SAME transaction: a queue failure rolls
+        // the invitation back, so the flash can never claim a delivery that
+        // did not happen.
+        if let Err(error) = enqueue_team_invite_email(
+            &mut tx,
+            &state.config.base_url,
+            &email,
+            &workspace,
+            &role,
+            &verification_token,
+            &setup_token,
+        )
+        .await
+        {
+            tracing::error!(error = %error, "team invite email queue failed");
+            let _ = tx.rollback().await;
+            return Err(InviteFailure::Mail(error));
         }
         match tx.commit().await {
             Ok(()) => Ok(()),
@@ -4726,7 +4988,16 @@ async fn form_team_invite(
     }
     .await;
     match outcome {
-        Ok(()) => redirect_success("Invitation created.", "/settings/team", &state.config),
+        // R6 (review §12.1/R5): the flash states what actually happened —
+        // an invitation record AND the two-link invitation e-mail. The old
+        // "Invitation created." implied a delivery that never existed.
+        Ok(()) => redirect_success(
+            &format!(
+                "Invitation sent to {email} — the email carries the password-setup and verification links."
+            ),
+            "/settings/team",
+            &state.config,
+        ),
         // Batch-2 leaked-copy fix: the entitlement detail (internal plan /
         // field names) stays in the log; the invitation flash speaks plainly.
         // FIX (outage-honesty audit #16): only a GENUINE plan refusal may
@@ -4751,9 +5022,9 @@ async fn form_team_invite(
             "/settings/team",
             &state.config,
         ),
-        // FIX (outage-honesty audit #16): the storage failure rides the
-        // single honest exit — error-logged, outage-counted, standard
-        // temporary-unavailable flash — never a bespoke "try again" copy.
+        // The storage failure rides the single honest exit — error-logged,
+        // outage-counted, standard temporary-unavailable flash — never a
+        // bespoke "try again" copy.
         Err(InviteFailure::Internal(error)) => {
             tracing::error!(email = %email, "team invitation could not be created");
             temporary_storage_failure(
@@ -4761,6 +5032,13 @@ async fn form_team_invite(
                 "/settings/team",
                 &state.config,
             )
+        }
+        // An invitation whose mail could not be queued is not an invitation:
+        // the transaction rolled back, so nothing is created and the flash
+        // says the send failed (cause logged above).
+        Err(InviteFailure::Mail(error)) => {
+            tracing::error!(email = %email, error = %error, "team invitation mail was not queued");
+            temporary_storage_response("/settings/team", &state.config)
         }
     }
 }
@@ -4925,10 +5203,35 @@ async fn web_contact_edit(
         );
     };
     let detail = ui_foundation::view_data::ContactEditData {
-        id: contact_id,
+        id: contact_id.clone(),
         email,
         name: name.unwrap_or_default(),
         status,
+        lists: {
+            // Review §6.2: the editor shows the contact's real audience
+            // membership. A failed read is unavailability, never "not in any
+            // list".
+            match sqlx::query_scalar::<_, String>(
+                "SELECT l.name FROM list_subscribers ls \
+                 JOIN lists l ON l.id = ls.list_id \
+                 WHERE ls.contact_id = $1::uuid AND l.tenant_id = $2 \
+                 ORDER BY l.name LIMIT 50",
+            )
+            .bind(&contact_id)
+            .bind(user.tenant_id.as_str())
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(lists) => lists,
+                Err(error) => {
+                    tracing::error!(error = %error, "contact edit membership lookup failed");
+                    return temporary_storage_response(
+                        &format!("/contacts/{contact_id}/edit"),
+                        &state.config,
+                    );
+                }
+            }
+        },
     };
     let form_csrf = form_csrf_for_render(&headers, &state.config);
     let path = format!("/contacts/{}/edit", detail.id);
@@ -5691,7 +5994,12 @@ async fn form_campaign_update(
     .await;
     match result {
         Ok(result) if result.rows_affected() == 1 => {
-            redirect_success("Campaign saved.", "/campaigns", &state.config)
+            let message = if as_draft {
+                "Campaign saved as a draft — the schedule was cleared."
+            } else {
+                "Campaign saved."
+            };
+            redirect_success(message, "/campaigns", &state.config)
         }
         Ok(_) => redirect_error(
             "That campaign could not be found in this workspace.",
@@ -5742,18 +6050,11 @@ async fn form_autopilot_action_replay(
     let action_id = match uuid::Uuid::parse_str(id.trim()) {
         Ok(action_id) => action_id,
         Err(_) => {
-            return redirect_error(
-                "That action could not be found.",
-                &return_to,
-                &state.config,
-            );
+            return redirect_error("That action could not be found.", &return_to, &state.config);
         }
     };
     let queue = sales_autopilot::actions::ActionQueue::new(state.db.clone(), "cp-web-replay");
-    match queue
-        .replay(data::SALES_AUTOPILOT_TENANT, action_id)
-        .await
-    {
+    match queue.replay(data::SALES_AUTOPILOT_TENANT, action_id).await {
         Ok(true) => {
             crate::audit_log::insert_audit_log_best_effort(
                 &state.db,
@@ -5783,6 +6084,123 @@ async fn form_autopilot_action_replay(
             // log the rich cause, then ride the SAME shared neutral exit
             // (outage counter + temporary-unavailable flash).
             tracing::error!(error = %error, "autopilot action replay failed");
+            temporary_storage_response(&return_to, &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/autopilot/decisions/:id/review — the control-plane sales
+/// page's native approve/reject control (review §7: "native SSR forms can
+/// implement these actions"; decision review was JSON-only, and the page had
+/// to tell operators to use an API client). Delegates to the sales-autopilot
+/// service's canonical `apply_review` — the same transactional path the JSON
+/// proxy reaches, scoped to the sales-autopilot tenant the page reads, with
+/// the same audit action as the JSON twin.
+async fn form_autopilot_decision_review(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let return_to = safe_return_to(&form, "/sales");
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, &return_to, &state.config);
+    }
+    let system_tenant = match is_system_tenant(&state, &user.tenant_id).await {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            // Audit #16: storage down is not "you are not an operator".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                &return_to,
+                &state.config,
+            );
+        }
+    };
+    if !system_tenant {
+        return redirect_error("Operator access required.", &return_to, &state.config);
+    }
+    let decision_id = match Uuid::parse_str(id.trim()) {
+        Ok(decision_id) => decision_id,
+        Err(_) => {
+            return redirect_error(
+                "That decision could not be found.",
+                &return_to,
+                &state.config,
+            );
+        }
+    };
+    let action = match sales_autopilot::control::ReviewAction::parse(&field(&form, "outcome")) {
+        Ok(action) => action,
+        // The service's parser names the accepted vocabulary; the console
+        // form only ever offers Approve/Reject, so an unknown value is
+        // handled with the page's own actionable copy.
+        Err(_) => {
+            return redirect_error(
+                "Choose Approve or Reject for this decision.",
+                &return_to,
+                &state.config,
+            );
+        }
+    };
+    let note = field_truncated(&form, "note", 500);
+    // The console acts as the operator session: record who decided. The
+    // JSON twin takes `x-operator-id`; this surface carries the session
+    // user, with a stable fallback for API-key sessions without a user id.
+    let reviewed_by = user
+        .user_id
+        .clone()
+        .unwrap_or_else(|| "control-plane console".to_string());
+    match sales_autopilot::control::apply_review(
+        &state.db,
+        data::SALES_AUTOPILOT_TENANT,
+        decision_id,
+        action,
+        &note,
+        &reviewed_by,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            crate::audit_log::insert_audit_log_best_effort(
+                &state.db,
+                Some(user.tenant_id.as_str()),
+                user.user_id.as_deref(),
+                "control_plane.autopilot.decision_reviewed",
+                "sales_autopilot",
+                Some(&decision_id.to_string()),
+                serde_json::json!({
+                    "source": "web_console",
+                    "outcome": outcome.status,
+                    "actionsAffected": outcome.actions_affected,
+                }),
+                None,
+                None,
+            )
+            .await;
+            // The outcome carries the AUTHORITATIVE status: an approval the
+            // gates refused is recorded as 'rejected' with its reasons, so
+            // the flash never claims a release that did not happen.
+            let released = outcome.actions_affected;
+            let flash = match outcome.status.as_str() {
+                "approved" => {
+                    format!("Decision approved — {released} action(s) released to the queue.")
+                }
+                _ => format!(
+                    "Decision recorded as rejected — {released} linked action(s) cancelled."
+                ),
+            };
+            redirect_success(&flash, &return_to, &state.config)
+        }
+        // The service's guard refusal names the exact condition (already
+        // reviewed, not approval-gated, gone) — operator-actionable copy,
+        // never a storage outage.
+        Err(sales_autopilot::types::SalesError::InvalidInput(message)) => {
+            redirect_error(&message, &return_to, &state.config)
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "autopilot decision review failed");
             temporary_storage_response(&return_to, &state.config)
         }
     }
@@ -6152,24 +6570,55 @@ async fn form_placement_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+    // Lossless parse (repeated `providers=` checkbox keys survive — a
+    // HashMap would collapse them to the last box) and a field map that
+    // carries the posted values, so a failed-POST replays the whole test
+    // configuration including the selected provider group.
+    let form = match parse_form_body(&headers, body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return redirect_error(message, "/inbox-placement/new", &state.config);
+        }
+    };
+    if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/inbox-placement/new", &state.config);
     }
-    let name = field_truncated(&form, "name", 120);
-    let from_email = field(&form, "from_email").trim().to_lowercase();
-    let subject = field_truncated(&form, "subject", 200);
-    let html_body = field(&form, "html_body");
+    let mut fields = FormFieldMap::new("placement-test-create");
+    let name: String = form.field("name").trim().chars().take(120).collect();
+    let from_email = form.field("from_email").trim().to_lowercase();
+    let from_name: String = form.field("from_name").trim().chars().take(120).collect();
+    let subject: String = form.field("subject").trim().chars().take(200).collect();
+    let html_body = form.field("html_body");
+    for (key, value) in [
+        ("name", name.as_str()),
+        ("from_email", from_email.as_str()),
+        ("from_name", from_name.as_str()),
+        ("subject", subject.as_str()),
+        ("html_body", html_body.as_str()),
+    ] {
+        if !value.is_empty() {
+            fields.set(key, value);
+        }
+    }
+    for provider in form.get_all("providers") {
+        let provider = provider.trim().to_string();
+        if !provider.is_empty() {
+            fields.add_value("providers", &provider);
+        }
+    }
     if name.is_empty() || subject.is_empty() || html_body.trim().is_empty() {
-        return redirect_error(
+        return redirect_with_field_map(
+            &fields,
             "Test name, subject, and HTML body are required.",
             "/inbox-placement/new",
             &state.config,
         );
     }
     if !valid_email(&from_email) {
-        return redirect_error(
+        return redirect_with_field_map(
+            &fields,
             "Enter a valid from email.",
             "/inbox-placement/new",
             &state.config,
@@ -7025,6 +7474,65 @@ fn leptos_list_detail_page(
     let path = format!("/lists/{}", detail.id);
     let mut inner = stub_flash_banner(flash);
     inner.push_str(&ui_foundation::leptos_views::web_list_detail_page_with_values(detail));
+    let layout =
+        ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, &path, csrf_token);
+    let title = ui_foundation::axum_router::route_document_title("web", &path);
+    ui_foundation::leptos_views::web_root_layout(&layout, &title)
+}
+
+/// GET /lists/{id}/members (review §6.2, filed by R1): the list detail's
+/// subscriber count previously had no way to be inspected. This page lists
+/// the list's subscribers (readable identity, per-list status, added date)
+/// or the honest empty state with its next action. Same contract as
+/// [`web_list_detail`]: anonymous GETs redirect to login, a non-UUID demo
+/// segment renders the static SSR skeleton, a real id that resolves to
+/// nothing gets the honest not-found flash, and a storage outage is never
+/// "list not found".
+async fn web_list_members(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    if Uuid::parse_str(&id).is_err() {
+        return state_ssr_fallback(&state, "web", &uri, &headers).await;
+    }
+    let flash = flash_from_headers(&headers, &state.config);
+    match data::load_list_members(&state.db, user.tenant_id.as_str(), &id).await {
+        Ok(Some(members)) => {
+            let form_csrf = form_csrf_for_render(&headers, &state.config);
+            let html = leptos_list_members_page(&members, &flash, &form_csrf.token);
+            html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
+        }
+        Ok(None) => redirect_error(
+            "That list could not be found in this workspace.",
+            "/lists",
+            &state.config,
+        ),
+        // A storage outage is NOT "list not found".
+        Err(error) => {
+            temporary_storage_failure(&WebActionError::Database(error), "/lists", &state.config)
+        }
+    }
+}
+
+/// Compose the full data-backed members document (root layout + shell + the
+/// with-values members view), titled from the route context.
+fn leptos_list_members_page(
+    members: &ui_foundation::view_data::ListMembersData,
+    flash: &[FlashMessage],
+    csrf_token: &str,
+) -> String {
+    let path = format!("/lists/{}/members", members.id);
+    let mut inner = stub_flash_banner(flash);
+    inner.push_str(&ui_foundation::leptos_views::web_list_members_page_with_values(members));
     let layout =
         ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, &path, csrf_token);
     let title = ui_foundation::axum_router::route_document_title("web", &path);
@@ -10791,7 +11299,7 @@ mod tests {
             session_id: None,
             scopes: vec!["messages:read".to_string()],
         };
-        let (response, _) =
+        let (response, escalation_map) =
             post_console_api_key_form(&state, &viewer, "name=Escalation&scopes=messages:send")
                 .await;
         assert_eq!(
@@ -10814,6 +11322,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 0, "no key may be minted for the escalation attempt");
+
+        // R2's filed failed-POST replay: the refused submission's field map
+        // carries name + the selected scope group, and the GET render
+        // re-checks the posted scope instead of dropping the whole form.
+        let escalation_map = escalation_map.expect("failed POST sets the field map");
+        assert!(
+            escalation_map
+                .values
+                .iter()
+                .any(|(name, value)| name == "name" && value == "Escalation"),
+            "the attempted name must replay: {:?}",
+            escalation_map.values
+        );
+        assert!(
+            escalation_map
+                .values
+                .iter()
+                .any(|(name, value)| name == "scopes" && value == "messages:send"),
+            "the attempted scope must replay: {:?}",
+            escalation_map.values
+        );
+        let replay_html = ui_foundation::axum_router::render_route_with_form_fields(
+            "web",
+            "/settings/api-keys",
+            None,
+            Some(&state.config.csrf_secret),
+            &[],
+            None,
+            Some(&escalation_map.clone().into_view_data()),
+        )
+        .expect("the api-keys page renders");
+        let scope_checked = replay_html
+            .find("value=\"messages:send\"")
+            .map(|at| {
+                let end = replay_html[at..]
+                    .find('>')
+                    .map(|offset| at + offset)
+                    .unwrap_or(replay_html.len());
+                replay_html[at..end].contains("checked")
+            })
+            .unwrap_or(false);
+        assert!(
+            scope_checked,
+            "the posted scope must render re-checked after a failed POST"
+        );
 
         // 4. Missing CSRF is refused outright.
         let mut headers = HeaderMap::new();
@@ -11505,6 +12058,43 @@ mod tests {
             html.contains("whsec_deadbeef"),
             "the reveal-once secret renders as a chip"
         );
+
+        // Failed-POST replay of a checkbox GROUP (review §3 P1-12 / R2's
+        // filed item): `add_value` records every selected option, the render
+        // pass takes its grouped path, and the re-checked set is EXACTLY the
+        // posted one — the page's rendered default (`message.bounced`
+        // checked) must not survive beside it.
+        let mut grouped = FormFieldMap::new("webhook-create");
+        grouped.add_value("events", "message.sent");
+        grouped.add_value("events", "message.complained");
+        let grouped_html = ui_foundation::axum_router::render_route_with_form_fields(
+            "web",
+            "/settings/webhooks",
+            None,
+            Some(&config.csrf_secret),
+            &[],
+            None,
+            Some(&grouped.into_view_data()),
+        )
+        .expect("settings/webhooks renders");
+        let is_checked = |value: &str| -> bool {
+            grouped_html
+                .find(&format!("value=\"{value}\""))
+                .map(|at| {
+                    let tag_end = grouped_html[at..]
+                        .find('>')
+                        .map(|offset| at + offset)
+                        .unwrap_or(grouped_html.len());
+                    grouped_html[at..tag_end].contains("checked")
+                })
+                .unwrap_or(false)
+        };
+        assert!(is_checked("message.sent"), "posted option re-checked");
+        assert!(is_checked("message.complained"), "posted option re-checked");
+        assert!(
+            !is_checked("message.bounced"),
+            "the rendered default must be replaced, not accumulated"
+        );
     }
 
     // ─── Multi-value form parsing ─────────────────────────────────
@@ -11798,7 +12388,7 @@ mod tests {
     // scoped to the /web form twins. Seeds are unique per run and cleaned
     // up in teardown; without a reachable database every test skips.
 
-    mod db_backed {
+    pub(crate) mod db_backed {
         use super::*;
         use axum::body::Body;
         use axum::http::Request;
@@ -13007,9 +13597,10 @@ mod tests {
             assert!(fields.secrets()[0].0.contains("signing secret"));
 
             // An unknown event name is rejected with the valid list and
-            // the URL is preserved for re-population.
+            // the URL is preserved for re-population — including the whole
+            // posted checkbox group (failed-POST replay, R2's filed item).
             let body = format!(
-                "_csrf={}&url=https%3A%2F%2Fexample.com%2Fhook&events=delivred",
+                "_csrf={}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.complained&events=delivred",
                 urlencode(&token)
             );
             let response = app
@@ -13023,6 +13614,78 @@ mod tests {
                 "flash was: {flash:?}"
             );
             assert!(flash_text(&flash).contains("message.accepted"));
+            // The failed POST's field map carries every posted group value…
+            let failed_cookie = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|cookie| cookie.starts_with(&format!("{FORM_FIELDS_COOKIE_NAME}=")))
+                .expect("failed POST sets the field-map cookie");
+            let mut failed_headers = HeaderMap::new();
+            failed_headers.insert(
+                header::COOKIE,
+                failed_cookie.split_once(';').unwrap().0.parse().unwrap(),
+            );
+            let failed_map =
+                decode_form_fields_from_headers(&failed_headers, &state.config.csrf_secret)
+                    .expect("failed field map decodes");
+            assert!(
+                failed_map
+                    .values
+                    .iter()
+                    .any(|(name, value)| name == "events" && value == "message.complained"),
+                "the posted group value must be recorded: {:?}",
+                failed_map.values
+            );
+            assert!(
+                failed_map
+                    .values
+                    .iter()
+                    .any(|(name, value)| name == "events" && value == "delivred"),
+                "the rejected value replays so the typo stays visible"
+            );
+            // …and rendering the same page with it re-checks exactly the
+            // posted options (the rendered `message.bounced` default does
+            // not survive next to them).
+            let replay_html = ui_foundation::axum_router::render_route_with_form_fields(
+                "web",
+                "/settings/webhooks",
+                None,
+                Some(&state.config.csrf_secret),
+                &[],
+                None,
+                Some(&failed_map.clone().into_view_data()),
+            )
+            .expect("settings/webhooks renders");
+            assert!(
+                replay_html.contains("value=\"message.complained\"")
+                    && replay_html
+                        .find("value=\"message.complained\"")
+                        .map(|at| {
+                            let end = replay_html[at..]
+                                .find('>')
+                                .map(|offset| at + offset)
+                                .unwrap_or(replay_html.len());
+                            replay_html[at..end].contains("checked")
+                        })
+                        .unwrap_or(false),
+                "the posted option must replay checked"
+            );
+            let bounced_checked = replay_html
+                .find("value=\"message.bounced\"")
+                .map(|at| {
+                    let end = replay_html[at..]
+                        .find('>')
+                        .map(|offset| at + offset)
+                        .unwrap_or(replay_html.len());
+                    replay_html[at..end].contains("checked")
+                })
+                .unwrap_or(false);
+            assert!(
+                !bounced_checked,
+                "the rendered default must be replaced on replay"
+            );
             let rows: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
                     .bind(&tenant)
@@ -13161,7 +13824,9 @@ mod tests {
         /// Privilege regression: POST /web/team/invite used to accept ANY
         /// authenticated session and insert `role='admin'` users. Only
         /// owner/admin sessions may invite, and nobody may grant a role
-        /// above their own.
+        /// above their own. Since R6 the accepted invite is also PROVEN to
+        /// deliver the two-link invitation mail.
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn team_invite_gates_on_the_caller_role() {
             let Some(state) = web_test_state("team_invite_gates_on_the_caller_role").await else {
@@ -13264,7 +13929,13 @@ mod tests {
             .unwrap();
             assert_eq!(stored, 0, "the owner invitation must not be stored");
 
-            // An admin CAN invite a member.
+            // An admin CAN invite a member — and since R6 the invitation
+            // actually DELIVERS: the invited row and the two-link invitation
+            // e-mail commit in ONE transaction.
+            let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            seed_web_system_sender(&state.db).await;
             let email = invitee();
             let response = app_admin
                 .clone()
@@ -13281,6 +13952,56 @@ mod tests {
                     ui_foundation::flash::FlashKind::Success
                 )),
                 "an admin inviting a member must succeed, flash was {flash:?}"
+            );
+            // The invited row carries HASHED credentials (never plaintext)
+            // with mandatory expiries — the row was previously token-less.
+            let metadata: serde_json::Value = sqlx::query_scalar(
+                "SELECT metadata FROM users WHERE tenant_id = $1 AND email = $2",
+            )
+            .bind(&tenant)
+            .bind(&email)
+            .fetch_one(&state.db)
+            .await
+            .expect("invited user row");
+            for key in ["verification_token_hash", "password_reset_token_hash"] {
+                let hash = metadata
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_else(|| panic!("{key} must be stored"));
+                assert_eq!(hash.len(), 64, "{key} must be a sha256 hex digest");
+            }
+            for key in [
+                "verification_expires",
+                "password_reset_expires",
+                "password_reset_iat",
+            ] {
+                assert!(
+                    metadata.get(key).and_then(|value| value.as_str()).is_some(),
+                    "{key} must be stored"
+                );
+            }
+            // …and the invitation e-mail is queued with the SAME transaction,
+            // carrying both acceptance links in HTML and text.
+            let queued: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT subject, html, text FROM email_queue \
+                 WHERE lower(\"to\") = lower($1) ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await
+            .expect("invitation queue row");
+            let (subject, html, text) = queued.expect("the invitation must be queued");
+            assert!(subject.contains("invited"), "subject was {subject}");
+            assert!(html.contains("/reset-password?token="), "no setup link");
+            assert!(html.contains("/verify-email?token="), "no verify link");
+            assert!(
+                text.contains("/reset-password?token="),
+                "no text setup link"
+            );
+            assert!(text.contains("If you weren't expecting this invitation"));
+            assert!(
+                !html.contains("control plane"),
+                "a workspace invitation must not claim control-plane access"
             );
 
             cleanup_tenant(&state, &tenant).await;
@@ -13359,11 +14080,102 @@ mod tests {
             cleanup_tenant(&state, &tenant).await;
         }
 
+        /// Review §7 + R6: the sales page's pending-approval control posts
+        /// to a MOUNTED console route that decides the review through
+        /// `sales_autopilot::control::apply_review` — the same transactional
+        /// path as the JSON twin. A review is terminal, so the second post
+        /// is refused with the guard's exact reason (never a 5xx).
+        #[tokio::test]
+        async fn sales_decision_review_form_decides_through_the_mounted_route() {
+            let Some(state) = web_test_state("sales_decision_review_form").await else {
+                return;
+            };
+            let decision_id = Uuid::new_v4();
+            let note = format!("r6 review {}", Uuid::new_v4().simple());
+            sqlx::query(
+                "INSERT INTO sales_decisions \
+                     (id, tenant_id, action, expected_value_eur, confidence, score_total, \
+                      evidence_ids, autonomy_mode, rationale, blocked, block_reasons, \
+                      enforcement, review_status, created_at) \
+                 VALUES ($1, $2, 'contact', 1.5, 0.5, 2.5, '{}'::uuid[], 'assisted', $3, \
+                         false, '[]'::jsonb, 'await_approval', 'pending', NOW())",
+            )
+            .bind(decision_id)
+            .bind(data::SALES_AUTOPILOT_TENANT)
+            .bind(format!("r6 review fixture {note}"))
+            .execute(&state.db)
+            .await
+            .expect("seed pending decision");
+
+            let reviewer = format!("op-{}", Uuid::new_v4().simple());
+            let app = axum::Router::new()
+                .route(
+                    "/web/admin/autopilot/decisions/:id/review",
+                    post(form_autopilot_decision_review),
+                )
+                .layer(axum::Extension(AuthUser {
+                    tenant_id: "system".into(),
+                    user_id: Some(reviewer.clone()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                }))
+                .with_state(state.clone());
+            let path = format!("/web/admin/autopilot/decisions/{decision_id}/review");
+            let body = csrf_body(&state, &[("outcome", "rejected"), ("note", note.as_str())]);
+
+            let response = app
+                .clone()
+                .oneshot(post_form(&path, &body))
+                .await
+                .expect("router answers");
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Success
+                )),
+                "the review must be recorded, flash was {flash:?}"
+            );
+            // The decision row is terminal, with the operator and the note
+            // on record — the review ran the service's transactional path.
+            let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT review_status, reviewed_by, review_note FROM sales_decisions WHERE id = $1",
+            )
+            .bind(decision_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("decision row");
+            assert_eq!(row.0, "rejected");
+            assert_eq!(row.1.as_deref(), Some(reviewer.as_str()));
+            assert_eq!(row.2.as_deref(), Some(note.as_str()));
+
+            // A second review of the same decision is refused with the
+            // guard's honest reason (a review is terminal).
+            let response = app
+                .oneshot(post_form(&path, &body))
+                .await
+                .expect("router answers");
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Error
+                ) && message.text.contains("cannot be reviewed")),
+                "the second review must be refused, flash was {flash:?}"
+            );
+
+            let _ = sqlx::query("DELETE FROM sales_decisions WHERE id = $1")
+                .bind(decision_id)
+                .execute(&state.db)
+                .await;
+        }
+
         /// Seed the system sender domain with valid DKIM material so the
         /// transactional verification-email queue admits messages (same
         /// contract as the auth.rs signup fixtures; caller must hold the
         /// DKIM env mutex across the whole seeded scope).
-        async fn seed_web_system_sender(db: &sqlx::PgPool) {
+        pub(crate) async fn seed_web_system_sender(db: &sqlx::PgPool) {
             std::env::set_var(
                 apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
                 "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
@@ -14926,7 +15738,7 @@ mod tests {
                 .unwrap();
             let flash = response_flash(&response, &state.config.csrf_secret);
             assert!(
-                flash_text(&flash).contains("Invitation created"),
+                flash_text(&flash).contains("Invitation sent to"),
                 "team invite flash: {flash:?}"
             );
             let invited: Option<(String,)> = sqlx::query_as(
@@ -16107,7 +16919,12 @@ mod coverage_handler_tests {
             "/campaigns"
         );
         bounced!(
-            form_placement_create(state(), extension(), headers.clone(), Form(form.clone())),
+            form_placement_create(
+                state(),
+                extension(),
+                headers.clone(),
+                axum::body::Bytes::from(serialize_pairs(&form))
+            ),
             "/inbox-placement/new"
         );
         bounced!(
@@ -16618,7 +17435,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert!(flash_text(&response, &app.config).contains("Placement test started"));
@@ -16635,7 +17452,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_eq!(
@@ -18836,6 +19653,7 @@ mod coverage_auth_admin_tests {
         assert_eq!(hooks, 2);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn team_invite_enforces_role_and_identity_rules() {
         let Some(app) = coverage_support::state("cov_team").await else {
@@ -18927,7 +19745,13 @@ mod coverage_auth_admin_tests {
         .await;
         assert!(flash_text(&response, &app.config).contains("valid email"));
 
-        // Valid invite persists an 'invited' row with a non-auth hash.
+        // Valid invite persists an 'invited' row with a non-auth hash AND
+        // queues the invitation mail (R6): the acceptance path exists, so
+        // the flash may claim delivery.
+        let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::tests::db_backed::seed_web_system_sender(&app.db).await;
         let invitee = format!("invitee-{tag}@example.test");
         let (headers, form) = signed_form(
             &app.config,
@@ -18941,12 +19765,12 @@ mod coverage_auth_admin_tests {
         )
         .await;
         assert!(
-            flash_text(&response, &app.config).contains("Invitation created"),
+            flash_text(&response, &app.config).contains("Invitation sent"),
             "got {}",
             flash_text(&response, &app.config)
         );
-        let (status, hash): (String, String) = sqlx::query_as(
-            "SELECT status, password_hash FROM users WHERE tenant_id = $1 AND email = $2",
+        let (status, hash, metadata): (String, String, serde_json::Value) = sqlx::query_as(
+            "SELECT status, password_hash, metadata FROM users WHERE tenant_id = $1 AND email = $2",
         )
         .bind(&tenant)
         .bind(&invitee)
@@ -18958,6 +19782,32 @@ mod coverage_auth_admin_tests {
             hash.starts_with('!'),
             "invited users must not hold a usable hash"
         );
+        // The invite carries BOTH hashed acceptance tokens (R6).
+        for key in [
+            "verification_token_hash",
+            "password_reset_token_hash",
+            "verification_expires",
+            "password_reset_expires",
+        ] {
+            assert!(
+                metadata.get(key).and_then(|value| value.as_str()).is_some(),
+                "{key} must be stored on the invited row"
+            );
+        }
+        // …and the two-link invitation mail was queued in the same
+        // transaction.
+        let queued: Option<(String, String)> = sqlx::query_as(
+            "SELECT subject, html FROM email_queue \
+             WHERE lower(\"to\") = lower($1) ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&invitee)
+        .fetch_optional(&app.db)
+        .await
+        .expect("queue row");
+        let (subject, html) = queued.expect("the invitation must be queued");
+        assert!(subject.to_lowercase().contains("invited"), "{subject}");
+        assert!(html.contains("/reset-password?token="));
+        assert!(html.contains("/verify-email?token="));
     }
 
     #[tokio::test]
@@ -20277,6 +21127,118 @@ mod coverage_detail_session_tests {
         assert_eq!(location(&response), "/domains");
         let _ = set_cookies(&response);
     }
+
+    /// Review §6.2 (filed by R1, closed by R6): the list detail's subscriber
+    /// count had no way to be inspected. `/lists/{id}/members` lists the
+    /// real subscribers (readable identity, per-list status, added date) and
+    /// the list detail LINKS to it; an empty list renders the empty state
+    /// with its next action; another tenant's list is refused, never leaked.
+    #[tokio::test]
+    async fn list_members_view_lists_subscribers_and_the_detail_links_to_it() {
+        let Some(app) = coverage_support::rsa_state("web_res_list_members").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("lmem");
+        let (other_tenant, other_tag) = coverage_support::tenant_pair("lmemb");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        coverage_support::seed_tenant(&app.db, &other_tenant, &other_tag).await;
+        let user_id: String =
+            sqlx::query_scalar("SELECT id::text FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(format!("member0-{tag}@example.test"))
+                .fetch_one(&app.db)
+                .await
+                .expect("seeded user");
+        let other_user_id: String =
+            sqlx::query_scalar("SELECT id::text FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(&other_tenant)
+                .bind(format!("member0-{other_tag}@example.test"))
+                .fetch_one(&app.db)
+                .await
+                .expect("other seeded user");
+
+        // The list detail's subscriber KPI links to the members view.
+        let detail = data::load_list_detail(&app.db, &tenant, &seeded.list_id)
+            .await
+            .expect("detail query")
+            .expect("seeded list detail");
+        let detail_html = ui_foundation::leptos_views::web_list_detail_page_with_values(&detail);
+        assert!(
+            detail_html.contains(&format!("href=\"/lists/{}/members\"", seeded.list_id)),
+            "the list detail's member count must link to the members view"
+        );
+
+        // The members page renders the REAL subscriber (seeded contact) with
+        // readable identity, status and added date.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            session_cookie(&app, &user_id, &tenant).parse().unwrap(),
+        );
+        let response = web_list_members(
+            State(app.clone()),
+            Path(seeded.list_id.clone()),
+            format!("/lists/{}/members", seeded.list_id)
+                .parse()
+                .unwrap(),
+            headers.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_of(response).await;
+        assert!(
+            html.contains(&format!("Contact 0 {tag}")),
+            "the subscriber's readable identity must render"
+        );
+        assert!(html.contains(&format!("contact0-{tag}@example.test")));
+        assert!(html.contains("subscribed"));
+        assert!(html.contains("1 subscriber(s) on this list, newest first."));
+
+        // An empty list renders the honest empty state WITH the next action.
+        let empty_list = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO lists (id, tenant_id, name, description, opt_in_mode, status, created_at, updated_at)
+             VALUES ($1, $2, $3, 'empty list', 'single', 'active', NOW(), NOW())",
+        )
+        .bind(empty_list)
+        .bind(&tenant)
+        .bind(format!("Empty {tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed empty list");
+        let response = web_list_members(
+            State(app.clone()),
+            Path(empty_list.to_string()),
+            format!("/lists/{empty_list}/members").parse().unwrap(),
+            headers.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_of(response).await;
+        assert!(html.contains("No subscribers on this list yet"));
+        assert!(html.contains("href=\"/contacts/new\""));
+
+        // An unknown/foreign list id is the honest not-found redirect.
+        let mut other_headers = HeaderMap::new();
+        other_headers.insert(
+            header::COOKIE,
+            session_cookie(&app, &other_user_id, &other_tenant)
+                .parse()
+                .unwrap(),
+        );
+        let response = web_list_members(
+            State(app.clone()),
+            Path(seeded.list_id.clone()),
+            format!("/lists/{}/members", seeded.list_id)
+                .parse()
+                .unwrap(),
+            other_headers,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/lists");
+        assert!(!body_of(response).await.contains(&tag));
+    }
 }
 
 // ─── Adversarial coverage of web helpers and outage branches ──────
@@ -20702,7 +21664,6 @@ mod adversarial_outage_tests {
         )
         .await;
         assert_graceful_error(&response, &config, "campaign create");
-
         let (headers, form) = signed_form(
             &state,
             &[("id", "camp-1"), ("name", "Camp"), ("subject", "Subj")],
@@ -20751,10 +21712,98 @@ mod adversarial_outage_tests {
             State(state.clone()),
             Extension(caller()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_graceful_error(&response, &config, "placement create");
+    }
+
+    /// R2's filed failed-POST replay: the placement form's `providers`
+    /// checkbox group is recorded in the field map when the POST fails
+    /// validation, and the rendered page re-checks exactly the posted
+    /// providers (the rendered outlook default must not survive). The
+    /// required-field refusal runs before any storage access, so the dead
+    /// pool also pins that this replay is pure.
+    #[tokio::test]
+    async fn placement_failed_post_replays_the_provider_group() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+        let (headers, form) = signed_form(&state, &[]);
+        let csrf = form.get("_csrf").cloned().unwrap_or_default();
+        // name is omitted → validation refusal; the group posts two of the
+        // three rendered defaults (gmail/outlook/yahoo).
+        let body = format!(
+            "_csrf={csrf}&from_email=sender%40example.com&subject=Placement&html_body=%3Cp%3Ehi%3C%2Fp%3E&providers=gmail&providers=yahoo"
+        );
+        let response = form_placement_create(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            axum::body::Bytes::from(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+            "/inbox-placement/new"
+        );
+        let cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|cookie| cookie.starts_with(&format!("{FORM_FIELDS_COOKIE_NAME}=")))
+            .expect("failed POST sets the field map");
+        let mut map_headers = HeaderMap::new();
+        map_headers.insert(
+            header::COOKIE,
+            cookie.split_once(';').unwrap().0.parse().unwrap(),
+        );
+        let map = decode_form_fields_from_headers(&map_headers, &config.csrf_secret)
+            .expect("field map decodes");
+        let providers: Vec<&str> = map
+            .values
+            .iter()
+            .filter(|(name, _)| name == "providers")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(
+            providers,
+            vec!["gmail", "yahoo"],
+            "every posted provider must be recorded: {:?}",
+            map.values
+        );
+        let html = ui_foundation::axum_router::render_route_with_form_fields(
+            "web",
+            "/inbox-placement/new",
+            None,
+            Some(&config.csrf_secret),
+            &[],
+            None,
+            Some(&map.clone().into_view_data()),
+        )
+        .expect("the placement new page renders");
+        let is_checked = |value: &str| -> bool {
+            html.find(&format!("value=\"{value}\""))
+                .map(|at| {
+                    let end = html[at..]
+                        .find('>')
+                        .map(|offset| at + offset)
+                        .unwrap_or(html.len());
+                    html[at..end].contains("checked")
+                })
+                .unwrap_or(false)
+        };
+        assert!(is_checked("gmail"), "posted provider must replay checked");
+        assert!(is_checked("yahoo"), "posted provider must replay checked");
+        assert!(
+            !is_checked("outlook"),
+            "a rendered default that was NOT posted must not survive"
+        );
     }
 
     #[tokio::test]
@@ -23159,6 +24208,57 @@ mod residual_zero_tests {
         let _ = seeded;
     }
 
+    /// P1-6 (review register): the domain detail page's Verify DNS form must
+    /// target the MOUNTED browser route. This renders the real page from the
+    /// real loader and drives the RENDERED action through the mounted
+    /// authenticated router — a stale action path fails here instead of
+    /// 404-ing in the browser.
+    #[tokio::test]
+    async fn domain_detail_verify_form_targets_the_mounted_route() {
+        use tower::ServiceExt;
+        let Some(app) = coverage_support::rsa_state("web_res_domain_verify_form").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("dvf");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+
+        let list = data::load_domain_detail(&app.db, &tenant, &seeded.domain_id, "us-east-1")
+            .await
+            .expect("detail query")
+            .expect("seeded domain detail");
+        let html = web_data_page(
+            &format!("/domains/{}", seeded.domain_id),
+            &list,
+            "record",
+            &[],
+            "csrf-render-token",
+        );
+        let action = format!("/web/domains/{}/verify", seeded.domain_id);
+        assert!(
+            html.contains(&format!("<form method=\"post\" action=\"{action}\"")),
+            "the rendered Verify DNS form must target {action}"
+        );
+
+        // Drive the rendered action through the mounted router: the mounted
+        // POST route answers with the handler's redirect, never a 404.
+        let caller = coverage_support::user(&tenant);
+        let router = authenticated_router(app.clone())
+            .layer(axum::Extension(caller))
+            .with_state(app.clone());
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(action)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from("_csrf=invalid"))
+            .expect("request builds");
+        let response = router.oneshot(request).await.expect("router answers");
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the rendered Verify DNS action must be a mounted route"
+        );
+    }
+
     fn session_cookie_for(state: &AppState, user_id: &str, tenant: &str) -> String {
         let claims = crate::middleware::auth::JwtClaims {
             sub: user_id.to_string(),
@@ -23395,7 +24495,7 @@ mod residual_zero_tests {
             State(state.clone()),
             axum::Extension(caller),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         // FIX (outage-honesty audit #16): the faulted storage now lands on
@@ -24064,6 +25164,78 @@ mod residual_zero_tests {
             flash_text(&response, &app.config)
         );
         let _ = seeded;
+    }
+
+    /// P1-7 (review register): the template editor must be a coherent round
+    /// trip — the GET renders the stored values into a form that targets the
+    /// mounted update handler, and the handler's redirect lands back on that
+    /// SAME edit route (which the browser surface renders).
+    #[tokio::test]
+    async fn template_edit_round_trip_render_post_redirect() {
+        let Some(app) = coverage_support::state("web_res_tpl_round_trip").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("trt");
+        let _seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let template_id = format!("tpl-{tag}-0");
+        let edit = data::load_template_edit(&app, &tenant, &template_id)
+            .await
+            .expect("the seeded template must load into the editor");
+        assert_eq!(edit.name, format!("Template 0 {tag}"));
+        assert_eq!(edit.html_body, "<p>hi</p>");
+
+        // GET render: the editor form targets the mounted update route and
+        // carries the stored values + the hidden identity.
+        let route_path = format!("/templates/{template_id}/edit");
+        let html = ui_foundation::axum_router::render_route_with_data(
+            "web",
+            &route_path,
+            None,
+            None,
+            &[],
+            Some(&ui_foundation::axum_router::RouteData {
+                template_edit: Some(edit),
+                ..Default::default()
+            }),
+        )
+        .unwrap_or_else(|| panic!("{route_path} must render"));
+        assert!(html.contains("action=\"/web/templates/update\""), "{html}");
+        assert!(
+            html.contains(&format!("name=\"id\" value=\"{template_id}\"")),
+            "{html}"
+        );
+        assert!(html.contains("&lt;p&gt;hi&lt;/p&gt;"), "{html}");
+
+        // POST: the redirect returns to the SAME edit route the GET rendered.
+        let caller = coverage_support::user(&tenant);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", template_id.as_str()),
+                ("name", "Round Trip"),
+                ("subject", "Kept"),
+                ("html_body", ""),
+            ],
+        );
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            location(&response),
+            route_path,
+            "redirect must land on the editor"
+        );
+        // Blank body kept the stored content (the round trip is lossless).
+        let kept: String = sqlx::query_scalar("SELECT html_body FROM templates WHERE id = $1")
+            .bind(&template_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(kept, "<p>hi</p>");
     }
 
     #[tokio::test]
@@ -26335,7 +27507,9 @@ mod residual_zero_tests {
             )
         };
 
-        // (a) A real schedule persists.
+        // (a) A real schedule persists AND promotes the draft into the
+        //     `scheduled` state the worker actually claims (P1-2: the copy
+        //     promises automatic start; the queue only runs scheduled rows).
         let response = update("2026-12-01T10:00:00Z").await;
         assert!(flash_text(&response, &state.config).contains("Campaign saved"));
         let stored: Option<String> =
@@ -26348,6 +27522,15 @@ mod residual_zero_tests {
             stored.as_deref(),
             Some("2026-12-01 10:00:00+00"),
             "the schedule must actually persist, got {stored:?}"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM campaigns WHERE id = $1::uuid")
+            .bind(&campaign_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, "scheduled",
+            "saving a schedule must arm the automatic send"
         );
 
         // (b) FIX (outage-honesty audit #16): a hostile date is caller
@@ -26414,7 +27597,9 @@ mod residual_zero_tests {
             "the foreign row must not move"
         );
 
-        // (d) An empty schedule clears the stored one.
+        // (d) An empty schedule clears the stored one AND returns the
+        //     campaign to draft — a "scheduled" row with no time is a lie
+        //     the worker would never pick up.
         let (caller2, _email) = seed_caller(&state.db, &tenant, "member").await;
         let (headers, form) = signed_form(
             &state.config,
@@ -26440,6 +27625,55 @@ mod residual_zero_tests {
                 .await
                 .unwrap();
         assert_eq!(stored, None, "an empty schedule must clear the field");
+        let status: String = sqlx::query_scalar("SELECT status FROM campaigns WHERE id = $1::uuid")
+            .bind(&campaign_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, "draft",
+            "clearing the schedule must return to draft"
+        );
+
+        // (e) Review §4.11: "Save as draft" authorizes nothing — even with a
+        //     future date still in the picker, the named submit clears the
+        //     schedule instead of arming an automatic send.
+        let (caller3, _email) = seed_caller(&state.db, &tenant, "member").await;
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("id", campaign_id.as_str()),
+                ("name", "Scheduled One"),
+                ("subject", "Hello"),
+                ("scheduled_at", "2027-05-01T09:00"),
+                ("as_draft", "1"),
+            ],
+        );
+        let response = form_campaign_update(
+            State(state.clone()),
+            axum::Extension(caller3),
+            headers,
+            axum::body::Bytes::from(serialize_pairs(&form)),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &state.config).contains("saved as a draft"),
+            "got {:?}",
+            flash_text(&response, &state.config)
+        );
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT scheduled_at::text FROM campaigns WHERE id = $1::uuid")
+                .bind(&campaign_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, None, "Save as draft must clear the schedule");
+        let status: String = sqlx::query_scalar("SELECT status FROM campaigns WHERE id = $1::uuid")
+            .bind(&campaign_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "draft");
     }
 
     // ── Webhook create: the inbound event entitlement gate ────────────
@@ -26917,7 +28151,7 @@ mod outage_matrix_tests {
             "/billing/plans" => "No plans in the catalog",
             "/compliance" => "No compliance requests",
             "/compliance/gdpr" => "No GDPR requests",
-            "/discovery" => "No discovery sources reporting",
+            "/discovery" => "No leads registered yet",
             _ => return None,
         })
     }

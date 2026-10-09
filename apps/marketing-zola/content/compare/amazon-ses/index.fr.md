@@ -40,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
     { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant géré, hébergé dans l’UE', comp = 'Oui (tous les comptes) — pool d’IP partagé par défaut<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business', comp = 'Oui — €22.95 (US$24.95)/mois par IP dédiée ; gestion de pools d’IP disponible<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business ; 3 sur Enterprise Cloud', comp = 'Oui — €22.95 (US$24.95)/mois par IP dédiée ; gestion de pools d’IP disponible<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Tenance dédiée", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Gestion autonome — le client conçoit sa tenance dédiée sur AWS en utilisant SES comme composant de service<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Inhérent — le client opère sur son propre compte AWS ; SES est un service AWS<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
@@ -50,7 +50,7 @@ comparison_sections = [
     { feature = "Disponibilité HIPAA", apex = 'Non proposée actuellement', comp = 'Oui — BAA AWS disponible ; SES est un service éligible HIPAA<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},
   { title = "TARIFS À 100K/MOIS (vérifiés le 2026-07-29)", rows = [
-    { feature = "Forfait comparé", apex = 'Pro : €65/mois (150 000 emails inclus, infrastructure gérée)', comp = 'Paiement à l’usage : ~€9.20 (US$10)/100K emails (envoi brut, aucune gestion incluse)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
+    { feature = "Forfait comparé", apex = 'Pro : €89/mois (150 000 emails inclus, infrastructure gérée)', comp = 'Paiement à l’usage : ~€9.20 (US$10)/100K emails (envoi brut, aucune gestion incluse)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Nature du modèle tarifaire", apex = 'Infrastructure email gérée : API, stockage des événements, livraison des webhooks, support et analyse inclus', comp = 'Facturation de capacité brute : IaaS — paiement à l’envoi, plus coûts AWS additionnels (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Offre gratuite", apex = '3 000 emails/mois récurrents + allocation de lancement unique de 30 000 emails (sans carte bancaire)', comp = '62 000 emails/mois en envoi depuis EC2 (12 premiers mois) ; 3 000/mois sinon<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},

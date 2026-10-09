@@ -29,8 +29,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "ZUSTELLBARKEIT", rows = [
-    { feature = "Zustellrate", apex = '<span class="text-brand-600 font-semibold">Hoch</span>', comp = '<span class="text-surface-600">Hoch</span>', winner = "tie" },
-    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
+    { feature = "Zustellrate", apex = '<span class="text-surface-600 font-semibold">Nicht direkt vergleichbar (anbieterspezifische Metrik)</span>', comp = '<span class="text-surface-600">Nicht direkt vergleichbar (anbieterspezifische Metrik)</span>', winner = "none" },
+    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth und Business; 3 ab Enterprise Cloud</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
     { feature = "IP-Warm-up", apex = '<span class="text-brand-600 font-semibold">Automatisch, geometrisch</span>', comp = '<span class="text-surface-600">Automatisch (verwaltet)</span>', winner = "tie" },
     { feature = "BIMI-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "ARC-Signierung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -44,6 +44,10 @@ comparison_sections = [
     { feature = "Idempotenzschlüssel", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Methodik:</strong> Die Funktionszeilen fassen öffentlich dokumentiertes Resend-Verhalten zusammen. Verglichene Tarife: ApexMail-Self-Service-Stufen und veröffentlichte Resend-Tarife; wo kein vergleichbarer veröffentlichter Messwert existiert (zum Beispiel Zustellrate), sagt die Zeile, dass kein direkter Vergleich möglich ist. Geprüft: 2026-10-04. Quellenstandards: <a href="/de/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">Vergleichsmethodik</a>."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

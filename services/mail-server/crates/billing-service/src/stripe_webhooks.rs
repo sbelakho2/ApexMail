@@ -3100,6 +3100,10 @@ async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Resul
     .bind(serde_json::json!({
         "invoiceId": invoice.id,
         "amount": invoice.amount_due,
+        // The invoice's own currency travels with the amount: the
+        // notification drainer renders money with this code and never
+        // assumes one (the drain labels an absent code explicitly).
+        "currency": normalize_stripe_currency(invoice.currency.as_deref()),
         "attemptCount": invoice.attempt_count.unwrap_or_default(),
         "dunningStatus": dunning.status,
         "nextRetryAt": dunning.next_retry_at.map(|value| value.to_rfc3339()),

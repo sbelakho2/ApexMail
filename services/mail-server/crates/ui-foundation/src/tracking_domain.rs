@@ -15,8 +15,6 @@
 //! status, the named failure reason when present, the exact CNAME record and
 //! the verify/remove actions.
 
-use crate::shell::html_escape;
-
 /// The render inputs for the tracking-domain page/panel. Pure data so the
 /// panel is directly testable without a database.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,15 +90,22 @@ pub fn tracking_domain_panel_html(panel: &TrackingDomainPanel, csrf_token: &str)
                 .as_deref()
                 .map(|reason| format!("<p class=\"mt-2 text-sm text-muted-foreground\">{}</p>", escape(reason)))
                 .unwrap_or_default();
-            let record = if row.status == "verified" {
-                String::new()
-            } else {
-                format!(
-                    "<div class=\"mt-4 rounded-sm border border-primary/30 bg-primary/5 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS record to publish</p><p class=\"mt-2 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Type · Host · Value</p><p class=\"mt-1 font-mono text-xs break-all select-text text-surface-800\">CNAME · {host} · {value}</p></div>",
-                    host = escape(&row.domain),
-                    value = escape(&row.cname_target),
-                )
-            };
+            // The CNAME record stays INSPECTABLE after verification too: the
+            // operator still needs to see (and keep) it, and the panel used to
+            // hide it the moment status flipped to verified (review §5.1
+            // tracking_domain.rs: "retain the record after verification").
+            let verified = row.status == "verified";
+            let record = format!(
+                "<div class=\"mt-4 rounded-sm border border-primary/30 bg-primary/5 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS record {heading}</p><p class=\"mt-2 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Type · Host · Value</p><p class=\"mt-1 font-mono text-xs break-all select-text text-surface-800\">CNAME · {host} · {value}</p>{after}</div>",
+                heading = if verified { "in place" } else { "to publish" },
+                host = escape(&row.domain),
+                value = escape(&row.cname_target),
+                after = if verified {
+                    "<p class=\"mt-2 text-xs text-muted-foreground\">Keep this record: removing it stops open and click tracking on this host.</p>"
+                } else {
+                    ""
+                },
+            );
             let verified_note = match row.verified_at.as_deref() {
                 Some(at) => format!(
                     "<p class=\"mt-2 text-xs text-muted-foreground\">Verified at {}. Tracked links on this host are served for this workspace.</p>",
@@ -143,4 +148,88 @@ pub fn web_domain_tracking_page(panel: Option<&TrackingDomainPanel>, csrf_token:
         header = header,
         body = body
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn panel(configured: Option<TrackingDomainPanelRow>) -> TrackingDomainPanel {
+        TrackingDomainPanel {
+            domain_id: "d_1".into(),
+            domain_name: "customer.test".into(),
+            domain_verified: true,
+            entitled: true,
+            configured,
+        }
+    }
+
+    fn row(status: &str, verified_at: Option<&str>) -> TrackingDomainPanelRow {
+        TrackingDomainPanelRow {
+            domain: "email.customer.test".into(),
+            status: status.into(),
+            status_reason: None,
+            cname_target: "track.apexmail.ee".into(),
+            verified_at: verified_at.map(str::to_string),
+        }
+    }
+
+    /// Review §5.1 tracking_domain.rs: the exact CNAME record stays visible
+    /// AFTER verification (operators must keep it in place) and the panel
+    /// never implies a dead form when the parent domain is unverified or the
+    /// plan lacks the capability.
+    #[test]
+    fn verified_row_keeps_the_cname_record_and_unmet_prereq_has_no_form() {
+        let html = tracking_domain_panel_html(
+            &panel(Some(row("verified", Some("2026-10-07T10:00:00+00:00")))),
+            "csrf",
+        );
+        assert!(
+            html.contains("CNAME · email.customer.test · track.apexmail.ee"),
+            "{html}"
+        );
+        assert!(html.contains("DNS record in place"), "{html}");
+        assert!(html.contains("Keep this record"), "{html}");
+        assert!(
+            html.contains("Verified at 2026-10-07T10:00:00+00:00"),
+            "{html}"
+        );
+        assert!(html.contains("/tracking-domain/verify"), "{html}");
+        assert!(html.contains("/tracking-domain/delete"), "{html}");
+
+        // Parent not verified: the prerequisite is named, no configure form.
+        let unverified = tracking_domain_panel_html(
+            &TrackingDomainPanel {
+                domain_verified: false,
+                ..panel(None)
+            },
+            "csrf",
+        );
+        assert!(unverified.contains("Verify <span"), "{unverified}");
+        assert!(
+            !unverified.contains("data-form-id=\"tracking-domain-create\""),
+            "{unverified}"
+        );
+
+        // Not entitled: the capability is named, still no dead form.
+        let unentitled = tracking_domain_panel_html(
+            &TrackingDomainPanel {
+                entitled: false,
+                ..panel(None)
+            },
+            "csrf",
+        );
+        assert!(unentitled.contains("Pro and above"), "{unentitled}");
+        assert!(
+            !unentitled.contains("data-form-id=\"tracking-domain-create\""),
+            "{unentitled}"
+        );
+
+        // Entitled + empty: exactly one configure form.
+        let empty = tracking_domain_panel_html(&panel(None), "csrf");
+        assert!(
+            empty.contains("data-form-id=\"tracking-domain-create\""),
+            "{empty}"
+        );
+    }
 }

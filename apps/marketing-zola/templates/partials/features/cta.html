@@ -17,13 +17,16 @@
         {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_subtitle"] %}{{ i18n_data[l]["features"]["cta_subtitle"] }}{% else %}ApexMail provides reliable transactional email with built-in compliance. Start free with 3,000 emails per month.{% endif %}
       </p>
 
+      {# Shared button variants: geometry, focus ring, sizing and emphasis stay
+         identical to every other CTA (the hand-rolled bg-surface-950 grammar
+         drifted from .btn-primary geometry and skipped the concentric ring). #}
       <div class="flex flex-col sm:flex-row gap-4 justify-center">
-        <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center gap-2 bg-surface-950 hover:bg-brand-700 text-white px-6 py-3 rounded-sm font-semibold transition-colors group uppercase">
+        <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg inline-flex items-center justify-center gap-2 group">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_button"] %}{{ i18n_data[l]["features"]["cta_button"] }}{% else %}Start Free{% endif %}
-          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="{{ lp }}/contact/" class="inline-flex items-center justify-center gap-2 bg-surface-50 text-surface-950 border border-surface-200 hover:bg-surface-100 px-6 py-3 rounded-sm font-semibold transition-colors uppercase">
-          <svg class="w-4 h-4 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <a href="{{ lp }}/contact/" class="btn-secondary inline-flex items-center justify-center gap-2">
+          <svg class="w-4 h-4 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_talk"] %}{{ i18n_data[l]["features"]["cta_talk"] }}{% else %}Talk to Sales{% endif %}
         </a>
       </div>

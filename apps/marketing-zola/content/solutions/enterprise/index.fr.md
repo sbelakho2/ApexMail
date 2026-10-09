@@ -57,4 +57,4 @@ Les prospects qualifiés peuvent demander le profil d'entreprise actuel, le DPA,
 
 ## Prochaine étape
 
-[Contacter les ventes](/contact/sales/) pour demander une revue d'architecture et commerciale.
+[Contacter les ventes](/fr/contact/sales/) pour demander une revue d'architecture et commerciale.

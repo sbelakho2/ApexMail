@@ -28,6 +28,7 @@ use crate::middleware::rate_limiter::{extract_public_client_ip, INCR_EXPIRE_LUA}
 use crate::routes::csrf::validate_form_csrf;
 use crate::routes::system_sender::{
     ensure_system_sender_ready, queue_system_email, queue_system_email_in_transaction,
+    render_transactional_email, EmailAction, TransactionalEmail,
 };
 use crate::state::AppState;
 
@@ -1832,20 +1833,22 @@ pub(crate) async fn enqueue_verification_email(
     // routed in app.rs), so a path-style link there would 404.
     let verification_link = build_action_link(base_url, "/v1/auth/verify-email", email, token);
     let safe_email = html_escape(email);
-    let safe_link = html_escape(&verification_link);
-    let html_body = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>Verify your email — ApexMail</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
-<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Verify Your ApexMail Account</h2>
-<p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>
-<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Verify email</a></p>
-<p style="font-size:13px;color:#71717a">This link expires in 24 hours.</p>
-<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
-<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999;text-decoration:none">apexmail.ee</a></p>
-</body></html>"#,
-    );
+    let html_body = render_transactional_email(&TransactionalEmail {
+        document_title: "Verify your email — ApexMail",
+        heading: "Verify Your ApexMail Account",
+        body_html: &format!(
+            "<p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>\n\
+             <p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours. If you didn't create this account, you can safely ignore this email.</p>\n"
+        ),
+        actions: &[EmailAction {
+            label: "Verify email",
+            url: &verification_link,
+            secondary: false,
+        }],
+        footer_link: true,
+    });
     let text_body = format!(
-        "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours.\n\n© 2026 ApexMail — https://apexmail.ee",
+        "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours. If you didn't create this account, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
     );
 
     queue_system_email_in_transaction(
@@ -1884,23 +1887,30 @@ pub(crate) async fn enqueue_operator_invite_email(
         urlencode_component(email),
     );
     let safe_email = html_escape(email);
-    let safe_verification = html_escape(&verification_link);
-    let safe_setup = html_escape(&setup_link);
-    let html_body = format!(
-        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>You have been invited — ApexMail</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
-<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Your ApexMail Operator Invitation</h2>
-<p>An ApexMail operator invited <strong>{safe_email}</strong> to the control plane. Two steps complete the account:</p>
-<p><strong>1. Set your password</strong></p>
-<p><a href="{safe_setup}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Set password</a></p>
-<p style="font-size:13px;color:#71717a">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>
-<p><strong>2. Confirm this email address</strong></p>
-<p><a href="{safe_verification}" style="display:inline-block;padding:12px 28px;background:#09090b;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Verify email</a></p>
-<p style="font-size:13px;color:#71717a">This link expires in 24 hours. Control-plane access also requires MFA enrollment at first sign-in.</p>
-<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
-<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999;text-decoration:none">apexmail.ee</a></p>
-</body></html>"#
-    );
+    let html_body = render_transactional_email(&TransactionalEmail {
+        document_title: "You have been invited — ApexMail",
+        heading: "Your ApexMail Operator Invitation",
+        body_html: &format!(
+            "<p>An ApexMail operator invited <strong>{safe_email}</strong> to the control plane. Two steps complete the account:</p>\n\
+             <p><strong>1. Set your password</strong></p>\n\
+             <p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If it expires, request a new one from the sign-in page.</p>\n\
+             <p><strong>2. Confirm this email address</strong></p>\n\
+             <p style=\"font-size:13px;color:#71717a\">Control-plane access also requires MFA enrollment at first sign-in.</p>\n"
+        ),
+        actions: &[
+            EmailAction {
+                label: "Set password",
+                url: &setup_link,
+                secondary: false,
+            },
+            EmailAction {
+                label: "Verify email",
+                url: &verification_link,
+                secondary: true,
+            },
+        ],
+        footer_link: true,
+    });
     let text_body = format!(
         "Your ApexMail Operator Invitation\n\nAn ApexMail operator invited {email} to the control plane.\n\n1. Set your password (expires in 1 hour): {setup_link}\n2. Confirm this email address (expires in 24 hours): {verification_link}\n\nControl-plane access also requires MFA enrollment at first sign-in.\n\nApexMail \u{2014} https://apexmail.ee"
     );
@@ -2681,18 +2691,24 @@ async fn login(
 
                     let safe_email = html_escape(&user.email);
                     let safe_code = html_escape(&code_str);
-                    let html_body = format!(
-                        r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>Your ApexMail verification code</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
-<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Your MFA Code</h2>
-<p>Your one-time verification code for <strong>{safe_email}</strong> is:</p>
-<p style="font-size:28px;font-family:ui-monospace,'JetBrains Mono',monospace;letter-spacing:0.2em;font-weight:700;color:#dc2626">{safe_code}</p>
-<p style="font-size:13px;color:#71717a">This code expires in 5 minutes. If you didn't request this, your account may be at risk.</p>
-<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
-<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail</p>
-</body></html>"#,
+                    let html_body = render_transactional_email(&TransactionalEmail {
+                        document_title: "Your ApexMail verification code",
+                        heading: "Your MFA Code",
+                        body_html: &format!(
+                            "<p>Your one-time verification code for <strong>{safe_email}</strong> is:</p>\n\
+                             <p style=\"font-size:28px;font-family:ui-monospace,'JetBrains Mono',monospace;letter-spacing:0.2em;font-weight:700;color:#dc2626\">{safe_code}</p>\n\
+                             <p style=\"font-size:13px;color:#71717a\">This code expires in 5 minutes. If you didn't request this, your account may be at risk.</p>\n"
+                        ),
+                        // A code email deliberately carries no action links.
+                        actions: &[],
+                        footer_link: false,
+                    });
+                    // Plain-text parity: the account context and the
+                    // unrequested-code warning accompany the code.
+                    let text_body = format!(
+                        "Your MFA Code\n\nYour one-time verification code for {email} is: {code_str}\n\nThis code expires in 5 minutes. If you didn't request this, your account may be at risk.\n\n© 2026 ApexMail",
+                        email = user.email
                     );
-                    let text_body = format!("Your MFA Code\n\nYour one-time verification code is: {code_str}\n\nThis code expires in 5 minutes.");
                     let challenge_token = match store_mfa_challenge(
                         &state.redis,
                         &MfaChallengeState {
@@ -4603,9 +4619,15 @@ async fn reset_password(
         ));
     };
 
-    if status != "active" {
+    // R7/parity with the browser twin (`web.rs::form_reset_password`): a team
+    // invitation's password-setup link resolves to an `invited` row, and
+    // setting the password through it IS the acceptance step. The JSON twin
+    // previously demanded `active`, so the same setup token worked in the
+    // browser and was refused by the API with "account is invited".
+    if !matches!(status.as_str(), "active" | "invited") {
         return Err(ApiError::Forbidden(format!("account is {status}")));
     }
+    let accepting_invitation = status == "invited";
 
     // Primary expiration check: token-level expiry (typically one hour).
     // Missing or malformed expiry metadata must never turn a reset token into
@@ -4651,10 +4673,11 @@ async fn reset_password(
     let password_update = sqlx::query(
         "UPDATE users
          SET password_hash = $1,
+             status = CASE WHEN status = 'invited' THEN 'active' ELSE status END,
              metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
              updated_at = NOW()
          WHERE id = $2::uuid
-           AND status = 'active'
+           AND status IN ('active', 'invited')
            AND metadata->>'password_reset_token_hash' = $3",
     )
     .bind(password_hash)
@@ -4670,7 +4693,11 @@ async fn reset_password(
 
     Ok(Json(ResetPasswordResponse {
         success: true,
-        message: "Password updated successfully.".into(),
+        message: if accepting_invitation {
+            "Invitation accepted — password set.".into()
+        } else {
+            "Password updated successfully.".into()
+        },
     }))
 }
 
@@ -10589,6 +10616,44 @@ mod adversarial_auth_tests_3 {
         .await;
         assert!(matches!(result, Err(ApiError::Forbidden(_))));
 
+        // R7 parity with the browser twin: an INVITED user accepts the
+        // invitation through the JSON twin — the guarded UPDATE promotes
+        // invited → active and consumes the setup token (the JSON path
+        // previously refused with "account is invited").
+        let (email, token, invited_user) = seed_reset_user(
+            &fx,
+            &tenant,
+            &fx.csrf,
+            json!({"password_reset_expires": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(), "password_reset_iat": Utc::now().to_rfc3339()}),
+            "invited",
+        )
+        .await;
+        let status = reset_ok(
+            &fx,
+            json!({"token": token, "email": email, "password": NEW_PASSWORD, "confirmPassword": NEW_PASSWORD}),
+            Some(&fx.csrf),
+        )
+        .await
+        .expect("an invited user can accept the invitation via the JSON twin");
+        assert_eq!(status, StatusCode::OK);
+        let (invited_hash, invited_status, invited_meta): (
+            Option<String>,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as("SELECT password_hash, status, metadata FROM users WHERE id = $1")
+            .bind(invited_user)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            invited_status, "active",
+            "accepting the invitation via the API twin must promote invited → active"
+        );
+        assert!(
+            verify_password_or_log(NEW_PASSWORD, invited_hash.as_deref().unwrap(), &email).unwrap()
+        );
+        assert!(invited_meta.get("password_reset_token_hash").is_none());
+
         // Unknown token / empty fields / mismatched confirmation / weak
         // password / over-long inputs.
         let (email, _, _) = seed_reset_user(
@@ -12274,6 +12339,9 @@ mod transactional_email_contracts {
         subject: String,
         html: String,
         text: String,
+        /// The address the code was sent to (the account context the
+        /// plain-text twin must carry).
+        recipient: String,
     }
 
     /// Set the DKIM env under the mutex, returning the previous value. The
@@ -12500,6 +12568,7 @@ mod transactional_email_contracts {
             subject: row.0,
             html: row.1,
             text: row.2,
+            recipient: email.clone(),
         };
 
         restore_dkim_key(previous);
@@ -12660,12 +12729,30 @@ mod transactional_email_contracts {
             "mfa code email",
             &queued.text,
             None,
-            &format!("Your one-time verification code is: {code}"),
+            "Your one-time verification code for ",
+        );
+        assert!(
+            queued.text.contains(&code),
+            "text body must carry the code: {:?}",
+            queued.text
         );
         assert!(
             queued.text.contains("expires in 5 minutes"),
             "text body must carry the expiry copy: {:?}",
             queued.text
+        );
+        // §12.1 parity: the plain-text twin carries the same account context
+        // and the same unrequested-code warning as the HTML body.
+        assert!(
+            queued
+                .text
+                .contains("If you didn't request this, your account may be at risk."),
+            "text body must carry the unrequested-code warning: {:?}",
+            queued.text
+        );
+        assert!(
+            queued.text.contains(&queued.recipient),
+            "text body must name the account (the address the code was sent to)"
         );
     }
 

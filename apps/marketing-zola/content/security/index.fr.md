@@ -122,7 +122,7 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 ## Liens connexes
 
 - [Centre de conformité](/fr/compliance)
-- [Aperçu de l'architecture](/architecture)
+- [Aperçu de l'architecture](/architecture) (en anglais)
 - [Politique de confidentialité](/fr/privacy)
 - [Accord de traitement des données](/fr/dpa)
 - [Politique d'utilisation acceptable](/fr/acceptable-use)

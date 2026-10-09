@@ -9,6 +9,16 @@ last_updated = "2026-07-30"
 
 Diese Richtlinie zur akzeptablen Nutzung („AUP") definiert verbotene und akzeptable Nutzungen der ApexMail-E-Mail-Infrastruktur. Verstöße können zur Aussetzung oder Kündigung führen. Diese AUP unterscheidet zwischen Marketing- und Werbe-E-Mails und Transaktions- und Service-E-Mails — jede Kategorie unterliegt unterschiedlichen Einwilligungs-, Abmelde- und Versandpflichten wie unten beschrieben.
 
+### Welche Regeln für Ihre Nachricht gelten
+
+| Wenn die Nachricht … | Kategorie | Es gilt |
+|---|---|---|
+| primär kommerzielle Werbung oder Kundenbindung ist (Newsletter, Angebote, Ankündigungen) | Marketing & Werbung | Opt-in-Einwilligung, funktionsfähige Abmeldung, Absenderidentifikation, keine gekauften Listen |
+| notwendig ist, um einen vom Empfänger angeforderten Dienst zu erbringen oder gesetzlich vorgeschrieben ist (Belege, Passwort-Resets, Sicherheitswarnungen) | Transaktional & Service | Korrekte Absenderidentität, kein getarntes Marketing, korrekte Kategorie-Kennzeichnung |
+| transaktionalen Zweck hat, aber auch Werbeinhalte enthält | Als Marketing behandelt (gemischter Zweck) | Die gesamte Nachricht muss die Anforderungen für Marketing & Werbung erfüllen, einschließlich Abmeldung |
+
+Ordnen Sie ehrlich ein: Werbeinhalte in einer transaktionalen Nachricht oder mit transaktionalem Tag zu versenden, verstößt gegen diese Richtlinie.
+
 ## Marketing- und Werbe-E-Mails
 
 Marketing- und Werbe-E-Mails umfassen Newsletter, Produktankündigungen, Angebote, Veranstaltungseinladungen und jede Nachricht, deren Hauptzweck kommerzielle Werbung oder Kundenbindung über die direkte Erfüllung einer Dienstleistung hinaus ist.

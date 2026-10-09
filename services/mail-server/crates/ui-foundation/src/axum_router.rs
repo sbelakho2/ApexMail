@@ -1290,8 +1290,10 @@ pub fn render_route_with_form_fields_and_csrf(
                         path,
                         &csrf_token,
                         crate::leptos_views::CONTROL_PLANE_ROLE_PLACEHOLDER,
-                        user_context.as_ref(),
-                        impersonation_banner.clone(),
+                        crate::leptos_views::ControlPlaneSessionContext {
+                            user_context: user_context.clone(),
+                            impersonation_banner: impersonation_banner.clone(),
+                        },
                     )
                 }
             };
@@ -1499,26 +1501,151 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
         }
     }
 
-    // 2. Value / error injection per named control.
-    let form_scoped = html.contains("data-form-id=\"");
-    if form_scoped
-        && !html.contains(&format!(
-            "data-form-id=\"{}\"",
-            crate::shell::html_escape(&map.form_id)
-        ))
-    {
+    // 2. Value / error injection per named control — STRUCTURALLY scoped to
+    //    the failing form (review §3 P1-12: "replay is not reliably confined
+    //    to the matching form").
+    if !html.contains("data-form-id=\"") {
+        // No form identity anywhere on the page: replay page-wide, but a
+        // field name carried by MORE THAN ONE form is dropped — with no
+        // marker there is no way to know which form failed, and guessing
+        // would replay into an unrelated form.
+        let cross_form = cross_form_names(&html);
+        let owned;
+        let scoped_map = if cross_form.is_empty() {
+            map
+        } else {
+            owned = without_cross_form_fields(map, &cross_form);
+            &owned
+        };
+        inject_input_values(&mut html, scoped_map);
+        inject_textarea_values(&mut html, scoped_map);
+        inject_select_values(&mut html, scoped_map);
+        return html;
+    }
+    // The page marks its forms. The map must name one of them, and replay
+    // happens ONLY inside that form element — same-named fields in sibling
+    // forms stay untouched.
+    let Some((start, end)) = marked_form_region(&html, &map.form_id) else {
         // The map belongs to a form this page does not carry — do not
         // replay values into unrelated fields.
         return html;
-    }
-    inject_input_values(&mut html, map);
-    inject_textarea_values(&mut html, map);
-    inject_select_values(&mut html, map);
-    html
+    };
+    let mut scoped = html[start..end].to_string();
+    inject_input_values(&mut scoped, map);
+    inject_textarea_values(&mut scoped, map);
+    inject_select_values(&mut scoped, map);
+    format!("{}{scoped}{}", &html[..start], &html[end..])
 }
 
-/// Toggle `checked` on checkbox/radio inputs whose value was posted.
-fn make_checked(html: &str, name: &str, value: &str) -> String {
+/// Byte range of the `<form …>…</form>` element whose opening tag carries
+/// `data-form-id="<form_id>"`. Forms cannot nest, so the nearest preceding
+/// `<form` and the first following `</form>` delimit the element.
+fn marked_form_region(html: &str, form_id: &str) -> Option<(usize, usize)> {
+    let needle = format!("data-form-id=\"{}\"", crate::shell::html_escape(form_id));
+    let marker = html.find(&needle)?;
+    let open = html[..marker].rfind("<form")?;
+    let open_end = html[open..].find('>').map(|offset| open + offset + 1)?;
+    let close = html[open_end..]
+        .find("</form>")
+        .map(|offset| open_end + offset + "</form>".len())?;
+    Some((open, close))
+}
+
+/// Every `<form …>…</form>` region of a document, in order.
+fn form_regions(html: &str) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut cursor = 0;
+    while let Some(offset) = html[cursor..].find("<form") {
+        let open = cursor + offset;
+        let Some(open_end) = html[open..].find('>').map(|offset| open + offset + 1) else {
+            break;
+        };
+        let Some(close) = html[open_end..]
+            .find("</form>")
+            .map(|offset| open_end + offset + "</form>".len())
+        else {
+            break;
+        };
+        regions.push((open, close));
+        cursor = close;
+    }
+    regions
+}
+
+/// Control names carried by one form region, deduped: a checkbox group
+/// deliberately repeats one name, which is not cross-form ambiguity.
+fn form_control_names(region: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for tag_name in ["<input", "<select", "<textarea"] {
+        let mut cursor = 0;
+        while let Some(offset) = region[cursor..].find(tag_name) {
+            let start = cursor + offset;
+            let Some(end) = region[start..].find('>').map(|offset| start + offset + 1) else {
+                break;
+            };
+            if let Some(name) = extract_attribute(&region[start..end], "name") {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            cursor = end;
+        }
+    }
+    names
+}
+
+/// Field names that occur in more than one form of an unmarked document.
+fn cross_form_names(html: &str) -> Vec<String> {
+    let regions = form_regions(html);
+    if regions.len() < 2 {
+        return Vec::new();
+    }
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for (start, end) in regions {
+        for name in form_control_names(&html[start..end]) {
+            match seen.iter_mut().find(|(existing, _)| *existing == name) {
+                Some((_, count)) => *count += 1,
+                None => seen.push((name, 1)),
+            }
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// A copy of `map` without the fields whose names are cross-form ambiguous
+/// (values AND their errors: an error under the wrong control is worse than
+/// no error at all).
+fn without_cross_form_fields(map: &FormFieldData, cross_form: &[String]) -> FormFieldData {
+    FormFieldData {
+        form_id: map.form_id.clone(),
+        values: map
+            .values
+            .iter()
+            .filter(|(name, _)| !cross_form.contains(name))
+            .cloned()
+            .collect(),
+        errors: map
+            .errors
+            .iter()
+            .filter(|(name, _)| !cross_form.contains(name))
+            .cloned()
+            .collect(),
+        secrets: map.secrets.clone(),
+    }
+}
+
+/// REPLACE the checked state of every same-name choice control: any rendered
+/// default `checked` is removed first and re-added only when that control's
+/// value was actually posted.
+///
+/// The old implementation only ever ADDED `checked`, so a failed POST kept
+/// the SSR-rendered defaults alive next to the replayed values (review §3
+/// P1-12 / §4.10 "replace previous selected/checked state rather than
+/// accumulating attributes").
+fn replace_choice_state(html: &str, name: &str, values: &[String]) -> String {
     let needle = format!("name=\"{name}\"");
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
@@ -1530,21 +1657,62 @@ fn make_checked(html: &str, name: &str, value: &str) -> String {
             .find('>')
             .map(|offset| pos + offset)
             .unwrap_or(pos);
-        if is_input
-            && rest[tag_start..=tag_end]
-                .contains(&format!("value=\"{}\"", crate::shell::html_escape(value)))
-        {
-            out.push_str(&rest[..tag_end]);
-            out.push_str(" checked");
-            out.push('>');
+        let tag = &rest[tag_start..=tag_end];
+        let is_choice = tag.contains("type=\"checkbox\"") || tag.contains("type=\"radio\"");
+        if is_input && is_choice {
+            let body = strip_boolean_attribute(tag, "checked");
+            let posted =
+                extract_attribute(tag, "value").is_some_and(|value| values.contains(&value));
+            let self_closing = body.ends_with("/>");
+            let closer = if self_closing { "/>" } else { ">" };
+            let mut inner = body[..body.len() - closer.len()].trim_end().to_string();
+            if posted {
+                inner.push_str(" checked");
+            }
+            // Keep the conventional single space before a self-closing "/>".
+            if self_closing {
+                inner.push(' ');
+            }
+            out.push_str(&rest[..tag_start]);
+            out.push_str(&inner);
+            out.push_str(closer);
             rest = &rest[tag_end + 1..];
             continue;
         }
-        out.push_str(&rest[..tag_end + 1]);
+        out.push_str(&rest[..=tag_end]);
         rest = &rest[tag_end + 1..];
     }
     out.push_str(rest);
     out
+}
+
+/// Remove a boolean attribute (` checked` / ` selected`) from a tag body,
+/// including the single whitespace character that separated it from the
+/// previous attribute. Attribute-boundary aware, so `aria-checked` or a
+/// `checked`-looking value never matches.
+fn strip_boolean_attribute(body: &str, attribute: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(pos) = rest.find(attribute) {
+        let after = &rest[pos + attribute.len()..];
+        let before_is_space = pos > 0 && rest[..pos].ends_with([' ', '\t', '\n']);
+        let after_is_boundary = after.is_empty() || after.starts_with([' ', '>', '/', '\t', '\n']);
+        if before_is_space && after_is_boundary {
+            out.push_str(&rest[..pos - 1]);
+            rest = after;
+        } else {
+            out.push_str(&rest[..pos + attribute.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The stable id for a control's inline error paragraph, when the control
+/// carries an id (`<control-id>-error`), mirroring the primitives' contract.
+fn error_paragraph_id(tag: &str) -> Option<String> {
+    extract_attribute(tag, "id").map(|id| format!("{}-error", crate::shell::html_escape(&id)))
 }
 
 fn inject_input_values(html: &mut String, map: &FormFieldData) {
@@ -1571,11 +1739,7 @@ fn inject_input_values(html: &mut String, map: &FormFieldData) {
             .collect()
     };
     for (name, values) in grouped {
-        let mut current = std::mem::take(html);
-        for value in values {
-            current = make_checked(&current, &name, &value);
-        }
-        *html = current;
+        *html = replace_choice_state(html, &name, &values);
     }
 
     // Single-valued fields: set/replace value="…" and render the error.
@@ -1589,14 +1753,18 @@ fn inject_input_values(html: &mut String, map: &FormFieldData) {
         let tag = &rest[start..end];
         output.push_str(&rest[..start]);
         output.push_str(&rewrite_input_tag(tag, map));
-        // Per-field error text right under the control.
+        // Per-field error text right under the control, carrying the stable
+        // `<control-id>-error` id the control's aria-describedby targets.
         if let Some(name) = extract_attribute(tag, "name") {
             if name != "_csrf"
                 && !tag.contains("type=\"submit\"")
                 && !tag.contains("type=\"button\"")
             {
                 if let Some(error) = map.field_error(&name) {
-                    output.push_str(&field_error_paragraph(error));
+                    output.push_str(&field_error_paragraph(
+                        error_paragraph_id(tag).as_deref(),
+                        error,
+                    ));
                 }
             }
         }
@@ -1608,8 +1776,10 @@ fn inject_input_values(html: &mut String, map: &FormFieldData) {
 
 /// Rewrite one `<input …>` opening tag against the field map: hidden CSRF
 /// inputs and submit/button inputs stay untouched; text-like inputs get
-/// their value set/replaced; checkbox/radio inputs gain `checked` when
-/// their value was posted; fields with errors gain `aria-invalid`.
+/// their value set/replaced; checkbox/radio inputs have their checked state
+/// REPLACED (default removed, posted value re-added); fields with errors
+/// gain `aria-invalid` plus an `aria-describedby` pointing at the stable
+/// `<control-id>-error` paragraph.
 fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
     let Some(name) = extract_attribute(tag, "name") else {
         return tag.to_string();
@@ -1639,10 +1809,17 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
     if let Some(value) = value {
         let escaped = crate::shell::html_escape(value);
         if is_choice {
-            if extract_attribute(tag, "value").as_deref() == Some(value)
-                && !body.contains(" checked")
-            {
-                body.push_str(" checked");
+            // REPLACE: the rendered default never survives next to the
+            // replayed state. A GROUP name (several posted values, e.g. a
+            // webhook event checkbox group) is owned by the grouped pass
+            // above — this single-value pass must not re-strip its marks.
+            let grouped = map.values.iter().filter(|(n, _)| *n == name).count() > 1;
+            if !grouped {
+                body = strip_boolean_attribute(&body, "checked");
+                if extract_attribute(tag, "value").as_deref() == Some(value) {
+                    body.truncate(body.trim_end().len());
+                    body.push_str(" checked");
+                }
             }
         } else {
             // Drop any existing value="…" then append the submitted one.
@@ -1655,18 +1832,38 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
             body.push_str(&format!(" value=\"{escaped}\""));
         }
     }
-    if error.is_some() && !body.contains("aria-invalid") {
-        body.push_str(" aria-invalid=\"true\"");
+    if error.is_some() {
+        if !body.contains("aria-invalid") {
+            body.push_str(" aria-invalid=\"true\"");
+        }
+        // Associate the message with the control whenever the control has
+        // an id: `aria-describedby` is only added together with the
+        // `<id>-error` paragraph the caller emits right after the tag, so
+        // the reference always resolves (a11y gate `error-association`).
+        if let Some(id) = error_paragraph_id(tag) {
+            if !tag.contains("aria-describedby") {
+                body.push_str(&format!(" aria-describedby=\"{id}\""));
+            }
+        }
     }
     format!("{body}{}", if self_closing { "/>" } else { ">" })
 }
 
-/// The per-field error paragraph rendered directly after its control.
-fn field_error_paragraph(error: &str) -> String {
-    format!(
-        "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
-        crate::shell::html_escape(error)
-    )
+/// The per-field error paragraph rendered directly after its control. When
+/// the control carries an id, the paragraph carries the stable
+/// `<control-id>-error` id (mirrors `primitives::Input`); otherwise it stays
+/// unlabelled rather than inventing an id nothing references.
+fn field_error_paragraph(error_id: Option<&str>, error: &str) -> String {
+    match error_id {
+        Some(id) => format!(
+            "<p id=\"{id}\" class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+            crate::shell::html_escape(error)
+        ),
+        None => format!(
+            "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+            crate::shell::html_escape(error)
+        ),
+    }
 }
 
 fn inject_textarea_values(html: &mut String, map: &FormFieldData) {
@@ -1682,23 +1879,32 @@ fn inject_textarea_values(html: &mut String, map: &FormFieldData) {
             .map(|offset| open_end + offset)
             .unwrap_or(rest.len());
         let tag = &rest[start..open_end];
-        output.push_str(&rest[..open_end]);
-        if let Some(name) = extract_attribute(tag, "name") {
-            if let Some(value) = map.field_value(&name) {
+        let name = extract_attribute(tag, "name");
+        let error = name.as_deref().and_then(|name| map.field_error(name));
+        output.push_str(&rest[..start]);
+        output.push_str(&with_error_state(tag, error.is_some()));
+        if let Some(name) = &name {
+            if let Some(value) = map.field_value(name) {
                 output.push_str(&crate::shell::html_escape(value));
                 output.push_str("</textarea>");
                 // The submitted value must not swallow the field error: in a
                 // failed POST both are present, and the old code rendered
                 // only the value, hiding the validation message.
-                if let Some(error) = map.field_error(&name) {
-                    output.push_str(&field_error_paragraph(error));
+                if let Some(error) = error {
+                    output.push_str(&field_error_paragraph(
+                        error_paragraph_id(tag).as_deref(),
+                        error,
+                    ));
                 }
                 rest = &rest[close + "</textarea>".len()..];
                 continue;
             }
-            if let Some(error) = map.field_error(&name) {
+            if let Some(error) = error {
                 output.push_str(&rest[open_end..close + "</textarea>".len()]);
-                output.push_str(&field_error_paragraph(error));
+                output.push_str(&field_error_paragraph(
+                    error_paragraph_id(tag).as_deref(),
+                    error,
+                ));
                 rest = &rest[close + "</textarea>".len()..];
                 continue;
             }
@@ -1723,63 +1929,45 @@ fn inject_select_values(html: &mut String, map: &FormFieldData) {
             .map(|offset| open_end + offset)
             .unwrap_or(rest.len());
         let tag = &rest[start..open_end];
-        output.push_str(&rest[..open_end]);
+        let name = extract_attribute(tag, "name");
+        let error = name.as_deref().and_then(|name| map.field_error(name));
+        output.push_str(&rest[..start]);
+        output.push_str(&with_error_state(tag, error.is_some()));
         let mut inner = rest[open_end..close].to_string();
-        if let Some(name) = extract_attribute(tag, "name") {
-            if let Some(value) = map.field_value(&name) {
-                let escaped = crate::shell::html_escape(value);
-                // Clear any rendered selection, then mark the posted option.
-                inner = inner.replace(" selected>", ">");
-                let mut selected_inner = String::with_capacity(inner.len());
+        if let Some(name) = &name {
+            if let Some(value) = map.field_value(name) {
+                // REPLACE any rendered selection, then mark the posted option
+                // only: an existing `selected` attribute is stripped from
+                // every option first (the old `replace(" selected>", ">")`
+                // missed `<option selected >` and any attribute order that
+                // did not end in exactly `">`).
+                let mut rebuilt = String::with_capacity(inner.len());
                 let mut options = inner.as_str();
                 while let Some(option_start) = options.find("<option") {
                     let option_end = options[option_start..]
                         .find('>')
                         .map(|offset| option_start + offset + 1)
                         .unwrap_or(options.len());
-                    let option_tag = &options[option_start..option_end];
-                    // `selected` is an ATTRIBUTE: it belongs INSIDE the
-                    // opening tag. Appending it after the '>' (as the old
-                    // code did) produced `<option value="x"> selected>`,
-                    // which browsers render as option text — the posted
-                    // value was never actually re-selected.
-                    let closes = option_tag.ends_with('>');
-                    let tag_body = if closes {
-                        &option_tag[..option_tag.len() - 1]
-                    } else {
-                        option_tag
-                    };
-                    selected_inner.push_str(&options[..option_start]);
-                    selected_inner.push_str(tag_body);
-                    if closes && extract_attribute(option_tag, "value").as_deref() == Some(value) {
-                        selected_inner.push_str(" selected");
-                    }
-                    if closes {
-                        selected_inner.push('>');
-                    }
-                    // Preserve the rest of this option's markup up to the
-                    // next option (or the end).
-                    let next = options[option_end..]
-                        .find("<option")
-                        .map(|offset| option_end + offset)
-                        .unwrap_or(options.len());
-                    selected_inner.push_str(&options[option_end..next]);
-                    options = &options[next..];
+                    rebuilt.push_str(&options[..option_start]);
+                    rebuilt.push_str(&rewrite_option_tag(
+                        &options[option_start..option_end],
+                        value,
+                    ));
+                    options = &options[option_end..];
                 }
-                selected_inner.push_str(options);
-                let _ = escaped;
-                inner = selected_inner;
+                rebuilt.push_str(options);
+                inner = rebuilt;
             }
         }
         output.push_str(&inner);
         output.push_str("</select>");
         // Selects carry per-field errors the same way inputs and textareas
         // do; the old code never rendered them.
-        if let Some(error) = extract_attribute(tag, "name")
-            .as_deref()
-            .and_then(|name| map.field_error(name))
-        {
-            output.push_str(&field_error_paragraph(error));
+        if let Some(error) = error {
+            output.push_str(&field_error_paragraph(
+                error_paragraph_id(tag).as_deref(),
+                error,
+            ));
         }
         rest = &rest[close + "</select>".len()..];
     }
@@ -1787,12 +1975,63 @@ fn inject_select_values(html: &mut String, map: &FormFieldData) {
     *html = output;
 }
 
-/// Extract a double-quoted attribute value from a tag string.
+/// Extract a double-quoted attribute value from a tag string. The match must
+/// start at an attribute boundary, so `id="x"` is not found inside
+/// `data-list-id="x"` and `value="x"` is not found inside `data-value="x"`.
 fn extract_attribute(tag: &str, attribute: &str) -> Option<String> {
     let needle = format!("{attribute}=\"");
-    let start = tag.find(&needle)? + needle.len();
-    let end = tag[start..].find('"')? + start;
-    Some(tag[start..end].to_string())
+    let mut from = 0;
+    while let Some(offset) = tag[from..].find(&needle) {
+        let at = from + offset;
+        let boundary = at == 0 || tag[..at].ends_with([' ', '\t', '\n', '"', '\'']);
+        if boundary {
+            let start = at + needle.len();
+            let end = tag[start..].find('"')? + start;
+            return Some(tag[start..end].to_string());
+        }
+        from = at + needle.len();
+    }
+    None
+}
+
+/// Mark a failed control: `aria-invalid="true"` always, plus
+/// `aria-describedby="<control-id>-error"` when the control carries an id.
+/// The paragraph with that id is emitted by the caller directly after the
+/// element, so the reference always resolves (a11y gate `error-association`).
+fn with_error_state(tag: &str, has_error: bool) -> String {
+    if !has_error {
+        return tag.to_string();
+    }
+    let trimmed = tag.trim_end();
+    let self_closing = trimmed.ends_with("/>");
+    let closer = if self_closing { "/>" } else { ">" };
+    let mut inner = trimmed[..trimmed.len() - closer.len()].to_string();
+    if !tag.contains("aria-invalid") {
+        inner.push_str(" aria-invalid=\"true\"");
+    }
+    if !tag.contains("aria-describedby") {
+        if let Some(id) = error_paragraph_id(tag) {
+            inner.push_str(&format!(" aria-describedby=\"{id}\""));
+        }
+    }
+    format!("{inner}{closer}")
+}
+
+/// Rewrite one `<option …>` opening tag: strip any rendered `selected`
+/// attribute and re-add it only when this option's value was posted.
+fn rewrite_option_tag(option_tag: &str, posted_value: &str) -> String {
+    let closes = option_tag.ends_with('>');
+    let (body, closer) = if closes {
+        (&option_tag[..option_tag.len() - 1], ">")
+    } else {
+        (option_tag, "")
+    };
+    let body = strip_boolean_attribute(body, "selected");
+    if extract_attribute(option_tag, "value").as_deref() == Some(posted_value) {
+        format!("{body} selected{closer}")
+    } else {
+        format!("{body}{closer}")
+    }
 }
 
 /// Inject the hidden `_csrf` input into every native `POST /web/*` form and
@@ -1924,6 +2163,7 @@ fn web_route_page_name(path: &str) -> &'static str {
     match path {
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => "Edit Campaign",
         p if p.starts_with("/campaigns/") => "Campaign Detail",
+        p if p.starts_with("/lists/") && p.ends_with("/members") => "List Members",
         p if p.starts_with("/lists/") && p.ends_with("/edit") => "Edit List",
         p if p.starts_with("/lists/") => "List Detail",
         p if p.starts_with("/domains/") => "Domain Detail",
@@ -2324,6 +2564,13 @@ fn render_web(
         // name so POST /web/lists/update can actually save (batch-2
         // list-edit fix). Without data (anonymous / no row) the static
         // no-values form renders — it cannot claim a list it did not load.
+        // Lane R6/review §6.2: /lists/{id}/members first — it must resolve
+        // BEFORE the generic detail catch-all. With data the api-server
+        // composes the real rows (`load_list_members`); without data this is
+        // the manifest/render-inventory skeleton.
+        p if p.starts_with("/lists/") && p.ends_with("/members") => {
+            leptos_views::web_list_members_page()
+        }
         p if p.starts_with("/lists/") && p.ends_with("/edit") => {
             match data.and_then(|d| d.list_edit.as_ref()) {
                 Some(edit) => leptos_views::web_list_edit_page_with_values(edit),
@@ -2703,7 +2950,21 @@ mod tests {
             footer_has_class,
             "marketing /pricing must render a footer with a class attribute"
         );
-        assert!(html.contains("/pricing/calculator"));
+        // The built Zola page is the served authority (marketing_static_document).
+        // Its interactive calculator section is INLINE on /pricing, anchored
+        // `#apexmail-calculator` (review §8.1: plans/calculator/FAQ anchors);
+        // the standalone /pricing/calculator route is the catalog snapshot.
+        // Zola's built pages are minified with UNQUOTED attribute values
+        // (`id=pricing-faq`), so the anchor is asserted by name, not by a
+        // quoted-attribute shape.
+        assert!(
+            html.contains("apexmail-calculator"),
+            "marketing /pricing must carry the inline calculator section anchor"
+        );
+        assert!(
+            render_route("marketing", "/pricing/calculator").is_some(),
+            "the marketing /pricing/calculator route must still render"
+        );
     }
 
     #[test]
@@ -2778,6 +3039,17 @@ mod tests {
             render_route("web", "/campaigns/c_1/edit").expect("campaign edit route should resolve");
         assert!(edit.contains("Edit Campaign"));
         assert!(edit.contains("Campaign Name"));
+
+        // Lane R6/review §6.2: /lists/{id}/members resolves to the MEMBERS
+        // skeleton, not the generic list-detail catch-all (the render order
+        // is the load-bearing part: the members arm precedes `/lists/`).
+        let members =
+            render_route("web", "/lists/l_1/members").expect("list members route should resolve");
+        assert!(
+            members.contains("data-page=\"list-members\""),
+            "the members route must render the members skeleton, not the list detail"
+        );
+        assert!(members.contains("Open a list to see its members"));
     }
 
     #[test]
@@ -2789,8 +3061,9 @@ mod tests {
         assert!(!campaigns.contains("data-pagination-storage-key"));
         assert!(campaigns.contains("/confirm?intent=delete-campaign&amp;id=c_spring"));
         assert!(campaigns.contains("action=\"/web/campaigns/delete-bulk\""));
-        // The bulk bar states the select-all truth.
-        assert!(campaigns.contains("no select-all without scripts"));
+        // Review §4.2: the bulk bar states the interaction, not the
+        // implementation.
+        assert!(campaigns.contains("Select the rows you want to act on"));
 
         let contacts = render_route("web", "/contacts").expect("contacts route should render");
         assert!(contacts.contains("Select rows to act on them in bulk"));
@@ -3791,8 +4064,14 @@ mod tests {
         .unwrap();
         // Input value re-populated.
         assert!(html.contains("value=\"https://example.com/hook\""));
-        // Both checkbox-group members re-checked.
-        assert!(html.matches(" checked").count() >= 2);
+        // The fallback page renders sent/bounced as its DEFAULTS; the posted
+        // group (accepted/delivered) does not include them, so the replay
+        // must REPLACE the defaults — no stale `checked` survives (review §3
+        // P1-12). The positive case (posted values present in the markup)
+        // is pinned by `failed_replay_replaces_checked_and_selected_defaults`.
+        assert_eq!(html.matches(" checked").count(), 0);
+        assert!(!html.contains("value=\"message.sent\" checked"));
+        assert!(!html.contains("value=\"message.bounced\" checked"));
         // Per-field error under the control + aria-invalid.
         assert!(html.contains("Enter an https URL."));
         assert!(html.contains("aria-invalid=\"true\""));
@@ -4395,7 +4674,7 @@ mod tests {
             secrets: vec![],
         };
         let html = inject_form_field_state(page.to_string(), Some(&map));
-        assert_eq!(html.matches(" checked").count(), 2);
+        assert_eq!(html.matches(" checked").count(), 2, "{html}");
         assert!(html.contains("value=\"https://new.example/hook\""));
         assert!(!html.contains("value=\"old\""));
         assert!(html.contains("aria-invalid=\"true\""));
@@ -4459,9 +4738,9 @@ mod tests {
                 .to_string(),
             Some(&map),
         );
-        assert!(html.contains("a&lt;b&gt; &amp; c"));
-        assert!(!html.contains("old"));
-        assert!(html.contains("Too long"));
+        assert!(html.contains("a&lt;b&gt; &amp; c"), "{html}");
+        assert!(!html.contains("old"), "{html}");
+        assert!(html.contains("Too long"), "{html}");
         assert!(html.contains("<option value=\"free\">Free</option>"));
         assert!(html.contains("<option value=\"pro\" selected>Pro</option>"));
 
@@ -4508,6 +4787,97 @@ mod tests {
         assert_eq!(plain, page);
         // extract_query_param on a link without a query is None.
         assert!(extract_query_param("/confirm", "intent").is_none());
+    }
+
+    /// Review §3 P1-12 / §4.10: a failed multi-form replay must not
+    /// cross-contaminate. A page that marks its forms replays ONLY inside
+    /// the named form; on an unmarked page a same-named field carried by two
+    /// forms is dropped instead of guessed.
+    #[test]
+    fn failed_replay_is_confined_to_the_matching_form() {
+        let marked = "<main><form data-form-id=\"a\" method=\"post\" action=\"/web/a\">\
+<input type=\"text\" id=\"a-url\" name=\"url\" value=\"\" /></form>\
+<form data-form-id=\"b\" method=\"post\" action=\"/web/b\">\
+<input type=\"text\" id=\"b-url\" name=\"url\" value=\"stored-b\" /></form></main>";
+        let mut map = FormFieldData::new("b");
+        map.set("url", "https://posted.example/hook");
+        let html = inject_form_field_state(marked.to_string(), Some(&map));
+        // Form b replayed (its stored value replaced by the posted one);
+        // form a — same field name — byte-identical.
+        assert!(
+            html.contains("value=\"https://posted.example/hook\""),
+            "{html}"
+        );
+        assert!(!html.contains("stored-b"), "{html}");
+        assert_eq!(
+            html.matches("value=\"https://posted.example/hook\"")
+                .count(),
+            1,
+            "{html}"
+        );
+        assert!(
+            html.contains("<input type=\"text\" id=\"a-url\" name=\"url\" value=\"\" />"),
+            "{html}"
+        );
+        // The marker's own form (not the first) is the scope: form a's field
+        // must NOT have received the value.
+        let form_a = &html
+            [html.find("data-form-id=\"a\"").unwrap()..html.find("data-form-id=\"b\"").unwrap()];
+        assert!(!form_a.contains("posted.example"), "{form_a}");
+
+        // Unmarked page with two forms carrying the same name: ambiguous ⇒
+        // no replay anywhere (fail closed), and no error is misplaced.
+        let unmarked = "<main><form method=\"post\" action=\"/web/x\">\
+<input type=\"text\" id=\"x-token\" name=\"token\" /></form>\
+<form method=\"post\" action=\"/web/y\">\
+<input type=\"text\" id=\"y-token\" name=\"token\" /></form></main>";
+        let mut ambiguous = FormFieldData::new("unidentified");
+        ambiguous.set("token", "leaked");
+        ambiguous.error("token", "Bad token.");
+        let out = inject_form_field_state(unmarked.to_string(), Some(&ambiguous));
+        assert!(!out.contains("leaked"), "{out}");
+        assert!(!out.contains("Bad token."), "{out}");
+
+        // Unmarked page with ONE form still replays (the legacy console
+        // pages carry a single form per route).
+        let single = "<main><form method=\"post\" action=\"/web/z\">\
+<input type=\"text\" id=\"z-token\" name=\"token\" /></form></main>";
+        let out = inject_form_field_state(single.to_string(), Some(&ambiguous));
+        assert!(out.contains("value=\"leaked\""), "{out}");
+    }
+
+    /// Review §3 P1-12 / §4.10: replay REPLACES rendered defaults instead of
+    /// accumulating attributes — an unchecked box loses its stale `checked`,
+    /// a non-posted option loses `selected`, and each failed control gains
+    /// `aria-invalid` plus a resolvable `aria-describedby` error link.
+    #[test]
+    fn failed_replay_replaces_checked_and_selected_defaults() {
+        let page = "<form><input type=\"checkbox\" id=\"ev-bounced\" name=\"events\" value=\"bounced\" checked />\
+<input type=\"checkbox\" id=\"ev-accepted\" name=\"events\" value=\"accepted\" />\
+<select id=\"plan\" name=\"plan\"><option value=\"free\" selected>Free</option>\
+<option value=\"pro\">Pro</option><option value=\"scale\" selected>Scale</option></select></form>";
+        let mut map = FormFieldData::new("webhook-create");
+        map.set("events", "accepted");
+        let html = inject_form_field_state(page.to_string(), Some(&map));
+        // The rendered default is REPLACED: exactly one box stays checked,
+        // and it is the posted one.
+        assert_eq!(html.matches(" checked").count(), 1, "{html}");
+        assert!(html.contains("value=\"accepted\" checked"), "{html}");
+
+        let mut plan = FormFieldData::new("webhook-create");
+        plan.set("plan", "pro");
+        plan.error("plan", "Pick a valid plan.");
+        let html = inject_form_field_state(page.to_string(), Some(&plan));
+        // No stale default survives (two `selected` attributes in, one out),
+        // and the error is ASSOCIATED with the control.
+        assert_eq!(html.matches(" selected").count(), 1, "{html}");
+        assert!(html.contains("<option value=\"pro\" selected>"), "{html}");
+        assert!(!html.contains("value=\"free\" selected"), "{html}");
+        assert!(!html.contains("value=\"scale\" selected"), "{html}");
+        assert!(html.contains("aria-describedby=\"plan-error\""), "{html}");
+        assert!(html.contains("id=\"plan-error\""), "{html}");
+        assert!(html.contains("aria-invalid=\"true\""), "{html}");
+        assert!(html.contains("Pick a valid plan."), "{html}");
     }
 
     /// Route-context lookup stays honest for unknown paths.

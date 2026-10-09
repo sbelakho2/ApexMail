@@ -19,7 +19,7 @@
 {# Category jump navigation ahead of the long card inventory: the page lists
    38 capability cards in six categories, so the reader can go straight to
    the category that matters instead of scrolling the whole inventory. #}
-<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['feature_categories'] %}{{ i18n_data[l]['a11y']['feature_categories'] }}{% else %}Feature categories{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 -mt-8 lg:-mt-10 relative z-10">
+<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['feature_categories'] %}{{ i18n_data[l]['a11y']['feature_categories'] }}{% else %}Feature categories{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
   <div class="flex flex-wrap gap-2 justify-center">
     {% set feature_anchors = ["#cat-email-delivery", "#cat-deliverability", "#cat-compliance-security", "#cat-insights-intelligence", "#cat-analytics-tracking", "#cat-enterprise"] %}
     {% set feature_keys = ["cat_email_delivery", "cat_deliverability", "cat_compliance", "cat_insights", "cat_analytics", "cat_enterprise"] %}

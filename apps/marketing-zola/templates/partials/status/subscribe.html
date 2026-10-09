@@ -5,16 +5,16 @@
   <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="flex flex-col sm:flex-row items-center justify-between gap-6">
       <div>
-        <h3 class="text-lg font-semibold text-surface-950 mb-1">Stay Informed</h3>
+        <h3 class="text-lg font-semibold text-surface-950 mb-1">Check service status</h3>
         <p class="text-sm text-surface-600">
-          Get notified about incidents and scheduled maintenance.
+          These links open the live status page and its JSON feed. They do not subscribe you to notifications.
         </p>
       </div>
       {# The status vhost serves NO /subscribe/email and NO /feed (verified
          404, 2026-09-10, deploy/tests/broken-links.sh finding) — the old
          CTAs promised channels that do not exist. Link what is real: the
          live status page and the public status JSON. #}
-      <div class="flex gap-3">
+      <div class="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
         <a href="{{ config.extra.status_url }}/status" class="inline-flex items-center gap-2 px-6 py-3 bg-surface-950 hover:bg-brand-700 text-white text-sm font-semibold rounded-sm transition-colors">
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           Live Status

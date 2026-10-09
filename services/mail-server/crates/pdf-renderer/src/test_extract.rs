@@ -17,8 +17,7 @@ pub fn extract_text(pdf: &[u8]) -> String {
 /// Build a world whose main source is the given Typst source (test-only:
 /// exercises diagnostics and layout without touching the embedded templates).
 pub fn world_with_source(source: &str) -> TypstWorld {
-    let mut world =
-        TypstWorld::new("invoice", "{}".to_string()).expect("base world must build");
+    let mut world = TypstWorld::new("invoice", "{}".to_string()).expect("base world must build");
     world.set_main_source_for_test(source);
     world
 }

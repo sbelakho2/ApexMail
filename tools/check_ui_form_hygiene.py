@@ -29,7 +29,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ui_routes  # noqa: E402
-from ui_html_rules import iter_documents, control_label_state  # noqa: E402
+from ui_html_rules import (  # noqa: E402
+    control_label_state,
+    iter_documents,
+    require_fixture_coverage,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FIXTURES = ROOT / "services/mail-server/crates/ui-foundation/baselines/rust-ui"
@@ -62,6 +66,8 @@ def main(argv: list[str]) -> int:
               "--bin export_visual_fixtures -- <dir>  (from services/mail-server)")
         return 1
 
+    if require_fixture_coverage(fixtures):
+        return 1
     post_routes = ui_routes.post_routes(WEB_RS.read_text())
     print(f"fixtures: {fixtures}")
     print(f"registered POST routes (web.rs): {len(post_routes)}")

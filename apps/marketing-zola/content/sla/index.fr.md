@@ -4,7 +4,7 @@ description = "SLA ApexMail — engagements contractuels de disponibilité pour 
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-09-09"
 +++
 
 ## 1. Portée

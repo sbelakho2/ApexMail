@@ -28,8 +28,21 @@ ApexMail kann Interessenten bei der Prüfung der aktuellen AVV, der Unterauftrag
 1. Bestätigen Sie die vorgesehenen Datenkategorien, Aufbewahrungsanforderungen und den Versand-Workflow.
 2. Prüfen Sie die aktuelle AVV, den Datenresidenz-Umfang und die Unterauftragsverarbeiter-Informationen.
 3. Wählen Sie einen Tarif mit den erforderlichen Laufzeitfunktionen und Limits.
-4. Konfigurieren Sie für Scale oder Enterprise Identity-Kontrollen, Audit-Prüfung und operative Verantwortung bedarfsgerecht.
+4. Konfigurieren Sie für Business oder Enterprise Cloud Identity-Kontrollen, Audit-Prüfung und operative Verantwortung bedarfsgerecht.
 5. Schließen Sie vor dem Produktiveinsatz etwaige Sicherheits- oder Beschaffungsprüfungen ab.
+
+## Beschaffungs-Checkliste
+
+| Punkt | Status |
+|---|---|
+| AVV und Unterauftragsverarbeiter-Register | Zur Prüfung verfügbar |
+| Bestätigung der Datenresidenz | Bereitstellungs- und vertragsspezifisch; schriftlich bestätigt |
+| HIPAA-Verfügbarkeit / BAA-Abschluss | **Wird derzeit nicht angeboten** |
+| Private Cloud / BYOIP | Vertragsabhängig; schriftliche Genehmigung und technische Prüfung erforderlich |
+| Antworten auf Sicherheitsfragebögen (SIG/CAIQ/HECVAT oder individuell) | Enterprise-Prüfung; NDA falls erforderlich |
+| SLA- und Support-Zusagen | Nur im unterzeichneten Vertrag definiert |
+
+Jede Funktion, Zertifizierung oder Zusage ist erst verbindlich, wenn sie ausdrücklich schriftlich genehmigt wurde.
 
 ## Wichtige Einschränkungen
 

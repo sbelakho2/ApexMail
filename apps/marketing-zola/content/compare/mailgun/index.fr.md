@@ -40,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
     { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant, hébergé dans l’UE', comp = 'Oui (tous les forfaits)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business', comp = 'Disponible en option additionnelle sur le forfait Foundation et au-delà<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business ; 3 sur Enterprise Cloud', comp = 'Disponible en option additionnelle sur le forfait Foundation et au-delà<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Tenance dédiée", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
@@ -50,7 +50,7 @@ comparison_sections = [
     { feature = "Journaux d’audit", apex = 'Forfait Growth et supérieurs — activité du compte, usage des clés API, changements de configuration ; consultables, exportables', comp = 'Journaux d’événements accessibles via l’API Events ; rétention variable selon le forfait ; pas de piste d’audit consolidée au niveau du compte<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
   { title = "TARIFS À 100K/MOIS (vérifiés le 2026-07-29)", rows = [
-    { feature = "Forfait comparé", apex = 'Pro : €65/mois (150 000 emails inclus)', comp = 'Scale : €82.80 (US$90)/mois (100 000 emails inclus)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
+    { feature = "Forfait comparé", apex = 'Pro : €89/mois (150 000 emails inclus)', comp = 'Scale : €82.80 (US$90)/mois (100 000 emails inclus)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Conditions d’usage", apex = 'Voir le catalogue public actuel et le paiement pour les conditions d’usage applicables', comp = 'à partir de €1.20 (US$1.30)/1 000 en dépassement sur Foundation ; tarifs progressifs sur Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Offre gratuite", apex = '3 000 emails/mois + allocation de lancement unique de 30 000 emails', comp = '100 emails/jour (essai Flex — sans carte bancaire)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},

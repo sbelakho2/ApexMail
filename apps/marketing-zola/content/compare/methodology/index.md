@@ -39,11 +39,11 @@ What actually backs a comparison row today:
 | ApexMail implementation | On every row |
 | Competitor implementation | On every row |
 | Winner callout | Only where a row is objectively decidable; many rows deliberately declare none |
-| Inline source references with URLs | Only on the Amazon SES and Mailgun pages, which carry per-row numbered source links |
+| Inline source references with URLs | Only on the [Amazon SES](/compare/amazon-ses/) and [Mailgun](/compare/mailgun/) pages, which carry per-row numbered source links |
 | Verification date | One review date per page (per-page `pricing_as_of`, rendered under the table) |
 | Reviewer | ApexMail marketing engineering (named on the SES/Mailgun source footnotes) |
 
-Rows on pages without inline source links (SendGrid, Postmark, Resend) summarize publicly documented provider behavior as of the page's review date, without per-row citation. Where we cannot verify a competitor figure, the cell says so ("not publicly documented", "see provider pricing") rather than asserting a number.
+Rows on pages without inline source links ([SendGrid](/compare/sendgrid/), [Postmark](/compare/postmark/), [Resend](/compare/resend/)) summarize publicly documented provider behavior as of the page's review date, without per-row citation. Where we cannot verify a competitor figure, the cell says so ("not publicly documented", "see provider pricing") rather than asserting a number.
 
 ## Pricing Comparison Rules
 

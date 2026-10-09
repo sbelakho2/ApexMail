@@ -29,7 +29,7 @@ ApexMail bietet Transaktions-E-Mail-Infrastruktur für SaaS-Plattformen und regu
 
 ## Infrastruktur
 
-Die bereitgestellte ApexMail-Konfiguration ist auf EU/EWR-Regionen ausgerichtet. Aktive Speicherorte für Kundendaten und Telemetrie sowie Übermittlungsgarantien werden während der Bereitstellung oder im anwendbaren Vertrag bestätigt. Siehe unsere [Architekturseite](/architecture) für Bereitstellungsmodelle, Netzwerkarchitektur und die Verantwortlichkeitsmatrix.
+Die bereitgestellte ApexMail-Konfiguration ist auf EU/EWR-Regionen ausgerichtet. Aktive Speicherorte für Kundendaten und Telemetrie sowie Übermittlungsgarantien werden während der Bereitstellung oder im anwendbaren Vertrag bestätigt. Siehe unsere [Architekturseite](/architecture) (auf Englisch) für Bereitstellungsmodelle, Netzwerkarchitektur und die Verantwortlichkeitsmatrix.
 
 ## Kontakt
 

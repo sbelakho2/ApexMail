@@ -60,9 +60,10 @@ textarea:focus-visible {
 }
 
 /* ── Header Dropdowns (<details> disclosure, design audit item 5) ──
-   Native disclosure widgets: click/Enter/Space toggles, Esc closes,
-   and the open state is real markup — no frozen aria-expanded, no
-   JS-kitchen-sink ARIA. The chevron rotates with the open state. */
+   Native disclosure widgets: click/Enter/Space toggles and the open state
+   is real markup — no frozen aria-expanded, no JS-kitchen-sink ARIA. (No
+   Escape promise: browsers do not consistently close <details> on Escape
+   without script.) The chevron rotates with the open state. */
 details[data-dropdown] > summary {
   cursor: pointer;
   list-style: none;
@@ -93,8 +94,8 @@ details[data-dropdown][open] > [data-dropdown-menu] {
    itself (and by the details:not([open]) rule at the end of this file).
    The panel is absolutely positioned against the sticky #site-header so it
    spans the viewport width even though the <details> sits in the header
-   row. Focusability, the expanded state and Escape-to-close are the
-   element's own semantics — no checkbox hack, no proxy focus ring. */
+   row. Focusability and the expanded state are the element's own semantics
+   — no checkbox hack, no proxy focus ring. */
 #mobile-nav > summary {
   list-style: none;
   cursor: pointer;

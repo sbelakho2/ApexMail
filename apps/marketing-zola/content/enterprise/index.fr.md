@@ -13,14 +13,14 @@ Enterprise est une offre contractuelle de livraison d'emails pour les organisati
 
 ## Droits du catalogue
 
-| Élément | Enterprise |
+| Élément | Enterprise Cloud |
 |---|---|
 | Prix | à partir de €1,750/mois dans le cadre d'un contrat annuel |
 | Volume d'emails inclus | 5,000,000 emails/mois |
 | Appels API | Illimités |
 | Domaines et membres d'équipe | Illimités |
 | Rétention | 730 jours |
-| IP dédiées | 10 incluses |
+| IP dédiées | 3 incluses |
 | Contrôles d'accès | SAML SSO et journaux d'audit |
 | Niveau de support | Dédié |
 | Cloud Privé / BYOIP | Soumis à revue contractuelle et technique |

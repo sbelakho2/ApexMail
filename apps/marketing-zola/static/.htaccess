@@ -1,6 +1,12 @@
 # ──────────────────────────────────────────────
 # Apache Configuration for ZoneOS deployment
 # Ensures HSTS and security headers on apexmail.ee and www.apexmail.ee
+#
+# SCOPE (review §9): this file is the Apache EQUIVALENT of the canonical
+# delivery behavior — it is not an independent route authority. Header values
+# mirror apps/marketing-zola/static/_headers (edge) and nginx.conf (container);
+# the relocation rules below mirror static/_redirects so /forensic, /api-console
+# and /case-studies resolve identically on every deployment mode.
 # ──────────────────────────────────────────────
 
 <IfModule mod_headers.c>
@@ -21,3 +27,12 @@
 <FilesMatch "^\.ht">
     Require all denied
 </FilesMatch>
+
+# Canonical relocations (equivalent to static/_redirects + nginx.conf).
+<IfModule mod_alias.c>
+    RedirectMatch 301 ^/api-console/?$ /api-explorer/
+    RedirectMatch 301 ^/case-studies/(.*)$ /solutions/$1
+    RedirectMatch 301 ^/(de|fr|es)/case-studies/?$ /$1/solutions/
+    RedirectMatch 301 ^/forensic/?$ /email-logs/
+    RedirectMatch 301 ^/(de|fr|es)/forensic/?$ /$1/email-logs/
+</IfModule>

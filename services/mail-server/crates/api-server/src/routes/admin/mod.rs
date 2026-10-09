@@ -134,10 +134,19 @@ mod tests {
 
     /// The scope-scan decision over abstracted (module, source) pairs:
     /// every module source must contain the wildcard-scope guard call.
+    ///
+    /// The call is matched SEMANTICALLY (a `require_scopes(` call with the
+    /// `["*"]` wildcard argument), not by one spelling: clippy's
+    /// `needless_borrow` cleanup legitimately rewrites `require_scopes(&auth,
+    /// …)` to `require_scopes(auth, …)` when the parameter is already a
+    /// reference, and a literal-substring gate would fail a guarded file
+    /// (2026-10-09 review fold — the `mailboxes` false positive).
     fn missing_scope_guards_of(module_sources: &[(String, String)]) -> Vec<String> {
         module_sources
             .iter()
-            .filter(|(_, source)| !source.contains("require_scopes(&auth, &[\"*\"])"))
+            .filter(|(_, source)| {
+                !(source.contains("require_scopes(") && source.contains("[\"*\"]"))
+            })
             .map(|(module, _)| module.clone())
             .collect()
     }
@@ -179,14 +188,26 @@ mod tests {
         assert_eq!(undeclared, vec!["totally_new_module".to_string()]);
 
         // The scope-scan decision: a module source with the wildcard guard
-        // passes; one without is flagged by name.
+        // passes (in either spelling clippy allows); one without the guard —
+        // and one guarding only a NARROW scope — is flagged by name.
         let sources = vec![
             (
                 "audit".to_string(),
                 "require_scopes(&auth, &[\"*\"])?".to_string(),
             ),
+            (
+                "clean_spelling".to_string(),
+                "require_scopes(auth, &[\"*\"])?".to_string(),
+            ),
+            (
+                "narrow".to_string(),
+                "require_scopes(&auth, &[\"analytics:read\"])?".to_string(),
+            ),
             ("evil".to_string(), "fn x() {}".to_string()),
         ];
-        assert_eq!(missing_scope_guards_of(&sources), vec!["evil".to_string()]);
+        assert_eq!(
+            missing_scope_guards_of(&sources),
+            vec!["narrow".to_string(), "evil".to_string()]
+        );
     }
 }

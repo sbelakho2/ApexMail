@@ -29,8 +29,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "DÉLIVRABILITÉ", rows = [
-    { feature = "Taux de livraison", apex = '<span class="text-brand-600 font-semibold">Élevé</span>', comp = '<span class="text-surface-600">Élevé</span>', winner = "tie" },
-    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business</span>', comp = '<span class="text-surface-600">Voir les tarifs du fournisseur</span>', winner = "none" },
+    { feature = "Taux de livraison", apex = '<span class="text-surface-600 font-semibold">Non directement comparable (mesure définie par le fournisseur)</span>', comp = '<span class="text-surface-600">Non directement comparable (mesure définie par le fournisseur)</span>', winner = "none" },
+    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth et Business ; 3 sur Enterprise Cloud</span>', comp = '<span class="text-surface-600">Voir les tarifs du fournisseur</span>', winner = "none" },
     { feature = "Réchauffement IP", apex = '<span class="text-brand-600 font-semibold">Géométrique automatique</span>', comp = '<span class="text-surface-600">Automatique (géré)</span>', winner = "tie" },
     { feature = "Support BIMI", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Signature ARC", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -44,6 +44,10 @@ comparison_sections = [
     { feature = "Clés d’idempotence", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Méthodologie :</strong> Les lignes de fonctionnalités résument le comportement de Resend documenté publiquement. Forfaits comparés : les paliers self-service d’ApexMail et les forfaits publiés de Resend ; lorsqu’une mesure publiée comparable n’existe pas (par exemple le taux de livraison), la ligne indique qu’une comparaison directe n’est pas possible. Vérifié : 2026-10-04. Consultez notre <a href="/fr/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">méthodologie de comparaison</a>."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

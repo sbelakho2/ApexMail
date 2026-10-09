@@ -1,6 +1,11 @@
 #
 # French translations for ApexMail marketing site.
 #
+# STATUS (2026-10-08): SUPPLEMENTARY / NOT ACTIVE. Nothing reads these .po
+# files (no trans() call anywhere); the active localized UI catalog is
+# data/i18n.json. PO coverage here does NOT supply Markdown bodies — those
+# live in content/**/*.fr.md. Keep terminology aligned; edits here do not render.
+#
 msgid ""
 msgstr ""
 "Language: fr\n"

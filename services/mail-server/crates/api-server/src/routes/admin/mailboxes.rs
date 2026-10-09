@@ -85,7 +85,7 @@ async fn require_operator(state: &AppState, auth: &AuthUser) -> Result<(), ApiEr
     // membership check: provisioned mailboxes carry credentials, so the
     // operator-only surface must not be reachable by a scoped non-operator
     // credential that merely lives in the system tenant.
-    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_scopes(auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(state, auth).await
 }
 

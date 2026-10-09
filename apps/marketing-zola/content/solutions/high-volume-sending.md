@@ -26,7 +26,7 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 ## ApexMail Solution
 
-- **Dedicated IPs** — Approved add-on on Pro; 1 included on Growth, 3 on Business, and 10 on Enterprise. Contract-scoped deployment options are reviewed separately.
+- **Dedicated IPs** — Approved add-on on Pro; 1 included on Growth and Business, and 3 on Enterprise Cloud. Contract-scoped deployment options are reviewed separately.
 - **Automated Warm-Up** — Gradual volume ramp following provider-specific schedules. Monitored for reputation signals. Manual override available.
 - **Queue Prioritization** — Transactional traffic is prioritized ahead of bulk under load. Time-to-inbox targets monitored.
 - **Batch API** (`POST /v1/messages/batch`) — Submit up to 100 messages per request. Lower per-message overhead than individual API calls.
@@ -57,8 +57,8 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 | Plan | Monthly Volume | Dedicated IPs | Rate Limit | Support |
 |---|---|---|---|---|
 | Growth | 500,000 emails | 1 included | Per plan | Email support |
-| Scale | 2,000,000 emails | 3 included | Per plan | Priority support |
-| Enterprise | 5,000,000 emails | 10 included | Contract-scoped | Dedicated support |
+| Business | 2,000,000 emails | 1 included | Per plan | Priority support |
+| Enterprise Cloud | 5,000,000 emails | 3 included | Contract-scoped | Dedicated support |
 
 ## Security Considerations
 

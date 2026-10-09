@@ -445,6 +445,20 @@ pub fn build_app(state: AppState) -> Router {
             ServeDir::new(format!("{marketing_public}/images")),
         )
         .nest_service("/js", ServeDir::new(format!("{marketing_public}/js")))
+        // Root-level assets the built pages reference directly. Without these
+        // arms the api-server-served marketing host 404s:
+        //   * /giallo.css — loaded by the 14 code-heavy pages (docs, quickstart,
+        //     architecture), so a missing route stripped syntax highlighting;
+        //   * /specs/openapi.yaml — the downloadable API contract linked from
+        //     /docs/api/openapi/.
+        // The marketing container's nginx served both from disk, which is how
+        // the gap stayed invisible (same defect class as the versioned-
+        // stylesheet 404: an asset URL no serving path resolved).
+        .route_service(
+            "/giallo.css",
+            ServeFile::new(format!("{marketing_public}/giallo.css")),
+        )
+        .nest_service("/specs", ServeDir::new(format!("{marketing_public}/specs")))
         .route_service(
             "/manifest.json",
             ServeFile::new(format!("{marketing_public}/manifest.json")),
@@ -960,7 +974,11 @@ fn static_asset_cache_control(path: &str) -> HeaderValue {
     let immutable = path.starts_with("/css/")
         || path.starts_with("/js/")
         || path.starts_with("/fonts/")
-        || path.starts_with("/images/");
+        || path.starts_with("/images/")
+        // Root-level build asset with a content-hash URL (?h=…), same tier as
+        // the /css/ tree it complements (the default no-store made every page
+        // re-download the syntax-highlighting sheet).
+        || path == "/giallo.css";
     if path == "/assets/globals.css" {
         return HeaderValue::from_static("no-cache, must-revalidate");
     }
@@ -4179,6 +4197,7 @@ mod tests {
             "/js/none.js",
             "/fonts/Inter.woff2",
             "/images/logo.svg",
+            "/giallo.css",
         ] {
             assert_eq!(
                 static_asset_cache_control(immutable),
@@ -4259,6 +4278,29 @@ mod tests {
             StatusCode::OK,
             "the marketing stylesheet must be served, not 404"
         );
+
+        // Root-level assets the built pages load directly must be routed too:
+        // /giallo.css stripped syntax highlighting (14 pages) and
+        // /specs/openapi.yaml 404'd the downloadable contract when the router
+        // only knew the /css //fonts //images //js trees.
+        for root_asset in ["/giallo.css", "/specs/openapi.yaml"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(root_asset)
+                        .header(HOST, "apexmail.ee")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{root_asset} is referenced by built marketing pages and must be routed"
+            );
+        }
 
         // Packaging invariant for the static export root artifacts: readable
         // by the non-root runtime user. A root-owned 0600 file copied into

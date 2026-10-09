@@ -49,6 +49,10 @@ module.exports = {
   },
 };
 
+// Every scale below is emitted with explicit 50–950 shades ONLY — there is no
+// DEFAULT key, so bare utilities such as `bg-info` / `text-info` compile to
+// nothing. Use a shaded token (`bg-info-500/10`, `text-info-700`) or add the
+// DEFAULT mapping here deliberately; templates are checked for bare forms.
 function colorScale(name) {
   return {
     50: withAlpha(`--${name}-50`),

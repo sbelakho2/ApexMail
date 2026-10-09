@@ -2,9 +2,17 @@
 module.exports = {
   content: {
     relative: true,
+    // Every authority that can emit a console/CP class must be scanned or the
+    // class ships undefined and renders as nothing (GATE K / class-integrity).
+    // Besides this crate's renderers the api-server composes HTML directly
+    // (request-pipeline shells, error responses) — review §5.2
+    // tailwind.config.js: "Scan every authoritative renderer that emits UI
+    // classes". globals.input.css is scanned because authored recipes there
+    // define utilities and their variant combinations.
     files: [
       './src/**/*.rs',
       './assets/globals.input.css',
+      '../../api-server/src/**/*.rs',
     ],
     // Rust source stores class names inside escaped string literals
     // (class=\"...\") which Tailwind's default extractor misses. Use a

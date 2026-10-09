@@ -43,6 +43,17 @@ Die Migration eines E-Mail-Anbieters ist ein riskanter Vorgang. Verlorene Zustel
 7. Beginnen Sie den Parallelversand mit 10% des Volumens und steigern Sie schrittweise unter Überwachung der Zustellmetriken.
 8. Leiten Sie nach der Validierungsphase 100% über ApexMail und entfernen Sie die Konfiguration des vorherigen Anbieters.
 
+## Gekoppelte Migrationsphasen
+
+Durchlaufen Sie diese Phasen der Reihe nach; jede hat ein klares Eintrittskriterium, Abnahmekriterien und einen Rollback-Auslöser.
+
+| Phase | Eintrittskriterium | Abnahmekriterien | Rollback-Auslöser |
+|---|---|---|---|
+| 1. Vorbereitung | Konto erstellt; Absenderdomain hinzugefügt; Templates inventarisiert | DNS-Datensätze ausgestellt und geprüft; Template-Zuordnung dokumentiert | Keiner — noch kein Produktionsverkehr |
+| 2. Parallel validieren | ApexMail-DKIM und SPF bestehen parallel zum aktuellen Anbieter; DMARC auf `p=none` | Testnachrichten werden mit gültiger Authentifizierung zugestellt; Webhook-Ereignisse empfangen und signaturgeprüft | Authentifizierungsfehler oder Webhook-Signaturabweichungen, die nach der Korrektur fortbestehen |
+| 3. Verkehrsanteil verschieben | Parallele Validierung abgeschlossen; Zustellmetriken je Anbieter messbar | Zustellmetriken entsprechen dem bisherigen Anbieter innerhalb der vereinbarten Toleranz im Beobachtungsfenster | Bounce- oder Beschwerdequote überschreitet die AUP-Schwellenwerte (2 % Bounce / 0,1 % Beschwerden) |
+| 4. Vollständige Umstellung | Anhaltende Annahme im vereinbarten Anteil | 100 % des Verkehrs über ApexMail; Legacy-Datensätze erst nach dem Aufbewahrungsfenster entfernt | Zustellverschlechterung, die sich nach Retry-Budget und Warm-up-Anpassungen nicht erholt |
+
 ## Relevante API-Endpunkte
 
 | Endpunkt | Beschreibung |
@@ -65,8 +76,8 @@ Die Migration eines E-Mail-Anbieters ist ein riskanter Vorgang. Verlorene Zustel
 | Tarif | Dedizierte IP | Support |
 |---|---|---|
 | Growth | 1 dedizierte IP enthalten | E-Mail-Support |
-| Scale | 3 dedizierte IPs enthalten | Prioritäts-Support |
-| Enterprise | 10 dedizierte IPs enthalten | Dedizierter Support |
+| Business | 1 dedizierte IP enthalten | Prioritäts-Support |
+| Enterprise Cloud | 3 dedizierte IPs enthalten | Dedizierter Support |
 
 ## Sicherheitshinweise
 

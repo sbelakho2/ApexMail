@@ -13,7 +13,7 @@ ApexMail prohíbe estrictamente el uso de su plataforma para enviar spam o email
 
 ## 2. Requisito de consentimiento
 
-Todos los destinatarios de emails enviados a través de ApexMail deben haber otorgado **consentimiento opt-in explícito y verificable** para recibir emails del remitente. Lo siguiente no constituye consentimiento:
+El email de marketing y promocional enviado a través de ApexMail requiere **consentimiento opt-in explícito y verificable** del destinatario. El email transaccional y de servicio no requiere consentimiento de marketing, pero debe cumplir las reglas de su categoría en la [Política de uso aceptable](/es/acceptable-use/). Lo siguiente no constituye consentimiento para email de marketing:
 
 - Listas de emails compradas, extraídas automáticamente o alquiladas.
 - Direcciones de email recopiladas de sitios web públicos.
@@ -22,13 +22,15 @@ Todos los destinatarios de emails enviados a través de ApexMail deben haber oto
 
 ## 3. Obligaciones de envío
 
-Cada email enviado a través de ApexMail debe:
+Cada email de marketing y promocional enviado a través de ApexMail debe:
 
 - Incluir un enlace de baja funcional que procese las solicitudes en un plazo de 24 horas.
 - Identificar con claridad el nombre y la dirección física del remitente.
 - Usar una línea de asunto veraz y no engañosa.
 - Ajustar el contenido al consentimiento otorgado (sin engaño del tipo cebo y cambio).
 - Atender las solicitudes de baja de forma pronta y permanente.
+
+El email transaccional y de servicio debe cumplir en su lugar los requisitos de categoría de la Política de uso aceptable: identidad del remitente precisa y ningún marketing encubierto. Los mensajes de seguridad, autenticación y cuenta no requieren un enlace de baja cuando la ley aplicable no lo exige.
 
 ## 4. Supervisión y aplicación
 

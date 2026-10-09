@@ -14,9 +14,9 @@ The ApexMail API is fully documented in OpenAPI 3.1 format. The specification is
 
 The OpenAPI specification is available for download:
 
-- **[openapi.yaml](/specs/openapi.yaml)** — OpenAPI 3.1 YAML specification
+- **[openapi.yaml](/specs/openapi.yaml)** — OpenAPI 3.1 YAML specification, version **1.0.0** (published 2026-07-29; see [Version History](#version-history))
 
-You can import this file into API tools such as:
+The downloadable file declares the same version in its `info.version` field. You can import this file into API tools such as:
 
 - [Swagger Editor](https://editor.swagger.io/)
 - [Postman](https://www.postman.com/)

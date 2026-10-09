@@ -97,8 +97,65 @@ pub(crate) fn bot_state_documents(surface: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The retained-POST-state documents: a failed form replay renders INSIDE
+/// the same page with the submitted values re-populated, per-field errors
+/// under their controls, and reveal-once secrets as mono chips. These
+/// documents exist only after a POST, so a gate sweep over manifest routes
+/// can never see them.
+pub(crate) fn retained_state_documents(surface: &str) -> Vec<(String, String)> {
+    if surface != "web" {
+        return Vec::new();
+    }
+    let mut map = crate::view_data::FormFieldData::new("webhook-create");
+    map.set("url", "https://example.com/hook");
+    map.set("events", "message.accepted");
+    map.set("events", "message.delivered");
+    map.error("url", "Enter an https URL.");
+    map.secret("Webhook signing secret", "whsec_gate_reveal_once");
+    let html = crate::axum_router::render_route_with_form_fields(
+        "web",
+        "/settings/webhooks",
+        None,
+        Some(TEST_CSRF_SECRET),
+        &[crate::flash::FlashMessage::error("Webhook not saved.")],
+        None,
+        Some(&map),
+    )
+    .unwrap_or_else(|| panic!("[web] /settings/webhooks must render the retained form state"));
+    vec![(
+        "/settings/webhooks?_state=retained-field-map".to_string(),
+        html,
+    )]
+}
+
+/// The Explorer RESULT page (a sandbox execution outcome): the response
+/// document `POST /explorer/exec` serves, which no manifest route render
+/// produces. It is a self-contained sandbox page (its own embedded
+/// stylesheet, pinned zinc-dark look), so only the web surface carries it.
+pub(crate) fn explorer_result_documents(surface: &str) -> Vec<(String, String)> {
+    if surface != "web" {
+        return Vec::new();
+    }
+    vec![(
+        "/explorer?_state=result".to_string(),
+        crate::explorer::explorer_response_page(&crate::explorer::ExplorerOutcome {
+            method: "POST",
+            path: "/v1/messages",
+            status: 202,
+            latency_ms: 138,
+            body: serde_json::json!({
+                "id": "msg_gate_0001",
+                "status": "queued",
+                "to": ["recipient@example.com"],
+            }),
+            request_body: r#"{"to":["recipient@example.com"],"subject":"Gate"}"#.to_string(),
+        }),
+    )]
+}
+
 /// Every gate document of one surface: the manifest routes, the stateful
-/// PRG variants, and the bot-surface state renders.
+/// PRG variants, the retained-POST-state documents, the bot-surface state
+/// renders, and the Explorer result page.
 pub(crate) fn gate_documents(surface: &str) -> Vec<(String, String)> {
     let mut documents: Vec<(String, String)> = crate::routing::surface_routes(surface)
         .into_iter()
@@ -110,7 +167,9 @@ pub(crate) fn gate_documents(surface: &str) -> Vec<(String, String)> {
         })
         .collect();
     documents.extend(stateful_variant_documents(surface));
+    documents.extend(retained_state_documents(surface));
     documents.extend(bot_state_documents(surface));
+    documents.extend(explorer_result_documents(surface));
     documents
 }
 

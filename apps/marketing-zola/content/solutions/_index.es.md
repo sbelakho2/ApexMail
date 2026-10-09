@@ -13,6 +13,17 @@ ApexMail ofrece infraestructura de email transaccional con opciones de despliegu
 
 ---
 
+## Elegir por objetivo
+
+| Su objetivo | Punto de partida | Siguiente acción |
+|---|---|---|
+| Enviar email de aplicación (restablecimientos, recibos, alertas) | [Email transaccional](transactional-email/) | Realizar el [Inicio rápido](/es/quickstart/) |
+| Operar email multiinquilino para sus propios clientes | [Plataformas SaaS](saas-platforms/) | Revisar el aislamiento de inquilinos y de dominios |
+| Mantener el envío bajo un marco regulado o auditado | [Industrias reguladas](regulated-industries/) | Confirmar el alcance de residencia de datos y el DPA en una revisión de seguridad |
+| Migrar desde otro proveedor | [Migración](migration/) | Solicitar una evaluación de migración y seguir las fases con puertas de control |
+| Enviar millones de emails al mes | [Envío de gran volumen](high-volume-sending/) | Revisar calentamiento, rendimiento y elegibilidad de IP dedicada |
+| Desplegar infraestructura dedicada o privada | [Enterprise](enterprise/) | Reservar una revisión de arquitectura |
+
 ## Soluciones por caso de uso
 
 - **[Email transaccional](transactional-email/)** — Email generado por la aplicación: restablecimientos de contraseña, recibos, notificaciones y alertas de cuenta. API REST y relé SMTP con webhooks firmados, idempotencia y configuración por caso de uso.

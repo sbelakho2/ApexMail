@@ -1,8 +1,9 @@
 {# ── Header Partial ──────────────────────────────────────────── #}
-{# Pure HTML + CSS header. Dropdowns are native <details>           #}
-{# disclosures (Esc + keyboard support for free); the mobile menu   #}
-{# uses the #mobile-menu-state checkbox defined in base.html.      #}
-{# Static header markup only.                                      #}
+{# Pure HTML + CSS header. Dropdowns and the mobile menu are native  #}
+{# <details> disclosures (click/Enter/Space toggling, open state in  #}
+{# real markup). No Escape promise: browsers do not consistently     #}
+{# close <details> on Escape without script, and this site ships     #}
+{# zero scripts. Static header markup only.                          #}
 {# NOTE: uses inline i18n conditionals (not macros::t) because   #}
 {# Tera macros cannot read the caller's scope variables          #}
 {# (i18n_data / l). Inline form matches the rest of the site.    #}
@@ -20,9 +21,10 @@
       {# ── Desktop Navigation ─────────────────────── #}
       <div class="hidden lg:flex items-center gap-2">
         {# Product dropdown — native <details> disclosure (design audit
-           item 5): Enter/Space toggles, Esc closes, and the open state
-           is real markup instead of a frozen aria-expanded. The chevron
-           rotation lives in no-js.css. #}
+           item 5): Enter/Space toggles and the open state is real markup
+           instead of a frozen aria-expanded. No Escape-handling promise
+           (browser-dependent without script). The chevron rotation lives
+           in no-js.css. #}
         <details class="relative" data-dropdown="product">
           <summary
             class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
@@ -114,10 +116,10 @@
 
       {# ── Mobile Menu (native <details> disclosure) ───── #}
       {# The visible hamburger IS the <summary> of a native disclosure:
-         focusability, focus ring, expanded state and Escape-to-close are
-         the element's own semantics, not promised-but-unimplemented
-         keyboard behavior. The former checkbox hack + off-screen input
-         needed a JS-free proxy focus ring and could not honour Escape.
+         focusability, the focus ring and the expanded state are the
+         element's own semantics, not promised-but-unimplemented keyboard
+         behavior (no Escape promise: browsers do not consistently close a
+         <details> on Escape without script, which this site does not ship).
          The panel lives inside this <details> (so the closed state is
          genuinely hidden by the user agent) and is absolutely positioned
          against the sticky header to span the full width. #}

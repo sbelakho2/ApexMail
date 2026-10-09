@@ -93,6 +93,15 @@ fn every_post_form_action_is_a_registered_web_route() {
             let html = render_with_secret(surface, route.path);
             violations.extend(form_action_violations(surface, route.path, &html));
         }
+        // The stateful PRG variants and the populated bot-state fixtures
+        // carry their own forms (MFA challenge, failed-form replay, draft
+        // rows): the action-registration rule must hold there too.
+        for (document, html) in crate::gate_support::gate_documents(surface)
+            .into_iter()
+            .filter(|(document, _)| document.contains('?') || document.starts_with("state-"))
+        {
+            violations.extend(form_action_violations(surface, &document, &html));
+        }
     }
     assert!(
         violations.is_empty(),
@@ -165,11 +174,20 @@ fn unlabeled_controls(surface: &str, path: &str, html: &str) -> Vec<String> {
 fn every_form_input_has_label_or_aria_label_or_is_hidden() {
     let mut off_allowlist: Vec<String> = Vec::new();
     let mut exempt_total = 0usize;
-    for surface in ["web", "control-plane"] {
-        for route in routing::surface_routes(surface) {
-            let html = render_with_secret(surface, route.path);
-            let unlabeled = unlabeled_controls(surface, route.path, &html);
-            if unlabeled_control_exempt(surface, route.path) {
+    // Manifest routes plus the stateful/populated documents: a control that
+    // only exists once the page is in a real state must still be labelled.
+    let documents = ["web", "control-plane"]
+        .into_iter()
+        .flat_map(|surface| {
+            crate::gate_support::gate_documents(surface)
+                .into_iter()
+                .map(move |(document, html)| (surface, document, html))
+        })
+        .collect::<Vec<_>>();
+    for (surface, document, html) in documents {
+        {
+            let unlabeled = unlabeled_controls(surface, &document, &html);
+            if unlabeled_control_exempt(surface, &document) {
                 exempt_total += unlabeled.len();
             } else {
                 off_allowlist.extend(unlabeled);

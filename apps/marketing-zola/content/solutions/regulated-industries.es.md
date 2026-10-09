@@ -28,8 +28,21 @@ ApexMail puede ayudar a un cliente potencial a revisar la DPA vigente, la inform
 1. Confirme las categorías de datos previstas, los requisitos de retención y el flujo de envío.
 2. Revise la DPA vigente, el alcance de residencia de datos y la información sobre subprocesadores.
 3. Seleccione un plan con las funciones y los límites en tiempo de ejecución requeridos.
-4. Para Scale o Enterprise, configure los controles de identidad, la revisión de auditoría y la titularidad operativa según corresponda.
+4. Para Business o Enterprise Cloud, configure los controles de identidad, la revisión de auditoría y la titularidad operativa según corresponda.
 5. Complete cualquier revisión de seguridad o de contratación antes del uso en producción.
+
+## Lista de verificación de contratación
+
+| Elemento | Estado |
+|---|---|
+| DPA y registro de subprocesadores | Disponibles para revisión |
+| Confirmación de residencia de datos | Según el despliegue y el acuerdo; confirmada por escrito |
+| Disponibilidad HIPAA / ejecución de BAA | **No se ofrece actualmente** |
+| Nube privada / BYOIP | Sujeto a contrato; requiere aprobación por escrito y revisión técnica |
+| Respuestas a cuestionarios de seguridad (SIG/CAIQ/HECVAT o personalizados) | Revisión Enterprise; NDA cuando sea necesario |
+| Compromisos de SLA y soporte | Definidos solo en el acuerdo firmado |
+
+Cualquier función, certificación o compromiso solo es vinculante una vez aprobado explícitamente por escrito.
 
 ## Limitaciones importantes
 

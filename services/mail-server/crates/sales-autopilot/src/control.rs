@@ -272,14 +272,19 @@ pub struct ReviewBody {
 }
 
 /// The operator's requested review outcome.
+///
+/// Public (with [`apply_review`]) because the api-server's control-plane
+/// sales page mounts a native SSR approve/reject form — the same visibility
+/// pattern [`crate::actions::ActionQueue::replay`] already follows for the
+/// dead-letter replay control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReviewAction {
+pub enum ReviewAction {
     Approve,
     Reject,
 }
 
 impl ReviewAction {
-    fn parse(raw: &str) -> Result<Self, SalesError> {
+    pub fn parse(raw: &str) -> Result<Self, SalesError> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "approved" | "approve" => Ok(Self::Approve),
             "rejected" | "reject" => Ok(Self::Reject),
@@ -289,7 +294,7 @@ impl ReviewAction {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Approve => "approved",
             Self::Reject => "rejected",
@@ -338,12 +343,13 @@ fn review_guard_violation(
 ///
 /// Mirrors [`crate::decision_engine::ExecutionRevalidation`] (the `checked`
 /// gate names are `&'static str` there by design), so the CP can render why
-/// the release was or was not allowed.
+/// the release was or was not allowed. Public so the console's native
+/// review form can report the outcome (see [`apply_review`]).
 #[derive(Debug, Clone)]
-struct RevalidationReport {
-    allowed: bool,
-    reasons: Vec<String>,
-    checked: Vec<&'static str>,
+pub struct RevalidationReport {
+    pub allowed: bool,
+    pub reasons: Vec<String>,
+    pub checked: Vec<&'static str>,
 }
 
 impl RevalidationReport {
@@ -364,14 +370,15 @@ impl RevalidationReport {
     }
 }
 
-/// Result of applying one operator review.
+/// Result of applying one operator review. Public for the console's native
+/// review form (see [`apply_review`]).
 #[derive(Debug, Clone)]
-struct ReviewOutcome {
-    decision_id: Uuid,
+pub struct ReviewOutcome {
+    pub decision_id: Uuid,
     /// The authoritative final `review_status` ("approved" or "rejected").
-    status: String,
-    actions_affected: u64,
-    revalidation: RevalidationReport,
+    pub status: String,
+    pub actions_affected: u64,
+    pub revalidation: RevalidationReport,
 }
 
 /// Maximum accepted length of an operator identifier, in bytes.
@@ -581,7 +588,13 @@ async fn write_review_status_tx(
 /// Any failure rolls back ALL of it, leaving the decision reviewable; there is
 /// no window in which `review_status = 'approved'` is durable while the
 /// linked action is still `awaiting_approval`.
-async fn apply_review(
+///
+/// Public (matching [`crate::actions::ActionQueue::replay`]'s visibility
+/// pattern) so the control-plane sales page can mount a native SSR
+/// approve/reject form: review §7's "native SSR forms can implement these
+/// actions" was otherwise unreachable from the console (the JSON control
+/// API was the only entry point).
+pub async fn apply_review(
     db: &PgPool,
     tenant: &str,
     decision_id: Uuid,

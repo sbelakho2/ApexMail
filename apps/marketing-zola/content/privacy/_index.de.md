@@ -45,6 +45,8 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).
 
+<span id="data-retention"></span>
+
 ## 5. Datenspeicherfristen
 
 Wir bewahren personenbezogene Daten nur so lange auf, wie es für die Zwecke, für die sie erhoben wurden, erforderlich ist:
@@ -57,7 +59,7 @@ Wir bewahren personenbezogene Daten nur so lange auf, wie es für die Zwecke, f�
 | Ereignisprotokolle (Zustell-, Öffnungs- und Klick-Ereignisse) | Standardmäßig 30 Tage (7 Tage im Free-Plan); planabhängig, bis zu 730 Tage bei Enterprise |
 | Support-Tickets | 2 Jahre nach Lösung |
 
-Vollständige Details finden Sie in unserer [Datenaufbewahrungsrichtlinie](/compliance/#data-retention).
+Vollständige Details finden Sie in unserer [Datenaufbewahrungsrichtlinie](/de/compliance/#data-retention).
 
 ## 6. Ihre Rechte
 
@@ -72,7 +74,7 @@ Gemäß der DSGVO haben Sie folgende Rechte:
 
 Zur Ausübung dieser Rechte kontaktieren Sie uns unter **privacy@apexmail.ee**. Wir antworten innerhalb von 30 Tagen.
 
-Für Kalifornien: siehe unseren [Hinweis „Do Not Sell My Personal Information"](/privacy/do-not-sell/) — ApexMail verkauft keine persönlichen Daten.
+Für Kalifornien: siehe unseren [Hinweis „Do Not Sell My Personal Information"](/privacy/do-not-sell/) (auf Englisch) — ApexMail verkauft keine persönlichen Daten.
 
 ## 7. Beschwerden
 

@@ -29,8 +29,8 @@ verdict_points = [
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
-    { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "tie" },
-    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
+    { feature = "Tasa de entrega", apex = '<span class="text-surface-600 font-semibold">No directamente comparable (métrica definida por el proveedor)</span>', comp = '<span class="text-surface-600">No directamente comparable (métrica definida por el proveedor)</span>', winner = "none" },
+    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth y Business; 3 en Enterprise Cloud</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
     { feature = "Calentamiento de IP", apex = '<span class="text-brand-600 font-semibold">Automático geométrico</span>', comp = '<span class="text-surface-600">Automático (gestionado)</span>', winner = "tie" },
     { feature = "Soporte de BIMI", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Firma ARC", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -44,6 +44,10 @@ comparison_sections = [
     { feature = "Claves de idempotencia", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }
   ]}
 ]
+
+# Trailing methodology paragraph (rendered by partials/compare/table.html).
+methodology_note = """\
+<strong>Metodología:</strong> Las filas de funciones resumen el comportamiento de Resend documentado públicamente. Planes comparados: los niveles de autoservicio de ApexMail y los planes publicados de Resend; cuando no existe una medición publicada comparable (por ejemplo, la tasa de entrega), la fila indica que no es directamente comparable. Revisado: 2026-10-04. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a>."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

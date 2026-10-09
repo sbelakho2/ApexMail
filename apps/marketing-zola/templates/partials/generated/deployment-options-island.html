@@ -12,7 +12,12 @@
       <p class="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">Start on shared cloud, then review dedicated and custom deployment models when your security and compliance requirements call for them.</p>
     </div>
 
-    {# Radio inputs (hidden, control tabs via CSS) #}
+    {# A real fieldset/legend groups the radio tab set for assistive tech; the
+       visually-hidden radios stay keyboard focusable (see no-js.css) and the
+       rings paint on the visible labels. #}
+    <fieldset class="border-0 p-0 m-0 min-w-0">
+    <legend class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['deployment_models'] %}{{ i18n_data[l]['a11y']['deployment_models'] }}{% else %}Deployment models{% endif %}</legend>
+    {# Radio inputs (visually hidden, control tabs via CSS) #}
     <input type="radio" name="deploy" id="deploy-shared" class="deploy-radio" checked />
     <input type="radio" name="deploy" id="deploy-dedicated" class="deploy-radio" />
     <input type="radio" name="deploy" id="deploy-private" class="deploy-radio" />
@@ -184,5 +189,6 @@
         </div>
       </div>
     </div>
+    </fieldset>
   </div>
 </section>

@@ -60,7 +60,7 @@
       "legal_info": "Impressum",
       "terms": "AGB",
       "privacy": "Datenschutz",
-      "your_privacy_choices": "Ihre Datenschutzoptionen",
+      "your_privacy_choices": "Ihre Datenschutzoptionen (EN)",
       "dpa": "AVV",
       "cookies": "Cookies",
       "acceptable_use": "Nutzungsbedingungen",
@@ -88,7 +88,8 @@
       "status_degraded": "Teilweise Beeinträchtigung",
       "status_disruption": "Dienstunterbrechung",
       "status_unavailable": "Statusdaten nicht verfügbar",
-      "status_link": "Systemstatus"
+      "status_link": "Systemstatus",
+      "faq": "Häufige Fragen"
     },
     "cta": {
       "heading_1": "Bereit für",
@@ -133,7 +134,8 @@
       "compliance_check_2": "HIPAA-Verfügbarkeit derzeit nicht angeboten",
       "compliance_check_3": "Datenresidenz (EU)",
       "compliance_check_4": "Verschlüsselung im Ruhezustand",
-      "compliance_check_5": "TLS 1.2+ bei Übertragung"
+      "compliance_check_5": "TLS 1.2+ bei Übertragung",
+      "not_offered": "Nicht angeboten"
     },
     "features": {
       "heading": "Vollständiger Funktionsumfang",
@@ -240,7 +242,7 @@
       "details_subtitle": "Sehen Sie, wie ApexMail komplexe E-Mail-Infrastruktur einfach macht.",
       "detail_api_label": "Entwicklung in Minuten",
       "detail_api_title": "Entwicklerorientierte API",
-      "detail_api_desc": "Unsere RESTful-API ist für Entwickler konzipiert, die Einfachheit und Leistung schätzen. Konsistente SDKs, umfassende Dokumentation und klares Anfrage-Feedback.",
+      "detail_api_desc": "Unsere RESTful-API ist für Entwickler konzipiert, die Einfachheit und Leistung schätzen. Die SDKs sind in Entwicklung (Quellcode im Monorepo), dazu umfassende Dokumentation und klares Anfrage-Feedback.",
       "detail_api_benefit_1": "Schnellstart-Pfad für den ersten Versand",
       "detail_api_benefit_2": "Idempotenzschlüssel für sichere Wiederholungen",
       "detail_api_benefit_3": "Webhook-Signaturen für Sicherheit",
@@ -390,10 +392,15 @@
       "billing_not_2": "Automatische Wiederholungen nach temporären Zustellfehlern",
       "billing_not_3": "Test-E-Mails im Testmodus oder an verifizierte Testadressen gesendet",
       "billing_overage_title": "Überschreitungsbehandlung",
-      "billing_overage_desc": "<strong>Self-Service-Tarife (Developer, Pro, Growth, Business):</strong> Überschreitungen werden bei aktivierter Abrechnung mit €0,40 pro 1.000 E-Mails berechnet. Eine gültige Zahlungsmethode und bestätigte Abrechnung sind erforderlich.",
+      "billing_overage_desc": "<strong>Self-Service-Tarife (Developer, Pro, Growth, Business):</strong> Überschreitungen werden bei aktivierter Abrechnung tarifabhängig berechnet: Developer €0,80, Pro €0,60, Growth/Business €0,35 pro 1.000; Enterprise Cloud €0,35 pro 1.000 (vertraglich). Eine gültige Zahlungsmethode und bestätigte Abrechnung sind erforderlich.",
       "billing_overage_free": "<strong>Free-Tarif:</strong> Keine automatische Überschreitung. Der Versand wird pausiert, wenn das enthaltene Volumen von 3.000/Monat erreicht ist. Führen Sie ein Upgrade durch, um weiter zu senden.",
       "billing_unused_title": "Ungenutztes Volumen & Bandpreise",
-      "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen — ungenutzte Anteile verfallen am Ende des Abrechnungsmonats."
+      "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen — ungenutzte Anteile verfallen am Ende des Abrechnungsmonats.",
+      "questions_title": "Noch Fragen?",
+      "questions_body": "Sprechen Sie mit unserem Team über Beschaffung, Jahresverträge, Migration oder den passenden Tarif für Ihr Volumen.",
+      "talk_to_sales": "Vertrieb kontaktieren",
+      "calculator_hint": "Verwenden Sie den Rechner oben",
+      "per_month": "pro Monat"
     },
     "home": {
       "hero_badge": "Jetzt mit Private-Cloud-Bereitstellungen",
@@ -432,7 +439,13 @@
       "email_grader_submit": "Domain bewerten",
       "email_grader_note": "Live-DNS-Prüfungen · SPF / DKIM / DMARC / MX",
       "hero_eyebrow": "Transaktionale E-Mail-Infrastruktur",
-      "hero_proof_line": "Keine Kreditkarte &middot; 3.000 E-Mails/Monat &middot; 30.000-Nachrichten-Startguthaben &middot; <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Standardmäßig im EWR gespeichert</a>"
+      "hero_proof_line": "Keine Kreditkarte &middot; 3.000 E-Mails/Monat &middot; 30.000-Nachrichten-Startguthaben &middot; <a href=\"/de/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Standardmäßig im EWR gespeichert</a>",
+      "teaser_emails_per_month": "E-Mails/Monat",
+      "teaser_launch_allowance": "Startguthaben",
+      "teaser_emails": "E-Mails",
+      "teaser_retention_suffix": " Tage Aufbewahrung",
+      "teaser_choose_plan": "Wählen Sie",
+      "hero_example_label": "Beispiel-Trace"
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -565,7 +578,21 @@
       "benefit_3": "Dedizierte IPs",
       "benefit_4": "Individuelles SLA",
       "cta": "Angebot anfordern",
-      "hero_title": "Private Cloud"
+      "hero_title": "Private Cloud",
+      "svc_mta": "MTA-Cluster",
+      "svc_queue": "Queue-Worker",
+      "svc_analytics": "Analytics-DB",
+      "svc_api": "API-Gateway",
+      "svc_lb": "Load Balancer",
+      "svc_dns": "DNS-Resolver",
+      "latency_vpc_tag": "Gleiches VPC",
+      "latency_vpc_desc": "Submillisekunden — App und API teilen dasselbe Netzwerk-Fabric",
+      "latency_region_tag": "Gleiche Region",
+      "latency_region_desc": "Wenige Millisekunden — minimale Cross-AZ-Hops",
+      "latency_shared_tag": "Regionsübergreifende API",
+      "latency_shared_desc": "Zehner bis Hunderter Millisekunden — Weg über das öffentliche Internet",
+      "latency_saas_tag": "Externe HTTPS-API",
+      "latency_saas_desc": "Variabel — zusätzlich DNS, TLS-Handshake und Internet-Routing"
     },
     "compliance": {
       "hero_badge": "Compliance-Infrastruktur",
@@ -578,8 +605,10 @@
       "auto_dpa_button": "DPA generieren",
       "auto_dpa_learn": "Mehr über DPA",
       "cta_title_1": "Compliance-Ready?",
-      "cta_subtitle": "",
-      "cta_button": "Compliance-Optionen prüfen"
+      "cta_subtitle": "ApexMail bietet E-Mail-Infrastruktur mit DSGVO-orientierten Workflows, auditfähigen Tarifen und einem faktenbasierten Security-Review-Prozess. HIPAA-Verfügbarkeit wird derzeit nicht angeboten.",
+      "cta_button": "Compliance-Optionen prüfen",
+      "cta_title": "Bereit für ruhigeren Schlaf?",
+      "cta_contact": "Compliance-Team kontaktieren"
     },
     "compare": {
       "hero_badge": "Marktvergleich",
@@ -589,7 +618,14 @@
       "table_methodology": "Methodik",
       "cta_title": "Bereit zum Wechsel?",
       "cta_subtitle": "Migration von SendGrid, Postmark oder Mailgun? Unser Team hilft Ihnen beim Umstieg.",
-      "cta_button": "Migrationsunterstützung erhalten"
+      "cta_button": "Migrationsunterstützung erhalten",
+      "hero_lead": "Direkter Vergleich: ApexMail gegen",
+      "hero_cta_secondary": "Vollständigen Vergleich ansehen",
+      "decision_label": "Entscheidungshilfe",
+      "choose_apexmail": "Wählen Sie ApexMail, wenn …",
+      "choose_competitor": "Wann die Alternative die bessere Wahl ist",
+      "alternatives": "Alternativen im Vergleich",
+      "cta_note": "Keine Kreditkarte • 3.000 E-Mails/Monat kostenlos"
     },
     "status": {
       "hero_title": "Systemstatus",
@@ -656,7 +692,10 @@
       "billing": "Abrechnung",
       "monthly": "Monatlich",
       "annual": "Jährlich (10 Monatszahlungen, ca. 16,7 % Ersparnis)",
-      "compute": "Preis berechnen"
+      "compute": "Preis berechnen",
+      "priced_factor": "preisrelevanter Faktor",
+      "context_only": "nur Kontext",
+      "rules_note": "Berechnet mit denselben Preisregeln wie die Abrechnung"
     },
     "home_testimonials": {
       "heading_1": "Gemacht für",
@@ -677,7 +716,24 @@
       "pricing": "Preise ansehen",
       "docs": "Dokumentation lesen",
       "console": "Konsole öffnen",
-      "docs_index": "oder besuchen Sie das <a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">vollständige Dokumentationsverzeichnis</a>."
+      "docs_index": "oder besuchen Sie das <a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">vollständige Dokumentationsverzeichnis</a>.",
+      "meta_title": "Seite nicht gefunden",
+      "meta_description": "Die angeforderte Seite wurde nicht gefunden. Entdecken Sie von hier aus ApexMail-Preise, Dokumentation oder die Entwicklerkonsole."
+    },
+    "pricing_faq": {
+      "title": "Häufig gestellte Fragen",
+      "q1": "Wie funktioniert die ApexMail-Preisgestaltung?",
+      "a1": "Wir berechnen nach monatlichem E-Mail-Volumen mit klaren Tariflimits. DKIM, SPF, DMARC, Webhooks und Kernanalytik sind grundsätzlich enthalten; höhere Tarife ergänzen dedizierte IPs, SSO, Compliance-Workflows und Account-Betreuung.",
+      "q2": "Gibt es einen kostenlosen Tarif?",
+      "a2": "Ja. Der Free-Tarif umfasst 3.000 E-Mails pro Monat, und jedes neue Konto erhält in den ersten 30 Tagen ein einmaliges Startguthaben von 30.000 E-Mails. Keine Kreditkarte erforderlich. Sie können jederzeit upgraden, wenn Ihr Volumen wächst.",
+      "q3": "Was passiert, wenn ich mein Tariflimit überschreite?",
+      "a3": "Zusätzliches Volumen über einen kostenpflichtigen Tarif hinaus wird tarifabhängig abgerechnet: Developer €0,80, Pro €0,60, Growth/Business €0,35 pro 1.000; Enterprise Cloud €0,35 pro 1.000 (vertraglich). Der Free-Tarif hat keine automatische Überschreitung — führen Sie stattdessen ein Upgrade durch. Nutzungs-, Missbrauchs- und Zahlungskontrollen gelten weiterhin. Prüfen Sie Ihre Abrechnungseinstellungen für die geltenden Limits und Warnungen.",
+      "q4": "Bieten Sie jährliche Abrechnung an?",
+      "a4": "Ja. Jahresabonnements werden mit dem 10-fachen Monatspreis abgerechnet — das entspricht einer Ersparnis von rund 16,7 % gegenüber zwölf Monatszahlungen. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular.",
+      "q5": "Ist HIPAA-Compliance enthalten?",
+      "a5": "HIPAA-Verfügbarkeit wird derzeit nicht angeboten. Enterprise kann Compliance-Workflow-Gespräche unterstützen, aber ein regulierter Anwendungsfall darf erst nach schriftlicher Bestätigung und gegebenenfalls erforderlicher Vereinbarung mit unseren Security- und Legal-Teams fortgesetzt werden.",
+      "q6": "Kann ich den Tarif jederzeit wechseln?",
+      "a6": "Wechsel bezahlter Tarife erfolgen über sicheres Stripe Checkout oder das Stripe-Abrechnungsportal. Ein Tarif ändert sich erst, wenn Stripe das Abrechnungsereignis bestätigt und ApexMail den verifizierten Stripe-Webhook verarbeitet hat. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular und den Servicebedingungen."
     }
   },
   "fr": {
@@ -741,7 +797,7 @@
       "legal_info": "Informations légales",
       "terms": "Conditions",
       "privacy": "Confidentialité",
-      "your_privacy_choices": "Vos choix de confidentialité",
+      "your_privacy_choices": "Vos choix de confidentialité (EN)",
       "dpa": "DPA",
       "cookies": "Politique de cookies",
       "acceptable_use": "Utilisation acceptable",
@@ -769,7 +825,8 @@
       "status_unavailable": "Données de statut indisponibles",
       "tagline": "Infrastructure email de niveau entreprise, opérée depuis l'UE.",
       "use_cases": "Cas d'usage",
-      "status_link": "État du service"
+      "status_link": "État du service",
+      "faq": "Questions fréquentes"
     },
     "cta": {
       "heading_1": "Prêt à envoyer",
@@ -814,7 +871,8 @@
       "compliance_check_3": "Résidence des données (UE)",
       "compliance_check_4": "Chiffrement au repos",
       "compliance_check_5": "TLS 1.2+ en transit",
-      "system_integrity_label": "Contrôles d'intégrité système"
+      "system_integrity_label": "Contrôles d'intégrité système",
+      "not_offered": "Non proposé"
     },
     "features": {
       "heading": "Ensemble complet de fonctionnalités",
@@ -1071,10 +1129,15 @@
       "billing_not_2": "Reprises automatiques après des échecs de livraison temporaires",
       "billing_not_3": "Emails de test envoyés en mode test ou à des adresses de test vérifiées",
       "billing_overage_title": "Gestion des dépassements",
-      "billing_overage_desc": "<strong>Forfaits en libre-service (Developer, Pro, Growth, Business) :</strong> Lorsque la facturation des dépassements est activée, les emails supplémentaires sont facturés 0,40 € par 1 000. Un moyen de paiement valide et une facturation confirmée sont requis.",
+      "billing_overage_desc": "<strong>Forfaits en libre-service (Developer, Pro, Growth, Business) :</strong> Lorsque la facturation des dépassements est activée, les emails supplémentaires sont facturés selon le forfait : Developer €0,80, Pro €0,60, Growth/Business €0,35 par 1 000 ; Enterprise Cloud €0,35 par 1 000 (contractuel). Un moyen de paiement valide et une facturation confirmée sont requis.",
       "billing_overage_free": "<strong>Forfait Free :</strong> Pas de dépassement automatique. L'envoi est suspendu lorsque le volume inclus de 3 000/mois est atteint. Effectuez une mise à niveau pour continuer à envoyer.",
       "billing_unused_title": "Volume inutilisé et tarification par paliers",
-      "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté — toute portion inutilisée expire à la fin du mois de facturation."
+      "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté — toute portion inutilisée expire à la fin du mois de facturation.",
+      "questions_title": "Encore des questions ?",
+      "questions_body": "Parlez à notre équipe de l'approvisionnement, des contrats annuels, de la migration ou du forfait adapté à votre volume.",
+      "talk_to_sales": "Parler aux ventes",
+      "calculator_hint": "Utilisez le calculateur ci-dessus",
+      "per_month": "par mois"
     },
     "home": {
       "hero_badge": "Maintenant avec déploiements Cloud Privé",
@@ -1113,7 +1176,13 @@
       "email_grader_submit": "Évaluer mon domaine",
       "email_grader_note": "vérifications DNS en direct · SPF / DKIM / DMARC / MX",
       "hero_eyebrow": "Infrastructure email transactionnelle",
-      "hero_proof_line": "Sans carte bancaire &middot; 3 000 emails/mois &middot; allocation de lancement de 30 000 messages &middot; <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">stocké dans l’EEE par défaut</a>"
+      "hero_proof_line": "Sans carte bancaire &middot; 3 000 emails/mois &middot; allocation de lancement de 30 000 messages &middot; <a href=\"/fr/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">stocké dans l’EEE par défaut</a>",
+      "teaser_emails_per_month": "emails/mois",
+      "teaser_launch_allowance": "allocation de lancement",
+      "teaser_emails": "emails",
+      "teaser_retention_suffix": " jours de conservation",
+      "teaser_choose_plan": "Choisissez",
+      "hero_example_label": "Trace d'exemple"
     },
     "a11y": {
       "back_to_top": "Retour en haut",
@@ -1147,7 +1216,10 @@
       "billing": "facturation",
       "monthly": "Mensuel",
       "annual": "Annuel (10 paiements mensuels, env. 16,7 % d'économie)",
-      "compute": "Calculer mon prix"
+      "compute": "Calculer mon prix",
+      "priced_factor": "facteur tarifé",
+      "context_only": "contexte uniquement",
+      "rules_note": "Calculé selon les mêmes règles tarifaires que la facturation"
     },
     "home_features": {
       "card_1_title": "API ultra-rapide",
@@ -1213,7 +1285,14 @@
       "hero_cta": "Tester l'API",
       "hero_subtitle": "Comparaison technique des fournisseurs d'infrastructure email.",
       "hero_title": "ApexMail vs alternatives",
-      "table_methodology": "Méthodologie"
+      "table_methodology": "Méthodologie",
+      "hero_lead": "Voyez comment ApexMail se compare à",
+      "hero_cta_secondary": "Voir la comparaison complète",
+      "decision_label": "Guide de décision",
+      "choose_apexmail": "Choisissez ApexMail lorsque…",
+      "choose_competitor": "Quand l'alternative est le meilleur choix",
+      "alternatives": "Alternatives comparées",
+      "cta_note": "Sans carte bancaire • 3 000 emails/mois gratuits"
     },
     "compliance": {
       "auto_dpa_button": "Générer un DPA",
@@ -1227,7 +1306,9 @@
       "hero_contact": "Contacter les ventes",
       "hero_cta": "Consulter la documentation de conformité",
       "hero_subtitle": "Des workflows RGPD, des pistes d'audit et une documentation de conformité actuelle pour la plateforme email.",
-      "hero_title": "Une conformité qui résiste aux audits."
+      "hero_title": "Une conformité qui résiste aux audits.",
+      "cta_title": "Prêt à dormir plus sereinement ?",
+      "cta_contact": "Parler à l'équipe conformité"
     },
     "forensic": {
       "cta_button": "Tester les outils",
@@ -1306,7 +1387,21 @@
       "benefit_2": "Réseau privé",
       "benefit_3": "IP dédiées",
       "benefit_4": "SLA personnalisé",
-      "cta": "Demander un devis"
+      "cta": "Demander un devis",
+      "svc_mta": "Cluster MTA",
+      "svc_queue": "Workers de file d'attente",
+      "svc_analytics": "BD analytique",
+      "svc_api": "Passerelle API",
+      "svc_lb": "Répartiteur de charge",
+      "svc_dns": "Résolveur DNS",
+      "latency_vpc_tag": "Même VPC",
+      "latency_vpc_desc": "Inférieur à la milliseconde — l'application et l'API partagent le même réseau",
+      "latency_region_tag": "Même région",
+      "latency_region_desc": "Quelques millisecondes — sauts inter-AZ minimaux",
+      "latency_shared_tag": "API inter-régions",
+      "latency_shared_desc": "De dizaines à des centaines de millisecondes — traversée de l'internet public",
+      "latency_saas_tag": "API HTTPS externe",
+      "latency_saas_desc": "Variable — ajout du DNS, de la poignée de main TLS et du routage internet"
     },
     "security_page": {
       "cta_button": "Demander la documentation",
@@ -1358,7 +1453,24 @@
       "pricing": "Voir les tarifs",
       "docs": "Lire la documentation",
       "console": "Ouvrir la console",
-      "docs_index": "ou visitez l'<a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">index complet de la documentation</a>."
+      "docs_index": "ou visitez l'<a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">index complet de la documentation</a>.",
+      "meta_title": "Page introuvable",
+      "meta_description": "La page demandée est introuvable. Explorez depuis ici les tarifs, la documentation ou la console développeur ApexMail."
+    },
+    "pricing_faq": {
+      "title": "Questions fréquentes",
+      "q1": "Comment fonctionne la tarification ApexMail ?",
+      "a1": "Nous facturons selon le volume mensuel d'emails, avec des limites de forfait claires. DKIM, SPF, DMARC, webhooks et analyses de base sont inclus de manière générale ; les forfaits supérieurs ajoutent des IP dédiées, le SSO, les flux de conformité et un accompagnement de compte.",
+      "q2": "Existe-t-il un forfait gratuit ?",
+      "a2": "Oui. Le forfait gratuit inclut 3 000 emails par mois, et chaque nouveau compte reçoit une allocation de lancement unique de 30 000 emails pour ses 30 premiers jours. Sans carte bancaire. Vous pouvez passer à un forfait supérieur à tout moment selon votre volume.",
+      "q3": "Que se passe-t-il si je dépasse la limite de mon forfait ?",
+      "a3": "Le volume supplémentaire au-delà d'un forfait payant est facturé selon le forfait : Developer €0,80, Pro €0,60, Growth/Business €0,35 par 1 000 ; Enterprise Cloud €0,35 par 1 000 (contractuel). Le forfait Free n'a pas de dépassement automatique — passez à un forfait supérieur. Les contrôles d'usage, d'abus et de paiement continuent de s'appliquer. Vérifiez votre configuration de facturation pour les limites et alertes applicables.",
+      "q4": "Proposez-vous la facturation annuelle ?",
+      "a4": "Oui. Les abonnements annuels sont facturés à 10 fois le prix mensuel — soit une économie d'environ 16,7 % par rapport à douze paiements mensuels. Les contrats annuels Enterprise suivent le bon de commande signé.",
+      "q5": "La conformité HIPAA est-elle incluse ?",
+      "a5": "La disponibilité HIPAA n'est pas proposée actuellement. Enterprise peut accompagner les discussions sur les flux de conformité, mais un cas d'usage réglementé ne peut avancer qu'après confirmation écrite et tout accord requis avec nos équipes sécurité et juridique.",
+      "q6": "Puis-je changer de forfait à tout moment ?",
+      "a6": "Les changements de forfait payant passent par Stripe Checkout sécurisé ou le portail de facturation Stripe. Un forfait ne change qu'une fois que Stripe a confirmé l'événement de facturation et qu'ApexMail a réconcilié le webhook Stripe vérifié. Les contrats annuels Enterprise suivent le bon de commande signé et les conditions de service."
     }
   },
   "es": {
@@ -1422,7 +1534,7 @@
       "legal_info": "Información legal",
       "terms": "Términos",
       "privacy": "Privacidad",
-      "your_privacy_choices": "Sus opciones de privacidad",
+      "your_privacy_choices": "Sus opciones de privacidad (EN)",
       "dpa": "DPA",
       "cookies": "Política de cookies",
       "acceptable_use": "Uso aceptable",
@@ -1450,7 +1562,8 @@
       "status_unavailable": "Datos de estado no disponibles",
       "tagline": "Infraestructura de email de nivel empresarial, operada desde la UE.",
       "use_cases": "Casos de uso",
-      "status_link": "Estado del servicio"
+      "status_link": "Estado del servicio",
+      "faq": "Preguntas frecuentes"
     },
     "cta": {
       "heading_1": "¿Listo para enviar",
@@ -1495,7 +1608,8 @@
       "compliance_check_3": "Residencia de datos (UE)",
       "compliance_check_4": "Cifrado en reposo",
       "compliance_check_5": "TLS 1.2+ en tránsito",
-      "system_integrity_label": "Controles de integridad del sistema"
+      "system_integrity_label": "Controles de integridad del sistema",
+      "not_offered": "No ofrecido"
     },
     "features": {
       "heading": "Conjunto completo de funcionalidades",
@@ -1752,10 +1866,15 @@
       "billing_not_2": "Reintentos automáticos tras fallos temporales de entrega",
       "billing_not_3": "Emails de prueba enviados en modo prueba o a direcciones de prueba verificadas",
       "billing_overage_title": "Gestión de excesos",
-      "billing_overage_desc": "<strong>Planes de autoservicio (Developer, Pro, Growth, Business):</strong> Cuando la facturación por exceso está habilitada, los emails adicionales se cobran a €0,40 por 1.000. Se requiere un método de pago válido y facturación confirmada.",
+      "billing_overage_desc": "<strong>Planes de autoservicio (Developer, Pro, Growth, Business):</strong> Cuando la facturación por exceso está habilitada, los emails adicionales se cobran según el plan: Developer €0,80, Pro €0,60, Growth/Business €0,35 por 1.000; Enterprise Cloud €0,35 por 1.000 (contractual). Se requiere un método de pago válido y facturación confirmada.",
       "billing_overage_free": "<strong>Plan Free:</strong> Sin exceso automático. El envío se pausa cuando se alcanza el volumen incluido de 3.000/mes. Actualice para continuar enviando.",
       "billing_unused_title": "Volumen no utilizado y precios por banda",
-      "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere — cualquier porción no utilizada expira al final del mes de facturación."
+      "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere — cualquier porción no utilizada expira al final del mes de facturación.",
+      "questions_title": "¿Aún tiene preguntas?",
+      "questions_body": "Hable con nuestro equipo sobre contratación, contratos anuales, migración o el plan adecuado para su volumen.",
+      "talk_to_sales": "Hablar con ventas",
+      "calculator_hint": "Use la calculadora de arriba",
+      "per_month": "al mes"
     },
     "home": {
       "hero_badge": "Ahora con implementaciones de Nube Privada",
@@ -1794,7 +1913,13 @@
       "email_grader_submit": "Evaluar mi dominio",
       "email_grader_note": "comprobaciones DNS en vivo · SPF / DKIM / DMARC / MX",
       "hero_eyebrow": "Infraestructura de email transaccional",
-      "hero_proof_line": "Sin tarjeta &middot; 3.000 emails/mes &middot; asignación de lanzamiento de 30.000 mensajes &middot; <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">almacenado en el EEE por defecto</a>"
+      "hero_proof_line": "Sin tarjeta &middot; 3.000 emails/mes &middot; asignación de lanzamiento de 30.000 mensajes &middot; <a href=\"/es/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">almacenado en el EEE por defecto</a>",
+      "teaser_emails_per_month": "emails/mes",
+      "teaser_launch_allowance": "asignación de lanzamiento",
+      "teaser_emails": "emails",
+      "teaser_retention_suffix": " días de retención",
+      "teaser_choose_plan": "Elija",
+      "hero_example_label": "Traza de ejemplo"
     },
     "a11y": {
       "back_to_top": "Volver arriba",
@@ -1828,7 +1953,10 @@
       "billing": "facturación",
       "monthly": "Mensual",
       "annual": "Anual (10 pagos mensuales, ahorro de aprox. 16,7 %)",
-      "compute": "Calcular mi precio"
+      "compute": "Calcular mi precio",
+      "priced_factor": "factor con precio",
+      "context_only": "solo contexto",
+      "rules_note": "Calculado con las mismas reglas de precios que la facturación"
     },
     "home_features": {
       "card_1_title": "API ultrarrápida",
@@ -1894,7 +2022,14 @@
       "hero_cta": "Probar la API",
       "hero_subtitle": "Comparación técnica de proveedores de infraestructura de email.",
       "hero_title": "ApexMail frente a alternativas",
-      "table_methodology": "Metodología"
+      "table_methodology": "Metodología",
+      "hero_lead": "Vea cómo se compara ApexMail con",
+      "hero_cta_secondary": "Ver comparación completa",
+      "decision_label": "Guía de decisión",
+      "choose_apexmail": "Elija ApexMail cuando…",
+      "choose_competitor": "Cuándo la alternativa es la mejor opción",
+      "alternatives": "Alternativas, comparadas",
+      "cta_note": "Sin tarjeta • 3.000 emails/mes gratis"
     },
     "compliance": {
       "auto_dpa_button": "Generar DPA",
@@ -1908,7 +2043,9 @@
       "hero_contact": "Contactar con ventas",
       "hero_cta": "Ver la documentación de cumplimiento",
       "hero_subtitle": "Flujos de trabajo RGPD, registros de auditoría y documentación de cumplimiento actual para la plataforma de email.",
-      "hero_title": "Un cumplimiento que supera las auditorías."
+      "hero_title": "Un cumplimiento que supera las auditorías.",
+      "cta_title": "¿Listo para dormir más tranquilo?",
+      "cta_contact": "Hablar con el equipo de cumplimiento"
     },
     "forensic": {
       "cta_button": "Probar las herramientas",
@@ -1987,7 +2124,21 @@
       "benefit_3": "IP dedicadas",
       "benefit_4": "SLA personalizado",
       "cta": "Solicitar presupuesto",
-      "hero_title": "Nube Privada"
+      "hero_title": "Nube Privada",
+      "svc_mta": "Clúster MTA",
+      "svc_queue": "Workers de cola",
+      "svc_analytics": "BD de analítica",
+      "svc_api": "Pasarela API",
+      "svc_lb": "Balanceador de carga",
+      "svc_dns": "Resolutor DNS",
+      "latency_vpc_tag": "Misma VPC",
+      "latency_vpc_desc": "Submilisegundos: la aplicación y la API comparten la misma red",
+      "latency_region_tag": "Misma región",
+      "latency_region_desc": "Pocos milisegundos: saltos mínimos entre zonas de disponibilidad",
+      "latency_shared_tag": "API entre regiones",
+      "latency_shared_desc": "Decenas a cientos de milisegundos: recorrido por internet pública",
+      "latency_saas_tag": "API HTTPS externa",
+      "latency_saas_desc": "Variable: se añaden DNS, handshake TLS y enrutamiento de internet"
     },
     "security_page": {
       "cta_button": "Solicitar documentación",
@@ -2039,7 +2190,24 @@
       "pricing": "Ver precios",
       "docs": "Leer documentación",
       "console": "Abrir consola",
-      "docs_index": "o visite el <a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">índice completo de documentación</a>."
+      "docs_index": "o visite el <a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">índice completo de documentación</a>.",
+      "meta_title": "Página no encontrada",
+      "meta_description": "No se encontró la página solicitada. Explore desde aquí los precios, la documentación o la consola de desarrollador de ApexMail."
+    },
+    "pricing_faq": {
+      "title": "Preguntas frecuentes",
+      "q1": "¿Cómo funciona el precio de ApexMail?",
+      "a1": "Cobramos según el volumen mensual de emails con límites de plan claros. DKIM, SPF, DMARC, webhooks y analítica básica están incluidos con carácter general; los planes superiores añaden IP dedicadas, SSO, flujos de cumplimiento y cobertura de cuenta.",
+      "q2": "¿Existe un plan gratuito?",
+      "a2": "Sí. El plan gratuito incluye 3.000 emails al mes, y cada cuenta nueva recibe una asignación de lanzamiento única de 30.000 emails durante sus primeros 30 días. No se requiere tarjeta de crédito. Puede actualizar en cualquier momento a medida que crezca su volumen.",
+      "q3": "¿Qué ocurre si supero el límite de mi plan?",
+      "a3": "El volumen adicional más allá de un plan de pago se factura según el plan: Developer €0,80, Pro €0,60, Growth/Business €0,35 por 1.000; Enterprise Cloud €0,35 por 1.000 (contractual). El plan Free no tiene exceso automático: actualice en su lugar. Los controles de uso, abuso y pago siguen aplicándose. Revise la configuración de facturación para conocer los límites y alertas aplicables.",
+      "q4": "¿Ofrecen facturación anual?",
+      "a4": "Sí. Las suscripciones anuales se facturan a 10 veces el precio mensual: un ahorro de aproximadamente el 16,7 % frente a doce pagos mensuales. Los contratos anuales Enterprise siguen el formulario de pedido firmado.",
+      "q5": "¿Está incluido el cumplimiento HIPAA?",
+      "a5": "La disponibilidad HIPAA no se ofrece actualmente. Enterprise puede apoyar conversaciones sobre flujos de cumplimiento, pero un caso de uso regulado solo puede avanzar tras confirmación por escrito y cualquier acuerdo requerido con nuestros equipos de seguridad y legal.",
+      "q6": "¿Puedo cambiar de plan en cualquier momento?",
+      "a6": "Los cambios de plan de pago utilizan Stripe Checkout seguro o el portal de facturación de Stripe. Un plan no cambia hasta que Stripe confirma el evento de facturación y ApexMail concilia el webhook verificado de Stripe. Los contratos anuales Enterprise siguen el formulario de pedido firmado y los términos del servicio."
     }
   }
 }

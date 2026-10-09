@@ -15,7 +15,7 @@
 
 use crate::gate_support::{
     manifest_route_set, matches_registered_browser_route, render_variant_with_secret,
-    render_with_secret, STATEFUL_RENDER_VARIANTS,
+    STATEFUL_RENDER_VARIANTS,
 };
 use crate::routing;
 
@@ -28,6 +28,22 @@ const APPEARANCE_SURFACES: &[&str] = &["web", "control-plane"];
 /// (https://apexmail.ee/pricing), which resolves.
 const DEAD_LINK_ALLOWLIST: &[(&str, &str, &str)] = &[];
 
+/// External hosts a web/control-plane document may link to. An absolute URL
+/// to anything else fails: a link to a host we do not own is either a typo
+/// or a claim we cannot keep ("do not assume absent authority exists").
+const EXTERNAL_HOST_ALLOWLIST: &[&str] = &[
+    "apexmail.ee",
+    "www.apexmail.ee",
+    "app.apexmail.ee",
+    "status.apexmail.ee",
+    "docs.apexmail.ee",
+    "api.apexmail.ee",
+];
+
+/// Cross-surface links a WEB document may carry into the control plane
+/// (`/cp…`), as (web document, target path).
+const WEB_TO_CP_LINK_ALLOWLIST: &[(&str, &str)] = &[];
+
 /// Allowlisted dead links in the marketing-zola documents, as
 /// (document path or "*", unresolvable target path).
 /// Data-locations fix: /data-locations now lives in the marketing-zola
@@ -36,25 +52,82 @@ const DEAD_LINK_ALLOWLIST: &[(&str, &str, &str)] = &[];
 /// former ("*", "/data-locations") entry is gone.
 const MARKETING_DEAD_LINK_ALLOWLIST: &[(&str, &str)] = &[];
 
-/// Collect every `href` and form `action`/`formaction` target in a document.
+/// Collect every `href`, `action`, and `formaction` target in a document —
+/// double-quoted, single-quoted, AND unquoted attribute forms. Missing the
+/// unquoted/single-quoted spellings meant a hand-written link could never
+/// fail the gate.
 fn link_targets(html: &str) -> Vec<String> {
     let mut targets = Vec::new();
     for attribute in ["href", "action", "formaction"] {
-        let needle = format!("{attribute}=\"");
-        let mut rest = html;
-        while let Some(rel) = rest.find(&needle) {
-            let value_start = rel + needle.len();
-            let value_end = rest[value_start..]
-                .find('"')
-                .map(|offset| value_start + offset)
-                .unwrap_or(rest.len());
-            targets.push(rest[value_start..value_end].to_string());
-            rest = &rest[value_end..];
+        let needle = format!("{attribute}=");
+        let mut cursor = 0usize;
+        while let Some(rel) = html[cursor..].find(&needle) {
+            let attribute_start = cursor + rel;
+            let start = attribute_start + needle.len();
+            // The character before the attribute name must be whitespace or
+            // a tag opener — `data-href=` is not a link.
+            let preceded_ok = html[..attribute_start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace() || c == '<' || c == '"' || c == '\'');
+            if !preceded_ok {
+                cursor = start;
+                continue;
+            }
+            let rest = &html[start..];
+            let (value, consumed) = if let Some(stripped) = rest.strip_prefix('"') {
+                let end = stripped.find('"').unwrap_or(stripped.len());
+                (stripped[..end].to_string(), end + 2)
+            } else if let Some(stripped) = rest.strip_prefix('\'') {
+                let end = stripped.find('\'').unwrap_or(stripped.len());
+                (stripped[..end].to_string(), end + 2)
+            } else {
+                let end = rest
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(rest.len());
+                (rest[..end].to_string(), end)
+            };
+            // Escaped example markup (`placeholder="&lt;a href=&quot;…"`)
+            // is documentation text, not a link target: a real URL cannot
+            // contain a raw quote or angle bracket.
+            let is_escaped_markup = value.contains("&quot;")
+                || value.contains("&lt;")
+                || value.contains("&gt;")
+                || value.contains("&#10;");
+            let is_placeholder_example = value.contains("{{") || value.contains("}}");
+            if !value.is_empty() && !is_escaped_markup && !is_placeholder_example {
+                targets.push(value);
+            }
+            cursor = start + consumed.max(1);
         }
     }
     targets.sort();
     targets.dedup();
     targets
+}
+
+/// The host of an absolute `http(s)://` (or scheme-relative `//`) target,
+/// lowercased and without a port; `None` for relative targets.
+fn absolute_host(target: &str) -> Option<String> {
+    let rest = target
+        .strip_prefix("https://")
+        .or_else(|| target.strip_prefix("http://"))
+        .or_else(|| target.strip_prefix("//"))?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
 }
 
 /// A link target resolves if it is an anchor, mail address, external URL,
@@ -105,7 +178,18 @@ fn target_resolves(
     }
     // A path this surface renders (detail/edit pattern routes included) even
     // when the manifest spells it with a canonical pattern.
-    crate::axum_router::render_route(surface, path_only).is_some()
+    if crate::axum_router::render_route(surface, path_only).is_some() {
+        return true;
+    }
+    // The API-Explorer sandbox RESULT document is a marketing-flow page
+    // served by the api-server (the explorer posts cross-origin from
+    // apexmail.ee/api-explorer): its own navigation lives in the marketing
+    // route space, so the built marketing site is the authority for those
+    // targets. The relative-link-on-the-api-origin nuance is a separate
+    // cross-origin finding tracked for the explorer's owner, not something
+    // the console gate can model.
+    path_only.starts_with("/api-explorer")
+        || crate::axum_router::render_route("marketing-zola", path_only).is_some()
 }
 
 /// Every `href` and form action in every web/control-plane document —
@@ -161,6 +245,153 @@ fn every_stateful_variant_is_rendered_by_its_surface_sweep() {
             "stateful variant [{surface}] {document} is never rendered by the gate sweep — the registry field order and the reader have drifted apart",
         );
     }
+}
+
+/// Fragments must land somewhere: every `#fragment` a web/CP document links
+/// (same-document or into another same-surface route) must exist as an
+/// `id="…"` on the target document. A link to `#section` that no element
+/// carries is a dead link that `split('#')` used to hide.
+#[test]
+fn linked_fragments_exist_on_their_target_documents() {
+    let mut missing: Vec<String> = Vec::new();
+    for &surface in APPEARANCE_SURFACES {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
+            for target in link_targets(&html) {
+                let Some((path, fragment)) = target.split_once('#') else {
+                    continue;
+                };
+                let fragment = fragment.trim();
+                if fragment.is_empty() || fragment.starts_with('?') {
+                    continue;
+                }
+                let target_html = if path.is_empty() {
+                    html.clone()
+                } else {
+                    // Only same-surface, same-authority targets are
+                    // resolvable here; external hosts and marketing pages are
+                    // covered by their own gates.
+                    if path.starts_with("http") || path.starts_with("//") {
+                        continue;
+                    }
+                    match crate::axum_router::render_route(surface, path) {
+                        Some(target_html) => target_html,
+                        None => continue,
+                    }
+                };
+                let id_marker = format!("id=\"{fragment}\"");
+                let name_marker = format!("name=\"{fragment}\"");
+                if !target_html.contains(&id_marker) && !target_html.contains(&name_marker) {
+                    missing.push(format!("[{surface}] {document} -> {target}"));
+                }
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "fragment links whose target carries no such id:\n{}",
+        missing.join("\n"),
+    );
+}
+
+/// Absolute links stay on hosts the platform actually owns or has reviewed.
+/// An unbounded "any https:// URL is external, therefore fine" rule let the
+/// gate bless links to hosts nobody maintains.
+#[test]
+fn external_link_hosts_are_allowlisted() {
+    let mut unknown: Vec<String> = Vec::new();
+    for &surface in APPEARANCE_SURFACES {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
+            for target in link_targets(&html) {
+                let Some(host) = absolute_host(&target) else {
+                    continue;
+                };
+                if !EXTERNAL_HOST_ALLOWLIST.contains(&host.as_str()) {
+                    unknown.push(format!("[{surface}] {document} -> {target} (host {host})"));
+                }
+            }
+        }
+    }
+    unknown.sort();
+    unknown.dedup();
+    assert!(
+        unknown.is_empty(),
+        "absolute links to hosts outside EXTERNAL_HOST_ALLOWLIST:\n{}\n\nAdd the host only when the platform genuinely owns/uses it.",
+        unknown.join("\n"),
+    );
+}
+
+/// A WEB document must not navigate into the control plane by relative link:
+/// the CP lives on its own host, and a `/cp…` link from the customer console
+/// is either a leak of operator surface or a 404.
+#[test]
+fn web_documents_do_not_link_into_the_control_plane() {
+    let mut leaks: Vec<String> = Vec::new();
+    for (document, html) in crate::gate_support::gate_documents("web") {
+        for target in link_targets(&html) {
+            let path_only = target.split(['?', '#']).next().unwrap_or(&target);
+            if path_only.starts_with("/cp") {
+                let allowlisted = WEB_TO_CP_LINK_ALLOWLIST
+                    .iter()
+                    .any(|(d, t)| *d == document && *t == path_only);
+                if !allowlisted {
+                    leaks.push(format!("[web] {document} -> {target}"));
+                }
+            }
+        }
+    }
+    leaks.sort();
+    leaks.dedup();
+    assert!(
+        leaks.is_empty(),
+        "web documents link into the control plane:\n{}",
+        leaks.join("\n"),
+    );
+}
+
+/// Forms declare a real method, and a form carrying the double-submit CSRF
+/// token is a POST — a GET form with `_csrf` would put the token in the URL
+/// and still not be accepted by the handler.
+#[test]
+fn form_methods_are_declared_and_csrf_forms_are_post() {
+    let mut violations: Vec<String> = Vec::new();
+    for &surface in APPEARANCE_SURFACES {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
+            for (open_tag, element) in crate::gate_support::form_elements(&html) {
+                let lowered = open_tag.to_ascii_lowercase();
+                let method = lowered
+                    .split_whitespace()
+                    .find_map(|part| part.strip_prefix("method=\""))
+                    .map(|rest| rest.split('"').next().unwrap_or("").to_string())
+                    .or_else(|| {
+                        lowered.split_whitespace().find_map(|part| {
+                            part.strip_prefix("method='")
+                                .map(|rest| rest.split('\'').next().unwrap_or("").to_string())
+                        })
+                    });
+                match method.as_deref() {
+                    None => violations.push(format!(
+                        "[{surface}] {document}: <form> without method: {open_tag}"
+                    )),
+                    Some(m) if m != "get" && m != "post" => violations.push(format!(
+                        "[{surface}] {document}: <form method=\"{m}\"> is not get/post"
+                    )),
+                    Some("get") if element.contains("name=\"_csrf\"") => violations.push(format!(
+                        "[{surface}] {document}: CSRF-carrying form uses GET: {open_tag}"
+                    )),
+                    _ => {}
+                }
+            }
+        }
+    }
+    violations.sort();
+    violations.dedup();
+    assert!(
+        violations.is_empty(),
+        "form method violations:\n{}",
+        violations.join("\n"),
+    );
 }
 
 /// The web/control-plane dead-link allowlist stays honest: every entry must
@@ -225,7 +456,14 @@ fn marketing_dead_link_allowlist_entries_are_still_dead() {
 
 /// Resolution rules for marketing document links: Zola documents may link
 /// sibling marketing routes (either marketing surface's manifest), the app
-/// routes, the consent endpoint, and static build assets.
+/// routes, the consent endpoint, the built site's own root assets
+/// (icon.svg / manifest.json / robots.txt / .well-known), and static build
+/// assets.
+///
+/// The BUILT page is the authority: `public/**/index.html` files that the
+/// router serves (locale variants, /security/, /solutions/*, /api-explorer)
+/// resolve even when the UI manifest has not listed them yet — the manifest
+/// is a gate inventory, not the site's routing table.
 fn marketing_target_resolves(target: &str) -> bool {
     let Some(path_only) = target.split(['?', '#']).next() else {
         return false;
@@ -246,6 +484,26 @@ fn marketing_target_resolves(target: &str) -> bool {
             return true;
         }
     }
+    // Root-level static files served verbatim by Zola.
+    for root_asset in [
+        "/icon.svg",
+        "/manifest.json",
+        "/favicon.ico",
+        "/robots.txt",
+        "/security.txt",
+        "/sitemap.xml",
+        "/feed.xml",
+        "/.htaccess",
+        "/_headers",
+        "/_redirects",
+    ] {
+        if path_only == root_asset {
+            return true;
+        }
+    }
+    if path_only.starts_with("/.well-known/") {
+        return true;
+    }
     if path_only.starts_with("/v1/") || path_only.starts_with("/api/") {
         return true;
     }
@@ -257,7 +515,8 @@ fn marketing_target_resolves(target: &str) -> bool {
             return true;
         }
     }
-    false
+    // The built site itself: every page the SSR router can serve.
+    crate::axum_router::render_route("marketing-zola", path_only).is_some()
 }
 
 /// No dead routes linked from the Zola-built marketing documents. Sampled

@@ -36,8 +36,39 @@ needs_rebuild() {
     [[ -n "$newer_input" ]]
 }
 
+# Resolve the Tailwind CLI for this host:
+#   1. the vendored v3.4.17 binary (apps/marketing-zola/tailwindcss) when it
+#      is executable here;
+#   2. `tailwindcss` on PATH (a host/CI install of the same major);
+#   3. otherwise FAIL loud — with the official download URL for this
+#      platform — instead of a bare "not found" (review §9/build robustness).
+resolve_tailwind_cli() {
+    local vendored="apps/marketing-zola/tailwindcss"
+    if [[ -x "$vendored" ]]; then
+        printf '%s' "$vendored"
+        return 0
+    fi
+    if command -v tailwindcss >/dev/null 2>&1; then
+        command -v tailwindcss
+        return 0
+    fi
+    local os arch url
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    case "$os" in
+        darwin) os="macos" ;;
+        linux) os="linux" ;;
+    esac
+    arch="$(uname -m)"
+    case "$arch" in
+        arm64|aarch64) arch="arm64" ;;
+        x86_64|amd64) arch="x64" ;;
+    esac
+    url="https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-${os}-${arch}"
+    error "Tailwind CLI not found: ${vendored} is not executable on this host and no 'tailwindcss' on PATH. Install the official v3.4.17 build for ${os}-${arch}: ${url} (see services/mail-server/crates/ui-foundation/README.md)"
+}
+
 build_rust_ui_css() {
-    local tailwind_cli="apps/marketing-zola/tailwindcss"
+    local tailwind_cli
     local config="services/mail-server/crates/ui-foundation/tailwind.config.js"
     local input="services/mail-server/crates/ui-foundation/assets/globals.input.css"
     local output="services/mail-server/crates/ui-foundation/assets/globals.css"
@@ -46,13 +77,13 @@ build_rust_ui_css() {
         return
     fi
 
-    [[ -x "$tailwind_cli" ]] || error "Tailwind CLI not found at $tailwind_cli"
+    tailwind_cli="$(resolve_tailwind_cli)"
     log "Building Rust UI stylesheet..."
     "$tailwind_cli" -c "$config" -i "$input" -o "$output"
 }
 
 build_marketing_static_site() {
-    local tailwind_cli="apps/marketing-zola/tailwindcss"
+    local tailwind_cli
     local css_input="apps/marketing-zola/static/css/input.css"
     local css_output="apps/marketing-zola/static/css/styles.css"
 
@@ -62,7 +93,7 @@ build_marketing_static_site() {
         "apps/marketing-zola/templates" \
         "apps/marketing-zola/content" \
         "apps/marketing-zola/static/js"; then
-        [[ -x "$tailwind_cli" ]] || error "Tailwind CLI not found at $tailwind_cli"
+        tailwind_cli="$(resolve_tailwind_cli)"
         log "Building marketing stylesheet..."
         "$tailwind_cli" -c apps/marketing-zola/tailwind.config.js -i "$css_input" -o "$css_output" --minify
         # A umask-077 shell produced a 0600 styles.css (dogfood 2026-10-08);

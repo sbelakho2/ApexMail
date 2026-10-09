@@ -64,6 +64,10 @@
             <span class="text-xs text-surface-400">5 Dedicated IPs · Illustrative data</span>
           </div>
 
+          <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-4 px-6 py-2 border-b border-surface-100 bg-surface-100 text-[11px] font-bold uppercase tracking-widest text-surface-500">
+            <span>IP address</span>
+            <span>Reputation score &middot; status</span>
+          </div>
           <div class="divide-y divide-surface-100">
             <div class="px-6 py-3 flex flex-wrap items-center justify-between gap-2 hover:bg-surface-100/50 transition-colors">
               <div class="flex items-center gap-3">
@@ -72,7 +76,7 @@
               <div class="flex flex-wrap items-center gap-4 min-w-0 justify-end">
                 <div class="flex items-center gap-2">
                   <div class="w-24 h-2 bg-surface-100 rounded-sm overflow-hidden">
-                    <div class="h-full bg-success-500 rounded-sm" style="width: 98%"></div>
+                    <div role="progressbar" aria-valuenow="98" aria-valuemin="0" aria-valuemax="100" aria-label="198.51.100.1 reputation score 98 percent" class="h-full bg-success-500 rounded-sm" style="width: 98%"></div>
                   </div>
                   <span class="text-xs font-semibold text-surface-600 w-8 text-right">98%</span>
                 </div>
@@ -89,7 +93,7 @@
               <div class="flex flex-wrap items-center gap-4 min-w-0 justify-end">
                 <div class="flex items-center gap-2">
                   <div class="w-24 h-2 bg-surface-100 rounded-sm overflow-hidden">
-                    <div class="h-full bg-success-500 rounded-sm" style="width: 96%"></div>
+                    <div role="progressbar" aria-valuenow="96" aria-valuemin="0" aria-valuemax="100" aria-label="198.51.100.2 reputation score 96 percent" class="h-full bg-success-500 rounded-sm" style="width: 96%"></div>
                   </div>
                   <span class="text-xs font-semibold text-surface-600 w-8 text-right">96%</span>
                 </div>
@@ -106,7 +110,7 @@
               <div class="flex flex-wrap items-center gap-4 min-w-0 justify-end">
                 <div class="flex items-center gap-2">
                   <div class="w-24 h-2 bg-surface-100 rounded-sm overflow-hidden">
-                    <div class="h-full bg-success-500 rounded-sm" style="width: 94%"></div>
+                    <div role="progressbar" aria-valuenow="94" aria-valuemin="0" aria-valuemax="100" aria-label="198.51.100.3 reputation score 94 percent" class="h-full bg-success-500 rounded-sm" style="width: 94%"></div>
                   </div>
                   <span class="text-xs font-semibold text-surface-600 w-8 text-right">94%</span>
                 </div>
@@ -123,7 +127,7 @@
               <div class="flex flex-wrap items-center gap-4 min-w-0 justify-end">
                 <div class="flex items-center gap-2">
                   <div class="w-24 h-2 bg-surface-100 rounded-sm overflow-hidden">
-                    <div class="h-full bg-warning-500 rounded-sm" style="width: 87%"></div>
+                    <div role="progressbar" aria-valuenow="87" aria-valuemin="0" aria-valuemax="100" aria-label="198.51.100.4 reputation score 87 percent" class="h-full bg-warning-500 rounded-sm" style="width: 87%"></div>
                   </div>
                   <span class="text-xs font-semibold text-surface-600 w-8 text-right">87%</span>
                 </div>
@@ -140,7 +144,7 @@
               <div class="flex flex-wrap items-center gap-4 min-w-0 justify-end">
                 <div class="flex items-center gap-2">
                   <div class="w-24 h-2 bg-surface-100 rounded-sm overflow-hidden">
-                    <div class="h-full bg-warning-500 rounded-sm" style="width: 72%"></div>
+                    <div role="progressbar" aria-valuenow="72" aria-valuemin="0" aria-valuemax="100" aria-label="198.51.100.5 reputation score 72 percent" class="h-full bg-warning-500 rounded-sm" style="width: 72%"></div>
                   </div>
                   <span class="text-xs font-semibold text-surface-600 w-8 text-right">72%</span>
                 </div>
@@ -155,7 +159,7 @@
           <div class="px-6 py-3 bg-surface-100 border-t border-surface-100">
             <div class="flex items-center justify-between text-xs text-surface-400">
               <span>Pool: production-transactional</span>
-              <span>Avg reputation: 89.4%</span>
+              <span>Average IP reputation score: 89.4% (illustrative)</span>
             </div>
           </div>
         </div>

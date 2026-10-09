@@ -13,7 +13,7 @@ ApexMail strictly prohibits the use of its platform to send spam or unsolicited 
 
 ## 2. Permission Requirement
 
-All recipients of email sent through ApexMail must have given **explicit, verifiable opt-in consent** to receive email from the sender. The following do not constitute consent:
+Marketing and promotional email sent through ApexMail requires **explicit, verifiable opt-in consent** from the recipient. Transactional and service email does not require marketing consent, but must comply with the category rules in the [Acceptable Use Policy](/acceptable-use/). The following do not constitute consent for marketing email:
 
 - Purchased, scraped, or rented email lists.
 - Email addresses harvested from public websites.
@@ -22,13 +22,15 @@ All recipients of email sent through ApexMail must have given **explicit, verifi
 
 ## 3. Sending Obligations
 
-Every email sent through ApexMail must:
+Every marketing and promotional email sent through ApexMail must:
 
 - Include a functional unsubscribe link that processes requests within 24 hours.
 - Clearly identify the sender's name and physical address.
 - Use a truthful and non-deceptive subject line.
 - Match the content to the consent given (no bait-and-switch).
 - Honor unsubscribe requests promptly and permanently.
+
+Transactional and service email must meet the AUP category requirements instead: accurate sender identity and no disguised marketing. A security, authentication, or account message does not require an unsubscribe link where applicable law does not require one.
 
 ## 4. Monitoring and Enforcement
 

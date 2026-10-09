@@ -14,7 +14,7 @@
         <div>
           <span class="text-sm font-bold text-surface-950 mb-2 block">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_label"] %}{{ i18n_data[l]["features"]["detail_api_label"] }}{% else %}Build in Minutes{% endif %}</span>
           <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_title"] %}{{ i18n_data[l]["features"]["detail_api_title"] }}{% else %}Developer-First API{% endif %}</h3>
-          <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_desc"] %}{{ i18n_data[l]["features"]["detail_api_desc"] }}{% else %}Our RESTful API is designed for developers who value simplicity and power. Consistent SDKs, comprehensive docs, and clear request feedback.{% endif %}</p>
+          <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_desc"] %}{{ i18n_data[l]["features"]["detail_api_desc"] }}{% else %}Our RESTful API is designed for developers who value simplicity and power. The first-party SDKs are in active development and not yet published to public package registries (integrate against the HTTP API today), with comprehensive docs and clear request feedback.{% endif %}</p>
           <ul class="space-y-3 mb-8">
             {% set api_benefits_labels = ["detail_api_benefit_1", "detail_api_benefit_2", "detail_api_benefit_3", "detail_api_benefit_4", "detail_api_benefit_5"] %}
             {% set api_benefits_defaults = ["Quickstart path for your first send", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 100 messages", "Delivery status updates"] %}
@@ -103,7 +103,10 @@ print(detail.json()["data"]["status"])  # 'queued'</code></pre>
             </div>
             <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>import requests
 
-# Send with consent context attached to the message record
+# Message-level tags are routing/analytics labels for your own reporting.
+# They are NOT consent records or lawful-basis evidence — consent and
+# processing-basis records live in the compliance workflow (/compliance/),
+# not in message tags.
 resp = requests.post(
     "https://api.apexmail.ee/v1/messages",
     headers={"X-API-Key": "am_live_xxx"},

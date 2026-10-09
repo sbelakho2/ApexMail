@@ -89,7 +89,7 @@
           </button>
           <p class="text-[11px] font-mono text-surface-400">
             <svg viewBox="0 0 24 14" width="12" height="8" fill="none" style="display:inline-block;vertical-align:middle;margin-right:4px" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
-            Calculated using the same pricing rules used for billing
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["calculator"] and i18n_data[l]["calculator"]["rules_note"] %}{{ i18n_data[l]["calculator"]["rules_note"] }}{% else %}Calculated using the same pricing rules used for billing{% endif %}
           </p>
         </div>
       </form>

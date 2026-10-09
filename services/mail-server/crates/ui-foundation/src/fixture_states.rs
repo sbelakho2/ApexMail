@@ -549,17 +549,20 @@ pub fn drafts_unavailable() -> AiDraftsPageData {
 /// Render one state fixture page (the same render the exporter writes to
 /// disk). Returns `None` for an unknown id rather than guessing.
 pub fn render_bot_state(id: &str) -> Option<String> {
-    let mut data = RouteData::default();
     // Every bot-surface page is an authenticated page: the fixtures carry a
     // realistic session identity (display name, long email, plan label) so
     // the shell header renders its real width — the live header overflowed
     // at 768 px only because no fixture had an identity (dogfood 2026-10-06
-    // ui-visual).
-    data.session_identity = Some(SessionIdentity {
-        display_name: "Lena Moreau".to_string(),
-        email: "lena.moreau@northwind-saas.example".to_string(),
-        plan_label: Some("Free Plan — 3K / mo".to_string()),
-    });
+    // ui-visual). Initialised in the struct literal (not assigned after
+    // `RouteData::default()`) so the construction stays clippy-clean.
+    let mut data = RouteData {
+        session_identity: Some(SessionIdentity {
+            display_name: "Lena Moreau".to_string(),
+            email: "lena.moreau@northwind-saas.example".to_string(),
+            plan_label: Some("Free Plan — 3K / mo".to_string()),
+        }),
+        ..Default::default()
+    };
     let flash: Vec<FlashMessage> = match id {
         "web-assistant-populated" => {
             data.assistant = Some(assistant_populated());

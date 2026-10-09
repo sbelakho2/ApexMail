@@ -24,3 +24,10 @@
 /api-console           /api-explorer/  301
 /api-console/*         /api-explorer/:splat  301
 /case-studies/*  /solutions/:splat  301
+# Delivery Diagnostics moved from /forensic/ (review 2026-09-08 §29) —
+# kept equivalent to the nginx vhost rules in apps/marketing-zola/nginx.conf.
+/forensic              /email-logs/  301
+/forensic/             /email-logs/  301
+/de/forensic           /de/email-logs/  301
+/fr/forensic           /fr/email-logs/  301
+/es/forensic           /es/email-logs/  301

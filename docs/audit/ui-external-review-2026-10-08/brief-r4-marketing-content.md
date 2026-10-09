@@ -59,3 +59,16 @@ families), §10.2 (13 English-only families), §13 where the legal/public twin t
 families (with the four language files each where applicable), P1-10/P1-11/P2-3 explicitly, the
 i18n.json changes; zero-skips appendix (literal commands + evidence per family or family group);
 "reported for other lanes" (R3 template keys, R1 strings); final orchestrator paragraph.
+
+
+## ADDENDUM — items filed by lane R3 (implement these too)
+
+1. Add the 42 missing i18n keys listed in `lane-r3-marketing.md` §6 to `apps/marketing-zola/i18n.json`
+   (with the suggested English values) AND wire/translate them in the locale content the way the
+   file's existing families do; verify key parity afterwards.
+2. Privacy retention anchors: the cross-page retention links must target stable
+   language-independent anchors — add/fix `#data-retention` anchors in the privacy pages so the
+   links from compliance/DPA pages resolve in every locale (prove with a fragment-resolution check).
+3. R3 notes that some template strings are pinned by gates (`plans.html` name/price literals are
+   R5's pins) — do not fight the gates; if a content change requires a template/data change, put it
+   in your report for fold.

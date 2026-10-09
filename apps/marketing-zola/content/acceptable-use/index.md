@@ -9,6 +9,16 @@ last_updated = "2026-07-30"
 
 This Acceptable Use Policy ("AUP") defines prohibited and acceptable uses of the ApexMail email infrastructure. Violation may result in suspension or termination. This AUP distinguishes between Marketing and Promotional Email and Transactional and Service Email — each category carries different consent, unsubscribe, and sending obligations as described below.
 
+### Which rules apply to your message?
+
+| If the message is… | Category | What applies |
+|---|---|---|
+| Primarily commercial promotion or engagement (newsletters, offers, announcements) | Marketing & Promotional | Opt-in consent, working unsubscribe, sender identification, no purchased lists |
+| Necessary to deliver a service the recipient requested or required by law (receipts, password resets, security alerts) | Transactional & Service | Accurate sender identity, no disguised marketing, correct category tagging |
+| Transactional in purpose but it also contains promotional content | Treated as Marketing (mixed purpose) | The entire message must meet the Marketing & Promotional requirements, including unsubscribe |
+
+Classify honestly: placing marketing content in a transactional message or tag violates this AUP.
+
 ## Marketing & Promotional Email
 
 Marketing and promotional email includes newsletters, product announcements, offers, event invitations, and any message whose primary purpose is commercial promotion or customer engagement beyond the direct fulfilment of a service.

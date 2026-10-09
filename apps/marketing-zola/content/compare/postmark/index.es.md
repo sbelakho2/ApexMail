@@ -22,7 +22,7 @@ comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
     { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "none" },
     { feature = "Aceptación P95 hasta el primer intento", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">No documentado públicamente</span>', winner = "none" },
-    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
+    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth y Business; 3 en Enterprise Cloud</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
     { feature = "Calentamiento automático de IP", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automático (gestionado por Postmark)</span>', winner = "none" },
     { feature = "Soporte de BIMI", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Soporte de MTA-STS", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }
@@ -59,7 +59,7 @@ comparison_sections = [
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.
 methodology_note = """\
-<strong>Metodología:</strong> Las comparativas de funciones se basan en documentación disponible públicamente, páginas de precios y fuentes oficiales. Planes comparados: los planes de autoservicio de ApexMail y los planes estándar de Postmark. Fecha de la instantánea de precios: 2026-05-09. Última verificación: 2026-07-30. Los datos pueden cambiar; verifique con la documentación actual de cada proveedor. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a> para conocer el detalle de las fuentes."""
+<strong>Metodología:</strong> Las comparativas de funciones se basan en documentación disponible públicamente, páginas de precios y fuentes oficiales. Planes comparados: los planes de autoservicio de ApexMail y los planes estándar de Postmark. Precios y detalles de los planes revisados por última vez: 2026-08-19. Los datos pueden cambiar; verifique con la documentación actual de cada proveedor. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a> para conocer el detalle de las fuentes."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

@@ -11,10 +11,15 @@
       <username>%EMAILADDRESS%</username>
       <authentication>password-cleartext</authentication>
     </incomingServer>
+    <!-- Outgoing submission matches the documented SMTP relay
+         (smtp.apexmail.ee:587 with STARTTLS) used across the setup docs and
+         the firewall's allowed service ports (25, 80, 443, 587, 993).
+         The previous 465/SSL entry advertised a port the documentation and
+         firewall list do not. -->
     <outgoingServer type="smtp">
-      <hostname>mail.apexmail.ee</hostname>
-      <port>465</port>
-      <socketType>SSL</socketType>
+      <hostname>smtp.apexmail.ee</hostname>
+      <port>587</port>
+      <socketType>STARTTLS</socketType>
       <username>%EMAILADDRESS%</username>
       <authentication>password-cleartext</authentication>
     </outgoingServer>

@@ -8,6 +8,8 @@ template = "prose.html"
 
 Envoyez les emails générés par vos applications via l'API REST ou le relais SMTP d'ApexMail. Chaque message est suivi de l'acceptation à la livraison, avec un historique d'événements par message.
 
+**Commencez ici :** envoyez votre premier message en moins de 10 minutes avec le [Démarrage rapide](/fr/quickstart/), puis suivez chaque message de l'acceptation à la réponse du MX destinataire dans [Diagnostic de livraison](/email-logs/) (en anglais).
+
 ## Audience
 
 Équipes d'ingénierie construisant des applications qui envoient des emails automatisés : réinitialisations de mot de passe, vérification de compte, reçus d'achat, notifications d'expédition, alertes de sécurité et mises à jour de statut système.
@@ -65,11 +67,11 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 | Forfait | Volume mensuel | Support |
 |---|---|---|
 | Free | 3 000 emails | Communauté |
-| Starter | 50 000 emails | Support par email |
+| Developer | 50 000 emails | Support par email |
 | Pro | 150 000 emails | Support par email |
 | Growth | 500 000 emails | Support par email |
-| Scale | 2 000 000 emails | Support prioritaire |
-| Enterprise | 5 000 000 emails | Support dédié |
+| Business | 2 000 000 emails | Support prioritaire |
+| Enterprise Cloud | 5 000 000 emails | Support dédié |
 
 ## Considérations de sécurité
 

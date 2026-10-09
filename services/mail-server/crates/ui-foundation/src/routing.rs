@@ -189,7 +189,10 @@ mod tests {
         // joins the web manifest (shared view in `ui_foundation::
         // tracking_domain`, so fixtures/goldens/gates cover it) —
         // web 38 → 39, total 127 → 128.
-        assert_eq!(declared_route_count("web"), Some(39));
+        // Lane R6 (review §6.2): /lists/{id}/members joins the web manifest —
+        // the list detail's subscriber count is inspectable — web 39 → 40,
+        // total 130 → 131.
+        assert_eq!(declared_route_count("web"), Some(40));
         // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
         // demo viewer (/demo) join the baseline — control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
@@ -204,7 +207,7 @@ mod tests {
         assert_eq!(declared_route_count("control-plane"), Some(34));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 130);
+        assert_eq!(total_route_count(), 131);
     }
 
     #[test]

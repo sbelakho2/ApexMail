@@ -9,6 +9,16 @@ last_updated = "2026-07-30"
 
 Cette Politique d'utilisation acceptable (« PUA ») définit les utilisations interdites et acceptables de l'infrastructure de messagerie ApexMail. Toute violation peut entraîner une suspension ou une résiliation. Cette PUA distingue les emails marketing et promotionnels des emails transactionnels et de service — chaque catégorie est soumise à des obligations de consentement, de désabonnement et d'envoi différentes, décrites ci-dessous.
 
+### Quelles règles s'appliquent à votre message
+
+| Si le message est… | Catégorie | Ce qui s'applique |
+|---|---|---|
+| principalement de la promotion commerciale ou de l'engagement (newsletters, offres, annonces) | Marketing et promotionnel | Consentement opt-in, désinscription fonctionnelle, identification de l'expéditeur, pas de listes achetées |
+| nécessaire pour fournir un service demandé par le destinataire ou exigé par la loi (reçus, réinitialisation de mot de passe, alertes de sécurité) | Transactionnel et de service | Identité d'expéditeur exacte, aucun marketing déguisé, étiquetage correct de la catégorie |
+| transactionnel par sa finalité mais contient aussi du contenu promotionnel | Traité comme marketing (finalité mixte) | Le message entier doit respecter les exigences marketing et promotionnelles, y compris la désinscription |
+
+Classez honnêtement : insérer du contenu marketing dans un message ou une étiquette transactionnelle viole cette politique.
+
 ## Emails marketing et promotionnels
 
 Les emails marketing et promotionnels comprennent les newsletters, les annonces de produits, les offres, les invitations à des événements et tout message dont l'objectif principal est la promotion commerciale ou l'engagement client au-delà de l'exécution directe d'un service.

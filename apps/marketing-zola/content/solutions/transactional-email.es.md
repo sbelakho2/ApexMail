@@ -8,6 +8,8 @@ template = "prose.html"
 
 Envíe email generado por su aplicación a través de la API REST o el relé SMTP de ApexMail. Cada mensaje se rastrea desde la aceptación hasta la entrega con un historial de eventos por mensaje.
 
+**Empiece aquí:** envíe su primer mensaje en menos de 10 minutos con el [Inicio rápido](/es/quickstart/) y siga después cada mensaje desde la aceptación hasta la respuesta del MX del destinatario en [Diagnóstico de entrega](/email-logs/) (en inglés).
+
 ## Público destinatario
 
 Equipos de ingeniería que construyen aplicaciones con envío de email automatizado: restablecimientos de contraseña, verificación de cuentas, recibos de compra, notificaciones de envío, alertas de seguridad y actualizaciones de estado del sistema.
@@ -65,11 +67,11 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 | Plan | Volumen mensual | Soporte |
 |---|---|---|
 | Free | 3.000 emails | Comunidad |
-| Starter | 50.000 emails | Soporte por email |
+| Developer | 50.000 emails | Soporte por email |
 | Pro | 150.000 emails | Soporte por email |
 | Growth | 500.000 emails | Soporte por email |
-| Scale | 2.000.000 de emails | Soporte prioritario |
-| Enterprise | 5.000.000 de emails | Soporte dedicado |
+| Business | 2.000.000 de emails | Soporte prioritario |
+| Enterprise Cloud | 5.000.000 de emails | Soporte dedicado |
 
 ## Consideraciones de seguridad
 

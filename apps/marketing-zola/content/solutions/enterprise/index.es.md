@@ -57,4 +57,4 @@ Los prospectos calificados pueden solicitar el perfil de empresa actual, el DPA,
 
 ## Siguiente paso
 
-[Contactar a ventas](/contact/sales/) para solicitar una revisión de arquitectura y comercial.
+[Contactar a ventas](/es/contact/sales/) para solicitar una revisión de arquitectura y comercial.

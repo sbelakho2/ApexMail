@@ -57,4 +57,4 @@ Qualifizierte Interessenten können das aktuelle Unternehmensprofil, den DPA, Su
 
 ## Nächster Schritt
 
-[Vertrieb kontaktieren](/contact/sales/), um eine Architektur- und kommerzielle Prüfung anzufordern.
+[Vertrieb kontaktieren](/de/contact/sales/), um eine Architektur- und kommerzielle Prüfung anzufordern.
