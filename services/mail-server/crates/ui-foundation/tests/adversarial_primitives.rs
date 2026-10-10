@@ -144,14 +144,14 @@ fn badge_text_is_escaped() {
 #[test]
 fn flash_decode_rejects_tampered_and_garbage_without_panic() {
     let secret = "test-secret-value-for-flash";
-    let messages = vec![FlashMessage::success("Saved")];
+    let messages = vec![FlashMessage::success("Saved.")];
     let ok = flash::encode_flash_cookie(&messages, secret);
     assert!(!ok.is_empty());
 
     // Round-trip with the correct secret.
     let decoded = flash::decode_flash_cookie(&ok, secret).expect("valid cookie decodes");
     assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0].text, "Saved");
+    assert_eq!(decoded[0].text, "Saved.");
 
     // Wrong secret must not decode.
     assert!(
