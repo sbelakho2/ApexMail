@@ -78,6 +78,11 @@ paths = [
     "(^|/)docs/api/endpoints/auth[.]md$",
     "(^|/)docs/analysis/salescloser-gap-analysis-2026-10-05[.]md$",
     "(^|/)crates/apexmail-db/src/repos/webhooks[.]rs$",
+    # The test-only key fixtures committed 2026-10-10 (the `*.pem` ignore rule
+    # had hidden compile-time include_str! targets from fresh checkouts):
+    # enterprise SSO/route test keys and the billing EMTA test certificate.
+    "(^|/)crates/enterprise/tests/keys/",
+    "(^|/)crates/billing-service/src/test_fixtures/",
     # Rust test fixture directories (e.g. crates/mta/tests/fixtures TLS material)
     "(^|/)tests/fixtures/",
     # Benchmark corpora
