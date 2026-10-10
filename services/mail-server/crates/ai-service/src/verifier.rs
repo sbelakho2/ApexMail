@@ -1784,7 +1784,6 @@ mod tests {
     /// claim-support check used to treat "eur" as an unsupported named entity,
     /// escalating every perfectly grounded answer that spelled the currency
     /// out (observed live against the mock runtime).
-    #[test]
     /// The live bypass (dogfood 2026-10-06): a claim spelling the currency as
     /// a WORD must be checked exactly like the symbol form.
     #[test]
@@ -1807,6 +1806,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn euro_spelled_as_a_word_is_the_same_canonical_price() {
         let v = ResponseVerifier::new();
         let facts = crate::knowledge::shared_knowledge_markdown();

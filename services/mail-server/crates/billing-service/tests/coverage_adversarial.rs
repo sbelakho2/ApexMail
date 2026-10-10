@@ -14,6 +14,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The active-plan row shape read by the parity assertions
+/// (`clippy::type_complexity`): name, display_name, price_monthly,
+/// price_yearly, email_limit, api_call_limit, is_active, features.
+type PlanRow = (String, String, i64, i64, i64, i64, bool, serde_json::Value);
+
 use billing_service::config::BillingConfig;
 use billing_service::types::MeterEventType;
 use billing_service::usage::{
@@ -1582,7 +1587,7 @@ db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
     // catalog row present with the catalog price/limit/retention/team.
     // (Foreign rows stay in the table as deactivated history — asserted
     // below — but are never served by `get_active_plans`.)
-    let rows: Vec<(String, String, i64, i64, i64, i64, bool, serde_json::Value)> = sqlx::query_as(
+    let rows: Vec<PlanRow> = sqlx::query_as(
         "SELECT name, display_name, price_monthly, price_yearly, email_limit,
                 api_call_limit, is_active, features
          FROM plans
@@ -6284,8 +6289,8 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
     assert_eq!(calculate_overage_cost_with_rate(101, 100, 80), 1);
 }
 
-/// Stripe-unverified ≠ paid: a subscription event whose price id is not
-/// bound to a plan must never grant a paid plan (fail closed to free).
+// Stripe-unverified ≠ paid: a subscription event whose price id is not
+// bound to a plan must never grant a paid plan (fail closed to free).
 db_test!(unverified_stripe_price_never_grants_a_paid_plan, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_unverified_price";
@@ -6328,8 +6333,8 @@ db_test!(unverified_stripe_price_never_grants_a_paid_plan, |h| {
     assert_eq!(subs, 0, "refused events write no subscription rows");
 });
 
-/// Double-webhook (same event id) is idempotent for BOTH `invoice.paid` and
-/// `customer.subscription.updated`: exactly one state transition, one row.
+// Double-webhook (same event id) is idempotent for BOTH `invoice.paid` and
+// `customer.subscription.updated`: exactly one state transition, one row.
 db_test!(
     double_webhook_invoice_paid_and_subscription_updated_is_one_transition,
     |h| {

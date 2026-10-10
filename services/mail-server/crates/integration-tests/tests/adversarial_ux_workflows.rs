@@ -998,7 +998,7 @@ fn sla_and_quickstart_locales_match_en_section_set() {
             let numbered = sections
                 .iter()
                 .filter(|h| {
-                    h.split(|c: char| c == ':' || c == ' ' || c == '　')
+                    h.split([':', ' ', '　'])
                         .any(|tok| tok.trim_end_matches(':') == n.to_string())
                 })
                 .count();

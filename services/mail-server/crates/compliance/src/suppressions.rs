@@ -686,7 +686,12 @@ mod tests {
             (SuppressionScope::Organization, "org-1"),
             (SuppressionScope::Global, "anything-else"),
         ] {
-            let result = check_suppression("victim@test.com", scope, scope_id, &[rec.clone()]);
+            let result = check_suppression(
+                "victim@test.com",
+                scope,
+                scope_id,
+                std::slice::from_ref(&rec),
+            );
             assert!(
                 result.is_some(),
                 "Global suppression must match {scope:?} send"
@@ -709,7 +714,7 @@ mod tests {
             "other-user@evil.com",
             SuppressionScope::Stream,
             "stream-1",
-            &[rec.clone()]
+            std::slice::from_ref(&rec)
         )
         .is_some());
         // Domain match must be case-insensitive.
@@ -717,7 +722,7 @@ mod tests {
             "user@EVIL.com",
             SuppressionScope::Workspace,
             "ws-1",
-            &[rec.clone()]
+            std::slice::from_ref(&rec)
         )
         .is_some());
         // Different domain — not blocked.
@@ -725,7 +730,7 @@ mod tests {
             "user@good.com",
             SuppressionScope::Stream,
             "stream-1",
-            &[rec.clone()]
+            std::slice::from_ref(&rec)
         )
         .is_none());
     }
@@ -743,7 +748,7 @@ mod tests {
             "user@test.com",
             SuppressionScope::Stream,
             "stream-1",
-            &[rec.clone()]
+            std::slice::from_ref(&rec)
         )
         .is_some());
         // Wrong scope_id at the same scope.
@@ -751,7 +756,7 @@ mod tests {
             "user@test.com",
             SuppressionScope::Stream,
             "stream-2",
-            &[rec.clone()]
+            std::slice::from_ref(&rec)
         )
         .is_none());
         // A Stream record must NOT match a Workspace-context send (a stream
@@ -760,7 +765,7 @@ mod tests {
             "user@test.com",
             SuppressionScope::Workspace,
             "stream-1",
-            &[rec.clone()]
+            std::slice::from_ref(&rec)
         )
         .is_none());
     }

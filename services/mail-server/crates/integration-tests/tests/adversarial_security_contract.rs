@@ -394,12 +394,12 @@ mod xss_sink_contract {
     #[test]
     fn template_props_are_html_escaped_in_every_interpolation() {
         for payload in PAYLOADS {
-            let html = format!("<p>Hello {{{{ name }}}} — {{{{ subject }}}}</p>");
+            let html = "<p>Hello {{ name }} — {{ subject }}</p>";
             let props = serde_json::json!({
                 "name": payload,
                 "subject": payload,
             });
-            let rendered = resolve_placeholders(&html, &props);
+            let rendered = resolve_placeholders(html, &props);
             assert!(
                 !super::escaping_relevant(payload) || !rendered.contains(payload),
                 "raw XSS payload leaked into rendered HTML: {payload} → {rendered}"
@@ -422,9 +422,9 @@ mod xss_sink_contract {
             "javascript&colon;alert(1)",
             "data:text/html,<script>alert(1)</script>",
         ] {
-            let html = format!("<a href=\"{{{{ link }}}}\">x</a>");
+            let html = "<a href=\"{{ link }}\">x</a>";
             let props = serde_json::json!({ "link": payload });
-            let rendered = resolve_placeholders(&html, &props);
+            let rendered = resolve_placeholders(html, &props);
             assert!(
                 !rendered.to_lowercase().contains("javascript:"),
                 "javascript: URI must be neutralised in href: {payload} → {rendered}"
@@ -1046,7 +1046,7 @@ mod db_harness {
             "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
              VALUES ($1, $2, $3, 'Adv Contact', 'subscribed', NOW(), NOW())",
         )
-        .bind(&id)
+        .bind(id)
         .bind(tenant_id)
         .bind(email)
         .execute(pool)
@@ -1137,8 +1137,10 @@ mod cross_tenant_and_ids {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// A token from tenant A + a resource id from tenant B must never return
-    /// B's data. 403/404 only — never 200 with foreign bytes.
+    // A token from tenant A + a resource id from tenant B must never return
+
+    // B's data. 403/404 only — never 200 with foreign bytes.
+
     db_test!(cross_tenant_reads_are_404_never_200, pool, db_url, {
         let (app, pool, key_a, _ten_a, key_b, ten_b) = two_tenant_app(pool.clone(), &db_url).await;
 
@@ -1284,9 +1286,12 @@ mod cross_tenant_and_ids {
         );
     });
 
-    /// Crafted path IDs: `../`, `..%2f`, NUL, 10k-char, UUID case variants,
-    /// unicode homoglyphs. Every one must be a controlled 400/404 — never a
-    /// 500 (that is a parse-bug signal) and never another tenant's row.
+    // Crafted path IDs: `../`, `..%2f`, NUL, 10k-char, UUID case variants,
+
+    // unicode homoglyphs. Every one must be a controlled 400/404 — never a
+
+    // 500 (that is a parse-bug signal) and never another tenant's row.
+
     db_test!(crafted_path_ids_never_500_or_leak, pool, db_url, {
         let (app, _pool, key_a, _ten_a, _key_b, _ten_b) =
             two_tenant_app(pool.clone(), &db_url).await;
@@ -1356,9 +1361,12 @@ mod csrf_web_forms {
     use axum::http::{header, Request, StatusCode};
     use tower::ServiceExt;
 
-    /// POST /web/auth/login without `_csrf`, with an empty `_csrf`, and with
-    /// a wrong-secret signature. All three must refuse with the PRG "session
-    /// expired" flash and must NOT set a session cookie.
+    // POST /web/auth/login without `_csrf`, with an empty `_csrf`, and with
+
+    // a wrong-secret signature. All three must refuse with the PRG "session
+
+    // expired" flash and must NOT set a session cookie.
+
     db_test!(
         web_login_rejects_missing_empty_and_forged_csrf,
         pool,
@@ -1438,8 +1446,10 @@ mod csrf_web_forms {
         }
     );
 
-    /// Replayed token: a VALID token whose `_csrf` value does not match the
-    /// double-submit cookie is refused (the cookie is the browser binding).
+    // Replayed token: a VALID token whose `_csrf` value does not match the
+
+    // double-submit cookie is refused (the cookie is the browser binding).
+
     db_test!(web_login_rejects_token_cookie_mismatch, pool, db_url, {
         let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) =
             two_tenant_app(pool.clone(), &db_url).await;
@@ -1663,10 +1673,14 @@ mod injection_http {
         }
     });
 
-    /// XSS through the template RENDER sink: `{{name}}` / `{{subject}}`
-    /// placeholders are filled from tenant-controlled variables and the
-    /// result is HTML. Every payload must come back escaped (templates.rs
-    /// `substitute` runs `html_escape` on every value).
+    // XSS through the template RENDER sink: `{{name}}` / `{{subject}}`
+
+    // placeholders are filled from tenant-controlled variables and the
+
+    // result is HTML. Every payload must come back escaped (templates.rs
+
+    // `substitute` runs `html_escape` on every value).
+
     db_test!(
         xss_variables_are_escaped_in_template_render,
         pool,

@@ -467,7 +467,7 @@ mod tests {
     async fn seed_tenant_with_owner(db: &PgPool, suffix: &str) -> String {
         let tenant = format!(
             "nd{}",
-            &suffix[..4.min(suffix.len())].replace(['-', '_'], "x")
+            suffix[..4.min(suffix.len())].replace(['-', '_'], "x")
         );
         let tenant: String = tenant.chars().take(26).collect();
         sqlx::query(
@@ -581,6 +581,10 @@ mod tests {
     /// platform message for the tenant owner and marked `sent`. Before the
     /// drainer existed the row stayed `pending` forever.
     #[tokio::test]
+    // The DKIM env guard serializes a PROCESS-GLOBAL env var whose
+    // mutation must span the awaited code under test — the documented
+    // clippy::await_holding_lock allowance (metering_monitor precedent).
+    #[allow(clippy::await_holding_lock)]
     async fn pending_notification_is_delivered_to_the_owner_and_marked_sent() {
         let _guard = crate::test_db::DKIM_ENV_MUTEX
             .lock()

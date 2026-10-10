@@ -3405,6 +3405,10 @@ mod adversarial_handler_tests {
     /// by the stale free-plan limit ("your plan allows 1 sending domain").
     /// The cap must come from the override-aware entitlement snapshot.
     #[tokio::test]
+    // The DKIM env guard serializes a PROCESS-GLOBAL env var whose
+    // mutation must span the awaited code under test — the documented
+    // clippy::await_holding_lock allowance (metering_monitor precedent).
+    #[allow(clippy::await_holding_lock)]
     async fn create_domain_uses_the_override_aware_capacity() {
         let Some(pool) = crate::test_db::optional_pg_pool("domains_override_cap").await else {
             return;

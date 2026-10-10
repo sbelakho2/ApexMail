@@ -1992,7 +1992,7 @@ mod tests {
         let protector = DdosProtector::new(ProtectorConfig::default())
             .await
             .expect("test should succeed");
-        let ip: IpAddr = "198.51.100.77".parse().unwrap();
+        let ip: IpAddr = "198.51.100.77".parse().expect("valid test IP");
         protector.block_ip(ip, Duration::from_secs(300), "test".to_string());
         let ctx = RequestContext {
             ip,
@@ -2038,7 +2038,7 @@ mod tests {
         let protector = DdosProtector::new(config)
             .await
             .expect("test should succeed");
-        let ip: IpAddr = "198.51.100.78".parse().unwrap();
+        let ip: IpAddr = "198.51.100.78".parse().expect("valid test IP");
         let ctx = RequestContext {
             ip,
             path: "/v1/expensive".to_string(),

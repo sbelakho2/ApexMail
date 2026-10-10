@@ -847,7 +847,7 @@ mod tests {
         let sent_at = base + chrono::Duration::seconds(30);
         let delivered_at = base + chrono::Duration::seconds(60);
         let bounced_at = base + chrono::Duration::seconds(90);
-        let recipient = format!("timeline-{}@example.test", &message_id.simple());
+        let recipient = format!("timeline-{}@example.test", message_id.simple());
 
         sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, \

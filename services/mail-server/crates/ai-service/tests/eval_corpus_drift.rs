@@ -26,16 +26,6 @@ fn corpus(name: &str) -> serde_json::Value {
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
 }
 
-fn string_set(value: &serde_json::Value, pointer: &str) -> BTreeSet<String> {
-    value
-        .pointer(pointer)
-        .and_then(serde_json::Value::as_array)
-        .unwrap_or_else(|| panic!("missing array at {pointer}"))
-        .iter()
-        .filter_map(|entry| entry.as_str().map(str::to_string))
-        .collect()
-}
-
 /// Every disposition the classification corpus asserts is canonical, and the
 /// corpus covers every canonical disposition — byte-for-byte with `TAXONOMY`.
 #[test]
@@ -174,7 +164,7 @@ fn format_number(value: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = digits.chars().collect();
     for (index, ch) in chars.iter().enumerate() {
-        if index > 0 && (chars.len() - index) % 3 == 0 {
+        if index > 0 && (chars.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*ch);

@@ -3444,7 +3444,7 @@ mod tests {
                 .bind(tenant_id)
                 .bind(Uuid::new_v4().to_string())
                 .bind(&email)
-                .bind(hour as i32)
+                .bind(hour)
                 .execute(&pool)
                 .await
                 .expect("seed event");

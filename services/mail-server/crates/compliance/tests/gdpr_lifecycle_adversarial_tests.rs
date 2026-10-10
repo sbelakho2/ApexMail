@@ -126,6 +126,16 @@ async fn audit_rows_for(pool: &PgPool, tenant: &str, request_id: &str) -> i64 {
 /// process (processing) → completed. A `completed` request MUST carry a
 /// processed_at + result record and a `dsr.lifecycle.completed` audit row.
 /// Nothing may jump straight to `completed` from intake.
+/// The terminal `data_subject_requests` row shape read by the lifecycle
+/// assertions (`clippy::type_complexity`): status, processed_at,
+/// completed_at, result.
+type DsrTerminalRow = (
+    String,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<serde_json::Value>,
+);
+
 #[tokio::test]
 async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
     let Some(pool) = test_pool("lifecycle").await else {
@@ -186,12 +196,7 @@ async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
         "access request should complete, not reject: {result:?}"
     );
 
-    let (final_status, processed_at, completed_at, stored_result): (
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<serde_json::Value>,
-    ) = sqlx::query_as(
+    let (final_status, processed_at, completed_at, stored_result): DsrTerminalRow = sqlx::query_as(
         "SELECT status, processed_at, completed_at, result
          FROM data_subject_requests WHERE id = $1",
     )
