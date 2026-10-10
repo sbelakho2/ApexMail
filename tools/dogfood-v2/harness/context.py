@@ -150,6 +150,15 @@ class Context:
             restarted = compose_restart(self.cfg, "api-server")
         if restarted:
             self._wait_for_api()
+            # The dev stack's session-signing secret is boot-ephemeral, so
+            # every restart invalidates the sessions minted before it. Drop
+            # the cached identities (and the operator) so the next
+            # ctx.identity(...) RE-ESTABLISHES them through the product
+            # lifecycle — otherwise every probe after a DDoS-recovery restart
+            # fails on a dead session and reports phantom findings
+            # (dogfood 2026-10-10 post-restart cluster).
+            self.identities.clear()
+            self.note("ddos recovery: identities dropped for re-provisioning after restart")
         return restarted
 
     def _wait_for_api(self, timeout: float = 90.0) -> bool:

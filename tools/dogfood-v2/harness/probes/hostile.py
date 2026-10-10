@@ -245,11 +245,21 @@ def oversized_bodies(ctx):
     big = {"from": f"noreply@{foreign.get('sender_domain', 'dogfood-v2.test')}",
            "to": ["victim@dogfood.test"], "subject": "big", "html": "D" * (41 * 1024 * 1024)}
     resp = owner.session.post("/v1/messages", big)
+    # A refusal-by-close is a REFUSAL: the body-limit layer answers 413 and
+    # closes before the whole 41 MiB uploads, so a real client sees EPIPE /
+    # ECONNRESET (status 0 with a transport error) — not a 4xx. Both shapes
+    # are the documented cap doing its job; only a 2xx or a 5xx is a defect.
+    transport_refused = resp.status == 0 and (
+        "Broken pipe" in str(resp.text)
+        or "Connection reset" in str(resp.text)
+        or "EPIPE" in str(resp.text)
+    )
     checks.add(
         "a 41 MiB send body is refused at the documented 40 MiB cap",
-        resp.status in (413, 400, 401, 403, 422),
+        transport_refused or resp.status in (413, 400, 401, 403, 422),
         observed=f"status={resp.status} body={resp.text[:120]!r}",
-        expected="413/4xx naming the body limit", severity="P1", surface="api:POST /v1/messages",
+        expected="413/4xx, or an early close (EPIPE/ECONNRESET) — never 2xx/5xx",
+        severity="P1", surface="api:POST /v1/messages",
     )
     return checks.obs
 

@@ -819,6 +819,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(routes::explorer::router())
         .merge(authenticated)
         .fallback(fallback_handler)
+        .layer(axum::middleware::from_fn(normalize_error_envelope))
         .layer(axum::middleware::from_fn(null_byte_check))
         .layer(axum::middleware::from_fn(content_type_check))
         .layer(axum::middleware::from_fn(security_headers))
@@ -1384,12 +1385,26 @@ async fn content_type_check(
 
 // ─── Null byte check ───────────────────────────────────────────
 
+/// `%00` in the RAW (still percent-encoded) URI: `uri().path()` is not
+/// decoded, so a real NUL byte only ever reaches the extractors through this
+/// encoding — and Postgres text parameters reject NUL, so every id-param
+/// route would answer 500 instead of a controlled 4xx (adversarial
+/// integration suite: `crafted_path_ids_never_500_or_leak`,
+/// `GET /v1/templates/%00`). Rejecting the encoded form here covers every
+/// route on both surfaces before any extraction runs. A hex-digit pair with
+/// letters can never be `00`, so the check is case-trivially exact.
+fn has_percent_encoded_nul(raw: &str) -> bool {
+    raw.as_bytes()
+        .windows(3)
+        .any(|window| window[0] == b'%' && window[1] == b'0' && window[2] == b'0')
+}
+
 async fn null_byte_check(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::response::Response> {
     let path = req.uri().path();
-    if apexmail_lib::validation::has_null_bytes(path) {
+    if apexmail_lib::validation::has_null_bytes(path) || has_percent_encoded_nul(path) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1403,7 +1418,7 @@ async fn null_byte_check(
     }
 
     if let Some(query) = req.uri().query() {
-        if apexmail_lib::validation::has_null_bytes(query) {
+        if apexmail_lib::validation::has_null_bytes(query) || has_percent_encoded_nul(query) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -1418,6 +1433,69 @@ async fn null_byte_check(
     }
 
     Ok(next.run(req).await)
+}
+
+// ─── Error-envelope normalization ──────────────────────────────
+
+/// Framework-generated rejections answer bare text or an empty body — a 405
+/// with no body, a body-extractor 400/415/422 whose content type is not
+/// JSON — while every product error uses the `{"error":{code,message}}`
+/// envelope. Normalize them at ONE boundary so clients (and the error
+/// taxonomy checks) always see a named refusal (adversarial dogfood:
+/// `p.errors.taxonomy` saw code=''/message='' on 405/400/422).
+///
+/// Scoped deliberately: only 400/405/415/422, only non-JSON bodies, and
+/// never HTML (SSR pages keep their rendered refusals).
+async fn normalize_error_envelope(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if !matches!(status.as_u16(), 400 | 405 | 415 | 422) {
+        return resp;
+    }
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if content_type.contains("json") || content_type.starts_with("text/html") {
+        // Already a structured error body (application/json,
+        // application/scim+json — SCIM has its own mandated error schema —
+        // or any +json type), or an SSR render: leave both untouched.
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, 16 * 1024)
+        .await
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    let (code, message) = match status.as_u16() {
+        405 => (
+            "METHOD_NOT_ALLOWED",
+            "the HTTP method is not allowed on this route".to_string(),
+        ),
+        415 => (
+            "UNSUPPORTED_MEDIA_TYPE",
+            "the request content type is not supported on this route".to_string(),
+        ),
+        _ => (
+            "VALIDATION_ERROR",
+            if text.is_empty() {
+                "the request body failed validation".to_string()
+            } else {
+                text
+            },
+        ),
+    };
+    let payload = serde_json::json!({ "error": { "code": code, "message": message } });
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    axum::response::Response::from_parts(parts, axum::body::Body::from(payload.to_string()))
 }
 
 // ─── Fallback ──────────────────────────────────────────────────

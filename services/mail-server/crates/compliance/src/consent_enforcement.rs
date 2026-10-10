@@ -129,6 +129,26 @@ impl FromStr for RegulatoryFramework {
     }
 }
 
+/// The `consent_records` row shape read by the suppression/consent checks
+/// (clippy `type_complexity`): id, tenant, subscriber, email, type, granted,
+/// granted_at, revoked_at, source, ip, user_agent, proof, expires_at, metadata.
+type ConsentRowTuple = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<DateTime<Utc>>,
+    serde_json::Value,
+);
+
 pub struct ConsentEnforcer {
     db: PgPool,
 }
@@ -147,8 +167,7 @@ impl ConsentEnforcer {
         let normalized_email = email.trim().to_lowercase();
 
         let is_suppressed = self.check_suppression(tenant_id, &normalized_email).await?;
-        if is_suppressed.is_some() {
-            let reason = is_suppressed.unwrap();
+        if let Some(reason) = is_suppressed {
             warn!(
                 tenant_id = %tenant_id,
                 email = %mail_common::pii::redact_email(&normalized_email),
@@ -162,17 +181,17 @@ impl ConsentEnforcer {
 
         let consent = self.fetch_consent(tenant_id, &normalized_email).await?;
 
-        let has_active_marketing_consent = consent.as_ref().map_or(false, |c| {
+        let has_active_marketing_consent = consent.as_ref().is_some_and(|c| {
             c.granted
                 && c.consent_type == ConsentType::Marketing
                 && !is_consent_expired(c.expires_at)
         });
 
-        let has_revoked_marketing = consent.as_ref().map_or(false, |c| {
-            !c.granted && c.consent_type == ConsentType::Marketing
-        });
+        let has_revoked_marketing = consent
+            .as_ref()
+            .is_some_and(|c| !c.granted && c.consent_type == ConsentType::Marketing);
 
-        let has_expired_marketing = consent.as_ref().map_or(false, |c| {
+        let has_expired_marketing = consent.as_ref().is_some_and(|c| {
             c.granted
                 && c.consent_type == ConsentType::Marketing
                 && is_consent_expired(c.expires_at)
@@ -272,8 +291,7 @@ impl ConsentEnforcer {
         let normalized_email = email.trim().to_lowercase();
 
         let is_suppressed = self.check_suppression(tenant_id, &normalized_email).await?;
-        if is_suppressed.is_some() {
-            let reason = is_suppressed.unwrap();
+        if let Some(reason) = is_suppressed {
             warn!(
                 tenant_id = %tenant_id,
                 email = %mail_common::pii::redact_email(&normalized_email),
@@ -302,17 +320,17 @@ impl ConsentEnforcer {
 
         let consent = self.fetch_consent(tenant_id, &normalized_email).await?;
 
-        let has_active_marketing_consent = consent.as_ref().map_or(false, |c| {
+        let has_active_marketing_consent = consent.as_ref().is_some_and(|c| {
             c.granted
                 && c.consent_type == ConsentType::Marketing
                 && !is_consent_expired(c.expires_at)
         });
 
-        let has_revoked_marketing = consent.as_ref().map_or(false, |c| {
-            !c.granted && c.consent_type == ConsentType::Marketing
-        });
+        let has_revoked_marketing = consent
+            .as_ref()
+            .is_some_and(|c| !c.granted && c.consent_type == ConsentType::Marketing);
 
-        let has_expired_marketing = consent.as_ref().map_or(false, |c| {
+        let has_expired_marketing = consent.as_ref().is_some_and(|c| {
             c.granted
                 && c.consent_type == ConsentType::Marketing
                 && is_consent_expired(c.expires_at)
@@ -434,22 +452,7 @@ impl ConsentEnforcer {
         tenant_id: &str,
         email: &str,
     ) -> Result<Option<ConsentRecord>, String> {
-        let row: Option<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            bool,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<DateTime<Utc>>,
-            serde_json::Value,
-        )> = sqlx::query_as(
+        let row: Option<ConsentRowTuple> = sqlx::query_as(
             "SELECT id, tenant_id, subscriber_id, email, consent_type, granted,
                     granted_at, revoked_at, source, ip_address, user_agent,
                     proof_document, expires_at, metadata

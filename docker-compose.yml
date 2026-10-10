@@ -735,7 +735,6 @@ services:
       DKIM_ENABLED: ${DKIM_ENABLED:-false}
       DKIM_SELECTOR: ${DKIM_SELECTOR:-apexmail}
       DKIM_KEY_PATH: ${DKIM_KEY_PATH:-}
-      DKIM_DOMAIN: ${DKIM_DOMAIN:-}
       # ── Customer automation executor (moved from sales-autopilot) ────────
       WORKER_RUN_AUTOMATIONS: ${WORKER_RUN_AUTOMATIONS:-true}
       AUTOMATION_TICK_SECS: ${AUTOMATION_TICK_SECS:-30}
@@ -850,6 +849,13 @@ services:
       target: outbound-mta
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "outbound-mta"]
+    healthcheck:
+      # /healthz on the documented health address (:8093).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8093"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
@@ -1026,6 +1032,18 @@ services:
       target: analytics-worker
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "analytics-worker"]
+    healthcheck:
+      # The binary's own one-shot health mode (`--health`): exits non-zero
+      # when the compaction/reconciliation state is unhealthy. Compose
+      # hygiene finding (dogfood-v2 infra.services): the service declared no
+      # healthcheck while every sibling did.
+      # Through the entrypoint wrapper: the one-shot needs the assembled
+      # DATABASE_URL/REDIS_URL (a bare healthcheck command has no env).
+      test: ["CMD-SHELL", "sh /opt/apexmail/entrypoint-wrapper.sh analytics-worker --health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
       - analytics-cold:/var/lib/apexmail/analytics

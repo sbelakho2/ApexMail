@@ -26,7 +26,7 @@ There is no batch-check endpoint: check addresses individually with
 
 ## Suppression Reasons
 
-`reason` and `source` are free-text columns (maximum 64 and 32 characters);
+`reason` and `source` are free-text columns (maximum 50 and 100 characters — matching the suppressions table VARCHAR(50)/VARCHAR(100) columns);
 the compliance removal policy recognises these reason tokens:
 
 | Reason | Description |
@@ -65,7 +65,7 @@ Add a single email address to the suppression list.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `email` | string | Yes | Email address to suppress |
-| `reason` | string | Yes | Suppression reason (max 64 characters) |
+| `reason` | string | Yes | Suppression reason (max 50 characters) |
 | `source` | string | No | Origin label (default `manual`, max 32 characters) |
 
 ```bash

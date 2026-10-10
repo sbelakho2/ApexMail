@@ -852,6 +852,14 @@ async fn store_response(
         let mut stream = body.into_data_stream();
         let mut buffer: Vec<u8> = Vec::new();
         let mut cacheable = true;
+        // Set once the client stops consuming the response. The record must
+        // STILL land: retry-safety cannot depend on the client reading the
+        // body — a 201 whose body a caller discards would otherwise leave the
+        // key unprotected and let a divergent replay create a second row
+        // (adversarial suite: `same_idempotency_key_with_a_different_body_is_409`).
+        // Only a genuinely INCOMPLETE body (stream error or the size limit)
+        // stays uncached.
+        let mut client_gone = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -867,16 +875,18 @@ async fn store_response(
                     if cacheable {
                         buffer.extend_from_slice(&bytes);
                     }
-                    if tx.send(Ok(bytes)).await.is_err() {
-                        // Client dropped the response mid-body; a partial
-                        // body must never be cached.
-                        cacheable = false;
-                        break;
+                    if !client_gone && tx.send(Ok(bytes)).await.is_err() {
+                        // Client dropped the response mid-body: stop sending
+                        // but KEEP draining the bounded stream so the complete
+                        // handler response is still recorded.
+                        client_gone = true;
                     }
                 }
                 Err(body_error) => {
                     cacheable = false;
-                    let _ = tx.send(Err(std::io::Error::other(body_error))).await;
+                    if !client_gone {
+                        let _ = tx.send(Err(std::io::Error::other(body_error))).await;
+                    }
                     break;
                 }
             }

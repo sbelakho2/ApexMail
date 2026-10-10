@@ -73,12 +73,18 @@ fn catalog_plans_are_unique_and_monotone() {
     let mut last_price = 0i64;
     for plan in catalog::PLANS {
         assert!(names.insert(plan.name), "duplicate plan id {}", plan.name);
-        assert!(
-            plan.price_monthly_cents >= last_price,
-            "plan {} dropped below the previous rung",
-            plan.name
-        );
-        last_price = plan.price_monthly_cents;
+        // The monotone ladder applies to PRICED rungs. `payg` (Pay As You Go)
+        // has a deliberately €0 base fee — it bills per email, not per month
+        // — so it is not a rung on the monthly-fee ladder and its position
+        // must not weaken the ordering of the plans that do charge.
+        if plan.price_monthly_cents > 0 {
+            assert!(
+                plan.price_monthly_cents >= last_price,
+                "plan {} dropped below the previous rung",
+                plan.name
+            );
+            last_price = plan.price_monthly_cents;
+        }
         // Retention is a real product promise — never zero.
         assert!(plan.max_retention_days > 0, "plan {} retention", plan.name);
     }

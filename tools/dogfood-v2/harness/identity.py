@@ -66,6 +66,18 @@ def fresh_totp(secret: str, min_remaining: int = 3) -> str:
     return totp(secret)
 
 
+def fresh_totp_next_window(secret: str, margin: int = 2) -> str:
+    """A TOTP for the NEXT time step.
+
+    The server enforces single-use codes per step (`mfa_totp_replay` guard),
+    so any verification that follows another verification of the same
+    account must wait for a fresh window — otherwise the guard (correctly)
+    refuses it as a replay and the probe/identity fails spuriously."""
+    remaining = 30 - (time.time() % 30)
+    time.sleep(remaining + margin)
+    return totp(secret)
+
+
 def parse_cookies(headers: dict[str, str]) -> dict[str, str]:
     out = {}
     for part in headers.get("set-cookie", "").split("\n"):
@@ -328,6 +340,31 @@ def login(ctx, session: Session, *, password: str | None = None) -> Session:
                 {"challenge_token": challenge, "mfaCode": fresh_totp(secret) if secret else ""},
                 kiwi_scope="mfa-verify",
             )
+            if (verify.status != 200 or "am_session" not in session.jar) and (
+                "invalid MFA code" in verify.text
+                or "invalid or expired MFA challenge" in verify.text
+                or verify.status == 401
+            ) and secret:
+                # Two single-use guards (correct behaviour) can refuse a login
+                # that follows another verification inside the same window:
+                # the TOTP step (`mfa_totp_replay`) and the challenge itself
+                # (consumed on the first attempt). Retry ONCE as a full
+                # re-login — a NEW challenge token plus a code for the NEXT
+                # 30 s step — instead of failing the identity.
+                relog = session.post(
+                    "/v1/auth/login",
+                    {"email": session.email, "password": password},
+                    kiwi_scope="login",
+                )
+                payload2 = _payload(relog)
+                verify = session.post(
+                    "/v1/auth/mfa/verify",
+                    {
+                        "challenge_token": payload2.get("challengeToken") or "",
+                        "mfaCode": fresh_totp_next_window(secret),
+                    },
+                    kiwi_scope="mfa-verify",
+                )
             if verify.status != 200 or "am_session" not in session.jar:
                 raise RuntimeError(f"mfa verify failed {verify.status}: {verify.text[:300]}")
         else:
@@ -436,6 +473,9 @@ def provision_operator(ctx, name: str = "operator_cp") -> "Identity":
     relogin = Session(ctx, email)
     relogin.email = email
     relogin.mfa_secret = secret
+    # A fresh Session has no CSRF token yet; every JSON POST (including the
+    # login below) refuses with 403 "missing X-CSRF-Token header" without it.
+    relogin.handshake()
     session = login(ctx, relogin)
     cp = session.form_kiwi(
         "/web/cp/login", {"email": email, "password": PASSWORD},
@@ -446,7 +486,7 @@ def provision_operator(ctx, name: str = "operator_cp") -> "Identity":
     if "apexmail_cp_session" not in session.jar:
         mfa = session.form_kiwi(
             "/web/auth/mfa/verify",
-            {"email": email, "code": fresh_totp(secret), "return_to": "/dashboard"},
+            {"email": email, "code": fresh_totp_next_window(secret), "return_to": "/dashboard"},
             scope="mfa-verify", follow=False,
         )
         if mfa.status not in (200, 302, 303, 307) or "apexmail_cp_session" not in session.jar:

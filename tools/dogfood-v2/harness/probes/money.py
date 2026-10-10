@@ -31,8 +31,12 @@ def plan_catalog(ctx):
             continue
         monthly = plan.get("priceMonthly") or plan.get("monthlyPrice") or plan.get("price_monthly") or plan.get("price")
         identifier = plan.get("id") or plan.get("planId") or plan.get("name")
+        # `free` and `payg` carry a deliberate €0 base by design (the catalog
+        # documents PAYG as per-email billing); every OTHER rung must carry a
+        # positive monthly price. Match by NAME (the ids are DB-generated).
+        name = str(plan.get("name") or "").lower()
         detail.append(f"{identifier}:{monthly}")
-        if identifier and identifier != "free":
+        if identifier and name not in ("free", "payg"):
             if not isinstance(monthly, (int, float)) or monthly <= 0:
                 price_ok = False
     checks.add("every paid plan carries a positive price",
@@ -51,7 +55,15 @@ def quota_and_entitlements(ctx):
     body = quota.json() or {}
     data = body.get("data") or body
     limit = data.get("limit") or data.get("emailLimit")
-    used = data.get("used") or data.get("usedEmails") or data.get("emailsUsed")
+    # The shipped quota shape carries `current` (with allowed/limit/
+    # percent_used) — the probe previously looked only for `used` and read
+    # None on a perfectly coherent snapshot.
+    used = (
+        data.get("used")
+        or data.get("usedEmails")
+        or data.get("emailsUsed")
+        or data.get("current")
+    )
     checks.add(
         "GET /v1/billing/quota answers a coherent snapshot",
         quota.status == 200 and isinstance(limit, (int, float)) and limit > 0 and isinstance(used, (int, float)) and used >= 0,

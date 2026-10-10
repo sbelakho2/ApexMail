@@ -39,6 +39,9 @@ fn shell() -> String {
 /// the journey cannot start from a blank or 404 chrome.
 #[test]
 fn persona_customer_shell_destinations_all_render() {
+    // The shell chrome carries the SIDEBAR destinations (the shipped IA puts
+    // Team/Profile on the Settings hub page, not in the sidebar — review §6.4
+    // groups them there deliberately).
     let chrome = shell();
     for href in [
         "/dashboard",
@@ -50,15 +53,26 @@ fn persona_customer_shell_destinations_all_render() {
         "/analytics",
         "/events",
         "/domains",
+        "/settings",
         "/settings/api-keys",
-        "/settings/team",
-        "/settings/billing",
         "/settings/webhooks",
-        "/settings/profile",
+        "/settings/dedicated-ips",
+        "/settings/suppressions",
+        "/settings/billing",
+        "/assistant",
     ] {
         assert!(
             chrome.contains(&format!("href=\"{href}\"")),
             "customer journey cannot reach {href}: {chrome}"
+        );
+    }
+    // …and the Settings hub page must carry the remaining account
+    // destinations one hop away.
+    let hub = ui_foundation::leptos_views::web_settings_page();
+    for href in ["/settings/team", "/settings/profile", "/settings/api-keys"] {
+        assert!(
+            hub.contains(&format!("href=\"{href}\"")),
+            "the settings hub cannot reach {href}: {hub}"
         );
     }
 }

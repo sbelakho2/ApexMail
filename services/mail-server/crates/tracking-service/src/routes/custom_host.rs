@@ -191,6 +191,7 @@ pub fn tenant_mismatch_refusal(host: &str) -> Response {
 
 /// Gate one decoded token against the host scope. `Ok(())` means serve;
 /// `Err(response)` is the honest refusal to return as-is.
+#[allow(clippy::result_large_err)] // the refusal IS the axum Response, by contract
 pub fn ensure_token_matches_host(scope: &HostScope, token_tenant_id: &str) -> Result<(), Response> {
     match scope {
         HostScope::Platform => Ok(()),
@@ -217,6 +218,7 @@ pub fn ensure_token_matches_host(scope: &HostScope, token_tenant_id: &str) -> Re
 
 /// Convenience for handlers that extract the scope early: resolve and, when
 /// the host itself is unknown/unavailable, return the refusal immediately.
+#[allow(clippy::result_large_err)] // the refusal IS the axum Response, by contract
 pub async fn host_scope_or_refuse(
     state: &AppState,
     headers: &HeaderMap,

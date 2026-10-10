@@ -33,6 +33,9 @@ pub mod ses_notifications;
 pub mod support;
 pub mod suppressions;
 pub(crate) mod system_sender;
+/// The canonical system tenant id (migration 072) — a public contract for
+/// callers outside the crate (integration suites seed operators on it).
+pub use system_sender::SYSTEM_TENANT_ID;
 pub mod templates;
 pub mod tracking_domains;
 pub mod web;

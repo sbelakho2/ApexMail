@@ -263,4 +263,38 @@ ApexMail call sites/config had to follow — minimal, behavior-preserving:
 
 ## Part 3 — Enablement and live proofs
 
-(to be filled by the live transcript)
+The enablement (compose flip + rebuild) was performed by this lane; the live proofs were executed
+here and then INDEPENDENTLY reproduced from scratch by the verifier lane K3 (see
+`lane-k3-verifier.md` — its §3 widget render matrix, §4 positive interop, §5 negative matrix,
+§6 dev-bypass, §7 abuse gates and §8 battery carry the literal transcripts). Summary of the verified
+state, with the authoritative transcripts in the K3 report:
+
+- **Enablement**: `docker-compose.yml` sets `KIWI_ENABLED: "true"` for the dev stack (prod compose
+  already enabled it); the rebuilt api-server container shows `KIWI_ENABLED=true` with the dev secret
+  `dev-kiwi-secret-not-for-production` (34 bytes ≥ the crate's 32-byte minimum). `docs/security/
+  kiwicaptcha-login.md` was updated to state exactly what ships (pages, scopes, enablement, bypass).
+- **Render matrix 15/15** (K3 §3): every gated page on both surfaces carries the widget with the
+  correct `data-kiwi-scope` (`login`, `signup`, `forgot-password`, `reset-password`, `mfa-verify`,
+  `resend-verification`, `cp-login`), per-response nonce'd scripts + style matching the auth CSP
+  header, and the hidden `kiwi__token` input inside every form (the MFA page carries two widgets for
+  its two forms); non-widget variants keep `script-src 'none'`.
+- **Positive interop** (K3 §4): real challenges minted and solved for all seven scopes are accepted
+  by their matching surface; full SSR `/login` → MFA → `/dashboard` end-to-end and the JSON twin
+  (`am_session`), plus the gated signup → Mailpit verify → login lifecycle.
+- **Negative matrix** (K3 §5): missing token, cross-scope token (both directions, both surfaces),
+  replayed token, expired token (125 s TTL), tampered counter/nonce and broken JSON are all refused
+  with named errors. Documented nuances: unsigned telemetry edits are accepted by design; a replayed
+  token answers "expired or not found" (single-use consume already removed it).
+- **Dev bypass** (K3 §6): impossible in the release container — `cfg!(debug_assertions)` is false and
+  the secret is not `"dev"`; a bogus token is refused live.
+- **Abuse gates** (K3 §7): issuance 429 exactly at the 31st request of the window; verify-attempt cap
+  20 with a correct-token control; MFA lockout still fires after 5 wrong codes WITH the new
+  `mfa-verify` captcha active; Redis outage fails closed (code path + tests).
+- **Battery** (K3 §8): `cargo nextest run -p api-server --lib` 2122 passed / 0 skipped after this
+  lane's fixture fix (K3's F-K3-1, fixed in the fold); Playwright 440 passed / 0 failed; CI-exact
+  `cargo fmt --check` green after the fold's formatting pass (K3's F-K3-2); the docs claim check
+  matches the shipped code (K3's §8.4).
+
+Gap acknowledged honestly: this report's Part 3 was a placeholder when K3 verified; the verifier's
+independent transcripts above are the evidence of record, and they confirm every claim this lane
+made.

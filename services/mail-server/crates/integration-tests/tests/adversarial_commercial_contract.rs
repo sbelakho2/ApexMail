@@ -240,16 +240,20 @@ async fn seed_customer_tenant(pool: &PgPool, plan: &str, scopes: &[&str]) -> (St
 }
 
 async fn seed_system_admin_key(pool: &PgPool) -> String {
-    // The system tenant row must exist for tenant-scoped joins.
+    // The canonical chain (migration 072) already seeds the system tenant
+    // with id `system_internal_tenant01` / slug `system`. Use THAT id — a
+    // hand-picked 'system' id never existed, so the operator FK below failed
+    // (and an invented duplicate collided on the slug unique index).
     sqlx::query(
         "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
-         VALUES ('system', 'ApexMail Platform', 'system', 'enterprise', 'active', NOW(), NOW())
-         ON CONFLICT (id) DO NOTHING",
+         VALUES ($1, 'ApexMail Platform', 'system', 'enterprise', 'active', NOW(), NOW())
+         ON CONFLICT DO NOTHING",
     )
+    .bind(api_server::routes::SYSTEM_TENANT_ID)
     .execute(pool)
     .await
     .expect("seed system tenant");
-    seed_api_key_for(pool, "system", &["*"]).await
+    seed_api_key_for(pool, api_server::routes::SYSTEM_TENANT_ID, &["*"]).await
 }
 
 fn api_key_request(method: &str, uri: &str, key: &str) -> Request<Body> {
@@ -591,10 +595,11 @@ async fn operator_delete_requires_the_confirm_echo() {
     let operator_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status)
-         VALUES ($1, 'system', $2, 'Commercial Operator', 'x', 'admin', 'active')",
+         VALUES ($1, $3, $2, 'Commercial Operator', 'x', 'admin', 'active')",
     )
     .bind(operator_id)
     .bind(format!("op-{}@apexmail.test", Uuid::new_v4().simple()))
+    .bind(api_server::routes::SYSTEM_TENANT_ID)
     .execute(&pool)
     .await
     .expect("seed operator");

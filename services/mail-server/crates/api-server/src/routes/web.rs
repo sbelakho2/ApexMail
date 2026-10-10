@@ -172,6 +172,14 @@ pub fn consent_safe_return_to(return_to: Option<&str>) -> String {
     if url.scheme() != "https" {
         return "/".to_string();
     }
+    // Userinfo in the authority (`https://attacker@apexmail.ee/`) is a
+    // phishing/confusion shape browsers still display confusingly, and it is
+    // never a legitimate console return target — the host check below would
+    // otherwise happily pass it (adversarial suite:
+    // `open_redirect_shapes_fall_back_to_root`).
+    if !url.username().is_empty() || url.password().is_some() {
+        return "/".to_string();
+    }
     let host = url.host_str().map(str::to_ascii_lowercase);
     match host.as_deref() {
         Some("apexmail.ee") | Some("www.apexmail.ee") => url.to_string(),

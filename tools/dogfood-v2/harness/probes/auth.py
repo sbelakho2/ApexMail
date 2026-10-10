@@ -12,7 +12,8 @@ import uuid
 
 from ..assertions import Checks, refusal_ok
 from ..identity import (
-    PASSWORD, Session, fresh_totp, login, observation, signup_only, totp, unreachable,
+    PASSWORD, Session, fresh_totp, fresh_totp_next_window, login, observation, signup_only, totp,
+    unreachable,
 )
 from ..kiwi import KiwiError
 from ..registry import probe
@@ -214,13 +215,15 @@ def first_login_mfa(ctx):
     )
     # a fresh login completes MFA and mints the session
     fresh = Session(ctx, "mfa-complete")
+    fresh.handshake()  # a fresh Session needs its CSRF token before any POST
     resp2 = fresh.post("/v1/auth/login", {"email": email, "password": PASSWORD}, kiwi_scope="login")
     payload2 = resp2.json() or {}
     if resp2.status == 202 and payload2.get("status") in ("mfa_setup_required", "mfa_required"):
         secret2 = payload2.get("secret") or secret
         done = fresh.post(
             "/v1/auth/mfa/verify",
-            {"challenge_token": payload2.get("challengeToken", ""), "mfaCode": fresh_totp(secret2)},
+            {"challenge_token": payload2.get("challengeToken", ""),
+             "mfaCode": fresh_totp_next_window(secret2)},
             kiwi_scope="mfa-verify",
         )
         checks.add(
@@ -256,8 +259,15 @@ def session_lifecycle(ctx):
     if ctx.db is not None:
         user_id = str((ctx.db.row("users", email=email) or {}).get("id", ""))
     sessions = base.get("/v1/auth/sessions")
-    body = sessions.json() or {}
-    rows = body.get("sessions") or body.get("data") or []
+    # The endpoint answers a top-level ARRAY of sessions; older wrappers used
+    # {sessions:[...]}. Handle both without assuming a dict (the previous
+    # `body.get` died on the array shape: probe could not execute).
+    body = sessions.json()
+    if isinstance(body, list):
+        rows = body
+    else:
+        body = body if isinstance(body, dict) else {}
+        rows = body.get("sessions") or body.get("data") or []
     if isinstance(rows, dict):
         rows = rows.get("sessions") or []
     checks.add(
@@ -277,7 +287,7 @@ def session_lifecycle(ctx):
         second.post(
             "/v1/auth/mfa/verify",
             {"challenge_token": payload2.get("challengeToken", ""),
-             "mfaCode": fresh_totp(payload2.get("secret") or second.mfa_secret)},
+             "mfaCode": fresh_totp_next_window(payload2.get("secret") or second.mfa_secret)},
             kiwi_scope="mfa-verify",
         )
     if "am_session" in second.jar:
@@ -310,6 +320,21 @@ def session_lifecycle(ctx):
         from ..dbctl import redis_cli
 
         tenant = str((ctx.db.row("users", email=email) or {}).get("tenant_id", ""))
+        # The current session id (for the exact per-session marker key) and
+        # the PRE-logout state of the user-wide marker: an EARLIER legitimate
+        # revocation (e.g. a password reset revokes all other sessions) may
+        # already have written it — the check is the DELTA this logout makes.
+        sessions_before = second.get("/v1/auth/sessions")
+        rows_before = sessions_before.json()
+        if isinstance(rows_before, dict):
+            rows_before = rows_before.get("sessions") or rows_before.get("data") or []
+        current_id = next(
+            (r.get("id", "") for r in (rows_before or []) if isinstance(r, dict) and r.get("current")),
+            "",
+        )
+        user_wide_before = redis_cli(
+            ctx.cfg, "exists", f"apexmail:session_revoked_after:{tenant}:{user_id}"
+        ).strip()
         logout = second.post("/v1/auth/logout", {})
         checks.add("POST /v1/auth/logout answers 2xx", 200 <= logout.status < 300,
                    observed=f"status={logout.status}", surface="api:POST /v1/auth/logout", severity="P1")
@@ -319,19 +344,27 @@ def session_lifecycle(ctx):
                    surface="api:GET /v1/auth/me", severity="P1")
         user_wide = redis_cli(ctx.cfg, "exists",
                               f"apexmail:session_revoked_after:{tenant}:{user_id}").strip()
+        # DELTA semantics: this logout must not be what CREATES the user-wide
+        # marker. (A pre-existing marker is another flow's legitimate
+        # revocation, not a D-1 regression.)
         checks.add(
             "logout writes a PER-SESSION marker, not a user-wide revocation (D-1 regression)",
-            user_wide in ("0", ""),
-            observed=f"user-wide marker exists={user_wide}",
-            expected="no apexmail:session_revoked_after:<tenant>:<user> key after a single logout",
+            not (user_wide_before in ("0", "") and user_wide not in ("0", "")),
+            observed=f"user-wide before={user_wide_before} after={user_wide}",
+            expected="this logout writes no apexmail:session_revoked_after:<tenant>:<user> key",
             surface="api:POST /v1/auth/logout", severity="P1",
         )
-        per_session = [k for k in redis_cli(ctx.cfg, "--scan", "--pattern", "apexmail:session_revoked:*").splitlines()
-                       if user_id in k]
+        # The per-session marker key is `apexmail:session_revoked:<session_id>`
+        # (the session id, NOT the user id — the previous filter matched
+        # nothing and reported a false negative).
+        per_session = redis_cli(
+            ctx.cfg, "exists", f"apexmail:session_revoked:{current_id}"
+        ).strip() if current_id else "0"
         checks.add(
             "logout writes the per-session revocation marker",
-            bool(per_session), observed=f"per-session markers={per_session[:3]}",
-            expected="apexmail:session_revoked:<...> present for the logged-out session",
+            per_session not in ("0", ""),
+            observed=f"session={current_id or 'unknown'} marker_exists={per_session}",
+            expected="apexmail:session_revoked:<session_id> present for the logged-out session",
             surface="api:POST /v1/auth/logout", severity="P1",
         )
     else:

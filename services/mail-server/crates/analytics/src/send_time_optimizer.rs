@@ -286,11 +286,11 @@ pub fn next_occurrence_utc(
         .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
     let local_now = now.with_timezone(&offset).naive_local();
     let target_day = window.day.min(6) as i64; // 0 = Monday, matching DAY_PRIORS.
-    let target_hour = window.hour.min(23) as u32;
+    let target_hour = window.hour.min(23);
 
     // Days from today to the target weekday (0 when today IS the target day).
     let today_ordinal = local_now.weekday().num_days_from_monday() as i64;
-    let mut day_delta = (target_day - today_ordinal).rem_euclid(7) as i64;
+    let mut day_delta = (target_day - today_ordinal).rem_euclid(7);
 
     let candidate_for = |day_delta: i64| -> chrono::DateTime<Utc> {
         let date = (local_now + chrono::Duration::days(day_delta)).date();
@@ -316,7 +316,7 @@ pub fn next_occurrence_utc(
     }
     // Defensive: the caller needs a strictly future instant.
     while candidate <= now {
-        candidate = candidate + chrono::Duration::days(7);
+        candidate += chrono::Duration::days(7);
     }
     candidate
         .with_second(0)

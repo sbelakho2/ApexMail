@@ -18,19 +18,14 @@
 //!    query ([`suppressed_recipients_in_db`]) shared with the REST validation
 //!    path; the SMTP caller lets admission drop suppressed recipients before
 //!    queueing, the REST caller validates them up front.
-//! 2b. **consent** (F4) — every non-transactional (marketing/other) recipient
-//!    is checked against the canonical consent records through
-//!    `compliance::consent_enforcement::ConsentEnforcer`. A marketing send
-//!    without an active consent record is refused with the enforcer's named
-//!    reason; transactional/service sends keep their existing contract
-//!    (suppression + quota). The consent store failing fails CLOSED.
-//! 3. **entitlement + quota** — the plan gate and the `EmailsSent`
+//! 3. **consent** (F4) — every non-transactional (marketing/other) recipient is checked against the canonical consent records through the `ConsentEnforcer`. A marketing send without an active consent record is refused with the enforcer's named reason; transactional/service sends keep their existing contract (suppression + quota). The consent store failing fails CLOSED.
+//! 4. **entitlement + quota** — the plan gate and the `EmailsSent`
 //!    reservation through the canonical
 //!    [`crate::usage::record_with_quota_check`], keyed by the deterministic
 //!    usage event id derived from the caller's idempotency identity
 //!    ([`usage_event_id`]): a duplicate send on either path records the SAME
 //!    metering event and can only ever reserve once.
-//! 4. **settlement** — the returned [`SendAdmission`] handle is
+//! 5. **settlement** — the returned [`SendAdmission`] handle is
 //!    [`SendAdmission::commit`]ed after a successful enqueue and
 //!    [`SendAdmission::rollback`]ed when the queue write fails, so a failed
 //!    enqueue never consumes quota. A duplicate reservation owns no metering

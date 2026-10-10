@@ -475,9 +475,9 @@ pub fn export_records(
             params.scope.as_ref().is_none_or(|s| r.scope == *s)
                 && params.scope_id.as_ref().is_none_or(|id| r.scope_id == *id)
                 && params.reason.as_ref().is_none_or(|rea| r.reason == *rea)
-                && params.start_date.map_or(true, |d| r.timestamp >= d)
-                && params.end_date.map_or(true, |d| r.timestamp <= d)
-                && params.active_only.map_or(true, |a| !a || r.is_active())
+                && params.start_date.is_none_or(|d| r.timestamp >= d)
+                && params.end_date.is_none_or(|d| r.timestamp <= d)
+                && params.active_only.is_none_or(|a| !a || r.is_active())
         })
         .collect();
 
@@ -504,22 +504,22 @@ pub fn search_suppressions(
             query
                 .recipient
                 .as_ref()
-                .map_or(true, |rec| r.recipient.contains(rec))
-                && query.scope.map_or(true, |s| r.scope == s)
-                && query.scope_id.as_ref().map_or(true, |id| r.scope_id == *id)
-                && query.reason.map_or(true, |rea| r.reason == rea)
-                && query.start_date.map_or(true, |d| r.timestamp >= d)
-                && query.end_date.map_or(true, |d| r.timestamp <= d)
-                && query.active_only.map_or(true, |a| !a || r.is_active())
+                .is_none_or(|rec| r.recipient.contains(rec))
+                && query.scope.is_none_or(|s| r.scope == s)
+                && query.scope_id.as_ref().is_none_or(|id| r.scope_id == *id)
+                && query.reason.is_none_or(|rea| r.reason == rea)
+                && query.start_date.is_none_or(|d| r.timestamp >= d)
+                && query.end_date.is_none_or(|d| r.timestamp <= d)
+                && query.active_only.is_none_or(|a| !a || r.is_active())
                 && query
                     .created_by
                     .as_ref()
-                    .map_or(true, |cb| r.created_by == *cb)
+                    .is_none_or(|cb| r.created_by == *cb)
         })
         .cloned()
         .collect();
 
-    results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    results.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
 
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);

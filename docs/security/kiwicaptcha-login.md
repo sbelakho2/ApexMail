@@ -3,13 +3,13 @@
 This document describes the KiwiCaptcha integration for ApexMail authentication flows.
 
 > **Status note (2026-10-09):** KiwiCaptcha is fully wired end to end. The JSON
-> API auth routes enforce it server-side, every credential-entry SSR page
-> renders the widget and verifies the token in its form handler, the MFA
-> step-two carries its own challenge on all three of its transports, the
-> resend-verification affordance is gated, and BOTH compose stacks run with
-> `KIWI_ENABLED=true` (dev now exercises the real flow; the widget solves
-> automatically in the browser). The previous "SSR wiring in flight" note is
-> obsolete.
+> API auth routes enforce it server-side. Every credential-entry SSR page
+> renders the widget and verifies the token in its form handler. The MFA
+> step-two carries its own challenge on all three of its transports, and the
+> resend-verification affordance is gated. Both compose stacks run with
+> `KIWI_ENABLED=true`; dev now exercises the real flow, with the widget
+> solving automatically in the browser. The previous "SSR wiring in flight"
+> note is obsolete.
 
 ## Scope
 
@@ -31,15 +31,15 @@ call in each handler.
 | Control-plane operator login | `POST /web/cp/login` | `cp-login` | CP `GET /login` |
 | Control-plane MFA step two | shared SSR handler `POST /web/auth/mfa/verify` | `mfa-verify` | CP `GET /login?mfa=1&email=…` |
 
-Deliberately NOT gated (with the reason): the `/verify-email` link exchange
-and `GET/POST /v1/auth/verify-email` (the mailed single-use token IS the
-credential), refresh-token rotation, logout, password change, MFA
-setup/confirm/disable for the caller's own session, and the OAuth SSO
-initiation/callback redirects (a captcha cannot be rendered into a provider
-redirect and the password-guessing threat does not exist there).
+Deliberately NOT gated, with the reason. The `/verify-email` link exchange
+and `GET/POST /v1/auth/verify-email`: the mailed single-use token IS the
+credential. Refresh-token rotation, logout, password change, and MFA
+setup/confirm/disable for the caller's own session: no anonymous guess.
+The OAuth SSO initiation/callback redirects: a captcha cannot be rendered
+into a provider redirect.
 
 KiwiCaptcha is a native Rust proof-of-work CAPTCHA. It has no external
-services, no iframes, and no external JS — an inline, per-response-nonce'd
+services, no iframes, and no external JS. An inline, per-response-nonce'd
 widget script talks to the API directly. A solution minted for one scope is
 rejected on every other scope, and every widget binds the client IP.
 
@@ -48,14 +48,14 @@ rejected on every other scope, and every widget binds the client IP.
 Two proof-of-work algorithms are supported, selected per deployment via
 `KIWI_ALGORITHM`:
 
-- **`sha256` (default)** — the client grinds a nonce until the SHA-256 hash
+- **`sha256` (default)**: the client grinds a nonce until the SHA-256 hash
   of `challenge || nonce` has at least `KIWI_DIFFICULTY_BITS` leading zero
   bits (default 20; the production compose sets 20).
-- **`argon2id` (optional)** — memory-hard variant with parameters
+- **`argon2id` (optional)**: memory-hard variant with parameters
   `KIWI_ARGON_M_KIB` (memory in KiB, e.g. 50000), `KIWI_ARGON_T` (iterations),
   and `KIWI_ARGON_P` (parallelism). Difficulty for this mode is
-  `KIWI_ARGON2_DIFFICULTY_BITS` (default 8) — Argon2id is ~1000× slower than
-  SHA-256 per attempt, so the bit count is lower.
+  `KIWI_ARGON2_DIFFICULTY_BITS` (default 8); Argon2id is roughly 1000x
+  slower than SHA-256 per attempt, so the bit count is lower.
 
 Flow when enabled:
 
@@ -63,9 +63,9 @@ Flow when enabled:
    (also mounted at `/v1/kcaptcha/challenge`) with the target `scope`.
    Issuance is rate-limited per IP (30 per 15 minutes), and each challenge is
    single-use, IP-bound, and stored in Redis with the TTL below.
-2. The client solves the proof of work (WASM solver in the browser, JS
-   fallback) and submits the solution token in the `kiwi__token` field of the
-   form / JSON body.
+2. The client solves the proof of work (a WebAssembly solver in the browser,
+   with a JavaScript fallback) and submits the solution token in the
+   `kiwi__token` field of the form or JSON body.
 3. The server re-derives and verifies the proof against the stored challenge
    and the shared HMAC secret (`KIWI_SECRET_KEY`), consuming it atomically
    (single-use: a replayed token is refused).
@@ -80,13 +80,14 @@ rejected on another.
 
 Error semantics (identical on the SSR flashes and the JSON error bodies):
 
-- `CAPTCHA_REQUIRED`: token missing — "CAPTCHA verification token is required"
+- `CAPTCHA_REQUIRED`: token missing. Message: "CAPTCHA verification token is
+  required".
 - `CAPTCHA_INVALID`: token present but verification failed (invalid,
-  expired, already-used, wrong scope, wrong IP) — "CAPTCHA verification
-  failed / challenge expired or not found / challenge already used — please
-  refresh and try again"
-- `CAPTCHA_UNAVAILABLE`: server-side verification or issuance store error —
-  503 "captcha challenge store unavailable; please retry shortly"
+  expired, already-used, wrong scope, wrong IP). Message: "CAPTCHA
+  verification failed / challenge expired or not found / challenge already
+  used; please refresh and try again".
+- `CAPTCHA_UNAVAILABLE`: server-side verification or issuance store error.
+  Answers 503 "captcha challenge store unavailable; please retry shortly".
 
 ## Environment Variables
 

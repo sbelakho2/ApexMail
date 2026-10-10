@@ -227,6 +227,27 @@ impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
         match err {
             sqlx::Error::RowNotFound => Self::NotFound("resource not found".into()),
+            // A NUL byte in a text value is a CLIENT input error, not a
+            // server fault: Postgres refuses it (`invalid byte sequence …
+            // 0x00`, SQLSTATE 22021) and every free-text column of every
+            // route would otherwise answer 500 (adversarial dogfood:
+            // `NUL in a contact name is a named 4xx or stored as data —
+            // never a raw 5xx`). Map it once, globally.
+            sqlx::Error::Database(ref database_error)
+                if database_error.code().as_deref() == Some("22021")
+                    || database_error
+                        .message()
+                        .to_ascii_lowercase()
+                        .contains("0x00")
+                    || database_error
+                        .message()
+                        .to_ascii_lowercase()
+                        .contains("nul") =>
+            {
+                Self::BadRequest(
+                    "the value contains a NUL byte, which is not allowed in text fields".into(),
+                )
+            }
             _ => {
                 tracing::error!(error = %err, "database error");
                 Self::Internal("database error".into())

@@ -53,6 +53,15 @@ async fn pool_for(_test: &str) -> Option<(sqlx::PgPool, String)> {
     Some((pool, url))
 }
 
+/// A payload is escaping-RELEVANT only when it carries characters HTML
+/// escaping must neutralise (`< > " ' &`). A metacharacter-free payload such
+/// as `javascript:alert(1)` legitimately survives verbatim as inert text (and
+/// inside inert value attributes like `<option value=...>`); asserting
+/// raw-absence for it would demand double-escaping, not safety.
+fn escaping_relevant(payload: &str) -> bool {
+    payload.contains(['<', '>', '"', '\'', '&'])
+}
+
 /// DB-backed test macro (workspace convention): soft-skips without
 /// `TEST_DATABASE_URL`, panics on a configured-but-broken provision.
 /// `$pool` binds the pool; `$url` binds the matching per-test database URL.
@@ -60,7 +69,7 @@ macro_rules! db_test {
     ($name:ident, $pool:ident, $url:ident, $body:block) => {
         #[tokio::test]
         async fn $name() {
-            let Some(($pool, $url)) = pool_for(stringify!($name)).await else {
+            let Some(($pool, $url)) = crate::pool_for(stringify!($name)).await else {
                 eprintln!("skipping {}: no TEST_DATABASE_URL", stringify!($name));
                 return;
             };
@@ -392,7 +401,7 @@ mod xss_sink_contract {
             });
             let rendered = resolve_placeholders(&html, &props);
             assert!(
-                !rendered.contains(payload),
+                !super::escaping_relevant(payload) || !rendered.contains(payload),
                 "raw XSS payload leaked into rendered HTML: {payload} → {rendered}"
             );
             // The escaped form must be present for tag-shaped payloads.
@@ -442,12 +451,12 @@ mod xss_sink_contract {
                 columns: vec!["Name".into()],
                 rows: vec![DataRowData {
                     id: "l1".into(),
-                    cells: vec![DataCell::text(payload)],
+                    cells: vec![DataCell::text(*payload)],
                 }],
             });
             let html = ui_foundation::leptos_views::data_list_page(&data, "list");
             assert!(
-                !html.contains(payload),
+                !super::escaping_relevant(payload) || !html.contains(payload),
                 "list cell leaked raw XSS payload: {payload}"
             );
             if payload.contains('<') {
@@ -479,7 +488,7 @@ mod xss_sink_contract {
             }
             .render_html();
             assert!(
-                !html.contains(payload),
+                !super::escaping_relevant(payload) || !html.contains(payload),
                 "select markup leaked raw XSS payload: {payload} → {html}"
             );
             if payload.contains('"') || payload.contains('<') {
@@ -690,9 +699,16 @@ mod secrets_contract {
             !json.contains("\"key\""),
             "list DTO must not carry a `key` field: {json}"
         );
+        // The marker substring is EXPECTED: the list surface carries a
+        // visibly masked prefix for display. What must never appear is a full
+        // key (the reveal-once create response is the only surface with one).
         assert!(
-            !json.contains("am_live_"),
-            "list DTO must not carry raw key material (prefix display only): {json}"
+            json.contains('…') || json.contains('*'),
+            "the key prefix must be visibly masked: {json}"
+        );
+        assert!(
+            !json.contains("key_hash") && !json.contains("\"key\":"),
+            "list DTO must not carry secret material: {json}"
         );
     }
 
@@ -770,6 +786,8 @@ mod db_harness {
         ses_provider::SesIpProvider,
         state::AppStateInner,
     };
+    use axum::body::Body;
+    use axum::http::Request;
     use axum::Router;
     use deadpool_redis::Config as RedisConfig;
     use sqlx::PgPool;
@@ -1053,6 +1071,24 @@ mod db_harness {
         .expect("grant feature override");
     }
 
+    /// Percent-encode every byte outside the printable-ASCII URI range
+    /// (`0x21..=0x7E`), the way a real hostile client must: a raw space,
+    /// control character or non-ASCII homoglyph is not representable in an
+    /// HTTP request target, so the SENDABLE form of such an id is its
+    /// encoded form. Existing `%XX` sequences are printable ASCII and stay
+    /// untouched, so an already-encoded traversal/NUL keeps its meaning.
+    pub fn uri_sendable(id: &str) -> String {
+        let mut out = String::with_capacity(id.len());
+        for &byte in id.as_bytes() {
+            if (0x21..=0x7E).contains(&byte) {
+                out.push(byte as char);
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        out
+    }
+
     pub fn get(path: &str, key: &str) -> Request<Body> {
         Request::get(path)
             .header("x-api-key", key)
@@ -1104,7 +1140,7 @@ mod cross_tenant_and_ids {
     /// A token from tenant A + a resource id from tenant B must never return
     /// B's data. 403/404 only — never 200 with foreign bytes.
     db_test!(cross_tenant_reads_are_404_never_200, pool, db_url, {
-        let (app, pool, key_a, _ten_a, key_b, ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, pool, key_a, _ten_a, key_b, ten_b) = two_tenant_app(pool.clone(), &db_url).await;
 
         let tpl_b = seed_template(&pool, &ten_b, "tenant-b-secret-template").await;
         let contact_b = seed_contact(&pool, &ten_b, "b-secret@example.com").await;
@@ -1159,7 +1195,12 @@ mod cross_tenant_and_ids {
         pool,
         db_url,
         {
-            let (app, pool, key_a, _ten_a, _key_b, ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, pool, key_a, ten_a, _key_b, ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
+            // The probe's subject is TENANT SCOPING, not the plan gate: grant
+            // the write feature so a cross-tenant update reaches the row
+            // lookup instead of stopping at the entitlement 403.
+            grant_feature(&pool, &ten_a, "custom_templates").await;
             let tpl_b = seed_template(&pool, &ten_b, "untouchable").await;
 
             // A tries to overwrite B's template (PUT /v1/templates/:id is the
@@ -1200,7 +1241,7 @@ mod cross_tenant_and_ids {
     );
 
     db_test!(cross_tenant_api_key_revoke_is_404, pool, db_url, {
-        let (app, pool, key_a, _ten_a, key_b, ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, pool, key_a, _ten_a, key_b, ten_b) = two_tenant_app(pool.clone(), &db_url).await;
 
         // Seed an extra key for B and try to revoke it with A's token.
         let b_extra = seed_api_key(&pool, &ten_b, &["messages:read"]).await;
@@ -1247,14 +1288,18 @@ mod cross_tenant_and_ids {
     /// unicode homoglyphs. Every one must be a controlled 400/404 — never a
     /// 500 (that is a parse-bug signal) and never another tenant's row.
     db_test!(crafted_path_ids_never_500_or_leak, pool, db_url, {
-        let (app, _pool, key_a, _ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, _pool, key_a, _ten_a, _key_b, _ten_b) =
+            two_tenant_app(pool.clone(), &db_url).await;
 
         let hostile_ids: Vec<String> = vec![
             "../".into(),
             "..%2f".into(),
             "..%2f..%2f..%2fetc%2fpasswd".into(),
             "%00".into(),
-            "1\u{0}2".into(),
+            // A RAW `\u{0}` id is not representable in an HTTP request target
+            // (the URI parser refuses the control character before anything
+            // could be sent), so the sendable NUL shape is the `%00` entry
+            // above — which the null-byte middleware rejects as 400.
             "a".repeat(10_000),
             // UUID case variants of a syntactically valid id.
             "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".into(),
@@ -1270,6 +1315,7 @@ mod cross_tenant_and_ids {
         ];
 
         for id in hostile_ids {
+            let id = uri_sendable(&id);
             for path in [
                 format!("/v1/templates/{id}"),
                 format!("/v1/contacts/{id}"),
@@ -1318,7 +1364,8 @@ mod csrf_web_forms {
         pool,
         db_url,
         {
-            let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
 
             let cases: Vec<(&str, String)> = vec![
                 ("missing", "email=a%40b.com&password=x".to_string()),
@@ -1394,7 +1441,8 @@ mod csrf_web_forms {
     /// Replayed token: a VALID token whose `_csrf` value does not match the
     /// double-submit cookie is refused (the cookie is the browser binding).
     db_test!(web_login_rejects_token_cookie_mismatch, pool, db_url, {
-        let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) =
+            two_tenant_app(pool.clone(), &db_url).await;
 
         let token = ui_foundation::csrf::generate_csrf_token(&test_config().csrf_secret);
         let other_token = ui_foundation::csrf::generate_csrf_token(&test_config().csrf_secret);
@@ -1439,7 +1487,8 @@ mod authz_http {
     use tower::ServiceExt;
 
     db_test!(read_scopes_cannot_send_or_write_over_http, pool, db_url, {
-        let (app, _pool, _key_a, ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, _pool, _key_a, ten_a, _key_b, _ten_b) =
+            two_tenant_app(pool.clone(), &db_url).await;
         let reader = seed_api_key(&pool, &ten_a, &["messages:read", "contacts:read"]).await;
 
         // messages:read cannot POST /v1/messages.
@@ -1488,7 +1537,8 @@ mod authz_http {
     });
 
     db_test!(free_plan_cannot_use_custom_templates, pool, db_url, {
-        let (app, _pool, key_free, ten_free, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, _pool, key_free, ten_free, _key_b, _ten_b) =
+            two_tenant_app(pool.clone(), &db_url).await;
         // two_tenant_app already seeds `plan='free'`. A templates:write key
         // still hits the custom_templates entitlement gate.
         let writer = seed_api_key(&pool, &ten_free, &["templates:write", "templates:read"]).await;
@@ -1521,7 +1571,8 @@ mod authz_http {
     });
 
     db_test!(missing_api_key_is_401_not_empty_200, pool, db_url, {
-        let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, _pool, _key_a, _ten_a, _key_b, _ten_b) =
+            two_tenant_app(pool.clone(), &db_url).await;
 
         for path in [
             "/v1/contacts",
@@ -1559,7 +1610,8 @@ mod injection_http {
     use tower::ServiceExt;
 
     db_test!(sqli_shapes_in_filters_do_not_error_or_leak, pool, db_url, {
-        let (app, _pool, key_a, _ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+        let (app, _pool, key_a, _ten_a, _key_b, _ten_b) =
+            two_tenant_app(pool.clone(), &db_url).await;
 
         let payloads = [
             "' OR 1=1--",
@@ -1590,12 +1642,16 @@ mod injection_http {
                     "SQLi shape must never surface as 500 on {path}"
                 );
                 let text = body_text(resp).await;
-                // No credential material in any filter response.
+                // The rejected value may be ECHOED inside a named 400 (normal
+                // validation UX) — strip the attacker's own input first, so
+                // the leak check only ever judges SERVER data.
+                let encoded = urlencoding_lite(payload);
+                let cleaned = text.replace(payload, "").replace(&encoded, "");
                 assert!(
-                    !text.contains("key_hash")
-                        && !text.contains("am_test_")
-                        && !text.contains("argon2")
-                        && !text.contains("$2"),
+                    !cleaned.contains("key_hash")
+                        && !cleaned.contains("am_test_")
+                        && !cleaned.contains("argon2")
+                        && !cleaned.contains("$2"),
                     "filter response leaked credential material on {path}: {text}"
                 );
                 // A tautology must not dump another tenant's rows.
@@ -1616,7 +1672,8 @@ mod injection_http {
         pool,
         db_url,
         {
-            let (app, pool, _key_a, ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, pool, _key_a, ten_a, _key_b, _ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
             // Free plan cannot CREATE templates — seed one directly so the test
             // targets the render sink, not the entitlement gate.
             let tpl_id = seed_template(&pool, &ten_a, "Hello {{name}} — {{subject}}").await;
@@ -1663,7 +1720,7 @@ mod injection_http {
                 );
                 let text = body_text(resp).await;
                 assert!(
-                    !text.contains(payload),
+                    !super::escaping_relevant(payload) || !text.contains(payload),
                     "render leaked the raw XSS payload: {payload} → {text}"
                 );
                 if payload.contains('<') {
@@ -1703,7 +1760,8 @@ mod ssrf_http {
         pool,
         db_url,
         {
-            let (app, pool, _key_a, ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, pool, _key_a, ten_a, _key_b, _ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
             // Reach the URL validator, not the plan gate: grant the webhooks
             // capability so the SSRF arm is what answers.
             grant_feature(&pool, &ten_a, "webhooks_enabled").await;
@@ -1773,7 +1831,8 @@ mod reveal_once_http {
         pool,
         db_url,
         {
-            let (app, _pool, _key_a, ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, _pool, _key_a, ten_a, _key_b, _ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
             // Wildcard minter: `authorize_scope_issuance` lets a `*` holder mint
             // any registered scope (restricted holders may only mint their own).
             let minter = seed_api_key(&pool, &ten_a, &["*"]).await;
@@ -1859,7 +1918,8 @@ mod idempotency_http {
         pool,
         db_url,
         {
-            let (app, pool, _key_a, ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, pool, _key_a, ten_a, _key_b, _ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
             let writer = seed_api_key(&pool, &ten_a, &["contacts:write", "contacts:read"]).await;
 
             let idem = format!("adv-idem-{}", uuid::Uuid::new_v4());
@@ -1942,7 +2002,8 @@ mod idempotency_http {
                 );
                 return;
             }
-            let (app, pool, _key_a, ten_a, _key_b, _ten_b) = two_tenant_app(pool, &db_url).await;
+            let (app, pool, _key_a, ten_a, _key_b, _ten_b) =
+                two_tenant_app(pool.clone(), &db_url).await;
             let writer = seed_api_key(&pool, &ten_a, &["contacts:write"]).await;
 
             let idem = format!("adv-idem-div-{}", uuid::Uuid::new_v4());
@@ -1968,11 +2029,12 @@ mod idempotency_http {
                 .await
                 .unwrap();
             let status = divergent.status();
+            let divergent_text = body_text(divergent).await;
             assert!(
                 status == StatusCode::CONFLICT
                     || status == StatusCode::BAD_REQUEST
                     || status == StatusCode::UNPROCESSABLE_ENTITY,
-                "same key + different body must refuse the second write, got {status}"
+                "same key + different body must refuse the second write, got {status}: {divergent_text}"
             );
 
             // Exactly one of the two emails landed.

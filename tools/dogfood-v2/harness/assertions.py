@@ -181,17 +181,25 @@ def raw_script_present(text: str, payload: str) -> bool:
         return True
     if re.search(r"<script\b[^>]*>[^<]{0,300}dgv2xss", text, re.IGNORECASE | re.DOTALL):
         return True
-    # A handler/URL-shaped hit only counts when it is NOT inside an
-    # entity-escaped construct: `&lt;svg/onload=alert(&#x27;dgv2xss&#x27;)&gt;`
-    # is inert, while a raw `<svg onload=...>` is executable.
-    for pattern in (
-        r"on(?:error|load)\s*=\s*[^>\s]{0,120}dgv2xss",
-        r"javascript:[^\"\'\s<>]{0,120}dgv2xss",
+    # An `on*=` handler counts only INSIDE REAL MARKUP: a raw tag opener must
+    # appear in the run-up with no entity escapes, or the construct is inert
+    # (`&lt;svg/onload=alert(&#x27;dgv2xss&#x27;)&gt;` is text).
+    for match in re.finditer(r"on(?:error|load)\s*=\s*[^>\s]{0,120}dgv2xss", text, re.IGNORECASE):
+        head = text[max(0, match.start() - 200):match.start()]
+        if "&lt;" in head or "&#" in head:
+            continue
+        if "<" in head:
+            return True
+    # `javascript:` is executable ONLY in a URL-bearing attribute. Inside a
+    # text node or an inert attribute (`value="javascript:…"` on a search
+    # input) it is plain text — the entity-escaped query echo that the raw
+    # substring search above already cleared must not read as executable.
+    if re.search(
+        r"(?:href|src|action|formaction|xlink:href|poster|cite|data)\s*=\s*[\"\']?\s*javascript:[^\"\'\s<>]{0,120}dgv2xss",
+        text,
+        re.IGNORECASE,
     ):
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            prefix = text[max(0, match.start() - 40):match.start()]
-            if "&lt;" not in prefix and "&#" not in prefix:
-                return True
+        return True
     return False
 
 

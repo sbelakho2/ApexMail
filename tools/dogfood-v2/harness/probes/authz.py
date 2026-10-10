@@ -79,10 +79,14 @@ def cross_tenant_idor(ctx):
     ]
     for surface in surfaces:
         path = _substitute(surface.path, foreign)
+        # follow=False: the product's documented refusal for both surfaces is
+        # a PRG redirect (303 → /login + flash) or a 4xx — following it would
+        # judge the destination page (a 200 login render) instead of the
+        # refusal itself (dogfood 2026-10-10 false-positive cluster).
         if surface.method in ("GET", "DELETE"):
-            resp = owner_a.session.req(surface.method, path)
+            resp = owner_a.session.req(surface.method, path, follow=False)
         else:
-            resp = owner_a.session.req(surface.method, path, body={})
+            resp = owner_a.session.req(surface.method, path, body={}, follow=False)
         if resp.status == 0:
             checks.unreachable(f"cross-tenant {surface.method} {surface.path}", resp.text, surface=surface.id)
             continue

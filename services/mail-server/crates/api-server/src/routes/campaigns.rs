@@ -1540,16 +1540,24 @@ async fn send_campaign(
             .await?;
 
     if recipient_count == 0 {
-        // Nothing to drain: converge now rather than reporting a send that
-        // will never happen.
+        // Nothing to drain. Converging silently to `sent` reported a "send"
+        // that reached nobody (adversarial dogfood: `a campaign start with no
+        // audience is a named refusal, never a silent success`). Revert the
+        // claim and refuse with an actionable named error instead — the
+        // caller can add a list/segment/recipients and start for real.
         sqlx::query(
-            "UPDATE campaigns SET status = 'sent', sent_count = 0, updated_at = NOW() \
+            "UPDATE campaigns SET status = 'draft', updated_at = NOW() \
              WHERE id = $1::uuid AND tenant_id = $2 AND status = 'sending'",
         )
         .bind(campaign_id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
+        return Err(ApiError::Validation(vec![
+            "campaign has no recipients: add a list, a segment or explicit recipients before \
+             sending (nothing was sent)"
+                .into(),
+        ]));
     }
 
     let row = fetch_campaign(&state, &auth.tenant_id, id).await?;
@@ -3351,12 +3359,22 @@ mod adversarial_tests {
         )
         .await
         .expect("create empty");
-        let Json(empty_sent) =
-            send_campaign(State(state.clone()), write.clone(), Path(empty.id.clone()))
+        // An audience-less start is a NAMED refusal (never a silent success):
+        // the claim is reverted and nothing is sent.
+        let empty_refused =
+            send_campaign(State(state.clone()), write.clone(), Path(empty.id.clone())).await;
+        match empty_refused {
+            Err(ApiError::Validation(messages)) => assert!(
+                messages.iter().any(|m| m.contains("no recipients")),
+                "{messages:?}"
+            ),
+            other => panic!("an audience-less send must refuse, got {other:?}"),
+        }
+        let Json(reverted) =
+            get_campaign(State(state.clone()), read.clone(), Path(empty.id.clone()))
                 .await
-                .expect("send empty");
-        assert_eq!(empty_sent.status, "sent");
-        assert_eq!(empty_sent.recipient_count, 0);
+                .expect("fetch after refused send");
+        assert_eq!(reverted.status, "draft", "the claim must be reverted");
 
         // Malformed path ids are 404s everywhere.
         for handler_result in [

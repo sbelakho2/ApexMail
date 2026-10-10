@@ -292,6 +292,26 @@ def env_surface(ctx):
     for surface in ctx.ledger.by_kind("service"):
         if surface.meta.get("image_only"):
             image_only.add(surface.id.split(":", 1)[1])
+    # …including services that only exist in the PROD overlay (backups,
+    # exporters): derive them from every compose file — a service with an
+    # `image:` and no `build:` is third-party, and its documented env
+    # contract is consumed by that image (e.g. BACKUP_KEEP_* by the
+    # postgres-backup image; the dogfood ledger only classified the base
+    # compose and read them as repo-built config-theater).
+    for compose_path in sorted(REPO_ROOT.glob("docker-compose*.yml")):
+        try:
+            text = compose_path.read_text(errors="ignore")
+        except OSError:
+            continue
+        current = None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if re.match(r"^[A-Za-z0-9_.-]+:\s*$", stripped) and not line.startswith((" ", "\t")):
+                current = stripped[:-1]
+            elif current and stripped.startswith("image:"):
+                image_only.add(current)
+            elif current and stripped.startswith("build:"):
+                image_only.discard(current)
     in_env_files = set()
     for candidate in (REPO_ROOT / ".env", REPO_ROOT / ".env.example",
                       REPO_ROOT / ".env.production.example"):

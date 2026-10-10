@@ -42,10 +42,21 @@ fn input_never_renders_raw_xss_payloads() {
             !html.contains("<script>") && !html.contains("<img src=x") && !html.contains("<svg/"),
             "raw XSS survived Input: {payload} in {html}"
         );
-        assert!(
-            html.contains("&lt;"),
-            "payload must be escaped: {payload} in {html}"
-        );
+        if payload.contains('<') {
+            // Only tag-shaped payloads contain a `<` to escape; requiring
+            // `&lt;` for an attribute-break payload (" onfocus="alert(1))
+            // demanded an entity that no input can produce.
+            assert!(
+                html.contains("&lt;"),
+                "payload must be escaped: {payload} in {html}"
+            );
+        }
+        if payload.contains('"') {
+            assert!(
+                html.contains("&quot;") || html.contains("&#34;"),
+                "attribute-break payload must escape its quote: {payload} in {html}"
+            );
+        }
     }
 }
 

@@ -1168,7 +1168,6 @@ services:
       METRICS_ENABLED: "true"
       METRICS_PORT: "9090"
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
-      LOCAL_DOMAINS: ${LOCAL_DOMAINS:-apexmail.ee}
       # ── TLS (certbot-managed certs bind-mounted at /opt/apexmail/certs) ─────
       TLS_ENABLED: "true"
       TLS_CERT_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/fullchain.pem

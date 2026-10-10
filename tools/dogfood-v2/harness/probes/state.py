@@ -141,12 +141,15 @@ def out_of_order(ctx):
     if not campaign_id:
         checks.unreachable("campaign fixture for transitions", "no campaign fixture id")
         return checks.obs
-    # pause/resume on a draft campaign — invalid transition
-    for action in ("pause", "resume"):
-        resp = owner.session.post(f"/v1/campaigns/{campaign_id}/{action}", {})
-        refusal_ok(checks, resp, f"{action} on a draft campaign is refused",
-                   allowed=(400, 404, 409, 422), surface=f"api:POST /v1/campaigns/:id/{action}",
-                   severity="P1")
+    # Pause on a draft is an invalid transition (pause requires
+    # sending/scheduled/resending). Resume on a draft is DOCUMENTED
+    # (docs/api/endpoints/campaigns.md: "Resume a paused or draft campaign"),
+    # so it is not probed as a refusal here; resume on a SENT campaign is
+    # checked below, after the send flow.
+    resp = owner.session.post(f"/v1/campaigns/{campaign_id}/pause", {})
+    refusal_ok(checks, resp, "pause on a draft campaign is refused",
+               allowed=(400, 404, 409, 422), surface="api:POST /v1/campaigns/:id/pause",
+               severity="P1")
     # edit after send — drive a real send first (disposable campaign with an audience)
     from ..fixtures import ensure_consent
 
@@ -166,6 +169,10 @@ def out_of_order(ctx):
         edit = owner.session.patch(f"/v1/campaigns/{sent_campaign}", {"name": "dogfood-edit-after-send"})
         refusal_ok(checks, edit, "editing a sent campaign is refused", allowed=(400, 404, 409, 422),
                    surface="api:PATCH /v1/campaigns/:id", severity="P1")
+        resume_sent = owner.session.post(f"/v1/campaigns/{sent_campaign}/resume", {})
+        refusal_ok(checks, resume_sent, "resume on a sent campaign is refused (only paused/draft)",
+                   allowed=(400, 404, 409, 422),
+                   surface="api:POST /v1/campaigns/:id/resume", severity="P1")
     else:
         checks.unreachable("create a campaign for the edit-after-send probe", create.text[:160])
     # start with no audience: the honest answer is a named refusal, never a

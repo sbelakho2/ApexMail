@@ -6391,7 +6391,8 @@ db_test!(
         "INSERT INTO stripe_subscriptions
              (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
               billing_cycle_end, stripe_customer_id)
-         VALUES ($1, 'sub_cov_double', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')",
+         VALUES ($1, 'sub_cov_double', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')
+         ON CONFLICT (stripe_subscription_id) DO NOTHING",
     )
     .bind(tenant)
     .bind((now - 86_400) as f64)

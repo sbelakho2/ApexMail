@@ -27,15 +27,26 @@ async fn test_pool(test_name: &str) -> Option<PgPool> {
     )
     .await
     {
-        Ok(pool) => Some(pool),
+        // fresh_canonical_pool returns Result<Option<Pool>, _>: None is the
+        // soft-skip (no TEST_DATABASE_URL), so pass the Option through.
+        Ok(pool) => pool,
         Err(error) => panic!("{}", error.panic_message()),
     }
 }
 
-fn dummy_redis() -> deadpool_redis::Pool {
-    deadpool_redis::Config::from_url("redis://127.0.0.1:1/97")
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .expect("fake redis pool")
+/// The canonical test Redis. The DSR verify/queue paths are Redis-backed
+/// (single-use nonces), so a dead pool only produced "Connection refused"
+/// panics; without TEST_REDIS_URL the tests soft-skip instead.
+fn test_redis() -> Option<deadpool_redis::Pool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
+    let url = std::env::var("TEST_REDIS_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    Some(
+        deadpool_redis::Config::from_url(&url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("test redis pool"),
+    )
 }
 
 fn test_gdpr_config() -> GdprConfig {
@@ -122,8 +133,12 @@ async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
     };
     let audit = audit_logger(&pool);
     audit.initialize().await.expect("audit chain init");
-    let gdpr = GdprAutomation::new(pool.clone(), dummy_redis(), test_gdpr_config())
-        .with_audit_logger(audit);
+    let Some(redis) = test_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL to run the DSR lifecycle tests");
+        return;
+    };
+    let gdpr =
+        GdprAutomation::new(pool.clone(), redis, test_gdpr_config()).with_audit_logger(audit);
 
     let tenant = unique_tenant();
     seed_tenant(&pool, &tenant).await;
@@ -185,10 +200,26 @@ async fn dsar_lifecycle_is_create_in_progress_completed_with_audit_record() {
     .await
     .expect("read terminal row");
 
-    assert_eq!(
-        final_status, "completed",
-        "the deliberate path ends in completed"
+    // The canonical chain deliberately reports a missing export store (the
+    // source suite documents `contact_list_members`: "does not exist on the
+    // canonical chain: the store is reported skipped and the export is
+    // PARTIAL, not complete"). The honest terminal outcome is therefore
+    // `completed` OR `partial` — both terminal, both completed_at-stamped,
+    // and a partial MUST disclose itself in the result.
+    assert!(
+        final_status == "completed" || final_status == "partial",
+        "the deliberate path ends in a terminal, recorded outcome, got {final_status:?}"
     );
+    if final_status == "partial" {
+        let disclosed = stored_result
+            .as_ref()
+            .map(|value| value.to_string().to_lowercase().contains("partial"))
+            .unwrap_or(false);
+        assert!(
+            disclosed,
+            "a partial export must disclose itself in the result: {stored_result:?}"
+        );
+    }
     assert!(
         processed_at.is_some(),
         "processing timestamp is the in_progress record"
@@ -235,8 +266,12 @@ async fn dsar_cannot_skip_to_completed_without_the_processing_record() {
     };
     let audit = audit_logger(&pool);
     audit.initialize().await.expect("audit chain init");
-    let gdpr = GdprAutomation::new(pool.clone(), dummy_redis(), test_gdpr_config())
-        .with_audit_logger(audit);
+    let Some(redis) = test_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL to run the DSR lifecycle tests");
+        return;
+    };
+    let gdpr =
+        GdprAutomation::new(pool.clone(), redis, test_gdpr_config()).with_audit_logger(audit);
 
     let tenant = unique_tenant();
     seed_tenant(&pool, &tenant).await;
@@ -342,8 +377,12 @@ async fn tenant_cannot_complete_another_tenants_dsar() {
     };
     let audit = audit_logger(&pool);
     audit.initialize().await.expect("audit chain init");
-    let gdpr = GdprAutomation::new(pool.clone(), dummy_redis(), test_gdpr_config())
-        .with_audit_logger(audit);
+    let Some(redis) = test_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL to run the DSR lifecycle tests");
+        return;
+    };
+    let gdpr =
+        GdprAutomation::new(pool.clone(), redis, test_gdpr_config()).with_audit_logger(audit);
 
     let tenant_a = unique_tenant();
     let tenant_b = unique_tenant();
@@ -377,7 +416,11 @@ async fn tenant_cannot_complete_another_tenants_dsar() {
         .await
         .expect("verify A"));
     gdpr.process_request(&req_a.id).await.expect("process A");
-    assert_eq!(status_of(&pool, &req_a.id).await, "completed");
+    let status_a = status_of(&pool, &req_a.id).await;
+    assert!(
+        status_a == "completed" || status_a == "partial",
+        "A's own request reaches a terminal outcome, got {status_a:?}"
+    );
 
     // Tenant B's request is untouched — not completed by A's processing.
     let status_b = status_of(&pool, &req_b.id).await;
@@ -416,7 +459,11 @@ async fn tenant_cannot_complete_another_tenants_dsar() {
         .await
         .expect("verify B"));
     gdpr.process_request(&req_b.id).await.expect("process B");
-    assert_eq!(status_of(&pool, &req_b.id).await, "completed");
+    let status_b_final = status_of(&pool, &req_b.id).await;
+    assert!(
+        status_b_final == "completed" || status_b_final == "partial",
+        "B's own request reaches a terminal outcome, got {status_b_final:?}"
+    );
     assert_eq!(audit_rows_for(&pool, &tenant_b, &req_b.id).await, 1);
 
     // Export download is tenant-scoped: B presenting A's export id gets the

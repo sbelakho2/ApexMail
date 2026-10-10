@@ -504,11 +504,16 @@ mod tests {
         let _serial = MONITORED_DRAIN_TEST_SERIAL.lock().await;
         reset_error_streak();
         let owned = provision_env("monitored_drain_success").await;
-        let env = &owned;
-        let _metering_guard =
-            crate::test_support::redis_keys_guard(&owned.admin_url, "metering").await;
-        crate::test_support::clear_pending_metering_keys(&env.state.redis).await;
-        crate::test_support::seed_tenant(&env.pool, "mtcov_mon_drain", "growth").await;
+        // A PRIVATE redis: the shared test instance is drained concurrently by
+        // sibling test PROCESSES, so seeding `meter:pending:*` there made the
+        // drain pick up other tests' keys (observed: processed 24 vs 1).
+        let mut isolated = crate::test_support::spawn_isolated_redis();
+        let config = crate::config::BillingConfig {
+            redis_url: "redis://127.0.0.1:1".to_string(),
+            ..owned.state.config.clone()
+        };
+        let state = crate::AppState::new(owned.pool.clone(), isolated.pool.clone(), config);
+        crate::test_support::seed_tenant(&owned.pool, "mtcov_mon_drain", "growth").await;
 
         // Two pending events (one valid, one malformed) mirror the recovery
         // semantics the monitor reports: processed=1, discarded=1.
@@ -520,7 +525,7 @@ mod tests {
             "timestamp": Utc::now().to_rfc3339(),
             "metadata": {},
         });
-        let mut conn = env.state.redis.get().await.expect("redis");
+        let mut conn = state.redis.get().await.expect("redis");
         for (key, value) in [
             ("meter:pending:evt_mtcov_mon_0001", payload.to_string()),
             ("meter:pending:evt_mtcov_mon_bad", "not json".to_string()),
@@ -535,7 +540,7 @@ mod tests {
         drop(conn);
 
         push_consecutive_errors(DRAIN_ERROR_ALERT_THRESHOLD + 3);
-        let result = monitored_drain_pending_events(&env.state, 100)
+        let result = monitored_drain_pending_events(&state, 100)
             .await
             .expect("monitored drain succeeds");
         assert_eq!(result.processed_count, 1);
@@ -546,6 +551,7 @@ mod tests {
             "a successful drain resets the consecutive-error streak"
         );
 
+        isolated.kill();
         owned.finish().await;
     }
 

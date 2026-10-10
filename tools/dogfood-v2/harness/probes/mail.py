@@ -191,11 +191,26 @@ def domain_dkim(ctx):
     body = created.json() or {}
     data = body.get("data") or body
     domain_id = data.get("id", "")
+    # Documented contract (docs/api/endpoints/domains.md): creation ANSWERS the
+    # domain shape (no selector/public key in the response — "the private key
+    # is never returned; retrieve the DNS values via GET /dns-records") while
+    # GENERATING and persisting the DKIM material. Judge that: the documented
+    # field set is complete, and the material must never leak in the create
+    # response.
+    documented_fields = {
+        "id", "name", "status", "ses_verified", "spf_verified",
+        "dkim_verified", "dmarc_verified", "return_path_verified", "created_at",
+    }
+    leaked = any(
+        key in data for key in ("dkim_private_key", "dkim_public_key", "dkim_selector")
+    )
     checks.add(
-        "creating a domain answers 2xx with DKIM material provisioned",
-        created.status in (200, 201) and (bool(data.get("dkim_selector")) or bool(data.get("dkim_public_key"))),
-        observed=f"status={created.status} body={created.text[:200]!r}",
-        expected="201 with selector/public key",
+        "creating a domain answers the documented shape, never leaking key material",
+        created.status in (200, 201)
+        and documented_fields.issubset(set(data))
+        and not leaked,
+        observed=f"status={created.status} fields={sorted(set(data))} leaked={leaked}",
+        expected="201 with the documented field set; no key material in the response",
         severity="P1", surface="api:POST /v1/domains",
     )
     if not domain_id:

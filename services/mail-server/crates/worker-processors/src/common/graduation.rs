@@ -60,7 +60,7 @@ pub async fn graduate_mature_warmup_ips(db: &PgPool) -> Result<Vec<String>, Stri
             "by": "worker:graduation-reconciler",
         });
         crate::common::audit::append_audit_log(
-            &mut *tx,
+            &mut tx,
             crate::common::audit::AuditEntry {
                 tenant_id: Some("system"),
                 action: "ip.warmup_graduated",

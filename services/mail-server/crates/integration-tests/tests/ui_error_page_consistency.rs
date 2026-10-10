@@ -157,11 +157,17 @@ fn error_pages_never_leak_internal_details() {
             "{name}: must render at least one paragraph"
         );
         if name.contains("404") {
+            // The documented short labels: the customer/console surfaces say
+            // "Page not found"; the control plane names its own scope
+            // ("That control-plane page does not exist." — the UI-review
+            // wave made the CP copy destination-explicit on purpose).
+            const NOT_FOUND_LABELS: &[&str] =
+                &["Page not found", "That control-plane page does not exist."];
             assert!(
                 paragraphs
                     .iter()
-                    .any(|text| text.trim() == "Page not found"),
-                "{name}: must render the documented not-found label, got: {paragraphs:?}"
+                    .any(|text| NOT_FOUND_LABELS.contains(&text.trim())),
+                "{name}: must render a documented not-found label, got: {paragraphs:?}"
             );
         } else {
             assert!(
