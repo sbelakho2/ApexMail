@@ -183,7 +183,7 @@ def prep() -> None:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 body = json.loads(resp.read().decode())
                 status = resp.status
         except urllib.error.HTTPError as e:  # noqa: F821

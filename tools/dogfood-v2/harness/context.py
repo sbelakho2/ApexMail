@@ -118,7 +118,7 @@ class Context:
                 request = urllib.request.Request(
                     self.cfg.base + "/__fixture/clear_rates", data=b"{}",
                     headers={"Content-Type": "application/json"}, method="POST")
-                urllib.request.urlopen(request, timeout=5).read()
+                urllib.request.urlopen(request, timeout=5).read() # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             except Exception:  # noqa: BLE001
                 pass
             return
@@ -171,7 +171,7 @@ class Context:
                 request = urllib.request.Request(
                     self.cfg.base + "/health", headers={"Host": self.cfg.host}, method="GET"
                 )
-                with urllib.request.urlopen(request, timeout=5) as response:
+                with urllib.request.urlopen(request, timeout=5) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                     if response.status == 200:
                         return True
             except Exception:  # noqa: BLE001

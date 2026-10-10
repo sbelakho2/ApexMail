@@ -63,7 +63,7 @@ def call(
         headers["Cookie"] = cookie
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return response.status, response.read().decode(errors="replace"), dict(response.headers)
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode(errors="replace"), dict(error.headers)
@@ -96,7 +96,7 @@ def mailpit_links(recipient: str, subject_contains: str) -> list[str]:
     import re
     import urllib.parse
 
-    with urllib.request.urlopen("http://127.0.0.1:8025/api/v1/messages?limit=50", timeout=15) as response:
+    with urllib.request.urlopen("http://127.0.0.1:8025/api/v1/messages?limit=50", timeout=15) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         listing = json.loads(response.read().decode())
     for message in listing.get("messages", []):
         to = [t.get("Address", "") for t in message.get("To", [])]
@@ -104,7 +104,7 @@ def mailpit_links(recipient: str, subject_contains: str) -> list[str]:
             continue
         if subject_contains.lower() not in (message.get("Subject") or "").lower():
             continue
-        with urllib.request.urlopen(
+        with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             f"http://127.0.0.1:8025/api/v1/message/{message['ID']}", timeout=15
         ) as response:
             body = json.loads(response.read().decode())

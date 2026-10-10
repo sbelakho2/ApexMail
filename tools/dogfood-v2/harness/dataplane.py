@@ -142,7 +142,7 @@ class FixtureDataPlane(DataPlane):
     def _get(self, path: str, **params) -> dict:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         url = f"{self.base}{path}" + (f"?{query}" if query else "")
-        with urllib.request.urlopen(url, timeout=10) as response:
+        with urllib.request.urlopen(url, timeout=10) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             body = json.loads(response.read().decode())
         if isinstance(body, dict) and isinstance(body.get("data"), dict):
             return {**body["data"], **{k: v for k, v in body.items() if k not in ("data", "error", "meta")}}

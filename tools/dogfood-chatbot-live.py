@@ -175,7 +175,7 @@ def mailpit_messages(recipient: str) -> list[dict]:
     last_error: Exception | None = None
     for _attempt in range(5):
         try:
-            with urllib.request.urlopen(
+            with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 f"{MAILPIT}/api/v1/messages?limit=50", timeout=30
             ) as response:
                 listing = json.loads(response.read().decode())
@@ -197,7 +197,7 @@ def mailpit_text(message_id: str) -> str:
     last_error: Exception | None = None
     for _attempt in range(5):
         try:
-            with urllib.request.urlopen(
+            with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 f"{MAILPIT}/api/v1/message/{message_id}", timeout=30
             ) as response:
                 body = json.loads(response.read().decode())

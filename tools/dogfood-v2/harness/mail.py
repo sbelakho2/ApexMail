@@ -61,7 +61,7 @@ class MailpitSource(MailSource):
         self.url = url
 
     def _get(self, path: str) -> dict:
-        with urllib.request.urlopen(f"{self.url}{path}", timeout=15) as response:
+        with urllib.request.urlopen(f"{self.url}{path}", timeout=15) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return json.loads(response.read().decode())
 
     def messages(self, limit: int = 100) -> list[dict]:
@@ -79,13 +79,13 @@ class MailpitSource(MailSource):
     def delete_all(self) -> None:
         request = urllib.request.Request(f"{self.url}/api/v1/messages", method="DELETE")
         try:
-            urllib.request.urlopen(request, timeout=10)
+            urllib.request.urlopen(request, timeout=10) # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         except Exception:  # noqa: BLE001
             pass
 
     def raw_message(self, mid: str) -> str:
         try:
-            with urllib.request.urlopen(f"{self.url}/api/v1/message/{mid}/raw", timeout=15) as response:
+            with urllib.request.urlopen(f"{self.url}/api/v1/message/{mid}/raw", timeout=15) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 return response.read().decode(errors="replace")
         except Exception:  # noqa: BLE001
             return ""
@@ -98,7 +98,7 @@ class FixtureMailSource(MailSource):
         self.base = base
 
     def _get(self, path: str) -> dict:
-        with urllib.request.urlopen(f"{self.base}{path}", timeout=10) as response:
+        with urllib.request.urlopen(f"{self.base}{path}", timeout=10) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return json.loads(response.read().decode())
 
     def messages(self, limit: int = 100) -> list[dict]:
@@ -113,6 +113,6 @@ class FixtureMailSource(MailSource):
     def delete_all(self) -> None:
         request = urllib.request.Request(f"{self.base}/__fixture/mailbox", method="DELETE")
         try:
-            urllib.request.urlopen(request, timeout=5)
+            urllib.request.urlopen(request, timeout=5) # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         except Exception:  # noqa: BLE001
             pass

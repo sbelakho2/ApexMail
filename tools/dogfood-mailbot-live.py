@@ -168,7 +168,7 @@ def cp_call(base: str, method: str, path: str, body=None, key: str | None = None
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=30) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return response.status, response.read().decode(errors="replace")
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode(errors="replace")
@@ -177,7 +177,7 @@ def cp_call(base: str, method: str, path: str, body=None, key: str | None = None
 
 
 def mailpit_messages(limit: int = 200) -> list[dict]:
-    with urllib.request.urlopen(
+    with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         f"http://127.0.0.1:8025/api/v1/messages?limit={limit}", timeout=15
     ) as response:
         return json.loads(response.read().decode()).get("messages", [])

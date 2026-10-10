@@ -158,7 +158,7 @@ def call(base: str, host: str, method: str, path: str, body=None, cookie=None,
         headers["Cookie"] = cookie
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return response.status, response.read().decode(errors="replace"), dict(response.headers)
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode(errors="replace"), dict(error.headers)
@@ -183,7 +183,7 @@ def csrf_session(base: str, host: str) -> tuple[str, str]:
 
 
 def mailpit_links(recipient: str, subject_contains: str, mailpit: str) -> list[str]:
-    with urllib.request.urlopen(f"{mailpit}/api/v1/messages?limit=50", timeout=15) as response:
+    with urllib.request.urlopen(f"{mailpit}/api/v1/messages?limit=50", timeout=15) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         listing = json.loads(response.read().decode())
     for message in listing.get("messages", []):
         to = [t.get("Address", "") for t in message.get("To", [])]
@@ -191,7 +191,7 @@ def mailpit_links(recipient: str, subject_contains: str, mailpit: str) -> list[s
             continue
         if subject_contains.lower() not in (message.get("Subject") or "").lower():
             continue
-        with urllib.request.urlopen(
+        with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             f"{mailpit}/api/v1/message/{message['ID']}", timeout=15
         ) as response:
             body = json.loads(response.read().decode())
@@ -466,7 +466,7 @@ def ai_classify(args, tenant: str, body: str, headers: dict) -> tuple[int, dict 
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            with urllib.request.urlopen(request, timeout=args.timeout) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 return response.status, json.loads(response.read().decode()), ""
         except urllib.error.HTTPError as error:
             return error.code, None, error.read().decode(errors="replace")[:200]

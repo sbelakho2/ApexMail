@@ -204,21 +204,21 @@ def db_one(sql: str) -> str:
 
 def mailpit_messages(limit: int = 100) -> list[dict]:
     try:
-        with urllib.request.urlopen(f"{MAILPIT}/api/v1/messages?limit={limit}", timeout=15) as r:
+        with urllib.request.urlopen(f"{MAILPIT}/api/v1/messages?limit={limit}", timeout=15) as r: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return json.loads(r.read().decode()).get("messages", [])
     except Exception:  # noqa: BLE001
         return []
 
 
 def mailpit_message(mid: str) -> dict:
-    with urllib.request.urlopen(f"{MAILPIT}/api/v1/message/{mid}", timeout=15) as r:
+    with urllib.request.urlopen(f"{MAILPIT}/api/v1/message/{mid}", timeout=15) as r: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         return json.loads(r.read().decode())
 
 
 def mailpit_delete_all() -> None:
     req = urllib.request.Request(f"{MAILPIT}/api/v1/messages", method="DELETE")
     try:
-        urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=10) # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
     except Exception:  # noqa: BLE001
         pass
 

@@ -1510,7 +1510,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                      "X-ApexMail-Webhook-Id": row["id"]},
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=10) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 ok = 200 <= response.status < 300
         except Exception:  # noqa: BLE001
             ok = False

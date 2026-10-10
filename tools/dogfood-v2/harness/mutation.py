@@ -259,7 +259,7 @@ class Mutant:
                     pass
                 raise RuntimeError(f"mutant api-server exited early:\n{tail}")
             try:
-                with urllib.request.urlopen(url, timeout=2) as response:
+                with urllib.request.urlopen(url, timeout=2) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                     if response.status == 200:
                         return
             except Exception:  # noqa: BLE001

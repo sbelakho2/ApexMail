@@ -187,6 +187,6 @@ def _fixture_post(cfg: Config, path: str, body: dict) -> None:
         headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
-        urllib.request.urlopen(request, timeout=10).read()
+        urllib.request.urlopen(request, timeout=10).read() # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
     except Exception as error:  # noqa: BLE001
         raise RuntimeError(f"fixture call {path} failed: {error}") from error

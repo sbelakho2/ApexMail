@@ -82,7 +82,7 @@ def http(
             time.sleep(0.9)  # stay under the adaptive per-IP DDOS limiter (5-min baseline window)
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                 text = resp.read().decode(errors="replace")
                 return resp.status, _maybe_json(text), dict(resp.headers)
         except urllib.error.HTTPError as e:
