@@ -442,11 +442,16 @@ services:
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_MAX_PER_MINUTE: ${RATE_LIMIT_MAX_PER_MINUTE:-1000}
       # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
-      # Disabled in development. Set KIWI_ENABLED=true to enforce CAPTCHA
-      # challenges on login/signup. The dev secret MUST satisfy the crate's
-      # HMAC minimum (16 bytes): a short secret makes EVERY challenge
-      # issuance fail (kiwicaptcha SignError::WeakSecret).
-      KIWI_ENABLED: "false"
+      # ENABLED in development: the dev stack runs the REAL flow — every auth
+      # page renders the nonce'd widget (which solves automatically in the
+      # browser) and every auth form verifies the token server-side, exactly
+      # as production does. The prod overlay defaults to true as well, so the
+      # dev stack now exercises the same code path. The dev secret MUST
+      # satisfy the crate's master-key minimum (32 bytes,
+      # kiwicaptcha::keys::MIN_MASTER_BYTES): a short secret makes EVERY
+      # challenge issuance fail (SignError::KeyTooShort) and the auth pages
+      # would show a captcha outage.
+      KIWI_ENABLED: "true"
       KIWI_SECRET_KEY: ${KIWI_SECRET_KEY:-dev-kiwi-secret-not-for-production}
       # ── UI surface routing (Host header → SSR surface) ────────────────────
       # The .env "UI Surface Routing" block was inert: nothing passed these

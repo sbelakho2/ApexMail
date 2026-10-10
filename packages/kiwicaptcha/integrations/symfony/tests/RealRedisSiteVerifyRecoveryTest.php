@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -179,8 +180,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-000000000001';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
@@ -195,7 +196,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
             self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-            self::assertNull($store->stored($backendId, $uuid), 'the lost reply must NOT finalize the claim');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the lost reply must NOT finalize the claim');
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the transition EXECUTED on real Redis');
             self::assertSame(
@@ -248,11 +249,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-0000000000e1';
-        $staticBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $effectiveBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
+        $staticBackendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $effectiveBackendId = hash_hmac('sha256', 'login|1|', self::SITEVERIFY_SECRET);
         self::assertNotSame($staticBackendId, $effectiveBackendId, 'precondition: the effective epoch must differ from the static one');
-        $staticKey = '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
-        $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
+        $staticKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
+        $effectiveKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
         $probe->del([$effectiveKey, $staticKey]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
@@ -274,7 +275,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
-            self::assertNull($store->stored($effectiveBackendId, $uuid), 'the lost reply must NOT finalize the claim');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($effectiveBackendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the lost reply must NOT finalize the claim');
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the transition EXECUTED on real Redis');
             self::assertSame(
@@ -331,8 +332,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         self::assertNotSame($token, $wrongToken);
 
         $uuid = 'c0ffee00-0000-4000-8000-000000000002';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -343,7 +344,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
-            self::assertNull($store->stored($backendId, $uuid), 'the lost reply must NOT finalize the claim');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $wrongToken), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the lost reply must NOT finalize the claim');
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
             self::assertSame(
@@ -364,7 +365,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $after = $storage->consumedState($nonce);
             self::assertNotNull($after?->consumedResult, 'the resumed invalid outcome must be committed');
             self::assertSame(false, $after->consumedResult->valid);
-            $stored = $store->stored($backendId, $uuid);
+            $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $wrongToken), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($stored, 'a failed resumed verification is ALSO finalized');
             self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
 
@@ -389,8 +390,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, $challenge] = $this->issueArgon($storage);
         $nonce = $challenge->nonce;
         $uuid = 'c0ffee00-0000-4000-8000-000000000003';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -446,7 +447,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // finalize) never WAIT.
         $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient(self::redisTestUrl(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $store = new RedisSiteVerifyIdempotencyStore($counting, 'ci-idem-wait', 3, 1, 100);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         // A fresh key per run: the previous run's claim (whose WAIT threw
         // after the write landed) must not turn this run's claim into
         // pending_same.
@@ -456,7 +457,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // fails closed on this replica-less server: 0 of 1 acked).
         $waitsBefore = \count($counting->waits());
         try {
-            $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
+            $store->claim($backendId, $key, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'), null, null);
             self::fail('the claim WAIT must fail closed on a replica-less server');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
             // the fail-closed barrier fired ✓
@@ -466,7 +467,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // The claim landed (the WAIT comes after the write): a second
         // claim with the same hash is pending_same — the read-only
         // outcome never WAITs.
-        [$claim2] = $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
+        [$claim2] = $store->claim($backendId, $key, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'), null, null);
         self::assertSame(IdempotencyClaim::PendingSame, $claim2);
         self::assertSame($waitsBefore + 1, \count($counting->waits()), 'pending_same never WAITs');
 
@@ -476,7 +477,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // WAIT-enabled store.
         $key2 = sprintf('223e4567-e89b-42d3-a456-42661417%04d', random_int(0, 9999));
         $plain = new RedisSiteVerifyIdempotencyStore($counting, 'ci-idem-wait', 3);
-        [, $owner2] = $plain->claim($backendId, $key2, 'hash-b', 300, 'ip:127.0.0.1', null, null);
+        [, $owner2] = $plain->claim($backendId, $key2, hash('sha256', 'hash-b'), 300, hash('sha256', 'ip:127.0.0.1'), null, null);
         try {
             $store->renew($backendId, $key2, (string) $owner2);
             self::fail('the renewal WAIT must fail closed');
@@ -486,11 +487,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         // finalize: the successful finalize WAITs; a refused finalize
         // (the wrong owner) returns false and never WAITs.
-        $refused = $store->finalize($backendId, $key2, 'hash-b', 'wrong-owner', ['success' => true]);
+        $refused = $store->finalize($backendId, $key2, hash('sha256', 'hash-b'), 'wrong-owner', ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
         self::assertFalse($refused, 'a refused finalize returns false');
         self::assertSame($waitsBefore + 2, \count($counting->waits()), 'a refused finalize never WAITs');
         try {
-            $store->finalize($backendId, $key2, 'hash-b', (string) $owner2, ['success' => true]);
+            $store->finalize($backendId, $key2, hash('sha256', 'hash-b'), (string) $owner2, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::fail('the successful finalize WAIT must fail closed');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
         }
@@ -502,7 +503,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // (The finalize's own WAIT threw, so the completed record's
         // replication is unproven; the acceptance read re-checks it.)
         try {
-            $store->stored($backendId, $key2);
+            $store->storedForOperation($backendId, $key2, hash('sha256', 'hash-b'), hash('sha256', 'ip:127.0.0.1'), '');
             self::fail('the stored-success acceptance must re-establish the barrier and fail closed');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
         }
@@ -524,8 +525,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $record = $storage->find($nonce);
         self::assertNotNull($record);
         $uuid = 'c0ffee00-0000-4000-8000-000000000004';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         // A short fixed store lease (1s) keeps the takeover instant; the
         // waiter bound (0.5s) stays below it (the per-request occupancy bound).
@@ -575,9 +576,9 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 return false;
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
             {
-                return $this->inner->stored($backendId, $idempotencyKey);
+                return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
             }
         };
 
@@ -600,7 +601,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 'the operation identity lands atomically with the real-Redis state flip',
             );
             self::assertNull($consumed->consumedResult, 'the Expired outcome is NEVER committed — the record stays consumed-without-result');
-            self::assertNull($store->stored($backendId, $uuid), 'the owner crashed BEFORE finalizing the idempotency record');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the owner crashed BEFORE finalizing the idempotency record');
 
             // Wait past the signed expiry (5s TTL) AND the 1s lease.
             sleep(7);
@@ -641,9 +642,9 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, , $nonce] = $this->issueSha($storage);
         $uuidA = 'c0ffee00-0000-4000-8000-000000000005';
         $uuidB = 'c0ffee00-0000-4000-8000-000000000006';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyA, $idemKeyB]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -699,10 +700,10 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $secret1 = 'secret-one-'.str_repeat('a', 16);
         $secret2 = 'secret-two-'.str_repeat('b', 16);
         $uuid = 'c0ffee00-0000-4000-8000-000000000007';
-        $backendId1 = hash('sha256', $secret1.'|login|0|');
-        $backendId2 = hash('sha256', $secret2.'|login|0|');
-        $idemKey1 = '{kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
-        $idemKey2 = '{kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
+        $backendId1 = hash_hmac('sha256', 'login|0|', $secret1);
+        $backendId2 = hash_hmac('sha256', 'login|0|', $secret2);
+        $idemKey1 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
+        $idemKey2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
         $probe->del([$idemKey1, $idemKey2]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -749,8 +750,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-000000000008';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -787,8 +788,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
         $uuidB = 'c0ffee00-0000-4000-8000-000000000009';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyB]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
 
@@ -858,7 +859,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
             self::assertSame(503, $keyedResponse->getStatusCode(), 'a keyed replay of a no-key redemption must NEVER resume');
-            self::assertNull($store->stored($backendId, $uuidB), 'the keyed replay must not finalize anything');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the keyed replay must not finalize anything');
             self::assertNull($storage->consumedState($nonce)?->consumedResult);
         } finally {
             $probe->del([$idemKeyB, 'kiwicaptcha:'.$nonce]);
@@ -879,8 +880,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             [$token, $challenge] = $this->issueArgon($storage);
             $nonce = $challenge->nonce;
             $uuid = 'c0ffee00-0000-4000-8000-00000000000a';
-            $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-            $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+            $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+            $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
             $probe->del([$idemKey]);
             $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
             $lost = $this->lostConsumeReplyStorage($storage);
@@ -912,7 +913,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame(503, $gatedResponse->getStatusCode(), 'admission exhaustion during the resume must map to the retryable 503');
             self::assertSame(['internal-error'], json_decode((string) $gatedResponse->getContent(), true)['error-codes']);
             self::assertNull($storage->consumedState($nonce)?->consumedResult, 'admission rejection must NOT commit anything');
-            self::assertNull($store->stored($backendId, $uuid), 'the admission rejection must NOT finalize');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the admission rejection must NOT finalize');
 
             // Capacity freed: the next same-key retry resumes to the
             // original success.
@@ -939,8 +940,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-00000000000b';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -1036,8 +1037,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-00000000000c';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);

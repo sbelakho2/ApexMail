@@ -1,0 +1,33 @@
+# KiwiCaptcha ASN dataset sample, format version 1 (tab-separated).
+#
+# A free, redistributable export (a public routing-table dump or the free
+# IPtoASN dataset) is the production source; this file is the versioned
+# test fixture that covers the cross-language resolution vectors. It is
+# read from local disk only. Accepted row shapes (fields beyond the ASN
+# are ignored metadata):
+#   first_ip <TAB> last_ip <TAB> asn
+#   first_ip <TAB> last_ip <TAB> asn <TAB> cc <TAB> registry <TAB> allocated
+#   registry <TAB> first_ip <TAB> last_ip <TAB> asn <TAB> cc <TAB> allocated
+# Blank lines and #-comment lines are skipped. A row that fails
+# validation (unparsable IP, mixed family, first above last, an ASN
+# outside 1..4294967294) is skipped and counted as malformed.
+192.0.2.0	192.0.2.255	64496
+198.18.0.0	198.19.255.255	64497	us	arin	2024-01-15
+198.51.100.0	198.51.100.127	64498	us	arin	2024-02-01
+198.51.100.128	198.51.100.255	64498	us	arin	2024-02-01
+198.51.101.0	198.51.101.63	64499	us	arin	2024-02-02
+203.0.113.0	203.0.113.127	64500	fr	ripencc	2024-03-01
+203.0.113.200	203.0.113.255	64501	de	ripencc	2024-03-02
+ripencc	2001:db8:1::	2001:db8:1:ffff:ffff:ffff:ffff:ffff	64502	int	2024-04-01
+2001:db8:2::	2001:db8:2:ffff:ffff:ffff:ffff:ffff	64503	ch	ripencc	2024-04-02
+2001:db8:3:8000::	2001:db8:3:ffff:ffff:ffff:ffff:ffff	64504	jp	apnic	2024-04-03
+2001:db8:aaaa::	2001:db8:aaaa:ffff:ffff:ffff:ffff:ffff	64505	br	lacnic	2024-04-04
+2620:fe::fe:fe	2620:fe::fe:fe	64506	global	ripencc	2024-05-01
+198.51.101.64	198.51.101.127	64510	ca	arin	2024-05-02
+# Malformed rows below: skipped per-row, counted in the dataset info.
+not-an-ip	192.0.2.99	64496
+192.0.2.0	not-an-ip	64496
+203.0.113.5	203.0.113.1	64500
+2001:db8:1::	198.51.100.0	64498
+192.0.2.0	192.0.2.255	zero
+192.0.2.0	192.0.2.255	0

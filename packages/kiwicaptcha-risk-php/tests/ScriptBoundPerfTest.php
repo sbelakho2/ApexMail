@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk\Tests;
 
 use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
+use KiwiCaptcha\Risk\RiskAction;
 use Predis\Client;
+use Predis\Command\CommandInterface;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -49,6 +51,54 @@ final class ScriptBoundPerfTest extends TestCase
             self::fail("cannot read bundled script at resources/{$file}");
         }
         return $script;
+    }
+
+    /**
+     * The calibrator ships script bytes only on the first use per script
+     * and on a NOSCRIPT repair (SCRIPT LOAD). Every steady-state call is
+     * an EVALSHA of the cached 40-char sha, never a full-body EVAL of the
+     * multi-kilobyte script — the same cached-sha pattern the state store
+     * applies.
+     */
+    public function testCalibratorShipsScriptBytesOnlyOnNoscriptRepair(): void
+    {
+        $url = getenv('RISK_REDIS_URL');
+        if (!is_string($url) || $url === '') {
+            self::markTestSkipped('RISK_REDIS_URL not set');
+        }
+        $spy = new CommandSpyClient($url);
+        $c = new AggregateCalibrator($spy, namespace: $this->namespace(), samplingMode: 'complete');
+        $hour = intdiv($this->nowMs(), 3_600_000);
+
+        // First use of register_decision.lua and confirm.lua: one SCRIPT
+        // LOAD each; every following call is a bare EVALSHA.
+        $c->recordReceipt('sbp-1', 1, 1, RiskAction::Sha20, 100, 1, $hour);
+        $c->recordReceipt('sbp-2', 1, 1, RiskAction::Sha20, 100, 1, $hour);
+        $c->confirmOutcome('sbp-1', false);
+        $c->confirmOutcome('sbp-2', false);
+
+        $tally = static function (CommandSpyClient $spy): array {
+            $out = ['SCRIPT' => 0, 'EVAL' => 0, 'EVALSHA' => 0];
+            foreach ($spy->commands as $id) {
+                if (isset($out[$id])) {
+                    $out[$id]++;
+                }
+            }
+            return $out;
+        };
+        $before = $tally($spy);
+        self::assertSame(0, $before['EVAL'], 'the calibrator must never ship the full script body via EVAL');
+        self::assertSame(2, $before['SCRIPT'], 'exactly one SCRIPT LOAD per script on first use');
+        self::assertSame(4, $before['EVALSHA'], 'every script invocation is a cached-sha EVALSHA');
+
+        // A server-side script-cache flush forces one NOSCRIPT repair:
+        // exactly one more SCRIPT LOAD, still no full-body EVAL.
+        AggregateCalibrator::createClient($url)->script('FLUSH');
+        $c->recordReceipt('sbp-3', 1, 1, RiskAction::Sha20, 100, 1, $hour);
+        $after = $tally($spy);
+        self::assertSame(0, $after['EVAL'], 'the repair path must reload the sha, never EVAL the body');
+        self::assertSame(3, $after['SCRIPT'], 'the NOSCRIPT repair ships the script bytes exactly once more');
+        self::assertSame(6, $after['EVALSHA'], 'the repair call issues the failed EVALSHA plus the retried EVALSHA');
     }
 
     private function namespace(): string
@@ -196,5 +246,18 @@ final class ScriptBoundPerfTest extends TestCase
             $meanUs,
             sprintf('calibration.lua average %.2f µs exceeds the %.0f ms guard', $meanUs, self::AVG_BUDGET_MS)
         );
+    }
+}
+
+/** Predis client recording every command id executed (no body). */
+final class CommandSpyClient extends Client
+{
+    /** @var list<string> */
+    public array $commands = [];
+
+    public function executeCommand(CommandInterface $command)
+    {
+        $this->commands[] = $command->getId();
+        return parent::executeCommand($command);
     }
 }

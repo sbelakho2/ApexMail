@@ -1,0 +1,15 @@
+{
+  "$schema": "kiwicaptcha.rsw-identity-v1/1",
+  "format_version": 1,
+  "description": "The one canonical rsw modulus identity fixture: the shared 2048-bit modulus of both language test suites (packages/kiwicaptcha-php RswFixture::MODULUS_N_B64 and packages/kiwicaptcha rsw::fixtures::MODULUS_N_B64, the base64 of tools/rsw-keygen's FIXTURE_N_HEX) with the identity values every component must agree on. rsw_modulus_n_sha256 is the canonical identity: lowercase-hex SHA-256 of the DECODED 256-byte modulus, exactly what the rsw-keygen prints as rsw_modulus_n_sha256 (the PHP RswModulusIdentity::fingerprint, the Rust rsw::modulus_fingerprint_hex). legacy_base64_text_sha256 is the historical pre-migration PHP rule (SHA-256 of the base64 TEXT), a clearly named legacy alias accepted only for identity-bearing records below protocol v5. The fixture is asserted by the PHP RswModulusIdentityTest, the Rust rsw identity test and the rsw-keygen fixture test.",
+  "modulus_n_b64": "sL1Mk2YZ4BnznBgWe2YB3uOZ+KFN/VETl1T0H9zuWkP54/nAN8sgPhqozDrRCVQxdJc5IDgkh9EemAGzYjku+zqv2fdryfy5iHbtQEhkHJVt+5f/6yxrZDvHUMhgDRAmLe7rRjEIZC8GqcfcbQyVECgxzNfd3FE+ATeuxc8wKafjUtQ/rvizFBJCo5L0r4U67JDooXVt4yTLtRsoFK3WZBOKIOSZ+E0vZJDt2ddeDSluS/qaqZ5C3dSVeaSyaelX8dGpmovr8xClC+9SKsFnMc+6m9WBo2CsCSpJGk3LZM2847HM5/r2gfmNdN5zRecjEY5MLLEQ/34JinuMtMJpuw==",
+  "lambda_b64": "WF6mSbMM8Az5zgwLPbMA73HM/FCm/qiJy6p6D+53LSH88fzgG+WQHw1UZh1ohKoYukuckBwSQ+iPTADZsRyXfZ1X7Pu15P5cxDt2oCQyDkq2/cv/9ZY1sh3jqGQwBogTFvd1oxiEMheDVOPuNoZKiBQY5mvu7iifAJvXYueYFNMcEwMJdHQi8lgNFBJMwNN+267oViuNdvXRtCLx0MeOSiIPOvDNnLU0Ba4bJg5mTXLY9llIMPtOuHU5BiN8E7IY8kKCdYlpJTgGqv+uu5aNS/SPQl3sMR8dIo3zn7wZhcsMyzJ1n/dLZHNSwXs3QX6XQU+Bx8OVz5pmJYPTJUdsEA==",
+  "rsw_modulus_n_sha256": "8aa0239a5d27b93ceff3317fcee8ef9ac59510685178e6f34d0f07decc075fc2",
+  "legacy_base64_text_sha256": "f1f2a6ea53d328d7e7f0a4176c7a1f8afc319c94d8e993bb201c92c313e4c445",
+  "secondary": {
+    "description": "A second generated trapdoor pair, published here for the A-bound-record / B-configured-verifier negative tests only (an attacker-computed B proof for an A-bound record must never verify). Test material; never deploy.",
+    "modulus_n_b64": "gErZx6ByUHUa/gVrpiSDgLqurJepEQIdA3j5004QK2SXCyOAeeleXeXhzc+llE/IB7IyYuMEy+w2lQDfxLYkcP1ajKmmL1VUGG6DFfBOlJBa2cexg/v2Moc2e2sWFunXRzgtGFi0rX9kAJprkAwkbkoTP+sv8Tq88zDGdoQAPzOQI08WjGhq/Gj6ARJ7hEgNjg7RVTXzj5lh8ze+v0JQqx6KDwE9Weuwd89eASfce/cFvjl6C0gz1NPMc6kmT3XQSUEIrV7lqR5F9exY7LVkEcdikMeAETXT0xNIEpcAdwpg2mCgCrJP9M+iPFdVgLrmmEfitJYbsoL3trw3hcQ/5w==",
+    "lambda_b64": "DNRI+lzYOz7pGWbxKjbZ80XeRHWQ6BnPs4wY+4fOar1CTenzP2QjCWPJx8f29Tstml6eo30aFGRr27NJk6vQcbLvdHddayIiAnFzgjGhdUGir2DE85kyOEC4pfEbzxdiU+wEgm9FRIy9M0KkWzRqCwdoUzEeZOxGGFGtckBmbLg25PWt1wFV17OHzYSaBcJP2YhdDuSSC8fKFjzbcgFsB1+GU+oLV9eBNQwNt3KLcbnMDc4f2Yg4craAjh9jJpllzAkhMLcFlVmTR0nTmAsyZO9YaWRbnqrpGxcY8RYrKbSFbXTt4VgtLxaaErk6osZQcYwMrHXZEuQsnz4o0nIQ8A==",
+    "rsw_modulus_n_sha256": "e6f0de227d062baeb7d7c0273c5b59abfd15bc9c6c680e82bd815da1c93ce7ae"
+  }
+}

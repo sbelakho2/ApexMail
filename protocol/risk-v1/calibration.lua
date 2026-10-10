@@ -4,17 +4,21 @@
 -- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     25 (24 hourly buckets + 1 rate-limit state)
 --   max Redis calls:      30 (24 HGETALL + 1 TIME + 2 HGET + 3 HSET)
---   max collection cardinality: 12 flat fields per bucket hash (6 fields
+--   max collection cardinality: 16 flat fields per bucket hash (8 fields
 --                           as flat HGETALL pairs); 25 HGETALL-equivalent
---                           reads of the fixed 6-field shape — no
+--                           reads of the fixed 8-field shape — no
 --                           attacker-sized collections.
 --
 -- KEYS[1..24]  DECISION-TIME hourly score buckets for one scope (hash;
---              fields legit_count / legit_score_sum / abuse_count /
---              abuse_score_sum / sample_total / sample_resolved — exact
---              scores, not band-quantized; the sample counters live in
---              the SAME scope/hour buckets so scope, window, label
---              population and resolution population are one cohort)
+--              fields legit_count / legit_score_sum / legit_above_sum /
+--              abuse_count / abuse_score_sum / abuse_below_sum /
+--              sample_total / sample_resolved — exact scores, not
+--              band-quantized; the sample counters live in the SAME
+--              scope/hour buckets so scope, window, label population and
+--              resolution population are one cohort). The clipped sums
+--              (legit_above_sum, abuse_below_sum) are accumulated per
+--              sample against the decision boundary T; a legacy bucket
+--              without them reads as 0.
 -- KEYS[25]     rate-limit state (hash; fields bias_mp / ts)
 -- ARGV[1]      now (epoch ms — informational; the script uses its own
 --              Redis TIME for the rate-limit clock)
@@ -26,20 +30,27 @@
 -- ARGV[7]      false_positive_cost (float, default 1.0)
 -- ARGV[8]      false_negative_cost (float, default 2.0)
 --
--- CLASS-NORMALIZED exact score calibration (volume-independent):
---   FP mean = legit_score_sum / legit_count      (0 when no legit samples)
---   FN mean = (abuse_count*1000 - abuse_score_sum) / abuse_count
---                                               (0 when no abuse samples)
+-- BOUNDARY-RELATIVE class-normalized exact score calibration
+-- (volume-independent). T is the decision boundary: the score where the
+-- default ladder leaves the SHA20 band and enters the first Argon band
+-- (action.rs: 450..=599 => sha20, 600..=749 => argon16), so a sample's
+-- distance from T measures how far the classifier landed on the wrong
+-- side of the boundary the policy actually switches on:
+--   FP mean = Σ max(0, legit_score - T) / legit_count  (0 when no legit)
+--   FN mean = Σ max(0, T - abuse_score) / abuse_count  (0 when no abuse)
 --   error   = FN mean * fn_cost - FP mean * fp_cost
 --   raw     = error * 2 / 10
 --
--- Class normalization removes label-volume dominance: 99x more legitimate
--- cases can no longer swamp the signal on their own. The fp/fn cost knobs
--- let the operator price false positives against false negatives
--- explicitly. A perfectly separating classifier (legit traffic at low
--- scores, abuse at high scores) contributes ~zero pressure; abuse
--- predicted at low risk pushes the bias up, legitimate traffic predicted
--- at high risk pushes it down.
+-- The clipped sums are accumulated weight-scaled at confirmation (and
+-- reversed/redone by correction), so the means are per-sample distances,
+-- not aggregates of the full score sums. A healthy classifier (legit
+-- around 150, abuse around 600) lands entirely on the correct side of
+-- T and contributes zero pressure; only misclassified samples (abuse
+-- below T, legitimate above T) move the bias. Class normalization still
+-- removes label-volume dominance and the fp/fn cost knobs still price
+-- the two error kinds explicitly. Samples BEFORE this change carry no
+-- clipped sums (treated as 0), so legacy buckets contribute no
+-- boundary error until they expire.
 --
 -- RANDOM-SAMPLE RESOLUTION GATE: in random_sample mode, bias adjustment
 -- is SUSPENDED (target stays 0) while the per-scope sample_total >=
@@ -64,10 +75,18 @@ local function trunc_div(n, d)
     return math.ceil(q)
 end
 
+-- The decision boundary T shared with the action ladder
+-- (score.rs action_for_score / action.rs: the score where sha20 ends and
+-- the first Argon band begins). Pinned in the Lua so both cores compute
+-- the same clipped distances.
+local BOUNDARY_T = 600
+
 local legit_count = 0
 local legit_score_sum = 0
+local legit_above_sum = 0
 local abuse_count = 0
 local abuse_score_sum = 0
+local abuse_below_sum = 0
 local sample_total = 0
 local sample_resolved = 0
 for i = 1, 24 do
@@ -83,6 +102,10 @@ for i = 1, 24 do
             abuse_count = abuse_count + value
         elseif field == 'abuse_score_sum' then
             abuse_score_sum = abuse_score_sum + value
+        elseif field == 'legit_above_sum' then
+            legit_above_sum = legit_above_sum + value
+        elseif field == 'abuse_below_sum' then
+            abuse_below_sum = abuse_below_sum + value
         elseif field == 'sample_total' then
             sample_total = sample_total + value
         elseif field == 'sample_resolved' then
@@ -121,9 +144,9 @@ if total >= tonumber(ARGV[2]) and total > 0 then
     end
     if resolved_ratio_ok then
         local fp_mean = 0
-        if legit_count > 0 then fp_mean = legit_score_sum / legit_count end
+        if legit_count > 0 then fp_mean = legit_above_sum / legit_count end
         local fn_mean = 0
-        if abuse_count > 0 then fn_mean = (abuse_count * 1000 - abuse_score_sum) / abuse_count end
+        if abuse_count > 0 then fn_mean = abuse_below_sum / abuse_count end
         local error = fn_mean * tonumber(ARGV[8]) - fp_mean * tonumber(ARGV[7])
         local raw = trunc_div(error * 2, 10)
         local max_adj = tonumber(ARGV[3])

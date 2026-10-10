@@ -233,6 +233,25 @@ final class Verifier
     private readonly ?Rsw $rsw;
 
     /**
+     * The rsw trapdoor rotation keyring, keyed by the authenticated
+     * modulus SHA-256 (see the constructor parameter).
+     *
+     * @var array<string, Rsw>
+     */
+    private array $rswByHash = [];
+
+    /**
+     * The keyring's modulus base64 per identity form (canonical
+     * fingerprint and legacy alias): the resolution re-checks that the
+     * identity under which a record arrived is an accepted form for the
+     * record's protocol version (a v5 record resolves its canonical
+     * fingerprint exactly).
+     *
+     * @var array<string, string>
+     */
+    private array $rswModulusByHash = [];
+
+    /**
      * @var bool whether the one-time non-atomic-storage warning already
      *            fired in this process (the misconfiguration is a
      *            deployment property, not a per-verification event)
@@ -268,11 +287,16 @@ final class Verifier
          */
         private ?string $region = null,
         /**
-         * The current security-policy epoch. When non-null, a record
-         * whose policy_version differs is rejected with
-         * WrongPolicyVersion: outstanding challenges die immediately on
-         * policy revocation (origin/action-policy changes, emergency
-         * revocation, compromised tenant). Null (default) disables the check.
+         * The current security-policy epoch. When non-null and no
+         * rollout floor is declared, a record whose policy_version
+         * differs is rejected with WrongPolicyVersion: outstanding
+         * challenges die immediately on policy revocation
+         * (origin/action-policy changes, emergency revocation,
+         * compromised tenant). During a declared rollout window
+         * ($policyVersionFloor) a record within
+         * [floor, expected] verifies instead, so a mixed N/N+1 fleet
+         * redeems cross-node with zero spurious rejections while the
+         * old epoch drains. Null (default) disables the check.
          */
         private ?int $expectedPolicyVersion = null,
         /**
@@ -346,6 +370,56 @@ final class Verifier
          * client.
          */
         private readonly ?string $rswLambda = null,
+        /**
+         * The tenant scope of the derived purpose keys. When non-null,
+         * the challenge-signing and IP-binding keys are derived under
+         * the per-tenant root ("kiwi/v2/tenant/" + tenant id, see
+         * {@see DerivedKeys::fromMaster()}), so tenants of a shared
+         * master secret cannot forge each other's challenges or
+         * binding tags. A tenant-scoped record fails the signature
+         * check under any other tenant or under the global keys.
+         * Null (the default) derives the global purpose keys —
+         * byte-identical behavior to the tenantless construction. Must
+         * match the narrow identifier alphabet, at most 64 bytes of
+         * [A-Za-z0-9._:-].
+         */
+        private readonly ?string $tenantId = null,
+        /**
+         * The optional rsw trapdoor rotation keyring: a map of the
+         * modulus SHA-256 (the authenticated rsw_modulus_sha256 riding
+         * each issued record) to that trapdoor's {modulus_n, lambda}
+         * pair. A record whose authenticated identity is not the active
+         * pair resolves here, so a rotation (or a mixed-node window)
+         * keeps outstanding challenges verifiable; a record whose
+         * identity is in neither fails closed (UnsupportedRswParams).
+         * An empty keyring (the default) means a rotation requires
+         * draining all outstanding rsw challenges.
+         *
+         * @var array<string, array{modulus_n: string, lambda: string}>
+         */
+        private readonly array $rswVerificationKeys = [],
+        /**
+         * The bounded legacy rsw identity migration mode (default false):
+         * while enabled, the historical base64-text identity alias stays
+         * accepted for identity-bearing records below protocol v5 and as
+         * a keyring key. Enable it only while pre-v5 identity-bearing
+         * records drain (the maximum challenge TTL plus clock skew), then
+         * leave it off: a drained deployment must refuse the temporary
+         * grammar fail-closed.
+         */
+        private readonly bool $allowLegacyRswIdentity = false,
+        /**
+         * The declared rollout-window floor of the security-policy
+         * epoch. Null (the default) keeps the strict-equality contract:
+         * a record verifies only under exactly the expected epoch. When
+         * non-null (and an expected epoch is configured), a record
+         * whose policy_version sits within [floor, expected] verifies
+         * too, so a mixed N/N+1 fleet redeems cross-node while the old
+         * epoch drains. The floor is an explicit deployment declaration
+         * only — nothing derives it from central state, and a floor
+         * above the expected epoch accepts nothing (fail closed).
+         */
+        private ?int $policyVersionFloor = null,
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -362,9 +436,9 @@ final class Verifier
             ));
         }
         foreach ($secretsByKid as $kid => $secret) {
-            if (!\is_int($kid) || $kid < 1 || !\is_string($secret) || \strlen($secret) < 16) {
+            if (!\is_int($kid) || $kid < 1 || !\is_string($secret) || \strlen($secret) < Config::MIN_SECRET_BYTES) {
                 throw new \InvalidArgumentException(
-                    'secretsByKid keys must be positive integer kid values 1..N with secrets of at least 16 bytes'
+                    'secretsByKid keys must be positive integer kid values 1..N with secrets of at least 32 bytes'
                 );
             }
         }
@@ -385,9 +459,45 @@ final class Verifier
                 'rswModulusN and rswLambda must be configured together (the rsw trapdoor pair)'
             );
         }
+        if ($tenantId !== null && !Config::isValidIdentifier($tenantId, 64)) {
+            throw new \InvalidArgumentException(
+                'tenantId must be 1-64 characters of [A-Za-z0-9._:-] when set'
+            );
+        }
         $this->rsw = $rswModulusN !== null && $rswLambda !== null
             ? new Rsw($rswModulusN, $rswLambda)
             : null;
+        foreach ($rswVerificationKeys as $hash => $pair) {
+            if (!\is_string($hash) || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $hash) !== 1
+                || !\is_array($pair)
+                || !\is_string($pair['modulus_n'] ?? null) || $pair['modulus_n'] === ''
+                || !\is_string($pair['lambda'] ?? null) || $pair['lambda'] === ''
+            ) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys must map a 64-hex modulus SHA-256 to a {modulus_n, lambda} pair'
+                );
+            }
+            // The keyring key must be an identity form of the paired
+            // modulus under THE active mode: the canonical fingerprint
+            // always, the legacy base64-text alias only while the
+            // migration mode is enabled.
+            if (!RswModulusIdentity::matches($hash, $pair['modulus_n'], $this->allowLegacyRswIdentity)) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n'
+                    .' (or its legacy base64-text alias while allowLegacyRswIdentity is enabled)'
+                );
+            }
+            $trapdoor = new Rsw($pair['modulus_n'], $pair['lambda']);
+            $forms = $this->allowLegacyRswIdentity
+                ? RswModulusIdentity::allFingerprints($pair['modulus_n'])
+                : [RswModulusIdentity::fingerprint($pair['modulus_n'])];
+            foreach ($forms as $identity) {
+                $this->rswByHash[$identity] = $trapdoor;
+                $this->rswModulusByHash[$identity] = $pair['modulus_n'];
+            }
+            $this->rswByHash[$hash] = $trapdoor;
+            $this->rswModulusByHash[$hash] = $pair['modulus_n'];
+        }
         // A non-atomic storage (the {@see NonAtomicStorageInterface}
         // capability marker, e.g. the PSR-6 backend) keeps best-effort
         // single-use only: two racing requests can both win the consume.
@@ -527,6 +637,12 @@ final class Verifier
         // reads of one verification.
         $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
 
+        // The execution evidence of this token, built once and shared by
+        // the cheap phase, the compositional replay gate and every other
+        // execution-binding consumer below (the immutable value is the
+        // same at each site; only one instance is needed).
+        $evidence = ExecutionEvidence::fromToken($token);
+
         // The record source is a single snapshot for storages with the
         // {@see ChallengeRuntimeStateReadableInterface} capability:
         // runtimeState() decodes the full
@@ -623,7 +739,7 @@ final class Verifier
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
         //
-        $failure = $this->cheapPhaseCheck($peek, $token->nonce, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, ExecutionEvidence::fromToken($token));
+        $failure = $this->cheapPhaseCheck($peek, $token->nonce, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $evidence);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
@@ -660,7 +776,7 @@ final class Verifier
                 // the evidence stays preserved by the fused transition,
                 // and only a clean pass falls through to the consumed
                 // branch.
-                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token));
+                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs);
                 if ($hard !== null) {
                     return VerifyOutcome::invalid($hard);
                 }
@@ -701,8 +817,8 @@ final class Verifier
                     // the exempt circumstance may not mask a hard verdict
                     // that also applies to this request. Any hard failure
                     // wins with the evidence preserved; only a clean pass
-                    // falls through to the consume branch below.
-                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token));
+                    // falls through to the consumed branch below.
+                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs);
                     if ($hard !== null) {
                         return VerifyOutcome::invalid($hard);
                     }
@@ -727,8 +843,17 @@ final class Verifier
         //    record with failing telemetry falls through to the consumed
         //    branch with its retained state preserved, and an unreadable
         //    retained state is the fail-closed StorageUnavailable with the
-        //    record kept.
-        if ($enforceTelemetry && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))) {
+        //    record kept. A runtime-state snapshot that already resolved
+        //    the Consumed kind short-circuits the cleanup entirely:
+        //    consumed is terminal, so the fused delete-if-pending eval
+        //    could never observe anything else, and the held snapshot
+        //    answers the terminal-state resolution below without the
+        //    extra eval.
+        if (
+            $enforceTelemetry
+            && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))
+            && !($runtime !== null && $runtime->kind === ChallengeRuntimeStateKind::Consumed)
+        ) {
             if ($this->storage instanceof AtomicDeleteIfPendingInterface) {
                 try {
                     $cleanup = $this->storage->deleteIfPending($token->nonce);
@@ -783,8 +908,8 @@ final class Verifier
         //     record resolves through the identical consumed-record
         //     resolution the consume-returned envelope uses via
         //     {@see self::resolveConsumedRecord()}, again with no slot
-        //     burned, from the envelope that rode on the snapshot (the
-        //     single-snapshot fix removed the earlier second GET). A backend failure
+        //     burned, from the envelope that rode on the snapshot (a
+        //     single snapshot performs exactly one GET). A backend failure
         //     on the retained read maps exactly like the find() failure:
         //     the retryable StorageUnavailable, never a new error class.
         //     A pending record falls through to the legacy admission ->
@@ -808,7 +933,7 @@ final class Verifier
                 // that produced the peek: resolve it directly, never a
                 // second read.
                 if ($runtime->consumed !== null) {
-                    return $this->resolveConsumedRecord($runtime->consumed, $token->nonce, $operationIdentity, $receiptNs);
+                    return $this->resolveConsumedRecord($runtime->consumed, $token->nonce, $operationIdentity, $receiptNs, $secretKey);
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
@@ -822,7 +947,7 @@ final class Verifier
                         return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                     }
                     if ($retained !== null) {
-                        return $this->resolveConsumedRecord($retained, $token->nonce, $operationIdentity, $receiptNs);
+                        return $this->resolveConsumedRecord($retained, $token->nonce, $operationIdentity, $receiptNs, $secretKey);
                     }
                 }
             }
@@ -889,7 +1014,7 @@ final class Verifier
                 // {@see self::resolveConsumedRecord()}, used by both this
                 // consume path and the pre-admission terminal-state
                 // check, so the two can never diverge.
-                return $this->resolveConsumedRecord($consumed, $token->nonce, $operationIdentity, $receiptNs);
+                return $this->resolveConsumedRecord($consumed, $token->nonce, $operationIdentity, $receiptNs, $secretKey);
             }
             $record = $consumed->record;
 
@@ -932,7 +1057,7 @@ final class Verifier
             // racing swap that replaced the record between peek and consume
             // must fail closed here too, so the instance that actually
             // proves the PoW is from the current policy epoch.
-            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
 
@@ -976,7 +1101,7 @@ final class Verifier
             if ($now >= $record->expiresAt) {
                 return VerifyOutcome::invalid(VerifyError::Expired);
             }
-            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
             if ($this->region !== null && $record->region !== $this->region) {
@@ -989,7 +1114,7 @@ final class Verifier
             if (!$valid) {
                 // Commit the deterministic invalid outcome (best-effort) so
                 // a retry sees the same InsufficientWork without re-deriving.
-                $this->bestEffortCommit($record->nonce, false, $record->requestBinding);
+                $this->bestEffortCommit($record, false, $consumed->operationIdentity, $consumedSecret);
 
                 return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
@@ -997,7 +1122,7 @@ final class Verifier
             // Commit the deterministic valid outcome (best-effort: a
             // storage failure must not change the outcome) so a retry
             // replays it without re-deriving.
-            $this->bestEffortCommit($record->nonce, true, $record->requestBinding);
+            $this->bestEffortCommit($record, true, $consumed->operationIdentity, $consumedSecret);
 
             return VerifyOutcome::valid(
                 $record->nonce,
@@ -1032,7 +1157,31 @@ final class Verifier
     private function recomputeValidProof(ChallengeRecord $record, SolutionToken $token): ?bool
     {
         if ($record->algorithm === PoWAlgorithm::Rsw) {
-            if ($this->rsw === null) {
+            // The authenticated trapdoor identity selects the pair: the
+            // keyring first (a rotated/mixed-node record), then the
+            // active pair (including a legacy record that predates the
+            // identity). The legacy base64-text alias resolves only a
+            // pre-v5 identity; a v5 record resolves its canonical
+            // fingerprint exactly. An identity in neither fails closed
+            // as unsupported.
+            $rsw = null;
+            if ($record->rswModulusSha256 !== null) {
+                $allowLegacyAlias = $this->allowLegacyRswIdentity && $record->protocolVersion <= 4;
+                $identity = $record->rswModulusSha256;
+                $keyringModulus = $this->rswModulusByHash[$identity] ?? null;
+                if ($keyringModulus !== null
+                    && RswModulusIdentity::matches($identity, $keyringModulus, $allowLegacyAlias)
+                ) {
+                    $rsw = $this->rswByHash[$identity];
+                } elseif ($this->rsw !== null && $this->rswModulusN !== null
+                    && RswModulusIdentity::matches($identity, $this->rswModulusN, $allowLegacyAlias)
+                ) {
+                    $rsw = $this->rsw;
+                }
+            } else {
+                $rsw = $this->rsw;
+            }
+            if ($rsw === null) {
                 return null;
             }
             // The rsw composition invariant: an rsw record's solution
@@ -1044,7 +1193,7 @@ final class Verifier
             }
 
             return hash_equals(
-                $this->rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
+                $rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
                 $token->rswProof
             );
         }
@@ -1098,7 +1247,7 @@ final class Verifier
      * StorageUnavailable, never a generic exception escaping the
      * verifier.
      */
-    private function resolveConsumedRecord(ConsumedRecord $consumed, string $tokenNonce, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
+    private function resolveConsumedRecord(ConsumedRecord $consumed, string $tokenNonce, ?string $operationIdentity, ?int $receiptNs, string $secretKey): VerifyOutcome
     {
         if ($consumed->record->nonce !== $tokenNonce) {
             // The consumed envelope was loaded by the token's nonce (the
@@ -1119,6 +1268,14 @@ final class Verifier
             && $consumed->operationIdentity !== null
             && hash_equals($consumed->operationIdentity, $operationIdentity)
         ) {
+            // The stored success must carry an authentic server-state
+            // MAC from storedSuccessAuthentic(): a storage writer who
+            // forged valid=true under the recorded identity never gets
+            // a grant. Forged or corrupt persisted state, the evidence
+            // preserved.
+            if (!$this->storedSuccessAuthentic($consumed, $secretKey)) {
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+            }
             // Failed-barrier replay guard: the consume/commit mutations
             // that produced this stored success may have landed on the
             // primary with their WAIT failing. Accepting the stored
@@ -1284,8 +1441,15 @@ final class Verifier
 
         // The server receipt clock for the resume's exposed solve
         // duration, see {@see self::measurableSolveDurationMs()}, the
-        // same receipt instant that feeds every valid-returning path below.
+        // same receipt instant that feeds every valid-returning path
+        // below and the replay gate's receipt-timing floor.
         $receiptNs = (int) (microtime(true) * 1_000_000);
+
+        // The execution evidence of this token, built once and shared by
+        // the committed-result replay gate and the cheap-phase
+        // revalidation below (the immutable value is the same at each
+        // site; only one instance is needed).
+        $evidence = ExecutionEvidence::fromToken($token);
 
         // The retained consumed state must be readable (the bundle enforces
         // the ConsumedStateReadableInterface contract at configuration time;
@@ -1348,8 +1512,14 @@ final class Verifier
         // expiry, and a same-operation recovery may legitimately come from
         // another backend network path.
         if ($consumed->consumedResult !== null) {
-            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null) {
+            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs)) !== null) {
                 return VerifyOutcome::invalid($failure);
+            }
+            if ($consumed->consumedResult->valid && !$this->storedSuccessAuthentic($consumed, $secretKey)) {
+                // A stored success without an authentic server-state
+                // MAC is forged or corrupt persisted state: never a
+                // grant, the retained envelope preserved.
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
             }
             // Failed-barrier replay guard: the committed result's writes
             // may have landed with their WAIT failing; accepting the
@@ -1410,10 +1580,10 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $token->nonce, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, ExecutionEvidence::fromToken($token));
+        $failure = $this->cheapPhaseCheck($record, $token->nonce, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $evidence);
         if ($failure !== null) {
             if ($failure->isReplayExempt()
-                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null
+                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs)) !== null
             ) {
                 return VerifyOutcome::invalid($hard);
             }
@@ -1466,7 +1636,7 @@ final class Verifier
                     return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                 }
                 if ($loserState?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance', $receiptNs);
+                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance', $receiptNs, $secretKey);
                 }
 
                 return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
@@ -1534,7 +1704,7 @@ final class Verifier
             if ($now >= $record->expiresAt) {
                 return VerifyOutcome::invalid(VerifyError::Expired);
             }
-            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
             if ($this->region !== null && $record->region !== $this->region) {
@@ -1557,9 +1727,7 @@ final class Verifier
             // same outcome either way).
             $binding = $record->requestBinding;
             try {
-                $committed = $claimOwner !== null
-                    ? $this->storage->commitResultResume($record->nonce, $valid, $binding, $claimOwner)
-                    : $this->storage->commitResult($record->nonce, $valid, $binding);
+                $committed = $this->commitConsumedResult($record, $valid, $consumed->operationIdentity, $this->secretForKey($record, $secretKey) ?? $secretKey, $claimOwner);
             } catch (\Throwable) {
                 $committed = false;
             }
@@ -1570,7 +1738,7 @@ final class Verifier
                     $after = null;
                 }
                 if ($after?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance', $receiptNs);
+                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance', $receiptNs, $secretKey);
                 }
 
                 // A genuinely missing result. With a held claim the
@@ -1638,8 +1806,13 @@ final class Verifier
      * the shared PHP/Rust spec) and the authenticated decoy name from
      * the replayed record.
      */
-    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs): VerifyOutcome
+    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs, string $secretKey): VerifyOutcome
     {
+        if ($after->consumedResult->valid && !$this->storedSuccessAuthentic($after, $secretKey)) {
+            // A stored success without an authentic server-state MAC is
+            // forged or corrupt persisted state: never a grant.
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         try {
             if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
                 $this->storage->establishReplicationFence($fenceReason);
@@ -1721,7 +1894,7 @@ final class Verifier
         // record. The protocol-vs-decoy-vs-execution grammar is total:
         // a protocol-v2 record that carries a decoy is rejected
         // explicitly (the v2 canonical never includes the
-        // `|decoy_field` segment, so the combination cannot come from a
+        // tagged `d=` segment, so the combination cannot come from a
         // conforming issuer — an armed issuance writes protocol v3),
         // and a protocol-v3 record without one is rejected too. The
         // decoy is mandatory on v3, so a signed v2 record with its
@@ -1737,17 +1910,17 @@ final class Verifier
         if ($record->protocolVersion < 1 || $record->protocolVersion > ChallengeRecord::MAX_PROTOCOL_VERSION) {
             return false;
         }
-        if ($record->protocolVersion === 2 && $record->decoyField !== null) {
-            return false;
-        }
-        if ($record->protocolVersion === 3 && $record->decoyField === null) {
-            return false;
-        }
+        // The protocol-vs-extension grammar is the one shared matrix
+        // (the decoder applies the same table at its boundary), so the
+        // verifier and the decoder can never disagree about which
+        // records are structurally valid.
         $executionPresent = $record->executionProgram !== null;
-        if (($record->protocolVersion === 2 || $record->protocolVersion === 3) && $executionPresent) {
-            return false;
-        }
-        if ($record->protocolVersion === 4 && !$executionPresent) {
+        if (!ChallengeRecord::protocolExtensionGrammarOk(
+            $record->protocolVersion,
+            $record->decoyField !== null,
+            $executionPresent,
+            $record->rswModulusSha256 !== null,
+        )) {
             return false;
         }
         $scopeLen = \strlen($record->scope);
@@ -1767,7 +1940,7 @@ final class Verifier
         if ($record->decoyField !== null && !Config::isValidDecoyFieldName($record->decoyField)) {
             return false;
         }
-        // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix:
+        // The exact armed/unarmed equivalence contract:
         // signed commitment absent <=> stored program absent, signed
         // commitment present <=> stored program present, and
         // SHA256(stored program) == the signed commitment (constant
@@ -1788,6 +1961,19 @@ final class Verifier
             }
         } elseif ($record->executionVersion !== null || $record->executionCommitment !== null) {
             return false;
+        }
+        // The authenticated rsw modulus identity: when present it must be
+        // 64 lowercase hex and may only ride an rsw record (the decoder
+        // enforces the same on the persisted path; this closes the
+        // hand-rolled-record surface). The protocol grammar above
+        // guarantees a v5 record always carries it and a v2..v4 record's
+        // identity is the pre-v5 legacy shape.
+        if ($record->rswModulusSha256 !== null) {
+            if ($record->algorithm !== PoWAlgorithm::Rsw
+                || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $record->rswModulusSha256) !== 1
+            ) {
+                return false;
+            }
         }
         $nonceBytes = base64_decode($record->nonce, true);
         if ($nonceBytes === false || \strlen($nonceBytes) !== 32) {
@@ -2065,6 +2251,14 @@ final class Verifier
      * Returns the failing hard error, or null when every hard replay
      * invariant passes. The fresh-challenge path never calls this: the
      * public first-error precedence for pending records is unchanged.
+     *
+     * The receipt-timing floor evaluates on the same receipt instant the
+     * caller's original check used ($receiptNs), never a separately
+     * timed fresh clock read: the single-receipt-instant contract of
+     * {@see self::verify()}. A replay gate that took its own clock
+     * could answer differently than the check that produced the exempt
+     * failure it re-evaluates, for a receipt that lands on the floor's
+     * boundary.
      */
     private function replaySecurityCheck(
         ChallengeRecord $record,
@@ -2072,6 +2266,7 @@ final class Verifier
         ?string $expectedScope,
         RequestBindingExpectation $expectation,
         ExecutionEvidence $executionEvidence,
+        ?int $receiptNs,
     ): ?VerifyError {
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
             return $e;
@@ -2085,7 +2280,7 @@ final class Verifier
         if (($e = $this->checkExecutionBinding($record, $executionEvidence)) !== null) {
             return $e;
         }
-        if (($e = $this->checkMinDuration($record, null)) !== null) {
+        if (($e = $this->checkMinDuration($record, $receiptNs)) !== null) {
             return $e;
         }
 
@@ -2141,20 +2336,6 @@ final class Verifier
         $signingSecret = $this->secretForKey($record, $legacySecret);
         if ($signingSecret === null) {
             return VerifyError::UnknownKid;
-        }
-        // 2. The documented 16-byte HMAC secret minimum, enforced fail
-        //    closed at the verification seam. The constructor enforces it
-        //    for secretsByKid entries; the legacy single-secret path is a
-        //    per-call parameter, and signPayloadV2() (like the Rust
-        //    production verifier's cached-key path) deliberately does not
-        //    re-check it, so without this gate a caller passing a
-        //    sub-16-byte secret would verify records that no conforming
-        //    issuer (Config enforces the same minimum) could have signed.
-        //    A short secret is a configuration fault, never an authentic
-        //    record: BadSignature, the exact mapping the Rust verifier
-        //    produces for its KeyTooShort gate.
-        if (\strlen($signingSecret) < 16) {
-            return VerifyError::BadSignature;
         }
 
         // 2. Signature re-check: reconstruct the payload from the record and
@@ -2274,8 +2455,14 @@ final class Verifier
      * binding tag (recomputed here); v1 records carry the legacy
      * stable IP hash. Both are keyed by the kid-selected secret
      * (K_ip_bind is derived from the same master secret
-     * that signed the challenge). The exempt network circumstances —
-     * deliberately excluded from the compositional replay gate.
+     * that signed the challenge, under the verifier's tenant scope
+     * when one is configured). A client IP that cannot be canonicalized
+     * at all — a non-address string, a zoned IPv6 like `fe80::1%eth0`,
+     * an empty string — can never equal the tag an issuer derived from
+     * a canonical address. Such an input resolves to the typed
+     * IpMismatch instead of an escaped exception. The exempt network
+     * circumstances, deliberately excluded from the compositional
+     * replay gate.
      */
     private function checkIpBinding(ChallengeRecord $record, ?string $clientIp, string $signingSecret): ?VerifyError
     {
@@ -2283,15 +2470,40 @@ final class Verifier
             if ($clientIp === null) {
                 return VerifyError::MissingClientIp;
             }
-            $expectedTag = $record->protocolVersion === 1
-                ? Issuer::hashIp($clientIp, $signingSecret)
-                : Issuer::bindingTag($record->nonce, $clientIp, $signingSecret);
+            try {
+                $expectedTag = $record->protocolVersion === 1
+                    ? Issuer::hashIp($clientIp, $signingSecret)
+                    : Issuer::bindingTag($record->nonce, $clientIp, $signingSecret, $this->tenantId);
+            } catch (\InvalidArgumentException) {
+                return VerifyError::IpMismatch;
+            }
             if (!hash_equals($expectedTag, $record->bindingTag)) {
                 return VerifyError::IpMismatch;
             }
         }
 
         return null;
+    }
+
+    /**
+     * Whether the record's security-policy epoch satisfies the
+     * configured expectations: no expected epoch disables the check
+     * entirely; no declared floor keeps the strict-equality contract;
+     * a declared rollout window accepts floor <= epoch <= expected. A
+     * floor above the expected epoch accepts nothing — the window is
+     * fail-closed, never a licence to verify below the newest declared
+     * epoch.
+     */
+    private function policyVersionAccepted(?int $recordVersion): bool
+    {
+        if ($this->expectedPolicyVersion === null) {
+            return true;
+        }
+        if ($this->policyVersionFloor === null) {
+            return $recordVersion === $this->expectedPolicyVersion;
+        }
+
+        return $this->policyVersionFloor <= $recordVersion && $recordVersion <= $this->expectedPolicyVersion;
     }
 
     /**
@@ -2311,9 +2523,11 @@ final class Verifier
         }
 
         // 5c. Security-policy epoch: the policy that authorized
-        //     this challenge must still be in force; the verifier rejects
-        //     records issued under a different epoch (WrongPolicyVersion).
-        if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+        //     this challenge must still be in force; outside a declared
+        //     rollout window the verifier rejects records issued under a
+        //     different epoch (WrongPolicyVersion), and during a window
+        //     only epochs within [floor, expected] verify.
+        if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
             return VerifyError::WrongPolicyVersion;
         }
 
@@ -2343,6 +2557,13 @@ final class Verifier
             return VerifyError::MalformedRecord;
         }
         $floor = max(0, $record->minDurationMs);
+        if ($floor > 0 && $record->serverMac === null) {
+            // The issuance clock is unauthenticated (no record-metadata
+            // MAC): a storage writer could have backdated it, so the
+            // floor cannot be evaluated and fails closed. The MAC itself
+            // was verified with the signature before this check.
+            return VerifyError::MalformedRecord;
+        }
         if ($floor > 0) {
             $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
             if ($receiptNs >= $record->issuedAtNs) {
@@ -2381,12 +2602,15 @@ final class Verifier
      * elapsed time cannot be measured reliably, null; beyond the
      * tolerance the record is rejected as TooFast and never reaches a
      * valid outcome. A record whose issuance clock is unknown,
-     * `issued_at_ns <= 0`, is equally unmeasurable. Sub-millisecond
+     * `issued_at_ns <= 0`, or unauthenticated (no `server_mac`, see
+     * {@see ServerStateMac}) is equally unmeasurable. Sub-millisecond
      * spans floor toward zero.
      */
     private function measurableSolveDurationMs(ChallengeRecord $record, ?int $receiptNs): ?int
     {
-        if ($record->issuedAtNs <= 0 || $receiptNs === null || $receiptNs < $record->issuedAtNs) {
+        if ($record->serverMac === null || $record->issuedAtNs <= 0 || $receiptNs === null || $receiptNs < $record->issuedAtNs) {
+            // No record-metadata MAC: the issuance clock is untrusted,
+            // so no measured duration is reported.
             return null;
         }
 
@@ -2488,12 +2712,104 @@ final class Verifier
      * consumed record degrades to ConsumeIndeterminate, which is strictly
      * safer than re-deriving a wrong outcome.
      */
-    private function bestEffortCommit(string $nonce, bool $valid, ?string $binding): void
+    private function bestEffortCommit(ChallengeRecord $record, bool $valid, ?string $operationIdentity, string $secret): void
     {
         try {
-            $this->storage->commitResult($nonce, $valid, $binding);
+            $this->commitConsumedResult($record, $valid, $operationIdentity, $secret, null);
         } catch (\Throwable) {
         }
+    }
+
+    /**
+     * Commit a consumed result. On a storage with the
+     * {@see AuthenticatedResultCommitInterface} capability the result
+     * carries the server-state MAC over the record's challenge, the
+     * verdict, the binding and the operation identity the consume
+     * transition recorded, see {@see ServerStateMac::consumedResult()}.
+     * A held resume claim selects the claim-fenced variant.
+     */
+    private function commitConsumedResult(ChallengeRecord $record, bool $valid, ?string $operationIdentity, string $secret, ?string $claimOwner): bool
+    {
+        $binding = $record->requestBinding;
+        if ($this->storage instanceof AuthenticatedResultCommitInterface) {
+            $result = new ConsumedResult(
+                $valid,
+                $binding,
+                ServerStateMac::consumedResult(ServerStateMac::key($secret, $this->tenantId), $record->challenge, $valid, $binding, $operationIdentity),
+            );
+
+            return $claimOwner !== null
+                ? $this->storage->commitAuthenticatedResultResume($record->nonce, $result, $claimOwner)
+                : $this->storage->commitAuthenticatedResult($record->nonce, $result);
+        }
+
+        return $claimOwner !== null
+            ? $this->storage->commitResultResume($record->nonce, $valid, $binding, $claimOwner)
+            : $this->storage->commitResult($record->nonce, $valid, $binding);
+    }
+
+    /**
+     * Whether a consumed record's committed success is authentic enough
+     * to replay. The stored result must be `valid=true` and carry a
+     * server-state MAC that verifies under the record's kid secret and
+     * the deployment tenant for exactly this record, binding and
+     * recorded operation identity, see
+     * {@see ServerStateMac::verifyConsumedResult()}. A storage writer
+     * without the master secret cannot produce one, so a forged stored
+     * success is refused.
+     *
+     * A result without a MAC is accepted only on a storage that cannot
+     * carry one (no {@see AuthenticatedResultCommitInterface}
+     * capability): the legacy unauthenticated residual of third-party
+     * backends. Every shipped backend has the capability.
+     *
+     * Every stored-success grant consults this gate: the verify and
+     * resume paths here, {@see ConsumedOutcomeRecovery} and the Symfony
+     * validator's ambiguous-outcome normalization.
+     *
+     * @param string                $secretKey the legacy single secret (the
+     *                                         kid set, when configured, wins)
+     * @param StorageInterface|null $storage   the storage the record was read
+     *                                         from (default: the verifier's)
+     */
+    public function storedSuccessAuthentic(ConsumedRecord $consumed, string $secretKey, ?StorageInterface $storage = null): bool
+    {
+        $result = $consumed->consumedResult;
+        if ($result === null || !$result->valid) {
+            return false;
+        }
+        if ($result->mac === null) {
+            return !(($storage ?? $this->storage) instanceof AuthenticatedResultCommitInterface);
+        }
+        $secret = $this->secretForKey($consumed->record, $secretKey);
+        if ($secret === null) {
+            return false;
+        }
+
+        return ServerStateMac::verifyConsumedResult(ServerStateMac::key($secret, $this->tenantId), $consumed);
+    }
+
+    /**
+     * The record's hostname, only when its record-metadata MAC verifies
+     * under the record's kid secret and the deployment tenant (see
+     * {@see ServerStateMac::verifyRecordMeta()}); null otherwise. The
+     * hostname is not part of the signed canonical, so an echo of it
+     * (the siteverify response) must not trust an unauthenticated read.
+     *
+     * @param string $secretKey the legacy single secret (the kid set,
+     *                          when configured, wins)
+     */
+    public function authenticatedHostname(ChallengeRecord $record, string $secretKey): ?string
+    {
+        if ($record->serverMac === null) {
+            return null;
+        }
+        $secret = $this->secretForKey($record, $secretKey);
+        if ($secret === null || !ServerStateMac::verifyRecordMeta(ServerStateMac::key($secret, $this->tenantId), $record)) {
+            return null;
+        }
+
+        return $record->hostname;
     }
 
     /**
@@ -2507,6 +2823,19 @@ final class Verifier
     public function setExpectedPolicyVersion(int $policyVersion): void
     {
         $this->expectedPolicyVersion = $policyVersion;
+    }
+
+    /**
+     * Config wiring seam for the declared rollout-window floor: the
+     * bundle's risk.policy_rollout_min_epoch is applied once here at
+     * verifier construction. Deliberately not touched by the
+     * security-epoch monitor — the floor is an explicit deployment
+     * declaration, never derived from central state, and a monitor
+     * bump of the expected epoch must not narrow (or drop) it.
+     */
+    public function setPolicyVersionFloor(?int $policyVersionFloor): void
+    {
+        $this->policyVersionFloor = $policyVersionFloor;
     }
 
     /**
@@ -2592,23 +2921,32 @@ final class Verifier
      * whole record is authentic; used in the cheap phase and re-applied to
      * the consumed instance (the proof-phase re-check). When the record
      * carries an armed decoy (honeypot) field, the name is covered too:
-     * it is the `|<decoy_field>` segment appended after the kid
+     * it is the tagged `|d={decoy_field}` segment appended after the kid
      * see {@see Issuer::canonicalPayload()}, so stripping, renaming or
      * splicing it breaks the signature. When the record carries an armed
-     * execution program, its commitment is covered too: the final
-     * `|execution_version|execution_commitment` segments, so stripping,
-     * substituting or injecting a program breaks the signature. The
+     * execution program, its commitment is covered too: the tagged
+     * `|e={execution_version},{execution_commitment}` segment, so
+     * stripping, substituting or injecting a program breaks the
+     * signature. When the record carries the rsw trapdoor identity, the
+     * signed `|r={modulus_sha256}` segment pins the modulus, so
+     * substituting a different trapdoor breaks the signature. The
      * decoy segment rides a protocol v3/v4 record: armed issuance writes
      * version 3 (or 4 when the execution dimension is armed too), and the
      * v2-plus-decoy combination is rejected by the structural gate.
-     * An unarmed record (a v2) renders the legacy 18-field canonical
-     * bytes, byte-identical to the pre-extension format.
+     * An unarmed record (a v2) renders the plain base canonical
+     * bytes.
      * A v3 record always carries the decoy segment (the decoy is
      * mandatory on v3) and a v4 record always carries the execution
      * segments (the commitment is mandatory on v4).
+     * The signed canonical also commits the `m=1` record-metadata MAC
+     * marker whenever the record carries a `server_mac`. The marker is
+     * parsed from the challenge itself, never inferred from the stored
+     * MAC presence: an m=1 record must carry a valid MAC regardless of
+     * the timing floor, and stripping the MAC breaks the signature.
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {
+        $commitsMac = Issuer::signedCanonicalCommitsRecordMeta($record->challenge);
         $expected = $record->protocolVersion === 1
             ? Issuer::signPayload(sprintf(
                 '%s|%s|%s|%d',
@@ -2618,6 +2956,7 @@ final class Verifier
                 $record->issuedAt,
             ), $secretKey)
             : Issuer::signPayloadV2(Issuer::canonicalPayload(
+                $record->protocolVersion,
                 $record->nonce,
                 $record->scope,
                 $record->bindingTag,
@@ -2638,9 +2977,30 @@ final class Verifier
                 $record->decoyField,
                 $record->executionVersion,
                 $record->executionCommitment,
-            ), $secretKey);
+                $record->rswModulusSha256,
+                $commitsMac,
+            ), $secretKey, $this->tenantId);
 
-        return hash_equals($expected, self::signatureFromChallenge($record->challenge));
+        if (!hash_equals($expected, self::signatureFromChallenge($record->challenge))) {
+            return false;
+        }
+
+        // The record-metadata MAC authenticates issued_at_ns and hostname,
+        // which the canonical fields do not cover. A signed m=1 marker
+        // requires a valid MAC regardless of the timing floor; a present
+        // MAC always verifies, so a storage writer cannot backdate the
+        // clock or rewrite the hostname of an issuer-written record. An
+        // absent MAC on a record signed without the marker is judged where
+        // the metadata is consumed (the duration floor fails closed, the
+        // measured duration and the hostname are withheld).
+        $key = ServerStateMac::key($secretKey, $this->tenantId);
+        if ($commitsMac) {
+            return $record->serverMac !== null
+                && ServerStateMac::verifyRecordMeta($key, $record);
+        }
+
+        return $record->serverMac === null
+            || ServerStateMac::verifyRecordMeta($key, $record);
     }
 
     /**

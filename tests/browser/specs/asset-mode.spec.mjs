@@ -4,9 +4,12 @@ import { createHash } from 'node:crypto';
 // The files-mode asset delivery tier (kiwi_captcha.asset_mode "files"):
 // versioned immutable first-party asset URLs with exact content hashes,
 // long cache lifetimes, SRI, once-per-page dedup, and the lazy heavy
-// modules: the driver fetches the WASM runtime AND the Argon worker asset
-// only when a memory-hard challenge arrives, so a plain SHA-256 page pays
-// nothing for the Argon machinery.
+// modules: the driver fetches the WASM runtime AND the worker asset
+// only when a challenge needs the worker tier — a memory-hard Argon
+// challenge, or a SHA-256 challenge on a page without the wasm glue
+// (the glue-less solve dispatches to the worker at the solve phase, so
+// a plain SHA-256 page still never pays for the Argon machinery up
+// front).
 // The worker runs as a same-origin Worker whose source the driver
 // cryptographically preflights: the fetched bytes are hashed and
 // compared against the page-issued digest, then the content-addressed
@@ -70,10 +73,15 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await page.goto('/?assets=files');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
 
-    // The page references exactly two assets: the stylesheet and the driver.
+    // The page emits exactly two asset tags: the stylesheet and the
+    // driver. The lazy risk-module script the glue-less SHA-256 solve
+    // injects at the solve phase (data-kiwi-module="risk") is a
+    // driver-injected lazy tag, not an emitted page reference, and is
+    // excluded here (its own headers/SRI are asserted by the
+    // fetch-accounting cases below).
     const hrefs = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map((l) => l.getAttribute('href'));
-      const scripts = Array.from(document.querySelectorAll('script[src]')).map((s) => s.getAttribute('src'));
+      const scripts = Array.from(document.querySelectorAll('script[src]:not([data-kiwi-module])')).map((s) => s.getAttribute('src'));
       return links.concat(scripts);
     });
     const assetUrls = hrefs.filter((h) => h.includes('/kiwi-captcha/assets/'));
@@ -163,18 +171,33 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await expect(page.locator('[data-kiwi-widget]').nth(1)).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
   });
 
-  test('a SHA challenge triggers no runtime or worker asset fetch (lazy)', async ({ page }) => {
+  test('a glue-less files-tier SHA challenge solves through the worker: exactly one runtime fetch and one worker fetch, and the token verifies', async ({ page }) => {
+    // A SHA-256 challenge on a page without the wasm glue (files tier)
+    // dispatches its solve to the same-origin worker exactly like a
+    // memory-hard challenge: the lazy risk module is ensured at the
+    // solve phase (strictly after issuance) and the driver performs
+    // exactly one runtime fetch and one worker fetch (the shared
+    // per-URL dedup). The search never runs the long pure-JS loop on
+    // the main thread. The inline tier keeps its page-wasm SHA solve
+    // (zero asset requests; pinned in the inline block below).
     const driverFetches = await trackDriverFetches(page);
     await page.goto('/?assets=files');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
 
+    const fetches = await driverFetches();
+    expect(runtimeCount(fetches), 'the glue-less SHA-256 solve must fetch the runtime exactly once (the worker handshake)').toBe(1);
+    expect(workerCount(fetches), 'the glue-less SHA-256 solve must fetch the worker asset exactly once').toBe(1);
+    const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
+    expect(workerUsed, 'the glue-less SHA-256 solve must run in the same-origin worker').toBe(true);
+    const riskModule = await page.evaluate(() => {
+      const s = document.querySelector('script[data-kiwi-module="risk"]');
+      return s ? s.getAttribute('src') : null;
+    });
+    expect(riskModule, 'the files-tier SHA-256 solve must load the lazy risk module at the solve phase').toContain('/assets/risk.');
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
     const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
     expect((await resp.json()).ok).toBe(true);
-    const fetches = await driverFetches();
-    expect(runtimeCount(fetches), 'a SHA-256 solve must never download the Argon runtime').toBe(0);
-    expect(workerCount(fetches), 'a SHA-256 solve must never download the Argon worker').toBe(0);
   });
 
   test('an Argon challenge triggers exactly one driver runtime fetch and one driver worker fetch and verifies', async ({ page }) => {
@@ -318,6 +341,110 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
   });
 
+  test('a SHA challenge whose worker asset cannot load degrades to the in-page pure-JS solver, never worker-unavailable', async ({ page }) => {
+    // The SHA-256 degrade contract: unlike argon2id, a glue-less SHA
+    // challenge whose worker tier fails must still solve — the driver
+    // falls back to the in-page pure-JS solver (SHA-256 is
+    // main-thread-safe) and mints a verifying token. No worker is ever
+    // constructed from the refused bytes (the bounded retry exhausts
+    // first), so __kiwiWorkerUsed stays false.
+    let workerHits = 0;
+    await page.route('**/assets/worker*.js', async (route) => {
+      workerHits++;
+      await route.fulfill({ status: 500, contentType: 'application/javascript', body: 'boom' });
+    });
+    await page.goto('/?assets=files');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+
+    expect(workerHits).toBe(3);
+    const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
+    expect(workerUsed, 'the refused worker asset must never be constructed').toBe(false);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok, 'the in-page fallback solve must verify').toBe(true);
+  });
+
+  test('a transient risk-module outage is recoverable: reset retries the module and solves', async ({ page }) => {
+    // The first sequence fails every risk-module attempt (the loader's
+    // three tries), so the argon2id worker tier enters its controlled
+    // unavailable state. Memoizing that failure would poison the module
+    // kind for the rest of the page lifetime; the settled promise must
+    // be retired (success is cached by the module registry) with only a
+    // short failure backoff that an explicit reset clears.
+    let failing = true;
+    let served = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      if (failing) {
+        await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+        return;
+      }
+      served++;
+      await route.continue();
+    });
+    await page.goto('/?assets=files&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
+
+    // The network recovers; the user-driven retry (the native Retry
+    // button, i.e. reset) must start a fresh attempt.
+    failing = false;
+    await page.locator('[data-kiwi-retry]').click();
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    expect(served, 'the recovered reset must load the module again').toBeGreaterThan(0);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+  });
+
+  test('two simultaneous recoveries share one module request sequence', async ({ page }) => {
+    // The recovery attempt stays coalesced: two widgets reset in the
+    // same task must join the first in-flight load instead of starting
+    // two sequences.
+    let failing = true;
+    let served = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      if (failing) {
+        await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+        return;
+      }
+      served++;
+      await route.continue();
+    });
+    await page.goto('/?assets=files&algorithm=argon2id&widgets=2');
+    await expect(page.locator('[data-kiwi-widget][data-state="kiwi:worker-unavailable"]')).toHaveCount(2, { timeout: 60_000 });
+
+    failing = false;
+    await page.evaluate(() => {
+      document.querySelectorAll('[data-kiwi-widget]').forEach((widget) => {
+        const id = widget.dataset.kiwiInstance;
+        if (id) window.KiwiCaptcha.reset(id);
+      });
+    });
+    await expect(page.locator('[data-kiwi-widget][data-state="done"]')).toHaveCount(2, { timeout: 120_000 });
+    expect(served, 'the two recovery attempts must share one load (one request, not two)').toBe(1);
+  });
+
+  test('a SHA challenge whose risk module cannot load still solves in-page (the worker tier is never a SHA gate)', async ({ page }) => {
+    // The lazy widget-risk.js module is required for the argon2id solve
+    // tier, but a SHA-256 challenge must never hard-fail on it: the
+    // module's bounded retries exhaust, the worker dispatch degrades,
+    // and the in-page pure-JS solver completes the challenge.
+    let riskHits = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      riskHits++;
+      await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+    });
+    await page.goto('/?assets=files');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    await expect.poll(() => riskHits, 'the missing module must repeat through the bounded retries').toBe(3);
+
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the SHA challenge must solve without the risk module').toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok, 'the module-less fallback solve must verify').toBe(true);
+  });
+
   test('integrity verification fails closed: a page that cannot compute the digest never accepts the runtime or the worker', async ({ page }) => {
     // item 15: when the page supplies an integrity value and the digest
     // cannot be performed (no crypto.subtle.digest), the lazy fetch must
@@ -379,7 +506,62 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
   });
 
-  test('a cross-origin lookalike runtime URL is refused by the worker origin guard (parsed origin equality, never a prefix check)', async ({ page }) => {
+  test('watchdog: a HELD risk-module asset ends in the controlled worker-unavailable state, never a SHA downgrade', async ({ page }) => {
+    // The lazy widget-risk.js module is required for the argon2id solve
+    // tier (the required loads stay fail-closed). A
+    // hung risk asset must not stall the widget forever: the module
+    // watchdog bounds the wait and the flow enters the controlled
+    // kiwi:worker-unavailable state — one argon2id request, no
+    // weaker-profile re-request, no token, and no retry storm (the
+    // held route receives exactly one request).
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    let riskHits = 0;
+    const held = [];
+    await page.route('**/assets/risk*.js', async (route) => {
+      riskHits++;
+      held.push(route);
+    });
+    await page.goto('/?assets=files&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
+    expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
+    // Exactly one hung attempt: the watchdog resolves the required load
+    // instead of retrying a route that never answers.
+    expect(riskHits).toBe(1);
+    expect(bodies, 'the worker-unavailable flow must not re-request a weaker challenge').toHaveLength(1);
+    expect(bodies[0].algorithm, 'the single challenge request must stay argon2id').toBe('argon2id');
+    for (const route of held.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+  });
+
+  test('required chunk absent: an execution-armed challenge whose risk module cannot load mints no token (execution-unavailable)', async ({ page }) => {
+    // The ExecutionChallengeV1 runner lives in the lazy widget-risk.js
+    // module: a files-tier page whose risk asset 404s through the
+    // bounded retries must fail closed at the execution step — the
+    // controlled kiwi:execution-unavailable state, an empty token, and
+    // never a silent success. The interpreter is never fetched because
+    // the runner never loaded.
+    let riskHits = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      riskHits++;
+      await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+    });
+    const interpreterRequests = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/assets/execution.')) interpreterRequests.push(req.url());
+    });
+    await page.goto('/?assets=files&execution=1');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:execution-unavailable', { timeout: 60_000 });
+    expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
+    await expect.poll(() => riskHits, 'the missing module must repeat through the bounded retries').toBe(3);
+    expect(interpreterRequests, 'the interpreter must never be fetched when its runner cannot load').toEqual([]);
+  });
+
+  test('a cross-origin lookalike runtime URL is refused by the worker origin guard, and the glue-embedded worker asset solves on its own (parsed origin equality, never a prefix check)', async ({ page }) => {
     // Serve the files-mode widget page from the http://localhost origin
     // (route-fulfilled; the same-origin assets and the challenge are
     // forwarded to the real fixture) with data-kiwi-runtime-src rewritten
@@ -388,13 +570,18 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     // would accept it) but parses to a different origin, and it resolves
     // to the real fixture, which serves the real glue. The driver's lazy
     // preflight fetch of the lookalike is fulfilled with the real glue
-    // bytes (CORS-open), so the page-issued digest verifies; the worker's
-    // own importScripts of the same URL reaches the real fixture. Only
-    // the worker's origin guard stands between the lookalike and that
-    // importScripts. The guard must refuse it: the worker never loads
-    // the foreign-origin runtime, the solve fails closed, and no token
-    // is minted. (A prefix-based check would accept the lookalike, import
-    // the real glue, and mint a token.)
+    // bytes (CORS-open), so the page-issued digest verifies. The worker's
+    // origin guard must refuse the lookalike handshake: the foreign
+    // runtime URL is never importScripted (the lookalike request stream
+    // holds exactly the driver's single preflight fetch). Since the r8
+    // glue-embedding change the worker asset itself carries the wasm glue
+    // (its bytes are SRI-preflight-verified by the driver before the
+    // Worker is constructed from the content-addressed URL), so the
+    // worker solves the challenge with the authentic embedded runtime and
+    // the widget mints a token — the refused lookalike can neither race
+    // nor replace the verified runtime. (A prefix-based check would
+    // accept the lookalike, import it, and mint a token from
+    // unverified-directed bytes.)
     const real = 'http://127.0.0.1:8085';
     const lookalikeRequests = [];
     page.on('request', (req) => {
@@ -421,9 +608,10 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     });
     await page.route(/\/kiwi-captcha\/assets\/runtime/, async (route) => {
       // The driver's preflight fetch of the lookalike: real glue bytes,
-      // CORS-open so the cross-origin read succeeds. The worker's
-      // importScripts of the same URL bypasses the page routes and is
-      // served the same bytes by the real fixture.
+      // CORS-open so the cross-origin read succeeds. The worker's own
+      // importScripts of the same URL (which would only happen if the
+      // origin guard failed) bypasses the page routes and is served the
+      // same bytes by the real fixture.
       const res = await route.fetch();
       const body = await res.body();
       await route.fulfill({
@@ -448,9 +636,15 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
       await route.fulfill({ response: res });
     });
     await page.goto('http://localhost/?assets=files&algorithm=argon2id');
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
-    expect(await page.locator('[data-kiwi-token]').inputValue(), 'the refused lookalike runtime must never mint a token').toBe('');
-    expect(lookalikeRequests.length, 'the driver preflight fetch of the lookalike must have happened').toBeGreaterThanOrEqual(1);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the SRI-verified glue-embedded worker asset must solve the challenge').toBeGreaterThan(0);
+    const resp = await page.request.post(real + '/verify', { data: { token } });
+    expect((await resp.json()).ok, 'the worker-solved token must verify at the real fixture').toBe(true);
+    expect(
+      lookalikeRequests.length,
+      'exactly the driver preflight fetch may reach the lookalike — the worker origin guard must refuse the foreign runtime handshake (no importScripts)',
+    ).toBe(1);
   });
 });
 

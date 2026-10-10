@@ -74,20 +74,37 @@ final class RiskProfileResolver
      * client-reported device capabilities, since bots lie. If it proves
      * too expensive for legitimate mobile users, adjust the
      * server-selected ladder globally or transition earlier to StepUp.
-     *
-     * @param int   $argonEnvelopeMemoryKib the fixed Argon2id memory envelope
-     *                                      (risk.argon_verification_memory_kib)
-     *                                      for all adaptive Argon actions,
-     *                                      never the escalation mechanism.
-     * @param list<int> $argonTargetBits    the 3-rung target-bits ladder
-     *                                      (risk.argon_escalation_target_bits):
-     *                                      [Argon16, Argon32, Argon64],
-     *                                      strictly increasing within
-     *                                      1..Config::MAX_ARGON2_TARGET_BITS.
+     *     * @param PoWAlgorithm $algorithm             the deployment's configured
+     *                                            algorithm. This is the baseline family.
+     * @param int          $difficultyBits        the configured SHA target bits.
+     *                                            This is the application floor for
+     *                                            the sha256 family.
+     * @param int          $argonMKib             the configured Argon2id memory
+     *                                            (argon_m_kib). Part of the
+     *                                            application floor for the
+     *                                            argon2id family.
+     * @param int          $argonT                the configured Argon2id
+     *                                            iterations (argon_t).
+     * @param int          $argonP                the configured Argon2id
+     *                                            parallelism (argon_p).
+     * @param int          $argon2DifficultyBits  the configured Argon2id target
+     *                                            bits (argon2_difficulty_bits).
+     * @param int          $argonEnvelopeMemoryKib the fixed adaptive memory
+     *                                            envelope
+     *                                            (risk.argon_verification_memory_kib):
+     *                                            the adaptive Argon ladder raises
+     *                                            the nonce search space, never
+     *                                            below this envelope.
+     * @param list<int>    $argonTargetBits       the 3-rung target-bits ladder
+     *                                            (risk.argon_escalation_target_bits).
      */
     public function __construct(
         private readonly PoWAlgorithm $algorithm,
-        private readonly int $shaFloorBits,
+        private readonly int $difficultyBits,
+        private readonly int $argonMKib = 16384,
+        private readonly int $argonT = 3,
+        private readonly int $argonP = 1,
+        private readonly int $argon2DifficultyBits = 1,
         private readonly int $argonEnvelopeMemoryKib = 16384,
         private readonly array $argonTargetBits = [1, 2, 4],
     ) {
@@ -111,78 +128,169 @@ final class RiskProfileResolver
         }
     }
 
-    public function profileFor(RiskAction $action): ?ChallengeProfile
+    /**
+     * The application's own configured strength: the floor every
+     * issuance, chain requirement and strength comparison preserves.
+     */
+    public function baseline(): ChallengeStrength
     {
-        return match ($action) {
-            RiskAction::Allow => null,
-            RiskAction::Sha16 => $this->sha($this->shaRung(RiskAction::Sha16)),
-            RiskAction::Sha18 => $this->sha($this->shaRung(RiskAction::Sha18)),
-            RiskAction::Sha20 => $this->sha($this->shaRung(RiskAction::Sha20)),
-            // Fixed-envelope ladder: the memory never escalates with
-            // risk — all three actions share the server-controlled
-            // envelope at t=3, p=1; only the expected nonce search space
-            // (target bits) rises along the configured ladder.
-            RiskAction::Argon16 => $this->argon($this->argonTargetBits[0]),
-            RiskAction::Argon32 => $this->argon($this->argonTargetBits[1]),
-            RiskAction::Argon64 => $this->argon($this->argonTargetBits[2]),
-            // StepUp is handled by the controller (403 `STEP_UP_REQUIRED`)
-            // and must never be mapped to a challenge profile.
-            RiskAction::StepUp => throw new \LogicException('StepUp is handled by the controller, not mapped to a profile'),
-            RiskAction::Deny => null, // handled by the caller before issuance
+        return match ($this->algorithm) {
+            PoWAlgorithm::Sha256 => new ChallengeStrength(PoWAlgorithm::Sha256, 0, 0, 1, $this->difficultyBits),
+            PoWAlgorithm::Argon2id => new ChallengeStrength(
+                PoWAlgorithm::Argon2id,
+                $this->argonMKib,
+                $this->argonT,
+                $this->argonP,
+                $this->argon2DifficultyBits,
+            ),
+            // RSW has no adaptive-risk ordering: the bundle refuses
+            // rsw + risk at configuration time, so a resolver can never
+            // be constructed over an RSW deployment.
+            PoWAlgorithm::Rsw => throw new \LogicException(
+                'rsw has no adaptive-risk strength ordering; it cannot participate in profile escalation',
+            ),
         };
     }
 
     /**
-     * Whether a verified challenge record already satisfies a risk action
-     * under the actual configured ladders, the authoritative
-     * stage-strength comparison for selective chaining:
+     * The complete required strength for an action: the monotonic
+     * maximum of the application's configured baseline and the adaptive
+     * requirement. Null for Allow (nothing beyond the baseline), and for
+     * the terminal actions the caller handles before issuance.
      *
-     *  - Allow        -> true (the base: any solved challenge satisfies
-     *                    the weakest action).
-     *  - Sha16/18/20  -> the record's algorithm is SHA-256 and its target
-     *                    bits >= the action's fixed SHA rung (16/18/20).
-     *  - Argon16/32/64 -> the record's algorithm is Argon2id and its
-     *                    target bits >= the action's configured argon rung
-     *                    (risk.argon_escalation_target_bits).
-     *  - StepUp/Deny  -> false (terminal application-level actions, never
-     *                    satisfiable by a record; the chain logic never
-     *                    reaches them).
+     * Cross-family rules (the ONE place the family order is defined):
      *
-     * The comparison reuses the same ladder the profile mapping uses: a
-     * solved challenge satisfies an action exactly when the action's rung
-     * is at or below what the client actually solved.
+     *  - A SHA rung on an Argon baseline keeps the Argon baseline: the
+     *    configured memory-hard floor already dominates the SHA rung, so
+     *    demanding SHA would be a downgrade.
+     *  - An Argon rung on a SHA baseline escalates into the adaptive
+     *    Argon envelope, raised to the configured Argon parameters
+     *    (argon_m_kib / argon_t / argon_p) so the deployment's own
+     *    memory-hard floor is preserved.
+     *  - Within a family the parameters are combined monotonically:
+     *    mKib, t, p and targetBits are each at or above both the
+     *    baseline and the adaptive rung.
      */
-    public function recordSatisfies(ChallengeRecord $record, RiskAction $action): bool
+    public function requiredStrength(RiskAction $action): ?ChallengeStrength
     {
+        $baseline = $this->baseline();
+
         return match ($action) {
-            RiskAction::Allow => true,
-            RiskAction::Sha16 => $record->algorithm === PoWAlgorithm::Sha256 && $record->targetBits >= $this->shaRung(RiskAction::Sha16),
-            RiskAction::Sha18 => $record->algorithm === PoWAlgorithm::Sha256 && $record->targetBits >= $this->shaRung(RiskAction::Sha18),
-            RiskAction::Sha20 => $record->algorithm === PoWAlgorithm::Sha256 && $record->targetBits >= $this->shaRung(RiskAction::Sha20),
-            RiskAction::Argon16 => $record->algorithm === PoWAlgorithm::Argon2id && $record->targetBits >= $this->argonTargetBits[0],
-            RiskAction::Argon32 => $record->algorithm === PoWAlgorithm::Argon2id && $record->targetBits >= $this->argonTargetBits[1],
-            RiskAction::Argon64 => $record->algorithm === PoWAlgorithm::Argon2id && $record->targetBits >= $this->argonTargetBits[2],
+            RiskAction::Allow => null,
+            RiskAction::Sha16 => $this->shaRequirement($baseline, $this->shaRung($action)),
+            RiskAction::Sha18 => $this->shaRequirement($baseline, $this->shaRung($action)),
+            RiskAction::Sha20 => $this->shaRequirement($baseline, $this->shaRung($action)),
+            RiskAction::Argon16 => $this->argonRequirement($baseline, $this->argonTargetBits[0]),
+            RiskAction::Argon32 => $this->argonRequirement($baseline, $this->argonTargetBits[1]),
+            RiskAction::Argon64 => $this->argonRequirement($baseline, $this->argonTargetBits[2]),
+            // Terminal actions: handled by the controller before any
+            // profile is selected; never satisfiable by a record.
             RiskAction::StepUp,
-            RiskAction::Deny => false,
+            RiskAction::Deny => null,
         };
     }
 
-    private function sha(int $bits): ?ChallengeProfile
+    /**
+     * The profile to issue with, or null when issuing the configured
+     * baseline already satisfies the action (the baseline is the floor:
+     * increasing risk can never weaken the issued work).
+     */
+    public function profileFor(RiskAction $action): ?ChallengeProfile
     {
-        if ($this->algorithm !== PoWAlgorithm::Sha256 || $bits <= $this->shaFloorBits) {
+        if ($action === RiskAction::StepUp) {
+            throw new \LogicException('StepUp is handled by the controller, not mapped to a profile');
+        }
+        if ($action === RiskAction::Deny) {
+            return null;
+        }
+        $required = $this->requiredStrength($action);
+        if ($required === null || $this->baseline()->dominates($required)) {
             return null;
         }
 
-        return ChallengeProfile::sha($bits);
+        return new ChallengeProfile(
+            $required->algorithm,
+            $required->targetBits,
+            $required->mKib,
+            $required->t,
+            $required->p,
+        );
     }
 
     /**
-     * One rung of the fixed-envelope Argon ladder: the configured envelope
-     * memory at t=3, p=1 with the action's escalating target bits.
+     * Whether a solved record satisfies an action: its complete strength
+     * must dominate the action's required strength. The record's own
+     * algorithm family decides; the resolver never compares raw numbers
+     * across families.
      */
-    private function argon(int $targetBits): ChallengeProfile
+    public function recordSatisfies(ChallengeRecord $record, RiskAction $action): bool
     {
-        return new ChallengeProfile(PoWAlgorithm::Argon2id, $targetBits, $this->argonEnvelopeMemoryKib, 3, 1);
+        return $this->strengthSatisfies(ChallengeStrength::fromRecord($record), $action);
+    }
+
+    /**
+     * Whether a minted profile/challenge strength satisfies an action:
+     * the same complete comparison as {@see recordSatisfies()}, usable
+     * before a stored record exists.
+     */
+    public function strengthSatisfies(ChallengeStrength $strength, RiskAction $action): bool
+    {
+        if ($action === RiskAction::Allow) {
+            return true;
+        }
+        if ($action === RiskAction::StepUp || $action === RiskAction::Deny) {
+            return false;
+        }
+        $required = $this->requiredStrength($action);
+
+        return $required !== null && $strength->dominates($required);
+    }
+
+    private function shaRequirement(ChallengeStrength $baseline, int $bits): ChallengeStrength
+    {
+        if ($baseline->algorithm === PoWAlgorithm::Sha256) {
+            // Same family: the application floor and the fixed rung max.
+            return new ChallengeStrength(PoWAlgorithm::Sha256, 0, 0, 1, max($baseline->targetBits, $bits));
+        }
+        // The configured memory-hard baseline already dominates the SHA
+        // rung; requiring SHA work would downgrade the deployment, so the
+        // requirement stays the baseline itself.
+        return $baseline;
+    }
+
+    private function argonRequirement(ChallengeStrength $baseline, int $bits): ChallengeStrength
+    {
+        if ($baseline->algorithm === PoWAlgorithm::Argon2id) {
+            // The application IS an Argon deployment: the adaptive rung
+            // preserves its complete configured baseline (memory,
+            // iterations, parallelism, target) and raises only what the
+            // rung demands.
+            return new ChallengeStrength(
+                PoWAlgorithm::Argon2id,
+                max($baseline->mKib, $this->argonEnvelopeMemoryKib),
+                max($baseline->t, 3),
+                max($baseline->p, 1),
+                max($baseline->targetBits, $bits),
+            );
+        }
+
+        // A SHA baseline escalates into the adaptive Argon envelope
+        // alone: the core argon_m_kib/argon_t/argon_p/argon2_difficulty_bits
+        // knobs are inert in a sha256 deployment, and borrowing them
+        // would let a dormant setting (for example argon_p: 2, which the
+        // core only validates for argon2id) build an invalid or
+        // unexpectedly expensive profile the moment risk escalates. The
+        // adaptive profile is exactly the configured envelope at t=3,
+        // p=1 with the rung's target bits, the documented guarantee that
+        // risk raises the nonce search space and never the server
+        // verification cost.
+        return new ChallengeStrength(
+            PoWAlgorithm::Argon2id,
+            $this->argonEnvelopeMemoryKib,
+            3,
+            1,
+            $bits,
+        );
     }
 
     /** The fixed SHA rung of a SHA action (16/18/20, not configurable). */

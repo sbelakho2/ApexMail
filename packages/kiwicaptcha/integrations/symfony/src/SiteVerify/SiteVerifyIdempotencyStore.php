@@ -101,8 +101,29 @@ interface SiteVerifyIdempotencyStore
      */
     public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool;
 
-    /** The stored canonical response for a complete-same claim, or null. */
-    public function stored(string $backendId, string $idempotencyKey): ?array;
+    /**
+     * The operation-bound stored-result lookup: one atomic read that
+     * classifies the current record under the caller's full operation
+     * identity. An acceptance must never be produced from a mere
+     * structural read. After `claim()` returned CompleteSame or
+     * PendingSame, the key can expire and be reused by a different
+     * operation before this request reads it back (an ABA). The read
+     * must therefore re-prove response hash, remoteip fingerprint and
+     * binding digest in the same operation that extracts the result.
+     * The store classifies into:
+     *
+     *  - Missing: no live record; the caller treats it as such.
+     *  - PendingSame: the exact operation is still pending.
+     *  - CompleteSame: the exact operation completed; `result()` is the
+     *    cached canonical response (already passed the canonical result
+     *    validator on the store side).
+     *  - Changed: the key now holds a different operation (a reused key);
+     *    the caller must answer a retryable failure, never the new
+     *    operation's result.
+     *  - Corrupt: the record is present but structurally invalid or
+     *    lifetime-stripped; the caller fails closed.
+     */
+    public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): StoredLookup;
 
     /**
      * Atomically take over a `PENDING_SAME` claim whose lease has expired.

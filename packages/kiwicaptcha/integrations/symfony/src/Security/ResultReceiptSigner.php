@@ -18,12 +18,18 @@ use KiwiCaptcha\ChallengeRecord;
  * canonical payload below: the full replay-critical set taken from the
  * consumed record, see {@see ChallengeRecord} passed to {@see sign()}.
  *
- *     {jti, tenant, action, request_binding, issued_at, expires_at, issuer}
+ *     {v, jti, tenant, request_binding, issued_at, expires_at, issuer,
+ *      region, policy_version, algorithm, target_bits, m_kib, t, p}
  *
+ *   - v               the payload version (2). v1 payloads (without the
+ *                     version marker) are never treated as equivalent.
  *   - jti             the challenge nonce (the single-use replay id).
- *   - tenant          the flow scope the challenge was minted for.
- *   - action          the PoW action the challenge required
- *                     (sha256 | argon2id, the record's algorithm).
+ *   - tenant          the flow scope the challenge was minted for. This
+ *                     is the signed scope, NOT a multi-tenant separation
+ *                     id: two tenants that share one signing key and use
+ *                     the same scope name produce indistinguishable
+ *                     receipts. Operators serving multiple tenants must
+ *                     provision a distinct signing key per tenant.
  *   - request_binding the signed transaction binding (null when unbound).
  *   - issued_at       the record's issuance epoch (seconds, the record
  *                     wire unit, shared with the Rust schema).
@@ -31,6 +37,12 @@ use KiwiCaptcha\ChallengeRecord;
  *                     only acceptable while now <= expires_at (+ application
  *                     skew).
  *   - issuer          the deployment issuer; null when unset.
+ *   - region          the signed region (null when unset).
+ *   - policy_version  the signed security-policy epoch.
+ *   - algorithm       the PoW action the challenge required
+ *                     (sha256 | argon2id | rsw), the record's algorithm.
+ *   - target_bits, m_kib, t, p  the complete signed work profile, so a
+ *                     receiver can enforce a minimum strength.
  *
  * with sodium_crypto_sign_detached, and the application can hand the payload
  * + signature to any party holding the public key (derived from the seed via
@@ -121,11 +133,13 @@ final class ResultReceiptSigner
      * Sign a valid verification result into a detached Ed25519 receipt.
      *
      * The payload carries the full replay-critical set from the consumed
-     * record: jti (the nonce), tenant (the record's scope),
-     * action (the record's PoW algorithm), request_binding, issued_at /
-     * expires_at (epoch seconds, the record wire unit) and issuer. An
-     * integrator can key its idempotency, freshness and scope checks on the
-     * receipt alone.
+     * record: v, jti (the nonce), tenant (the record's scope),
+     * request_binding, issued_at / expires_at in epoch seconds, issuer,
+     * region, policy_version and the complete work profile (algorithm,
+     * target_bits, m_kib, t, p). An integrator can key its idempotency,
+     * freshness, scope and strength checks on the receipt alone. The
+     * scope is not a tenant separation id; use a distinct signing key
+     * per tenant when tenants share a deployment.
      *
      * @return array{payload: string, signature: string}|null the canonical
      *         JSON payload and its base64 detached signature, or null when

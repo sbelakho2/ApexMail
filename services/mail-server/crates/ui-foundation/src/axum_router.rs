@@ -5036,4 +5036,127 @@ mod tests {
         assert_eq!(aup, acceptable);
         assert!(render_route("marketing", "/aup").is_some());
     }
+
+    /// System contract: `/campaigns/{id}/edit` WITHOUT loaded editor data
+    /// still keeps the path id so the form POSTs to the update handler
+    /// (identity-preserving save) instead of the create path.
+    #[test]
+    fn campaign_edit_without_data_keeps_path_id_on_update_action() {
+        let html = render_route("web", "/campaigns/c_path1/edit")
+            .expect("edit route renders without data");
+        assert!(
+            html.contains("action=\"/web/campaigns/update\""),
+            "path-id edit must post to update: {html}"
+        );
+        assert!(
+            html.contains("name=\"id\" value=\"c_path1\""),
+            "path-id edit must carry the id: {html}"
+        );
+        assert!(
+            !html.contains("action=\"/web/campaigns\""),
+            "path-id edit must not post to create: {html}"
+        );
+    }
+
+    /// System contract: create route posts to create (no id).
+    #[test]
+    fn campaign_new_route_posts_to_create() {
+        let html = render_route("web", "/campaigns/new").expect("new route renders");
+        assert!(html.contains("action=\"/web/campaigns\""), "{html}");
+        assert!(!html.contains("action=\"/web/campaigns/update\""), "{html}");
+    }
+
+    /// System contract: placement detail prefers loaded status + results
+    /// over the static waiting view.
+    #[test]
+    fn placement_detail_route_prefers_loaded_results() {
+        let data = RouteData {
+            placement_detail: Some(crate::view_data::PlacementDetailData {
+                id: "t1".into(),
+                name: "Seed run".into(),
+                status: "completed".into(),
+                total_accounts: 10,
+                completed_accounts: 10,
+                created_at: "2026-10-01T09:00:00Z".into(),
+                completed_at: "2026-10-01T09:10:00Z".into(),
+                providers: vec![crate::view_data::PlacementProviderRow {
+                    provider: "Gmail".into(),
+                    accounts_tested: 10,
+                    inbox: 9,
+                    promotions: 1,
+                    spam: 0,
+                    absent: 0,
+                }],
+            }),
+            ..RouteData::default()
+        };
+        let html =
+            render_route_with_data("web", "/inbox-placement/t1", None, None, &[], Some(&data))
+                .expect("placement detail renders with data");
+        assert!(html.contains("Per-provider results"), "{html}");
+        assert!(html.contains(">Gmail<"), "{html}");
+        assert!(html.contains("10 of 10 seed accounts reported"), "{html}");
+        assert!(
+            !html.contains("Results appear once the test completes"),
+            "loaded completed results must not show the waiting empty state: {html}"
+        );
+    }
+
+    /// System contract: template edit with loaded values prefills the form
+    /// (round-trip) and still targets update + preview.
+    #[test]
+    fn template_edit_route_prefers_loaded_values() {
+        let data = RouteData {
+            template_edit: Some(crate::view_data::TemplateEditData {
+                id: "t_77".into(),
+                name: "Onboarding".into(),
+                subject: "Welcome".into(),
+                html_body: "<h1>Hi</h1>".into(),
+            }),
+            ..RouteData::default()
+        };
+        let html =
+            render_route_with_data("web", "/templates/t_77/edit", None, None, &[], Some(&data))
+                .expect("template edit renders with values");
+        assert!(html.contains("value=\"Onboarding\""), "{html}");
+        assert!(html.contains("value=\"Welcome\""), "{html}");
+        assert!(html.contains("&lt;h1&gt;Hi&lt;/h1&gt;"), "{html}");
+        assert!(html.contains("action=\"/web/templates/update\""), "{html}");
+        assert!(
+            html.contains("Leave the content empty to keep the stored body"),
+            "{html}"
+        );
+    }
+
+    /// System contract: domain verify form targets the mounted web handler.
+    #[test]
+    fn domain_detail_verify_targets_mounted_web_handler() {
+        let id = "99999999-8888-7777-6666-555555555555";
+        let mut list = crate::view_data::ListPageData {
+            title: "Domain".into(),
+            description: "DNS setup.".into(),
+            base_path: format!("/domains/{id}"),
+            ..Default::default()
+        };
+        list.table = Some(crate::view_data::TableData {
+            columns: vec!["Type".into(), "Host".into(), "Value".into(), "State".into()],
+            rows: vec![],
+        });
+        let html = render_route_with_data(
+            "web",
+            &format!("/domains/{id}"),
+            None,
+            None,
+            &[],
+            Some(&RouteData {
+                list: Some(list),
+                ..RouteData::default()
+            }),
+        )
+        .expect("domain detail renders");
+        assert!(
+            html.contains(&format!("action=\"/web/domains/{id}/verify\"")),
+            "{html}"
+        );
+    }
 }

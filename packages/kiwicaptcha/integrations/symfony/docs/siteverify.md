@@ -13,7 +13,9 @@ The endpoint is disabled unless `risk.siteverify_secrets` is configured: a
 map of secret → expected scope, so each backend's secret enforces its own
 policy scope server-side. The compatibility secret authenticates
 server-to-server use. An application backend (which holds the end-user IP)
-calls this endpoint with `remoteip`. A browser never sees the secret, so
+calls this endpoint with `remoteip`. Each secret must be a string of at
+least 32 bytes (build-time validation refuses shorter keys). A browser
+never sees the secret, so
 `remoteip` can never be supplied by an unauthenticated client. The secret
 comparison is constant-time (`hash_equals`).
 

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
@@ -48,12 +50,44 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
 
     private function pinKey(string $suffix = ''): string
     {
-        return '{kiwi:'.self::NS.'}:authority:pin'.($suffix !== '' ? ':'.$suffix : '');
+        return '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin'.($suffix !== '' ? ':'.$suffix : '');
     }
 
     private function infoCalls(FakePredisClient $fake): int
     {
         return \count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'INFO'));
+    }
+
+    public function testTheLegacyPinMigrationReturnsTheNxWinner(): void
+    {
+        // The migration's check-then-write window: another actor installs
+        // a primary pin between the legacy read and the SET NX. The NX
+        // write loses, and readPin() must return the winning primary pin
+        // — never the legacy value it read before the race.
+        $fake = $this->fake();
+        $legacyKey = '{kiwi:'.RedisNamespace::derive(self::NS, RedisNamespace::VERSION_LEGACY).'}:authority:pin';
+        $digestKey = '{kiwi:'.RedisNamespace::derive(self::NS, RedisNamespace::VERSION_DIGEST).'}:authority:pin';
+        $fake->strings[$legacyKey] = 'master|'.self::RUN_ID_A;
+        $fake->beforeSet = static function (string $key, string $value) use ($fake, $digestKey): void {
+            if ($key === $digestKey) {
+                // The competing writer wins the NX race first.
+                $fake->strings[$digestKey] = 'master|'.self::RUN_ID_B;
+            }
+        };
+
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, '', null, RedisNamespace::VERSION_DIGEST);
+        $state = $guard->state();
+
+        self::assertSame(
+            'master|'.self::RUN_ID_B,
+            $state['pinned'],
+            'the NX winner is authoritative: the loser never reports its stale legacy value',
+        );
+        self::assertSame(
+            'master|'.self::RUN_ID_B,
+            $fake->strings[$digestKey],
+            'the competing primary pin is left untouched by the losing NX write',
+        );
     }
 
     public function testInitializeRecordsThePinAndVerifiesPass(): void
@@ -136,14 +170,14 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'storage');
         self::assertSame(
-            '{kiwi:'.self::NS.'}:authority:pin:storage',
+            '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage',
             $guard->pinKey(),
             'one pin per distinct Redis authority: the storage authority pins its own key',
         );
 
         $riskGuard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'risk');
         self::assertSame(
-            '{kiwi:'.self::NS.'}:authority:pin:risk',
+            '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:risk',
             $riskGuard->pinKey(),
             'a distinct risk authority pins its own key',
         );
@@ -179,7 +213,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         self::assertSame('master|'.self::RUN_ID_A, $guard->initializePin());
         self::assertSame(
             'master|'.self::RUN_ID_A,
-            $fake->strings['{kiwi:'.self::NS.'}:authority:pin:storage'] ?? null,
+            $fake->strings['{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'] ?? null,
             'the initialize command records the operator-provisioned identity as the pin',
         );
     }

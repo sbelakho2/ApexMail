@@ -1,0 +1,40 @@
+{
+  "schema": "kiwicaptcha.client-perf-p1/1",
+  "title": "Per-rung fastest-device solve-time reference table (the solve-anomaly denominator)",
+  "reference_ms": {
+    "sha16": 23,
+    "sha18": 27,
+    "sha20": 27,
+    "argon16": 86,
+    "argon32": 86,
+    "argon64": 86,
+    "rsw75k": 244,
+    "rsw150k": 432,
+    "rsw300k": 810
+  },
+  "rung_keys": {
+    "sha16": "SHA-256 at 16 leading zero bits",
+    "sha18": "SHA-256 at 18 leading zero bits",
+    "sha20": "SHA-256 at 20 leading zero bits",
+    "argon16": "Argon2id rung; shares the measured envelope below",
+    "argon32": "Argon2id rung; shares the measured envelope below",
+    "argon64": "Argon2id rung; shares the measured envelope below",
+    "rsw75k": "RSW time-lock at T=75000 squarings",
+    "rsw150k": "RSW time-lock at T=150000 squarings",
+    "rsw300k": "RSW time-lock at T=300000 squarings"
+  },
+  "derivation": {
+    "source": "tools/client-perf/results/baseline.json, the committed maintenance baseline (schema kiwicaptcha.client-perf/1), results rows mainstream-desktop:<rung>:cold and mainstream-desktop:<rung>:warm",
+    "device": "mainstream-desktop, the only tier in tools/client-perf/release-budgets.json qualification.release_tiers (the qualified device of record)",
+    "statistic": "The baseline aggregates carry min, p50, p95 and p99 per row but no per-repetition samples, so the fastest recorded repetition (the row minimum) is the closest recorded statistic to the p1 and is what this table records per cache cell, floored to whole milliseconds; the reference per rung is the smaller of the cold and warm row minima.",
+    "rung_mapping": "argon16, argon32 and argon64 share the single measured Argon2id envelope (m=16384 KiB, target 4, the round-5 retuned release rung): the release ladder issues exactly this envelope, and the larger rungs reuse its reference as an upper bound, which errs toward zero anomaly for slow real solves.",
+    "conservatism": "The reference is chosen to be maximally permissive to real devices: a solve at or above the fastest recorded repetition of the qualified device scores zero anomaly. Lowering a reference would flag more solves, so refreshes may raise a reference only with a fresh committed baseline and must never lower one without re-deriving the shared vectors.",
+    "refresh": "Re-run the client-performance harness per tools/client-perf/README.md, promote a completed full-matrix run with --promote-baseline, then regenerate this table from the new baseline minima and bump schema_version. The risk cores assert their compiled tables equal this file (fixture-tested in both)."
+  },
+  "schema_version": 1,
+  "generated": "2026-10-04",
+  "consumers": [
+    "packages/kiwicaptcha-risk/src/evidence.rs (EVIDENCE_P1_MS, parity-checked against this file)",
+    "packages/kiwicaptcha-risk-php/src/Evidence/EvidenceModel.php (P1_MS, parity-checked against this file)"
+  ]
+}

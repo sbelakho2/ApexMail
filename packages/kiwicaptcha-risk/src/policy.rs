@@ -61,6 +61,16 @@ pub enum RiskReason {
     CapacityPressure,
     HardRateLimit,
     Cooldown,
+    MarkedIdentity,
+    CorroboratedAbuse,
+    TargetUnderAttack,
+    PricedEscalation,
+    InteractionAnomaly,
+    SolveAnomaly,
+    DecoyEscalation,
+    SpamMarkQuarantine,
+    NovelNetwork,
+    BreachedCredential,
 }
 
 impl RiskReason {
@@ -81,6 +91,16 @@ impl RiskReason {
             RiskReason::CapacityPressure => "capacity_pressure",
             RiskReason::HardRateLimit => "hard_rate_limit",
             RiskReason::Cooldown => "cooldown",
+            RiskReason::MarkedIdentity => "marked_identity",
+            RiskReason::CorroboratedAbuse => "corroborated_abuse",
+            RiskReason::TargetUnderAttack => "target_under_attack",
+            RiskReason::PricedEscalation => "priced_escalation",
+            RiskReason::InteractionAnomaly => "interaction_anomaly",
+            RiskReason::SolveAnomaly => "solve_anomaly",
+            RiskReason::DecoyEscalation => "decoy_escalation",
+            RiskReason::SpamMarkQuarantine => "spam_mark_quarantine",
+            RiskReason::NovelNetwork => "novel_network",
+            RiskReason::BreachedCredential => "breached_credential",
         }
     }
 }
@@ -129,6 +149,13 @@ pub struct RiskPolicy {
     pub hash: [u8; 32],
     pub weights: RiskWeights,
     pub scopes: HashMap<u32, ScopePolicy>,
+    /// The row applied to every scope the config does not list: a
+    /// conservative default (base risk 100, minimum sha20, degraded
+    /// sha20) unless the config overrides it with a `default_scope`
+    /// object shaped exactly like a scope row. Unconfigured scopes must
+    /// never degrade to Allow: a scope the operator forgot to list would
+    /// otherwise be the weakest hole in the policy.
+    pub default_scope: ScopePolicy,
     /// Global pressure level 0..4 -> minimum action floor. Level 0 has no
     /// floor (Allow).
     pub global_floors: [RiskAction; 5],
@@ -192,43 +219,41 @@ impl RiskPolicy {
         let scopes_obj = scopes_value.as_object().ok_or(PolicyError::InvalidScopes)?;
         let mut scopes = HashMap::new();
         for (key, spec) in scopes_obj {
+            // The canonical grammar both languages share: a u32 spelled
+            // as [1-9][0-9]* — no leading zeros, no sign, no trailing
+            // garbage. "01" and "+1" are configuration errors exactly
+            // like the PHP parser's non-integer keys, never silently
+            // parsed onto scope 1.
+            if key.is_empty()
+                || !key
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_digit() && b != b'0')
+                || !key.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(PolicyError::InvalidScopeId(key.clone()));
+            }
             let scope: u32 = key
                 .parse()
                 .map_err(|_| PolicyError::InvalidScopeId(key.clone()))?;
             if scope == 0 {
                 return Err(PolicyError::InvalidScopeId(key.clone()));
             }
-            let spec_obj = spec
-                .as_object()
-                .ok_or_else(|| PolicyError::InvalidScope(key.clone()))?;
-            let required = ["base_risk", "minimum", "post_solve_check", "degraded"];
-            for field in required {
-                if !spec_obj.contains_key(field) {
-                    return Err(PolicyError::InvalidScope(key.clone()));
-                }
-            }
-            let base_risk_value = spec["base_risk"]
-                .as_u64()
-                .ok_or_else(|| PolicyError::InvalidBaseRisk(key.clone()))?;
-            if base_risk_value > 1000 {
-                return Err(PolicyError::InvalidBaseRisk(key.clone()));
-            }
-            let base_risk = base_risk_value as u16;
-            let minimum = parse_action(&spec["minimum"])?;
-            let post_solve_check = spec["post_solve_check"]
-                .as_bool()
-                .ok_or_else(|| PolicyError::InvalidScope(key.clone()))?;
-            let degraded = parse_action(&spec["degraded"])?;
-            scopes.insert(
-                scope,
-                ScopePolicy {
-                    base_risk,
-                    minimum,
-                    post_solve_check,
-                    degraded,
-                },
-            );
+            let parsed = parse_scope_row(spec, key)?;
+            scopes.insert(scope, parsed);
         }
+
+        // The unconfigured-scope row: optional, but shaped exactly like a
+        // scope row. The default is deliberately NOT Allow on any axis.
+        let default_scope = match config.get("default_scope") {
+            Some(value) => parse_scope_row(value, "default_scope")?,
+            None => ScopePolicy {
+                base_risk: 100,
+                minimum: RiskAction::Sha20,
+                post_solve_check: false,
+                degraded: RiskAction::Sha20,
+            },
+        };
 
         let mut floors = Self::DEFAULT_GLOBAL_FLOORS;
         match config.get("global_floors") {
@@ -298,28 +323,31 @@ impl RiskPolicy {
             hash,
             weights,
             scopes,
+            default_scope,
             global_floors: floors,
         })
     }
 
-    /// Base risk for a scope (default 100).
+    /// Base risk for a scope: the scope row, else the conservative
+    /// `default_scope` row.
     pub fn base_risk(&self, scope: u32) -> u16 {
-        self.scopes.get(&scope).map_or(100, |s| s.base_risk)
+        self.scopes
+            .get(&scope)
+            .map_or(self.default_scope.base_risk, |s| s.base_risk)
     }
 
-    /// Minimum action for a scope (default Allow).
+    /// Minimum action for a scope: the scope row, else `default_scope`.
     pub fn minimum(&self, scope: u32) -> RiskAction {
         self.scopes
             .get(&scope)
-            .map_or(RiskAction::Allow, |s| s.minimum)
+            .map_or(self.default_scope.minimum, |s| s.minimum)
     }
 
     /// Full decision: band action, clamped to the scope minimum and the
     /// global floor, then hard overrides with reasons.
     ///
     /// Convenience wrapper without the scope-action hysteresis map (the
-    /// plain band mapping — byte-identical with the pre-audit-#95
-    /// behavior); the engine uses
+    /// plain band mapping); the engine uses
     /// [`RiskPolicy::decide_with_hysteresis`].
     #[allow(clippy::too_many_arguments)]
     pub fn decide(
@@ -341,11 +369,12 @@ impl RiskPolicy {
             now_ms,
             cooldown_until_ms,
             None,
+            &[],
         )
     }
 
     /// Full decision: band action (with enter/exit hysteresis when the
-    /// engine's per-process scope map is passed), clamped to the scope
+    /// engine's per-client map is passed), clamped to the scope
     /// minimum and the global floor, then hard overrides with reasons.
     ///
     /// Argon re-escalation order: `action = strongest(band, minimum,
@@ -354,13 +383,15 @@ impl RiskPolicy {
     /// capacity check is last, so floors/minimum can never reintroduce
     /// Argon after a demotion.
     ///
-    /// Hysteresis: with `hysteresis` the band selection uses
-    /// the scope's previous action — escalate to the next band only at its
-    /// enter threshold (upper + 10), de-escalate only below its exit
-    /// threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
-    /// mapping. The map stores the SCORE-selected action, so hard
-    /// overrides never poison the profile. `None` keeps the plain band
-    /// mapping.
+    /// Hysteresis: with `hysteresis` the band selection uses the
+    /// `(scope, client)` entry named by `client` — the session pseudonym
+    /// when present, else the source pseudonym. The selection escalates to
+    /// the next band only at its enter threshold (upper + 10), de-escalates
+    /// only below its exit threshold (lower − 10), and jumps straight to
+    /// the plain action when the score clears the target band margin.
+    /// Fresh keys and StepUp/Deny use the plain mapping. The map stores the
+    /// SCORE-selected action, so hard overrides never poison the profile.
+    /// `None` keeps the plain band mapping.
     #[allow(clippy::too_many_arguments)]
     pub fn decide_with_hysteresis(
         &self,
@@ -372,9 +403,11 @@ impl RiskPolicy {
         now_ms: u64,
         cooldown_until_ms: u64,
         hysteresis: Option<&ScopeActionHysteresis>,
+        client: &[u8],
     ) -> RiskDecision {
         let plain = RiskAction::action_for_score(score);
-        let band_action = hysteresis.map_or(plain, |h| h.select(scope, score, plain, now_ms));
+        let band_action =
+            hysteresis.map_or(plain, |h| h.select(scope, client, score, plain, now_ms));
         let minimum = self.minimum(scope);
         let floor = self.global_floors[(global_level as usize).min(4)];
         let mut action = strongest(band_action, minimum, floor);
@@ -382,6 +415,7 @@ impl RiskPolicy {
         let mut reasons: Vec<RiskReason> = Vec::new();
         let mut deny = false;
         let mut retry_after_ms = None;
+        let mut velocity_floor: Option<RiskAction> = None;
 
         if s.replay >= 700 {
             reasons.push(RiskReason::ReplayTraffic);
@@ -393,7 +427,20 @@ impl RiskPolicy {
         }
         if s.source_fast >= 950 {
             reasons.push(RiskReason::HardRateLimit);
-            deny = true;
+            // Velocity alone must not hard-deny: a shared IPv4 address
+            // (cgnat, an office, a campus) can exceed the saturation from
+            // legitimate volume, and the history is shed with the /64
+            // source identity so a single abusive host cannot speak for
+            // the aggregate. Deny only when another hard signal
+            // corroborates the source; otherwise floor the action at
+            // Argon32 (the strongest non-interactive band) and let the
+            // score/capacity logic decide — the argon-capacity check
+            // below still re-escalates a saturated backend to StepUp.
+            if s.bad_proof >= 300 || s.malformed >= 300 || s.replay >= 300 {
+                deny = true;
+            } else {
+                velocity_floor = Some(RiskAction::Argon32);
+            }
         }
         if r.issuance_capacity < 100 {
             reasons.push(RiskReason::CapacityPressure);
@@ -412,11 +459,20 @@ impl RiskPolicy {
         if cooldown_until_ms > 0 && now_ms < cooldown_until_ms && global_level >= 4 {
             reasons.push(RiskReason::Cooldown);
             deny = true;
-            retry_after_ms = Some((cooldown_until_ms - now_ms) as u32);
+            // The retry hint is the u32 wire field: saturate at the ceiling
+            // instead of wrapping a long hold into a much earlier retry (the
+            // PHP mirror saturates identically).
+            retry_after_ms = Some((cooldown_until_ms - now_ms).min(u32::MAX as u64) as u32);
         }
 
         if deny {
             action = RiskAction::Deny;
+        } else if let Some(floor_action) = velocity_floor {
+            action = strongest(action, floor_action, action);
+            if action.is_argon() && r.argon_capacity < 300 {
+                action = RiskAction::StepUp;
+                reasons.push(RiskReason::CapacityPressure);
+            }
         } else if action.is_argon() && r.argon_capacity < 300 {
             // Capacity check last: the final action is Argon and the
             // backend cannot serve memory-hard work — re-escalate to the
@@ -424,6 +480,13 @@ impl RiskPolicy {
             action = RiskAction::StepUp;
             reasons.push(RiskReason::CapacityPressure);
         }
+
+        // The weighted top contributors, appended exactly like the PHP
+        // decision assembles them: hard-policy reasons first, then the
+        // contributor list, then one dedupe pass and the 4-entry cap. The
+        // two languages must surface the identical ordered reason list for
+        // identical inputs (the shared reason vectors pin it).
+        reasons.extend(contributor_reasons(s, &self.weights));
 
         // Deduplicate in priority order, cap at 4.
         let mut seen = std::collections::HashSet::new();
@@ -444,6 +507,7 @@ impl RiskPolicy {
             retry_after_ms,
             band: (score.clamp(0, 1000) / 100) as u8,
             decision_id: String::new(),
+            quarantined: false,
         }
     }
 
@@ -455,7 +519,7 @@ impl RiskPolicy {
         let degraded = self
             .scopes
             .get(&scope)
-            .map_or(RiskAction::Allow, |s| s.degraded);
+            .map_or(self.default_scope.degraded, |s| s.degraded);
         let floor = self.global_floors[(global_level as usize).min(4)];
         let action = strongest(degraded, self.minimum(scope), floor);
 
@@ -469,8 +533,53 @@ impl RiskPolicy {
             retry_after_ms: None,
             band: 0,
             decision_id: String::new(),
+            quarantined: false,
         }
     }
+}
+
+/// Top contributors: for the 11 positive signals in `SignalVector`
+/// order, contribution = (value * weight) / 1000 (integer division);
+/// contributions > 0 are kept in `SignalVector` order, then sorted by
+/// contribution descending (stable, so ties keep the `SignalVector`
+/// order). Mirrors the PHP `RiskPolicy::contributorReasons()` exactly,
+/// including the tie order, because the reason list is part of the
+/// cross-language decision contract.
+fn contributor_reasons(s: &SignalVector, w: &RiskWeights) -> Vec<RiskReason> {
+    let pairs = [
+        (s.source_fast, w.source_fast, RiskReason::SourceBurst),
+        (s.source_slow, w.source_slow, RiskReason::SourceSustained),
+        (s.subnet_fast, w.subnet_fast, RiskReason::NetworkBurst),
+        (s.issue_debt, w.issue_debt, RiskReason::ChallengeDebt),
+        (s.bad_proof, w.bad_proof, RiskReason::InvalidProofs),
+        (s.malformed, w.malformed, RiskReason::MalformedTraffic),
+        (s.replay, w.replay, RiskReason::ReplayTraffic),
+        (
+            s.action_failure,
+            w.action_failure,
+            RiskReason::ActionFailures,
+        ),
+        (s.scope_switch, w.scope_switch, RiskReason::ScopeHopping),
+        (
+            s.global_pressure,
+            w.global_pressure,
+            RiskReason::GlobalAttack,
+        ),
+        (s.network_risk, w.network_risk, RiskReason::LocalNetworkRisk),
+    ];
+    let mut contributions: Vec<(RiskReason, u32)> = Vec::new();
+    for (value, weight, reason) in pairs {
+        let contribution = (u32::from(value) * u32::from(weight)) / 1000;
+        if contribution > 0 {
+            contributions.push((reason, contribution));
+        }
+    }
+    contributions.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+
+    contributions
+        .into_iter()
+        .map(|(reason, _)| reason)
+        .collect()
 }
 
 fn strongest(a: RiskAction, b: RiskAction, c: RiskAction) -> RiskAction {
@@ -482,6 +591,36 @@ fn strongest(a: RiskAction, b: RiskAction, c: RiskAction) -> RiskAction {
         best = c;
     }
     best
+}
+
+/// Parses one scope row (a configured scope or `default_scope`): every
+/// field is required, `base_risk` must be an integer within 0..=1000 (a
+/// float or string is a configuration error, never a silent cast) and the
+/// actions are the exact literal strings.
+fn parse_scope_row(spec: &Value, label: &str) -> Result<ScopePolicy, PolicyError> {
+    let spec_obj = spec
+        .as_object()
+        .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?;
+    let required = ["base_risk", "minimum", "post_solve_check", "degraded"];
+    for field in required {
+        if !spec_obj.contains_key(field) {
+            return Err(PolicyError::InvalidScope(label.to_string()));
+        }
+    }
+    let base_risk_value = spec["base_risk"]
+        .as_u64()
+        .ok_or_else(|| PolicyError::InvalidBaseRisk(label.to_string()))?;
+    if base_risk_value > 1000 {
+        return Err(PolicyError::InvalidBaseRisk(label.to_string()));
+    }
+    Ok(ScopePolicy {
+        base_risk: base_risk_value as u16,
+        minimum: parse_action(&spec["minimum"])?,
+        post_solve_check: spec["post_solve_check"]
+            .as_bool()
+            .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?,
+        degraded: parse_action(&spec["degraded"])?,
+    })
 }
 
 fn parse_action(value: &Value) -> Result<RiskAction, PolicyError> {
@@ -553,6 +692,213 @@ fn escape_json_string(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod malformed_vectors {
+    use super::*;
+
+    /// The shared malformed-policy vectors (protocol/risk-v1/fixtures.json):
+    /// every spelling both languages must reject under the identical
+    /// canonical grammar — [1-9][0-9]* within u32 — plus literal-boolean
+    /// post_solve_check flags.
+    #[test]
+    fn shared_malformed_scope_keys_and_flags_are_rejected() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let vectors = value
+            .get("malformed_policy_vectors")
+            .expect("the malformed-policy vectors must be recorded");
+
+        let scope_row = serde_json::json!({
+            "base_risk": 100, "minimum": "sha20", "post_solve_check": false, "degraded": "sha20"
+        });
+        for entry in vectors["malformed_policy_scopes"]
+            .as_array()
+            .expect("scope vectors")
+        {
+            let key = entry["key"].as_str().expect("the key is a string");
+            let mut scopes = serde_json::Map::new();
+            scopes.insert(key.to_string(), scope_row.clone());
+            let mut config = serde_json::json!({
+                "version": 3,
+                "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" },
+                "weights": {},
+            });
+            config
+                .as_object_mut()
+                .expect("config object")
+                .insert("scopes".into(), Value::Object(scopes));
+            let err = RiskPolicy::from_config(3, &config)
+                .err()
+                .unwrap_or_else(|| panic!("the malformed scope key {key} must be rejected"));
+            assert!(
+                matches!(err, PolicyError::InvalidScopeId(_)),
+                "the malformed key {key} fails the canonical-grammar rejection: {err}"
+            );
+        }
+
+        for entry in vectors["malformed_policy_flags"]
+            .as_array()
+            .expect("flag vectors")
+        {
+            let flag = entry["value"].clone();
+            let config = serde_json::json!({
+                "version": 3,
+                "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" },
+                "weights": {},
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "sha20", "post_solve_check": flag, "degraded": "sha20"
+                }}
+            });
+            let err = RiskPolicy::from_config(3, &config)
+                .err()
+                .unwrap_or_else(|| panic!("the malformed flag {flag} must be rejected"));
+            assert!(
+                matches!(err, PolicyError::InvalidScope(_)),
+                "the malformed flag {flag} fails the literal-boolean rejection: {err}"
+            );
+        }
+
+        // The shared reason vectors: identical inputs must surface the
+        // identical ordered reason list in PHP and Rust, including the
+        // contributor ordering and the stable tie order.
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let reason_vectors = fixtures["reason_vectors"]
+            .as_array()
+            .expect("reason vectors");
+        assert!(!reason_vectors.is_empty());
+        for vector in reason_vectors {
+            let config = serde_json::json!({
+                "version": 3,
+                "weights": vector["weights"].clone(),
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "allow", "post_solve_check": false, "degraded": "allow"
+                }},
+                "global_floors": {"0": "allow", "1": "allow", "2": "allow", "3": "allow", "4": "allow"},
+            });
+            let policy = RiskPolicy::from_config(3, &config).expect("the vector policy builds");
+            let signals: crate::signals::SignalVector =
+                serde_json::from_value(vector["signals"].clone())
+                    .expect("the vector signals parse");
+            let pressure = crate::resources::ResourcePressure {
+                argon_capacity: vector["argon_capacity"].as_u64().expect("argon") as u16,
+                issuance_capacity: vector["issuance_capacity"].as_u64().expect("issuance") as u16,
+            };
+            let decision = policy.decide(
+                1,
+                vector["score"].as_u64().expect("score") as u16,
+                &signals,
+                &pressure,
+                vector["global_level"].as_u64().expect("level") as u8,
+                1_700_000_000_000,
+                0,
+            );
+            let actual: Vec<&str> = decision
+                .reasons
+                .iter()
+                .flatten()
+                .map(|reason| reason.as_str())
+                .collect();
+            let expected: Vec<&str> = vector["expected_reasons"]
+                .as_array()
+                .expect("expected reasons")
+                .iter()
+                .map(|reason| reason.as_str().expect("reason"))
+                .collect();
+            assert_eq!(
+                expected,
+                actual,
+                "reason vector mismatch: {}",
+                vector["why"].as_str().unwrap_or("")
+            );
+            if let Some(expected_action) = vector.get("expected_action").and_then(|v| v.as_str()) {
+                assert_eq!(
+                    expected_action,
+                    decision.action.as_str(),
+                    "action vector mismatch: {}",
+                    vector["why"].as_str().unwrap_or("")
+                );
+            }
+        }
+
+        // The shared malformed global-floor values: an integer,
+        // boolean, array or object action is rejected exactly like the
+        // PHP parser's literal-string requirement — one shared
+        // acceptance set for the two policy readers.
+        for entry in vectors["malformed_global_floor_values"]
+            .as_array()
+            .expect("global-floor value vectors")
+        {
+            let level = entry["level"].as_str().expect("level");
+            let why = entry["why"].as_str().unwrap_or("malformed action");
+            let mut floors = serde_json::Map::new();
+            for canonical in ["0", "1", "2", "3", "4"] {
+                floors.insert(canonical.to_string(), serde_json::json!("sha20"));
+            }
+            floors.insert("0".to_string(), serde_json::json!("allow"));
+            floors.insert(level.to_string(), entry["value"].clone());
+            let config = serde_json::json!({
+                "version": 3,
+                "global_floors": floors,
+                "weights": {},
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "sha20", "post_solve_check": false, "degraded": "sha20"
+                }}
+            });
+            let err = RiskPolicy::from_config(3, &config).err().unwrap_or_else(|| {
+                panic!("the malformed global floor action at level {level} must be rejected: {why}")
+            });
+            assert!(
+                matches!(
+                    err,
+                    PolicyError::InvalidGlobalFloors(_) | PolicyError::InvalidAction(_)
+                ),
+                "the malformed action at level {level} fails the literal-string rejection: {err}"
+            );
+        }
+
+        // The shared malformed global-floor sets: the level keys are
+        // exactly the five canonical spellings "0".."4", each declared
+        // exactly once. A non-canonical spelling ("01", "+1", "04") must
+        // never be parsed onto a logical level, and a five-member object
+        // that repeats one logical level leaves another level absent —
+        // both are configuration errors in Rust exactly like the PHP
+        // parser's non-integer-key rejection.
+        for entry in vectors["malformed_global_floor_sets"]
+            .as_array()
+            .expect("global-floor vectors")
+        {
+            let floors = entry["floors"].clone();
+            let why = entry["why"].as_str().unwrap_or("malformed floors");
+            let config = serde_json::json!({
+                "version": 3,
+                "global_floors": floors,
+                "weights": {},
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "sha20", "post_solve_check": false, "degraded": "sha20"
+                }}
+            });
+            let err = RiskPolicy::from_config(3, &config)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("the malformed global_floors {floors} must be rejected: {why}")
+                });
+            assert!(
+                matches!(err, PolicyError::InvalidGlobalFloors(_)),
+                "the malformed global_floors {floors} fails the canonical-level rejection: {err}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -603,7 +949,9 @@ mod tests {
         assert_eq!(p.base_risk(999), 100);
         assert_eq!(p.minimum(1), RiskAction::Allow);
         assert_eq!(p.minimum(2), RiskAction::Sha16);
-        assert_eq!(p.minimum(999), RiskAction::Allow);
+        // Unconfigured scopes use the conservative default_scope row
+        // (sha20 minimum / sha20 degraded), never Allow.
+        assert_eq!(p.minimum(999), RiskAction::Sha20);
         assert_eq!(p.global_floors, RiskPolicy::DEFAULT_GLOBAL_FLOORS);
     }
 
@@ -635,35 +983,6 @@ mod tests {
                     "scope {scope} score {score} violated its minimum"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn malformed_global_floor_sets_are_rejected() {
-        // The canonical key grammar: the level keys are exactly the five
-        // literal spellings "0".."4", each declared exactly once. A
-        // non-canonical spelling ("01", "+1", "04") must never be parsed
-        // onto a logical level, and a five-member object that repeats one
-        // logical level leaves another level absent — both are
-        // configuration errors in Rust exactly like the PHP parser's
-        // non-integer-key rejection.
-        let malformed = [
-            json!({"0": "allow", "1": "sha16", "01": "deny", "2": "sha18", "3": "sha20"}),
-            json!({"0": "allow", "1": "sha16", "+1": "deny", "2": "sha18", "3": "sha20"}),
-            json!({"0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "04": "sha20"}),
-            json!({"0": "allow", "1": "sha16", "2": "sha18", "3": "sha20"}),
-            json!({"0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "5": "sha20"}),
-        ];
-        for floors in malformed {
-            let mut cfg = config();
-            cfg["global_floors"] = floors.clone();
-            let err = RiskPolicy::from_config(3, &cfg)
-                .err()
-                .unwrap_or_else(|| panic!("the malformed global_floors {floors} must be rejected"));
-            assert!(
-                matches!(err, PolicyError::InvalidGlobalFloors(_)),
-                "the malformed global_floors {floors} fails the canonical-level rejection: {err}"
-            );
         }
     }
 
@@ -768,6 +1087,9 @@ mod tests {
     #[test]
     fn source_fast_hard_override() {
         let p = policy();
+        // Velocity alone must not hard-deny a shared address: the reason
+        // is recorded and the action is floored at the strongest
+        // non-interactive band.
         let d = p.decide(
             1,
             0,
@@ -780,7 +1102,45 @@ mod tests {
             1_700_000_000_000,
             0,
         );
+        assert_eq!(d.action, RiskAction::Argon32);
+        assert!(d.has_reason(RiskReason::HardRateLimit));
+
+        // Corroboration (another hard signal at its floor) restores the
+        // hard deny.
+        let d = p.decide(
+            1,
+            0,
+            &SignalVector {
+                source_fast: 950,
+                bad_proof: 300,
+                ..Default::default()
+            },
+            &healthy(),
+            0,
+            1_700_000_000_000,
+            0,
+        );
         assert_eq!(d.action, RiskAction::Deny);
+        assert!(d.has_reason(RiskReason::HardRateLimit));
+
+        // A saturated backend re-escalates the velocity floor to the
+        // interactive step-up flow instead of weakening it.
+        let d = p.decide(
+            1,
+            0,
+            &SignalVector {
+                source_fast: 950,
+                ..Default::default()
+            },
+            &ResourcePressure {
+                issuance_capacity: 1000,
+                argon_capacity: 0,
+            },
+            0,
+            1_700_000_000_000,
+            0,
+        );
+        assert_eq!(d.action, RiskAction::StepUp);
         assert!(d.has_reason(RiskReason::HardRateLimit));
 
         let d = p.decide(
@@ -1007,9 +1367,9 @@ mod tests {
         let d = p.degraded_decision(2, 0);
         assert_eq!(d.action, RiskAction::Sha20);
 
-        // unknown scope degrades to allow
+        // unknown scope degrades to the conservative default_scope row
         let d = p.degraded_decision(999, 0);
-        assert_eq!(d.action, RiskAction::Allow);
+        assert_eq!(d.action, RiskAction::Sha20);
     }
 
     #[test]
@@ -1114,57 +1474,6 @@ mod tests {
             RiskPolicy::from_config(3, &cfg),
             Err(PolicyError::InvalidGlobalFloors(_))
         ));
-        // Missing entirely -> rejected.
-        let mut cfg = config();
-        cfg.as_object_mut().unwrap().remove("global_floors");
-        assert!(matches!(
-            RiskPolicy::from_config(3, &cfg),
-            Err(PolicyError::InvalidGlobalFloors(_))
-        ));
-        // Non-canonical level spelling -> rejected.
-        let mut cfg = config();
-        cfg["global_floors"] = json!({
-            "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "01": "sha20"
-        });
-        assert!(matches!(
-            RiskPolicy::from_config(3, &cfg),
-            Err(PolicyError::InvalidGlobalFloors(_))
-        ));
-    }
-
-    #[test]
-    fn global_floors_grammar_matches_the_php_port_acceptance_set() {
-        // The cross-language lock-in for the policy grammar: exactly the
-        // shapes the PHP `RiskPolicy::fromConfig` regression test
-        // (`testGlobalFloorsRequireEveryCanonicalLevelExactlyOnce`)
-        // refuses are refused here, and the canonical five-level set is
-        // accepted by both. Parse of the same JSON config must never
-        // diverge (a config one engine loads and the other refuses is a
-        // mixed-fleet policy split).
-        let rejected = [
-            json!({ "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }), // no level 0
-            json!({ "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20" }), // no level 4
-            json!({ "0": "allow", "1": "sha16", "2": "sha18" }),               // partial
-            json!({ "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "01": "sha20" }), // non-canonical spelling
-            json!({ "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20", "5": "deny" }), // out of range
-        ];
-        for floors in rejected {
-            let mut cfg = config();
-            cfg["global_floors"] = floors.clone();
-            assert!(
-                matches!(
-                    RiskPolicy::from_config(3, &cfg),
-                    Err(PolicyError::InvalidGlobalFloors(_))
-                ),
-                "the non-total global_floors {floors} must be refused"
-            );
-        }
-
-        let canonical = config();
-        assert!(
-            RiskPolicy::from_config(3, &canonical).is_ok(),
-            "the canonical five-level set must parse"
-        );
     }
 
     #[test]
@@ -1222,6 +1531,7 @@ mod tests {
                 now + i as u64,
                 0,
                 Some(&h),
+                b"client",
             );
             actions.push(d.action);
         }
@@ -1263,6 +1573,7 @@ mod tests {
                     now,
                     0,
                     Some(&h),
+                    b"client",
                 );
                 assert!(
                     d.action.rank() >= p.minimum(scope).rank(),
@@ -1277,6 +1588,7 @@ mod tests {
                     now + 1,
                     0,
                     Some(&h),
+                    b"client",
                 );
                 assert!(
                     d.action.rank() >= RiskAction::Sha20.rank(),
@@ -1285,5 +1597,52 @@ mod tests {
                 now += 2;
             }
         }
+    }
+
+    /// Hysteresis on the decision path is keyed per client: a bot burst
+    /// does not leak into another client's memory.
+    #[test]
+    fn hysteresis_is_keyed_per_client() {
+        let p = policy();
+        let h = ScopeActionHysteresis::new();
+        let now = 1_700_000_000_000;
+        let legit = p.decide_with_hysteresis(
+            1,
+            100,
+            &zero_vector(),
+            &healthy(),
+            0,
+            now,
+            0,
+            Some(&h),
+            b"legit",
+        );
+        assert_eq!(legit.action, RiskAction::Allow);
+        // The bot's own key jumps straight to Argon64.
+        let bot = p.decide_with_hysteresis(
+            1,
+            900,
+            &zero_vector(),
+            &healthy(),
+            0,
+            now + 1,
+            0,
+            Some(&h),
+            b"bot",
+        );
+        assert_eq!(bot.action, RiskAction::Argon64);
+        // A client with no history keeps the plain mapping.
+        let fresh = p.decide_with_hysteresis(
+            1,
+            100,
+            &zero_vector(),
+            &healthy(),
+            0,
+            now + 2,
+            0,
+            Some(&h),
+            b"fresh",
+        );
+        assert_eq!(fresh.action, RiskAction::Allow);
     }
 }

@@ -1,326 +1,283 @@
-/* ==========================================================================
-   KiwiCaptcha widget — Mono Checksum design language (2026-09-05)
-   ============================================================================
-   The unified platform language: four motifs, zero ornament.
+/* KiwiCaptcha — Spiral Lock interface.
+   Passive security status, one progress track, one native recovery control.
+   All selectors are widget-scoped; tokens remain integrator-overridable.
+   The logo is static. Motion, when present, is a progress-width transition. */
 
-   - SLOT: the flip-cell. The badge and the seven-cell checksum strip are
-     slots; states recolor them. Motion: settle 250ms, stagger 120ms —
-     never a loop faster than the eye can dismiss.
-   - NEEDLE: one solid among faint (the winning nonce). The icon chip in
-     its faint state is the search space; done is the found proof.
-   - RECEIPT: mono rows (challenge · work · proof) — the info line's
-     typography, ready for pipeline detail.
-   - HAIRLINE: the 2px progress track. No gradients, no glow, no shine
-     sweep, no scale bounce. State changes are color + width, 200ms.
+.kiwi-container {
+  --kiwi-font-scale: 1;
+  --kiwi-primary: #1663c7;
+  --kiwi-primary-rgb: 22, 99, 199;
+  --kiwi-success: #08764f;
+  --kiwi-success-rgb: 8, 118, 79;
+  --kiwi-error: #c33434;
+  --kiwi-error-rgb: 195, 52, 52;
+  --kiwi-bg: #ffffff;
+  --kiwi-text: #202733;
+  --kiwi-text-muted: #5b6473;
+  --kiwi-badge-neutral-text: #596273;
+  --kiwi-badge-solving-text: #174c94;
+  --kiwi-badge-success-text: #075438;
+  --kiwi-badge-error-text: #992727;
+  --kiwi-border: #dce1e8;
+  --kiwi-track: #edf0f4;
+  --kiwi-retry-border: #737373;
+  --kiwi-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: inline-flex;
+  width: 100%;
+  max-width: 352px;
+  min-width: 0;
+  position: relative;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--kiwi-text);
+  box-sizing: border-box;
+  text-align: start;
+  color-scheme: light;
+}
+.kiwi-container *, .kiwi-container *::before, .kiwi-container *::after { box-sizing: border-box; }
 
-   A11y contract preserved from the prior skin: sr-only live region,
-     >=44px retry target, 2px focus ring at >=3:1, red never used for
-     text (icon/chip only), badge text >=11px, prefers-reduced-motion
-     kills every decorative animation.
-   ========================================================================== */
-
-  /* Screen-reader-only live region (unchanged contract). */
-  .kiwi-sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-    border: 0;
-  }
-
+@media (prefers-color-scheme: dark) {
   .kiwi-container {
-    --kiwi-font-scale: 1;
-    /* Brand accent stays the widget token (integrators override). */
-    --kiwi-primary: #146de2;
-    --kiwi-primary-rgb: 20, 109, 226;
-    --kiwi-success: #008457;
-    --kiwi-success-rgb: 0, 132, 87;
-    --kiwi-error: #dc2626;
-    --kiwi-error-rgb: 220, 38, 38;
-    --kiwi-bg: #fafafa;
-    --kiwi-text: #333333;
-    --kiwi-text-muted: #737373;
-    --kiwi-badge-neutral-text: #5c5c5c;
-    --kiwi-badge-solving-text: #1055ad;
-    --kiwi-badge-success-text: #00603e;
-    --kiwi-badge-error-text: #b91c1c;
-    --kiwi-border: #e0e0e0;
-    /* WCAG 1.4.11 non-text contrast: meaningful control boundaries
-       need >=3:1 against the card background (#fafafa); --kiwi-border is the
-       decorative divider tone (1.26:1) and must not be used for controls. */
-    --kiwi-border-strong: #8a8a8a;
-    --kiwi-track: #e4e4e4;
-    --kiwi-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --kiwi-bg: #161b22;
+    --kiwi-text: #eff2f6;
+    --kiwi-text-muted: #a9b1bd;
+    --kiwi-badge-neutral-text: #c3cad4;
+    --kiwi-badge-solving-text: #b7d4ff;
+    --kiwi-badge-success-text: #abebcb;
+    --kiwi-badge-error-text: #ffc0c0;
+    --kiwi-primary: #80b5ff;
+    --kiwi-primary-rgb: 128, 181, 255;
+    --kiwi-success: #5bd6a2;
+    --kiwi-success-rgb: 91, 214, 162;
+    --kiwi-error: #f78b8b;
+    --kiwi-error-rgb: 247, 139, 139;
+    --kiwi-border: #313945;
+    --kiwi-track: #252e3a;
+    --kiwi-retry-border: #a9b1bd;
+    color-scheme: dark;
+  }
+}
+/* Page themes pin the palette independently of the OS. A widget's own
+   data-theme or framework theme class takes precedence over its host. */
+[data-theme="dark"] .kiwi-container {
+  --kiwi-bg: #161b22; --kiwi-text: #eff2f6; --kiwi-text-muted: #a9b1bd;
+  --kiwi-badge-neutral-text: #c3cad4; --kiwi-badge-solving-text: #b7d4ff;
+  --kiwi-badge-success-text: #abebcb; --kiwi-badge-error-text: #ffc0c0;
+  --kiwi-primary: #80b5ff; --kiwi-primary-rgb: 128, 181, 255;
+  --kiwi-success: #5bd6a2; --kiwi-success-rgb: 91, 214, 162;
+  --kiwi-error: #f78b8b; --kiwi-error-rgb: 247, 139, 139;
+  --kiwi-border: #313945; --kiwi-track: #252e3a; --kiwi-retry-border: #a9b1bd;
+  color-scheme: dark;
+}
+[data-theme="light"] .kiwi-container {
+  --kiwi-bg: #ffffff; --kiwi-text: #202733; --kiwi-text-muted: #5b6473;
+  --kiwi-badge-neutral-text: #596273; --kiwi-badge-solving-text: #174c94;
+  --kiwi-badge-success-text: #075438; --kiwi-badge-error-text: #992727;
+  --kiwi-primary: #1663c7; --kiwi-primary-rgb: 22, 99, 199;
+  --kiwi-success: #08764f; --kiwi-success-rgb: 8, 118, 79;
+  --kiwi-error: #c33434; --kiwi-error-rgb: 195, 52, 52;
+  --kiwi-border: #dce1e8; --kiwi-track: #edf0f4; --kiwi-retry-border: #737373;
+  color-scheme: light;
+}
+/* Widget-local theme always wins over the host page's data-theme.
+   Specificity is raised above `[data-theme] .kiwi-container` so a light
+   widget inside a dark host (or the reverse) resolves to its own theme. */
+.kiwi-container.kiwi-theme-dark,
+.kiwi-container[data-theme="dark"],
+html .kiwi-container.kiwi-theme-dark,
+html .kiwi-container[data-theme="dark"] {
+  --kiwi-bg: #161b22; --kiwi-text: #eff2f6; --kiwi-text-muted: #a9b1bd;
+  --kiwi-badge-neutral-text: #c3cad4; --kiwi-badge-solving-text: #b7d4ff;
+  --kiwi-badge-success-text: #abebcb; --kiwi-badge-error-text: #ffc0c0;
+  --kiwi-primary: #80b5ff; --kiwi-primary-rgb: 128, 181, 255;
+  --kiwi-success: #5bd6a2; --kiwi-success-rgb: 91, 214, 162;
+  --kiwi-error: #f78b8b; --kiwi-error-rgb: 247, 139, 139;
+  --kiwi-border: #313945; --kiwi-track: #252e3a; --kiwi-retry-border: #a9b1bd;
+  color-scheme: dark;
+}
+.kiwi-container.kiwi-theme-light,
+.kiwi-container[data-theme="light"],
+html .kiwi-container.kiwi-theme-light,
+html .kiwi-container[data-theme="light"] {
+  --kiwi-bg: #ffffff; --kiwi-text: #202733; --kiwi-text-muted: #5b6473;
+  --kiwi-badge-neutral-text: #596273; --kiwi-badge-solving-text: #174c94;
+  --kiwi-badge-success-text: #075438; --kiwi-badge-error-text: #992727;
+  --kiwi-primary: #1663c7; --kiwi-primary-rgb: 22, 99, 199;
+  --kiwi-success: #08764f; --kiwi-success-rgb: 8, 118, 79;
+  --kiwi-error: #c33434; --kiwi-error-rgb: 195, 52, 52;
+  --kiwi-border: #dce1e8; --kiwi-track: #edf0f4; --kiwi-retry-border: #737373;
+  color-scheme: light;
+}
 
-    display: inline-flex;
-    align-items: center;
-    width: 100%;
-    max-width: 336px;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    position: relative;
-    box-sizing: border-box;
-  }
-  @media (prefers-color-scheme: dark) {
-    .kiwi-container {
-      --kiwi-bg: #1c1c1f;
-      --kiwi-text: #f4f4f5;
-      --kiwi-text-muted: #a1a1aa;
-      --kiwi-badge-neutral-text: #a1a1aa;
-      --kiwi-badge-solving-text: #bfdbfe;
-      --kiwi-badge-success-text: #a7f3d0;
-      --kiwi-badge-error-text: #fecaca;
-      --kiwi-primary: #60a5fa;
-      --kiwi-primary-rgb: 96, 165, 250;
-      --kiwi-success: #34d399;
-      --kiwi-success-rgb: 52, 211, 153;
-      --kiwi-error: #f87171;
-      --kiwi-error-rgb: 248, 113, 113;
-      --kiwi-border: #333333;
-      --kiwi-track: #2e2e32;
-    }
-  }
-
-  /* ── Card: 1px border, no shadow, no hover lift — quiet chrome ── */
-  .kiwi-widget {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 14px;
-    background: var(--kiwi-bg);
-    border: 1px solid var(--kiwi-border);
-    border-radius: 12px 12px 8px 8px; /* ARCH (mark DNA) */
-    color: var(--kiwi-text);
-    width: 100%;
-    position: relative;
-    overflow: hidden;
-    cursor: default;
-    user-select: none;
-    transition: border-color 0.2s ease;
-  }
-  .kiwi-widget:hover { border-color: var(--kiwi-primary); }
-  /* The widget is never focusable (status, not control); the Retry button
-     carries the only visible focus ring (2px, >=3:1). */
-  .kiwi-retry:focus-visible {
-    /* CONCENTRIC (mark DNA): the spiral's two arms. */
-    outline: 2px solid var(--kiwi-primary);
-    outline-offset: 1px;
-    box-shadow: 0 0 0 4px var(--kiwi-bg), 0 0 0 5px var(--kiwi-border);
-  }
-
-  /* ── Icon chip: the NEEDLE motif — faint until found ── */
-  .kiwi-icon-wrapper {
-    flex-shrink: 0;
-    width: 30px;
-    height: 30px;
-    border-radius: 8px 8px 7px 7px; /* ARCH (mark DNA) */
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(var(--kiwi-primary-rgb), 0.08);
-    color: var(--kiwi-primary);
-    transition: background 0.2s ease, color 0.2s ease;
-  }
-  .kiwi-icon-wrapper svg { width: 18px; height: 18px; }
-  .kiwi-widget[data-state="done"] .kiwi-icon-wrapper {
-    background: rgb(var(--kiwi-success-rgb));
-    color: #ffffff;
-  }
-  .kiwi-widget[data-state="failed"] .kiwi-icon-wrapper {
-    background: rgba(var(--kiwi-error-rgb), 0.1);
-    color: var(--kiwi-error);
-  }
-  /* No pulse while solving; no scale on done. The slot strip carries the
-     activity; the chip stays still. */
-
-  /* ── Main column ── */
-  .kiwi-main { flex: 1; min-width: 0; }
-  .kiwi-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .kiwi-label {
-    font-size: calc(13px * var(--kiwi-font-scale));
-    color: var(--kiwi-text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* ── Badge: the primary SLOT ── */
-  .kiwi-badge {
-    flex-shrink: 0;
-    font-family: var(--kiwi-mono);
-    font-size: calc(11px * var(--kiwi-font-scale));
-    font-weight: 600;
-    line-height: 1;
-    padding: 4px 6px;
-    border-radius: 4px;
-    background: var(--kiwi-track);
-    color: var(--kiwi-badge-neutral-text);
-    transition: background 0.2s ease, color 0.2s ease;
-  }
-  .kiwi-widget[data-state="solving"] .kiwi-badge {
-    background: rgba(var(--kiwi-primary-rgb), 0.14);
-    color: var(--kiwi-badge-solving-text);
-  }
-  .kiwi-widget[data-state="done"] .kiwi-badge {
-    background: rgba(var(--kiwi-success-rgb), 0.16);
-    color: var(--kiwi-badge-success-text);
-  }
-  .kiwi-widget[data-state="failed"] .kiwi-badge {
-    background: rgba(var(--kiwi-error-rgb), 0.12);
-    color: var(--kiwi-badge-error-text);
-  }
-
-  /* ── The checksum strip: seven decorative slots ──
-     Solving: cells shimmer by opacity stagger (no position motion);
-     Done: all settle to success; Failed: all error; idle: faint. */
-  .kiwi-slots {
-    display: flex;
-    gap: 3px;
-    margin-top: 7px;
-  }
-  .kiwi-slots i {
-    flex: 1;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--kiwi-track);
-    transition: background 0.25s ease;
-  }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i {
-    background: rgba(var(--kiwi-primary-rgb), 0.55);
-    animation: kiwi-slot-cycle 1.2s ease-in-out infinite;
-  }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(2) { animation-delay: 0.12s; }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(3) { animation-delay: 0.24s; }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(4) { animation-delay: 0.36s; }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(5) { animation-delay: 0.48s; }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(6) { animation-delay: 0.60s; }
-  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(7) { animation-delay: 0.72s; }
-  .kiwi-widget[data-state="done"] .kiwi-slots i { background: rgb(var(--kiwi-success-rgb)); }
-  .kiwi-widget[data-state="failed"] .kiwi-slots i { background: rgb(var(--kiwi-error-rgb)); }
-  @keyframes kiwi-slot-cycle {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-  }
-
-  /* ── HAIRLINE track (kept: the driver writes data-progress widths) ── */
-  .kiwi-track {
-    margin-top: 7px;
-    width: 100%;
-    height: 2px;
-    background: var(--kiwi-track);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .kiwi-bar {
-    height: 100%;
-    width: 0%;
-    background: var(--kiwi-primary);
-    border-radius: 2px;
-    transition: width 0.25s ease;
-  }
-  .kiwi-bar[data-progress="10"] { width: 10%; }
-  .kiwi-bar[data-progress="20"] { width: 20%; }
-  .kiwi-bar[data-progress="30"] { width: 30%; }
-  .kiwi-bar[data-progress="40"] { width: 40%; }
-  .kiwi-bar[data-progress="50"] { width: 50%; }
-  .kiwi-bar[data-progress="60"] { width: 60%; }
-  .kiwi-bar[data-progress="70"] { width: 70%; }
-  .kiwi-bar[data-progress="80"] { width: 80%; }
-  .kiwi-bar[data-progress="90"] { width: 90%; }
-  .kiwi-bar[data-progress="100"] { width: 100%; }
-  .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
-  .kiwi-widget[data-state="failed"] .kiwi-bar { background: var(--kiwi-error); }
-
-  /* ── Bottom row: the RECEIPT typography (mono, muted) ──
-     Wraps: in the expired/failed states the Retry button shares this
-     row with the hint, and a hint that cannot fit beside it (narrow
-     integrations, longer locales) must wrap the button to its own
-     line instead of ellipsizing the actionable text. */
-  .kiwi-bottom {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 6px;
-  }
-  .kiwi-info {
-    margin: 0;
-    font-family: var(--kiwi-mono);
-    font-size: calc(10.5px * var(--kiwi-font-scale));
-    color: var(--kiwi-text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .kiwi-timer {
-    font-family: var(--kiwi-mono);
-    font-size: calc(10.5px * var(--kiwi-font-scale));
-    color: var(--kiwi-text-muted);
-    flex-shrink: 0;
-  }
-
-  /* ── Retry: >=44px target, mono, quiet ── */
-  .kiwi-retry {
-    min-height: 44px;
-    min-width: 44px;
-    margin-top: 8px;
-    align-self: flex-start;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 6px 12px;
-    border: 1px solid var(--kiwi-border-strong);
-    border-radius: 6px;
-    background: var(--kiwi-bg);
-    color: var(--kiwi-text);
-    font-family: var(--kiwi-mono);
-    font-size: calc(12px * var(--kiwi-font-scale));
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .kiwi-retry:hover { border-color: var(--kiwi-primary); color: var(--kiwi-primary); }
-  .kiwi-widget[data-state="idle"] .kiwi-retry,
-  .kiwi-widget[data-state="failed"] .kiwi-retry,
-  .kiwi-widget[data-state="expired"] .kiwi-retry,
-  .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry {
-    display: inline-flex;
-  }
-
-  /* ── Status text (driver-visible line under the card) ── */
-  .kiwi-status {
-    font-family: var(--kiwi-mono);
-    font-size: calc(10.5px * var(--kiwi-font-scale));
-    color: var(--kiwi-text-muted);
-    margin-top: 6px;
-  }
-
-  /* ── Reduced motion: every decorative animation stops; state colors and
-     the hairline width remain (they are information, not decoration). ── */
-  @media (prefers-reduced-motion: reduce) {
-    .kiwi-widget, .kiwi-badge, .kiwi-bar, .kiwi-slots i, .kiwi-icon-wrapper,
-    .kiwi-retry { transition: none; animation: none; }
-  }
-
-  /* High-contrast mode: borders carry the states alone. */
-  @media (forced-colors: active) {
-    .kiwi-widget { border: 1px solid CanvasText; }
-    .kiwi-badge, .kiwi-slots i { border: 1px solid CanvasText; }
-  }
-
-  /* ── Narrow-viewport relief (2026-09-06): the receipt/info line is
-     information, not decoration — at phone widths inside padded auth
-     cards the widget can be ~200px wide and the nowrap+ellipsis reduced
-     "Protected by KiwiCaptcha" to "Protected". Let it wrap. ── */
-  @media (max-width: 480px) {
-    .kiwi-info { white-space: normal; }
-    .kiwi-bottom { flex-wrap: wrap; }
-  }
+.kiwi-widget {
+  --kiwi-state-rgb: var(--kiwi-primary-rgb);
+  --kiwi-state-color: var(--kiwi-primary);
+  --kiwi-state-text: var(--kiwi-badge-neutral-text);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  min-height: 92px;
+  padding: 14px;
+  border: 1px solid var(--kiwi-border);
+  border-radius: 16px;
+  background: var(--kiwi-bg);
+  color: var(--kiwi-text);
+  position: relative;
+  cursor: default;
+  transition: border-color 180ms ease;
+}
+.kiwi-widget[data-state="connecting"], .kiwi-widget[data-state="solving"] {
+  --kiwi-state-text: var(--kiwi-badge-solving-text);
+}
+.kiwi-widget[data-state="done"] {
+  --kiwi-state-rgb: var(--kiwi-success-rgb);
+  --kiwi-state-color: var(--kiwi-success);
+  --kiwi-state-text: var(--kiwi-badge-success-text);
+  border-color: rgba(var(--kiwi-success-rgb), 0.4);
+}
+.kiwi-widget[data-state="failed"], .kiwi-widget[data-state="expired"],
+.kiwi-widget[data-state="kiwi:worker-unavailable"],
+.kiwi-widget[data-state="kiwi:execution-unavailable"],
+.kiwi-widget[data-state="kiwi:solver-mismatch"] {
+  --kiwi-state-rgb: var(--kiwi-error-rgb);
+  --kiwi-state-color: var(--kiwi-error);
+  --kiwi-state-text: var(--kiwi-badge-error-text);
+  border-color: rgba(var(--kiwi-error-rgb), 0.4);
+}
+.kiwi-icon-wrapper {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(var(--kiwi-state-rgb), 0.12);
+  border-radius: 11px;
+  background: rgba(var(--kiwi-state-rgb), 0.07);
+  color: var(--kiwi-state-color);
+}
+.kiwi-icon-wrapper svg { display: block; width: 24px; height: 24px; }
+.kiwi-main { flex: 1; min-width: 0; }
+.kiwi-top, .kiwi-bottom { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.kiwi-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: calc(14px * var(--kiwi-font-scale));
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.45;
+  color: var(--kiwi-text);
+}
+.kiwi-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-family: var(--kiwi-mono);
+  font-size: calc(11px * var(--kiwi-font-scale));
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  background: var(--kiwi-track);
+  color: var(--kiwi-state-text);
+}
+.kiwi-widget[data-state="connecting"] .kiwi-badge,
+.kiwi-widget[data-state="solving"] .kiwi-badge,
+.kiwi-widget[data-state="done"] .kiwi-badge,
+.kiwi-widget[data-state="failed"] .kiwi-badge,
+.kiwi-widget[data-state="expired"] .kiwi-badge,
+.kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-badge,
+.kiwi-widget[data-state="kiwi:execution-unavailable"] .kiwi-badge,
+.kiwi-widget[data-state="kiwi:solver-mismatch"] .kiwi-badge {
+  background: rgba(var(--kiwi-state-rgb), 0.1);
+}
+/* Older renderers may still include the decorative checksum strip. The
+   actual solver track is the single visible progress indicator. */
+.kiwi-slots { display: none; }
+.kiwi-track { margin-top: 9px; width: 100%; height: 4px; border-radius: 2px; background: var(--kiwi-track); overflow: hidden; }
+.kiwi-bar { width: 0%; height: 100%; border-radius: inherit; background: var(--kiwi-state-color); transition: width 250ms ease; }
+.kiwi-bar[data-progress="10"] { width: 10%; }
+.kiwi-bar[data-progress="20"] { width: 20%; }
+.kiwi-bar[data-progress="30"] { width: 30%; }
+.kiwi-bar[data-progress="40"] { width: 40%; }
+.kiwi-bar[data-progress="50"] { width: 50%; }
+.kiwi-bar[data-progress="60"] { width: 60%; }
+.kiwi-bar[data-progress="70"] { width: 70%; }
+.kiwi-bar[data-progress="80"] { width: 80%; }
+.kiwi-bar[data-progress="90"] { width: 90%; }
+.kiwi-bar[data-progress="100"] { width: 100%; }
+.kiwi-bottom { margin-top: 8px; }
+.kiwi-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-family: inherit;
+  font-size: calc(11.5px * var(--kiwi-font-scale));
+  line-height: 1.55;
+  color: var(--kiwi-text-muted);
+}
+.kiwi-timer {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--kiwi-mono);
+  font-size: calc(10.5px * var(--kiwi-font-scale));
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+  color: var(--kiwi-text-muted);
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.kiwi-timer:empty { display: none; }
+.kiwi-retry {
+  display: none;
+  flex: 0 1 100%;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 44px;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--kiwi-retry-border);
+  border-radius: 8px;
+  background: var(--kiwi-bg);
+  color: var(--kiwi-text);
+  font-family: inherit;
+  font-size: calc(12px * var(--kiwi-font-scale));
+  font-weight: 600;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.kiwi-retry:hover { background: rgba(var(--kiwi-primary-rgb), 0.05); }
+.kiwi-retry:focus-visible { outline: 2px solid var(--kiwi-primary); outline-offset: 3px; }
+.kiwi-widget[data-state="idle"] .kiwi-retry,
+.kiwi-widget[data-state="failed"] .kiwi-retry,
+.kiwi-widget[data-state="expired"] .kiwi-retry,
+.kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry,
+.kiwi-widget[data-state="kiwi:execution-unavailable"] .kiwi-retry { display: inline-flex; }
+/* Meaningful localized words always wrap, including at 200% text size.
+   No fixed text heights, clipping or ellipses, even in narrow host forms. */
+.kiwi-label, .kiwi-badge, .kiwi-info, .kiwi-timer, .kiwi-retry {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+.kiwi-status { font-family: inherit; font-size: calc(11.5px * var(--kiwi-font-scale)); color: var(--kiwi-text-muted); margin-top: 8px; }
+.kiwi-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .kiwi-widget, .kiwi-badge, .kiwi-bar, .kiwi-slots i, .kiwi-icon-wrapper, .kiwi-retry { transition: none; animation: none; }
+}
+@media (forced-colors: active) {
+  .kiwi-widget, .kiwi-icon-wrapper, .kiwi-badge, .kiwi-track, .kiwi-retry { border: 1px solid CanvasText; }
+  .kiwi-bar { forced-color-adjust: none; background: Highlight; }
+  .kiwi-retry:focus-visible { outline-color: Highlight; }
+  .kiwi-widget[data-state="done"] { border-color: Highlight; }
+  .kiwi-widget[data-state="failed"], .kiwi-widget[data-state="expired"],
+  .kiwi-widget[data-state="kiwi:worker-unavailable"],
+  .kiwi-widget[data-state="kiwi:execution-unavailable"],
+  .kiwi-widget[data-state="kiwi:solver-mismatch"] { border-color: Mark; }
+  .kiwi-widget[data-state="solving"] { border-style: dashed; }
+}

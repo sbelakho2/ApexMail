@@ -7,7 +7,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveFinalizeOutcome;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -48,6 +50,8 @@ final class PostSolveObligationGuardTest extends TestCase
             'stage2Nonce' => $stage2Nonce,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ], JSON_THROW_ON_ERROR);
     }
 
@@ -288,6 +292,39 @@ final class PostSolveObligationGuardTest extends TestCase
         self::assertSame('claimed', $store->claim($nonce4, 'owner-b', 300, null, self::OBLIGATION_ID, null, null)[0]);
         $outcome = $store->finalizeGuarded($nonce4, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, null, self::CHAIN_ID), self::OBLIGATION_ID, null, null);
         self::assertSame(PostSolveFinalizeOutcome::Finalized, $outcome, 'chain-required is a contract response and commits');
+    }
+
+    /**
+     * migrating_v2: the obligation lives in the legacy namespace, which
+     * the primary-namespace script cannot read. The chain store resolves
+     * the provenance and the store refuses the Pass candidate instead
+     * of accepting the stale record blind.
+     */
+    public function testLegacyNamespaceObligationRefusesThePassCandidate(): void
+    {
+        $fake = new DispositionWaitRedisFake();
+        $rawNamespace = 'kiwi-guard-legacy';
+        $namespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', RedisNamespace::VERSION_DIGEST);
+        $legacyNamespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', RedisNamespace::VERSION_LEGACY);
+        $chainStore = new RedisChainedChallengeStateStore($fake, $rawNamespace, 0, 100, RedisNamespace::VERSION_DIGEST, true);
+        $store = new RedisPostSolveDispositionStore($fake, $namespace, 300, 0, 100, $chainStore);
+        $fake->strings['{kiwi:'.$legacyNamespace.'}:chain-obligation:'.self::OBLIGATION_ID] = self::CHAIN_ID;
+
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::OBLIGATION_ID, null, null)[0]);
+        $outcome = $store->finalizeGuarded($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Pass), self::OBLIGATION_ID, null, null);
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $outcome, 'a legacy obligation refuses the Pass candidate');
+        $record = json_decode((string) $fake->strings['{kiwi:'.$namespace.'}:postsolve:'.$nonce], true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $record['state'], 'the refused Pass performs no write');
+        self::assertNull($record['disposition']);
+
+        // The stored-Pass replay takes the same refusal.
+        $storedNonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($storedNonce, 'owner-a', 300)[0]);
+        self::assertTrue($store->finalize($storedNonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        [$claim, , $guard] = $store->claim($storedNonce, 'owner-b', 300, null, self::OBLIGATION_ID, null, null);
+        self::assertSame('complete', $claim);
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $guard, 'the legacy obligation refuses the stored Pass replay');
     }
 
     /**

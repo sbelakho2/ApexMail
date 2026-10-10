@@ -311,7 +311,6 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
- "num-bigint",
  "rand",
  "serde",
  "serde_json",
@@ -322,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "kiwicaptcha-risk"
-version = "1.7.0"
+version = "0.1.0"
 dependencies = [
  "hex",
  "hkdf",

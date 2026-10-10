@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
-use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
@@ -41,6 +41,53 @@ final class ConfigurationTest extends TestCase
         return ProtectionProfileDefaults::finalize($processed, [$config]);
     }
 
+    public function testSessionStateTtlDefaultsTo1800AndRequiresSixty(): void
+    {
+        $processed = $this->process();
+        self::assertSame(
+            1800,
+            $processed['risk']['session_state_ttl_secs'],
+            'the SERVER-SIDE session-state TTL defaults to 1800 and is independent of the browser cookie lifetime',
+        );
+        self::assertSame(1800, $processed['risk']['continuity_cookie']['ttl_secs'], 'the cookie lifetime keeps its own default');
+
+        $withZeroCookie = $this->process([
+            'risk' => ['continuity_cookie' => ['ttl_secs' => 0], 'session_state_ttl_secs' => 120],
+        ]);
+        self::assertSame(0, $withZeroCookie['risk']['continuity_cookie']['ttl_secs'], 'a session cookie (ttl 0) stays allowed');
+        self::assertSame(120, $withZeroCookie['risk']['session_state_ttl_secs'], 'the Redis state TTL remains positive and separate');
+
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['session_state_ttl_secs' => 59]]);
+    }
+
+    public function testAHostPrefixedContinuityCookieRequiresTheRootPath(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessageMatches('/__Host- prefixed name requires path/');
+
+        $this->process(['risk' => ['continuity_cookie' => ['name' => '__Host-kiwi-session', 'path' => '/sub']]]);
+    }
+
+    public function testSameSiteNoneRequiresAnEffectivelySecureCookie(): void
+    {
+        // SameSite=None on a non-__Host- name without an explicit secure
+        // flag is refused: modern browsers reject the cookie and session
+        // continuity silently disappears.
+        try {
+            $this->process(['risk' => ['continuity_cookie' => ['name' => 'kiwi-session', 'samesite' => 'none']]]);
+            self::fail('SameSite=None without an effective Secure flag must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('samesite: none requires an effectively Secure cookie', $e->getMessage());
+        }
+
+        $secure = $this->process(['risk' => ['continuity_cookie' => ['name' => 'kiwi-session', 'samesite' => 'none', 'secure' => true]]]);
+        self::assertSame('none', $secure['risk']['continuity_cookie']['samesite'], 'SameSite=None with secure: true is accepted');
+
+        $hostPrefixed = $this->process(['risk' => ['continuity_cookie' => ['name' => '__Host-kiwi-session', 'samesite' => 'none']]]);
+        self::assertSame('none', $hostPrefixed['risk']['continuity_cookie']['samesite'], 'the __Host- prefix forces Secure, so SameSite=None is accepted');
+    }
+
     public function testDifficultyBits21IsRejectedByTheTree(): void
     {
         $this->expectException(InvalidConfigurationException::class);
@@ -66,7 +113,7 @@ final class ConfigurationTest extends TestCase
     {
         $processed = $this->process();
 
-        self::assertSame(18, $processed['difficulty_bits'], 'difficulty_bits defaults to 18 — the ordinary SHA baseline (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the 5,000,000-hash cap ≈ 5.2×10⁻⁹); 20 stays reachable as the elevated rung via risk escalation (Argon/StepUp above it), never a default that collapses the ladder');
+        self::assertSame(18, $processed['difficulty_bits'], 'difficulty_bits defaults to 18 — the ordinary SHA baseline (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the 20,000,000-hash cap ≈ 7.3×10⁻³⁴); 20 stays reachable as the elevated rung via risk escalation (Argon/StepUp above it), never a default that collapses the ladder');
     }
 
     public function testTreeCeilingTracksCoreConstant(): void
@@ -577,20 +624,212 @@ final class ConfigurationTest extends TestCase
         }
     }
 
-    public function testChainingHmacSecretRequiresAtLeastSixteenBytesWhenConfigured(): void
+    public function testChainingHmacSecretRequiresAtLeastThirtyTwoBytesWhenConfigured(): void
     {
-        // A configured secret below 16 bytes is refused at compile time;
-        // the null fallback (master_secret -> secret_key) is unchanged.
-        foreach (['short', '0123456789abcde'] as $weak) {
+        // A configured secret below the core 32-byte floor is refused at
+        // compile time; the null fallback (master_secret -> secret_key)
+        // is unchanged.
+        foreach (['short', '0123456789abcdef', '0123456789abcdef0123456789abcde'] as $weak) {
             try {
                 $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => $weak]]]);
-                self::fail('a chaining hmac_secret under 16 bytes must be rejected: '.$weak);
-            } catch (InvalidConfigurationException) {
-                self::assertTrue(true);
+                self::fail('a chaining hmac_secret under 32 bytes must be rejected: '.$weak);
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage());
             }
         }
-        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => '0123456789abcdef']]])['risk']['chaining'];
-        self::assertSame('0123456789abcdef', $processed['hmac_secret'], 'a 16-byte chaining secret is accepted');
+        $secret = str_repeat('a', 32);
+        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => $secret]]])['risk']['chaining'];
+        self::assertSame($secret, $processed['hmac_secret'], 'a 32-byte chaining secret is accepted');
+    }
+
+    public function testSecretsByKidValuesRequireTheCoreSecretFloor(): void
+    {
+        // 31 bytes is refused, 32 accepted: the historical keyring
+        // follows the core Config::MIN_SECRET_BYTES floor.
+        try {
+            $this->process(['kid' => 2, 'secrets_by_kid' => [1 => str_repeat('b', 31)]]);
+            self::fail('a 31-byte historical secret must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+            self::assertStringContainsString('MIN_SECRET_BYTES', $e->getMessage());
+        }
+        $accepted = $this->process(['kid' => 2, 'secrets_by_kid' => [1 => str_repeat('b', 32)]])['secrets_by_kid'];
+        self::assertSame(str_repeat('b', 32), $accepted[1], 'a 32-byte historical secret is accepted');
+    }
+
+    public function testExecutionKeyRequiresTheCoreSecretFloor(): void
+    {
+        try {
+            $this->process(['execution_key' => str_repeat('c', 31), 'risk' => ['execution_challenge' => 'on']]);
+            self::fail('a 31-byte execution_key must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+        }
+        $accepted = $this->process(['execution_key' => str_repeat('c', 32), 'risk' => ['execution_challenge' => 'on']])['execution_key'];
+        self::assertSame(str_repeat('c', 32), $accepted, 'a 32-byte execution_key is accepted');
+    }
+
+    /**
+     * The compile-time secret floors must never judge an env-managed
+     * value. `%env(...)%` unresolved and its resolved `env_...`
+     * placeholder form are accepted and preserved; the same floor is
+     * enforced when the runtime service/Config is constructed. Literal
+     * short values stay refused, as pinned above, and a literal empty
+     * string is refused too (see the dedicated test below).
+     */
+    public function testEnvPlaceholdersAreExemptFromTheCompileTimeSecretFloors(): void
+    {
+        $resolvedPlaceholder = 'env_0123456789abcdef_KIWI_RISK_SECRET_0123456789abcdef0123456789abcdef';
+
+        foreach ([
+            'execution_key' => [
+                ['execution_key' => '%env(KIWI_EXECUTION_KEY)%', 'risk' => ['execution_challenge' => 'on']],
+                ['execution_key' => $resolvedPlaceholder, 'risk' => ['execution_challenge' => 'on']],
+            ],
+            'hmac_secret' => [
+                ['risk' => ['chaining' => ['hmac_secret' => '%env(KIWI_RISK_SECRET)%']]],
+                ['risk' => ['chaining' => ['hmac_secret' => $resolvedPlaceholder]]],
+            ],
+            'secrets_by_kid' => [
+                ['kid' => 2, 'secrets_by_kid' => [1 => '%env(OLD_SECRET)%']],
+                ['kid' => 2, 'secrets_by_kid' => [1 => $resolvedPlaceholder]],
+            ],
+        ] as $label => $cases) {
+            foreach ($cases as $case) {
+                try {
+                    $this->process($case);
+                } catch (InvalidConfigurationException $e) {
+                    self::fail(sprintf('the %s env placeholder/fixture must be accepted, got: %s', $label, $e->getMessage()));
+                }
+            }
+        }
+
+        $processed = $this->process(['execution_key' => '%env(KIWI_EXECUTION_KEY)%', 'risk' => ['execution_challenge' => 'on']]);
+        self::assertSame('%env(KIWI_EXECUTION_KEY)%', $processed['execution_key'], 'the env placeholder is preserved for runtime resolution');
+    }
+
+    /**
+     * A literal empty string is an explicitly invalid secret value, not
+     * a deferred %env()% placeholder: it fails the build-time floors of
+     * every secret position instead of being exempted to runtime.
+     */
+    public function testAnEmptyStringSecretFailsTheCompileTimeFloorsInEverySecretPosition(): void
+    {
+        foreach ([
+            'execution_key' => ['execution_key' => '', 'risk' => ['execution_challenge' => 'on']],
+            'hmac_secret' => ['risk' => ['chaining' => ['hmac_secret' => '']]],
+            // The done-when shape: secrets_by_kid {1: ''} fires a
+            // build-time InvalidConfiguration.
+            'secrets_by_kid' => ['kid' => 2, 'secrets_by_kid' => [1 => '']],
+        ] as $label => $case) {
+            try {
+                $this->process($case);
+                self::fail(sprintf('an empty-string %s must be refused at build time', $label));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage(), sprintf('the %s refusal names the floor', $label));
+            }
+        }
+    }
+
+    public function testAnEmptyStringSiteverifySecretFailsTheCompileTimeFloor(): void
+    {
+        // The siteverify secrets are the map keys of their node: an
+        // empty-string secret (and an integer-coerced numeric one) is
+        // refused by the node's own key validation at build time.
+        foreach ([
+            ['' => 'login'],
+            ['1' => 'login'],
+        ] as $secrets) {
+            try {
+                $this->process(['risk' => ['siteverify_secrets' => $secrets]]);
+                self::fail('an empty-string (or integer-coerced) siteverify secret must be refused at build time');
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage(), 'the refusal names the siteverify secret floor');
+            }
+        }
+    }
+
+    public function testPolicyVersionInfoDocumentsTheEffectiveEpochAndCutover(): void
+    {
+        $info = $this->treeInfoText('risk.policy_version');
+        self::assertStringContainsString('max(configured, central min_policy_epoch)', $info);
+        self::assertStringContainsString('coordinated cutover', $info);
+        self::assertStringContainsString('WrongPolicyVersion', $info);
+        self::assertStringContainsString('risk.policy_rollout_min_epoch', $info, 'the epoch info points at the declared rollout-window escape hatch');
+    }
+
+    public function testPolicyRolloutWindowDefaultsToNullAndMustStayBelowTheExpectedEpoch(): void
+    {
+        // No window by default: the strict-equality contract stands
+        // unless an operator explicitly declares the drain floor.
+        self::assertNull($this->process()['risk']['policy_rollout_min_epoch']);
+
+        $processed = $this->process(['risk' => ['policy_version' => 2, 'policy_rollout_min_epoch' => 1]])['risk'];
+        self::assertSame(1, $processed['policy_rollout_min_epoch'], 'a declared window floor is processed');
+        self::assertSame(2, $processed['policy_version']);
+
+        foreach ([
+            ['risk' => ['policy_version' => 2, 'policy_rollout_min_epoch' => 2]],
+            ['risk' => ['policy_version' => 2, 'policy_rollout_min_epoch' => 3]],
+            ['risk' => ['policy_rollout_min_epoch' => 2]], // at/above the policy_version default of 1
+        ] as $case) {
+            try {
+                $this->process($case);
+                self::fail('a rollout floor at or above risk.policy_version must be refused: '.json_encode($case));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('strictly lower than risk.policy_version', $e->getMessage());
+            }
+        }
+    }
+
+    public function testPolicyRolloutWindowInfoDocumentsTheWindowContract(): void
+    {
+        $info = $this->treeInfoText('risk.policy_rollout_min_epoch');
+        self::assertStringContainsString('[floor, expected]', $info);
+        self::assertStringContainsString('strict equality', $info);
+        self::assertStringContainsString('central min_policy_epoch', $info, 'the floor is never derived from the central state');
+    }
+
+    public function testProtocolCeilingInfoTextUsesTheSolverCapAndCurrentExhaustionFigures(): void
+    {
+        $info = $this->treeInfoText('difficulty_bits');
+        self::assertStringContainsString('20,000,000-hash cap', $info);
+        self::assertStringNotContainsString('5,000,000', $info);
+        self::assertStringNotContainsString('0.8494%', $info);
+        self::assertStringNotContainsString('1 in 118', $info);
+        self::assertStringContainsString('5.2×10⁻⁹', $info);
+    }
+
+    public function testNamespaceInfoTextNamesBothKeyVersions(): void
+    {
+        $info = $this->treeInfoText('risk.namespace');
+        self::assertStringContainsString('namespace_key_version', $info);
+        self::assertStringContainsString('version 1 sanitizes to [A-Za-z0-9_.-]', $info);
+        self::assertStringContainsString('version 2 emits the digest form', $info);
+    }
+
+    public function testHealthInfoTextNamesTheV5CeilingAndTheEpochWarning(): void
+    {
+        $info = $this->treeInfoText('risk.health');
+        self::assertStringContainsString('min_protocol_version <= 5', $info);
+        self::assertStringContainsString('warning instead of failing readiness', $info);
+    }
+
+    /**
+     * The info text of a configuration path from the tree definition
+     * (the operator-facing documentation the tree carries).
+     */
+    private function treeInfoText(string $path): string
+    {
+        $node = (new Configuration())->getConfigTreeBuilder()->buildTree();
+        foreach (explode('.', $path) as $segment) {
+            $children = $node->getChildren();
+            self::assertArrayHasKey($segment, $children, 'the tree exposes the path segment '.$segment);
+            $node = $children[$segment];
+        }
+        self::assertInstanceOf(\Symfony\Component\Config\Definition\BaseNode::class, $node);
+
+        return $node->getInfo() ?? '';
     }
 
     public function testArgonEscalationLadderDefaultsToTheMonotonicThreeRungLadder(): void
@@ -659,17 +898,134 @@ final class ConfigurationTest extends TestCase
 
     public function testSiteverifySecretsRequireStrongKeys(): void
     {
+
         // The siteverify secrets are the entire server-to-server
         // authentication boundary — configuration rejects weak keys.
-        $processed = $this->process(['risk' => ['siteverify_secrets' => ['0123456789abcdef' => 'login']]])['risk']['siteverify_secrets'];
-        self::assertSame(['0123456789abcdef' => 'login'], $processed);
+        // The floor is 32 bytes, the same contract as the signing keys:
+        // a 32-byte siteverify secret is accepted...
+        $strong = '0123456789abcdef0123456789abcdef';
+        $processed = $this->process(['risk' => ['siteverify_secrets' => [$strong => 'login']]])['risk']['siteverify_secrets'];
+        self::assertSame([$strong => 'login'], $processed);
 
-        foreach ([['short' => 'login'], ['0123456789abcde' => 'login']] as $weak) {
+        // ...and a 16-byte secret (the old floor) is now rejected, as is
+        // everything below 32 bytes.
+        foreach ([
+            ['short' => 'login'],
+            ['0123456789abcdef' => 'login'],
+            ['0123456789abcdef0123456789abcde' => 'login'],
+        ] as $weak) {
             try {
                 $this->process(['risk' => ['siteverify_secrets' => $weak]]);
-                self::fail('a siteverify secret under 16 bytes must be rejected at config load');
+                self::fail('a siteverify secret under 32 bytes must be rejected at config load');
             } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
                 // expected
+            }
+        }
+    }
+
+    public function testSiteverifyNumericStringSecretStaysAStringKey(): void
+    {
+        // A >=32-byte numeric secret that PHP preserves as a string key
+        // (beyond PHP_INT_MAX, so no integer coercion happens) survives
+        // processing as the exact string key, and key normalization is
+        // off: a dash-bearing secret is never rewritten to underscores.
+        $numeric = '99999999999999999999999999999999'; // 32 digits > PHP_INT_MAX: stays a string key
+        self::assertIsString((string) $numeric);
+        $secrets = [$numeric => 'login'];
+        self::assertIsString(array_key_first($secrets), 'precondition: a >PHP_INT_MAX decimal key stays a string');
+
+        $processed = $this->process(['risk' => ['siteverify_secrets' => $secrets]])['risk']['siteverify_secrets'];
+        self::assertSame([$numeric => 'login'], $processed, 'the numeric-string secret key is preserved verbatim');
+
+        $dashBearing = 'ab-cd-ef-01-23-45-67-89-ab-cd-ef';
+        $processed = $this->process(['risk' => ['siteverify_secrets' => [$dashBearing => 'login']]])['risk']['siteverify_secrets'];
+        self::assertSame([$dashBearing => 'login'], $processed, 'normalizeKeys(false): a dash-bearing secret key is never rewritten to underscores');
+    }
+
+    public function testSiteverifyIntegerCoercedSecretKeyIsRejectedWithAnActionableMessage(): void
+    {
+        // A canonical-decimal numeric secret within int range becomes an
+        // integer array key at array-construction time (PHP semantics no
+        // config tree can undo); the validation rejects it with the
+        // actionable remedy instead of letting an integer secret key
+        // reach hash_equals() and fail every /siteverify request.
+        $secrets = ['999999999999999999' => 'login']; // 18 digits <= PHP_INT_MAX: coerced to int
+        self::assertIsInt(array_key_first($secrets), 'precondition: PHP coerced the canonical-decimal key to int');
+
+        try {
+            $this->process(['risk' => ['siteverify_secrets' => $secrets]]);
+            self::fail('an integer-coerced siteverify secret key must be rejected at config load');
+        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException $e) {
+            self::assertStringContainsString('must be a string', $e->getMessage(), 'the refusal explains the string-key contract');
+            self::assertStringContainsString('numeric', $e->getMessage(), 'the refusal explains the numeric-key coercion remedy');
+        }
+    }
+
+    public function testMetricsSecretDefaultsToNullAndEnforcesTheThirtyTwoByteFloor(): void
+    {
+        // Null disables the endpoint (the route stays unregistered), and
+        // a configured secret is the entire authentication boundary of
+        // the exporter: the same floor as the siteverify secrets.
+        self::assertNull($this->process()['risk']['metrics']['secret']);
+
+        $strong = 'metrics-exporter-secret-0123456789abcdef';
+        self::assertSame(
+            $strong,
+            $this->process(['risk' => ['metrics' => ['secret' => $strong]]])['risk']['metrics']['secret'],
+            'a 32-byte secret is accepted and preserved verbatim',
+        );
+
+        foreach (['short', '0123456789abcdef0123456789abcde', ''] as $weak) {
+            try {
+                $this->process(['risk' => ['metrics' => ['secret' => $weak]]]);
+                self::fail(sprintf('a metrics secret under 32 bytes (%s) must be refused at config load', var_export($weak, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+            }
+        }
+
+        // An env placeholder is length-checked at runtime instead, so it
+        // is preserved for the controller construction.
+        self::assertSame(
+            '%env(KIWI_METRICS_SECRET)%',
+            $this->process(['risk' => ['metrics' => ['secret' => '%env(KIWI_METRICS_SECRET)%']]])['risk']['metrics']['secret'],
+        );
+    }
+
+    public function testOutcomesKnobsDefaultAndValidateTheScopeShape(): void
+    {
+        $outcomes = $this->process()['risk']['outcomes'];
+        self::assertTrue($outcomes['auto_bridge'], 'the security auto-bridge defaults to armed (it self-gates on the surface preconditions)');
+        self::assertNull($outcomes['scope'], 'no outcomes scope by default: the bridge stays unregistered until one is named');
+
+        $processed = $this->process(['risk' => ['outcomes' => ['scope' => 'login']]])['risk']['outcomes'];
+        self::assertSame('login', $processed['scope']);
+
+        foreach (['bad scope', 'login/x', str_repeat('s', 129)] as $bad) {
+            try {
+                $this->process(['risk' => ['outcomes' => ['scope' => $bad]]]);
+                self::fail(sprintf('an outcomes scope of %s must be refused', var_export($bad, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('risk.outcomes.scope', $e->getMessage());
+            }
+        }
+    }
+
+    public function testScopeTargetFieldIsValidatedAsAFormFieldName(): void
+    {
+        // The per-scope target field feeds the engine's target resolver
+        // and the bridge's failure lane; a bounded field-name shape is
+        // the whole validation surface (the field itself may be absent
+        // from any given request).
+        $processed = $this->process(['risk' => ['scopes' => ['login' => ['id' => 10, 'target_field' => 'username']]]])['risk']['scopes']['login'];
+        self::assertSame('username', $processed['target_field']);
+
+        foreach (['bad field', 'username[x]', str_repeat('f', 129)] as $bad) {
+            try {
+                $this->process(['risk' => ['scopes' => ['login' => ['id' => 10, 'target_field' => $bad]]]]);
+                self::fail(sprintf('a target field of %s must be refused', var_export($bad, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('target_field', $e->getMessage());
             }
         }
     }
@@ -680,7 +1036,7 @@ final class ConfigurationTest extends TestCase
 
         self::assertSame(0, $redis['wait_replicas'], 'wait_replicas defaults to 0 (WAIT disabled)');
         self::assertSame(100, $redis['wait_timeout_ms'], 'wait_timeout_ms defaults to 100');
-        self::assertSame(0, $redis['ttl_margin_secs'], 'ttl_margin_secs defaults to 0 (no extra retention)');
+        self::assertSame(60, $redis['ttl_margin_secs'], 'ttl_margin_secs defaults to 60, above ordinary clock skew and failover margins');
 
         $redis = $this->process(['risk' => ['redis' => [
             'wait_replicas' => 2,
@@ -836,6 +1192,38 @@ final class ConfigurationTest extends TestCase
         self::assertSame(2, $belowCap['execution_required_version']);
     }
 
+    public function testExecutionVersionBoundsTrackTheGeneratorMaximum(): void
+    {
+        // The deployable maximum is the generator's, never a second
+        // literal: the config authority must accept the current
+        // generator maximum (version 5) for both execution-version
+        // knobs and refuse one above it. This is the semantic guard
+        // that keeps the public Symfony integration from lagging the
+        // protocol register.
+        $max = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
+
+        $atMax = $this->process([
+            'execution_version' => $max,
+            'execution_required_version' => $max,
+        ]);
+        self::assertSame($max, $atMax['execution_version'], 'the node cap must accept the generator maximum');
+        self::assertSame($max, $atMax['execution_required_version'], 'the required tier must accept the generator maximum');
+        self::assertGreaterThanOrEqual(5, $max, 'the register must be at the v5 causal object-graph grammar');
+
+        try {
+            $this->process(['execution_version' => $max + 1]);
+            self::fail('an execution_version above the generator maximum must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_version', $e->getMessage());
+        }
+        try {
+            $this->process(['execution_required_version' => $max + 1]);
+            self::fail('an execution_required_version above the generator maximum must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_required_version', $e->getMessage());
+        }
+    }
+
     public function testExecutionVersioningAliasesCanonicalizeOntoTheLegacyNames(): void
     {
         // The semantic names are canonicalized aliases: Symfony Config
@@ -984,8 +1372,9 @@ final class ConfigurationTest extends TestCase
     public function testArgon2MaxVerificationRuntimeMsDefaultsAndBounds(): void
     {
         // The deployment bound on a single verification derivation: below
-        // the default lease (45000) by the 5000 ms safety margin, so the
-        // default combination compiles (45000 > 30000 + 5000 = 35000).
+        // the default lease by the 5000 ms safety margin, so the default
+        // combination compiles (the configured default lease exceeds
+        // 30000 + 5000 = 35000).
         self::assertSame(30000, $this->process()['argon2_max_verification_runtime_ms'], 'argon2_max_verification_runtime_ms defaults to 30000 (below the default argon2_lease_ms 45000 by the 5000 ms safety margin)');
         self::assertSame(120000, $this->process(['argon2_max_verification_runtime_ms' => 120000])['argon2_max_verification_runtime_ms']);
     }
@@ -1559,171 +1948,5 @@ final class ConfigurationTest extends TestCase
         } catch (InvalidConfigurationException $e) {
             self::assertStringContainsString('bare root', $e->getMessage());
         }
-    }
-
-    /**
-     * The HMAC secret minimum the tree documents is enforced at compile
-     * time, not only at first use: a sub-16-byte secret_key must be
-     * refused when the configuration is processed (the core Config
-     * refuses it at issuance and the Verifier refuses it at verify time,
-     * so a short value is never a working deployment — it is a
-     * misconfiguration caught as early as possible).
-     */
-    public function testShortSecretKeyIsRejectedByTheTree(): void
-    {
-        foreach (['short', str_repeat('a', 15)] as $short) {
-            try {
-                $this->process(['secret_key' => $short]);
-                self::fail(sprintf('a %d-byte secret_key must be refused', \strlen($short)));
-            } catch (InvalidConfigurationException $e) {
-                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
-            }
-        }
-
-        $processed = $this->process(['secret_key' => str_repeat('a', 16)]);
-        self::assertSame(str_repeat('a', 16), $processed['secret_key'], '16 bytes is the documented floor and passes');
-    }
-
-    /**
-     * risk.master_secret derives every risk identity pseudonym: a short
-     * configured master would make the pseudonyms predictable. The
-     * sibling secret knobs (chaining.hmac_secret, execution_key, siteverify
-     * secrets, secrets_by_kid) all validate >= 16 at compile time; the
-     * master must not be the one silent hole. Null keeps the documented
-     * fallback to secret_key.
-     *
-     * The empty string is deliberately NOT a compile-time refusal: an
-     * %env(KIWI_RISK_SECRET)% placeholder is opaque here and Symfony
-     * refuses validated nodes that carry env placeholders (see
-     * testEnvPlaceholderIsAcceptedOnValidatedSecretNodes), so '' passes
-     * the tree and is refused on the RESOLVED value by the runtime
-     * guard — asserted here directly and via the wired factory.
-     */
-    public function testShortRiskMasterSecretIsRejectedByTheTree(): void
-    {
-        foreach (['short', str_repeat('b', 15)] as $short) {
-            try {
-                $this->process(['risk' => ['master_secret' => $short]]);
-                self::fail('a short risk.master_secret must be refused');
-            } catch (InvalidConfigurationException $e) {
-                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
-            }
-        }
-
-        $processed = $this->process(['risk' => ['master_secret' => str_repeat('b', 16)]]);
-        self::assertSame(str_repeat('b', 16), $processed['risk']['master_secret']);
-
-        $nullMaster = $this->process(['risk' => ['master_secret' => null]]);
-        self::assertNull($nullMaster['risk']['master_secret'], 'null keeps the secret_key fallback');
-    }
-
-    /**
-     * The resolved-value runtime guard for the risk identity keys: an
-     * env-resolved (or literal) master that is short or empty must fail
-     * closed at service construction — the load-time tree cannot see a
-     * placeholder's value, and PHP/Rust `RiskKeys` derive from any byte
-     * string without a length gate. Also pins that the extension wires
-     * this guard as the container factory, so the protection is real in
-     * a booted kernel, not just unit-level.
-     */
-    public function testResolvedRiskMasterSecretBelowTheMinimumFailsClosedAtRuntime(): void
-    {
-        foreach (['', 'short', str_repeat('b', 15)] as $short) {
-            try {
-                KiwiCaptchaExtension::createRiskKeys($short);
-                self::fail('an empty/short resolved risk master must fail closed');
-            } catch (\LogicException $e) {
-                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
-            }
-        }
-
-        $keys = KiwiCaptchaExtension::createRiskKeys(str_repeat('b', 16));
-        self::assertSame(
-            \KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('b', 16))->source,
-            $keys->source,
-            '16 bytes is the documented floor and derives the same keys as the raw factory'
-        );
-
-        // The container definition must route through the guard.
-        $container = new \Symfony\Component\DependencyInjection\ContainerBuilder();
-        $container->setParameter('kernel.project_dir', '/tmp');
-        $container->setParameter('kernel.environment', 'test');
-        (new KiwiCaptchaExtension())->load([[
-            'secret_key' => str_repeat('a', 32),
-            'redis_service' => 'fake_redis',
-            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis'],
-        ]], $container);
-        self::assertSame(
-            [KiwiCaptchaExtension::class, 'createRiskKeys'],
-            $container->getDefinition('kiwi_captcha.risk.keys')->getFactory(),
-            'the risk identity keys must be constructed through the runtime secret guard'
-        );
-    }
-
-    /**
-     * The documented env-managed secret form must stay accepted on every
-     * validated secret node even inside a full kernel build: Symfony's
-     * ValidateEnvPlaceholdersPass refuses a node that carries BOTH a
-     * final-validation closure and the cannotBeEmpty contract, which is
-     * why the tree uses allowEmptyValue + empty-tolerant closures and
-     * defers the minimum to the runtime guards. The recipe-shaped kernel
-     * test covers secret_key end to end; this pins the other three nodes
-     * at the configuration-processing level with the placeholder form the
-     * info strings recommend.
-     */
-    public function testEnvPlaceholderIsAcceptedOnValidatedSecretNodes(): void
-    {
-        $processed = $this->process([
-            'secret_key' => '%env(KIWI_CAPTCHA_SECRET)%',
-            'execution_key' => '%env(KIWI_EXECUTION_KEY)%',
-            'risk' => [
-                'enabled' => true,
-                'redis_service' => 'fake_redis',
-                'master_secret' => '%env(KIWI_RISK_SECRET)%',
-                'request_binding_authority' => 'app.binding_authority',
-                'chaining' => ['enabled' => true, 'ttl_secs' => 60, 'hmac_secret' => '%env(KIWI_RISK_SECRET)%'],
-            ],
-        ]);
-
-        self::assertSame('%env(KIWI_CAPTCHA_SECRET)%', $processed['secret_key']);
-        self::assertSame('%env(KIWI_EXECUTION_KEY)%', $processed['execution_key']);
-        self::assertSame('%env(KIWI_RISK_SECRET)%', $processed['risk']['master_secret']);
-        self::assertSame('%env(KIWI_RISK_SECRET)%', $processed['risk']['chaining']['hmac_secret']);
-    }
-
-    /**
-     * The build-time literal-secret lane: an explicitly empty (or short)
-     * literal secret_key is refused when the extension loads — the tree's
-     * empty-tolerant closure lets '' through so the %env()% form works,
-     * and this check restores the compile-time refusal for the literal
-     * case. An %env()% placeholder stays accepted (it is opaque here; the
-     * resolved value is refused by the consumers).
-     */
-    public function testLiteralEmptySecretKeyFailsClosedAtContainerBuildButEnvPlaceholdersPass(): void
-    {
-        foreach (['', 'short'] as $bad) {
-            try {
-                $container = new \Symfony\Component\DependencyInjection\ContainerBuilder();
-                $container->setParameter('kernel.project_dir', '/tmp');
-                $container->setParameter('kernel.environment', 'test');
-                (new KiwiCaptchaExtension())->load([['secret_key' => $bad]], $container);
-                self::fail(sprintf('a literal %d-byte secret_key must fail at container build', \strlen($bad)));
-            } catch (\Exception $e) {
-                // 'short' is refused by the tree (InvalidConfigurationException),
-                // '' by the extension's literal lane (InvalidArgumentException):
-                // both name the documented minimum.
-                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
-            }
-        }
-
-        $container = new \Symfony\Component\DependencyInjection\ContainerBuilder();
-        $container->setParameter('kernel.project_dir', '/tmp');
-        $container->setParameter('kernel.environment', 'test');
-        (new KiwiCaptchaExtension())->load([['secret_key' => '%env(KIWI_CAPTCHA_SECRET)%']], $container);
-        self::assertSame(
-            '%env(KIWI_CAPTCHA_SECRET)%',
-            $container->getParameter('kiwi_captcha.secret_key'),
-            'the env-managed secret must be accepted at container build'
-        );
     }
 }

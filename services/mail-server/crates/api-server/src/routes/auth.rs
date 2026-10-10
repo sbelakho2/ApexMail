@@ -378,6 +378,10 @@ pub async fn verify_kiwi_token(
     let ctx = kiwicaptcha::VerifyContext {
         record: &mut record_mut,
         secret_key: &config.kiwi_secret_key,
+        // No per-tenant key root: every challenge this deployment issues
+        // derives under the global purpose keys (see
+        // `routes::kiwicaptcha::issue_challenge_handler`).
+        tenant: None,
         // No key rotation configured: the single secret verifies every record
         // (the historical single-key path). No kids are revoked either.
         secrets_by_kid: None,
@@ -396,6 +400,10 @@ pub async fn verify_kiwi_token(
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        // No rollout window: policy-version pinning is off entirely on this
+        // deployment (the floor is only consulted when an expected version is
+        // set).
+        policy_version_floor: None,
         // IP binding is enforced inside verify_solution (intrinsic).
         client_ip: Some(client_ip),
         // Execution/RSW evidence passes through from the token verbatim. This
@@ -408,6 +416,9 @@ pub async fn verify_kiwi_token(
         rsw_proof: solution.rsw_proof.as_deref(),
         rsw_modulus_n: None,
         rsw_lambda: None,
+        // No RSW rotation: no trapdoor modulus is ever armed, so there is no
+        // historical keyring to resolve against.
+        rsw_keyring: None,
         // v1 challenges are rejected by default (the migration window is
         // closed); the api-server only ever issues v2.
         accept_legacy_v1: false,
@@ -2066,6 +2077,7 @@ pub struct UserInfo {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(non_snake_case)]
 pub struct CompleteMfaChallengeRequest {
     pub challenge_token: String,
     /// Optional: the endpoint's documented contract is "either `mfaCode`
@@ -2078,6 +2090,13 @@ pub struct CompleteMfaChallengeRequest {
     pub mfa_code: String,
     #[serde(default, rename = "recoveryCode", alias = "recovery_code")]
     pub recovery_code: Option<String>,
+    /// KiwiCaptcha proof-of-work token (scope `mfa-verify`), the same
+    /// hidden-field convention as [`LoginRequest::kiwi__token`]. Required
+    /// whenever the captcha is enforced: the second factor is a 6-digit
+    /// secret and the per-user lockout does not stop distributed attackers
+    /// pacing under it across many accounts.
+    #[serde(default, rename = "kiwi__token")]
+    pub kiwi__token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2968,6 +2987,21 @@ async fn complete_mfa_challenge(
             "mfa_code or recovery_code is required".into(),
         ]));
     }
+
+    // KiwiCaptcha gate (scope `mfa-verify`): mirror the SSR step — the
+    // second factor pays its own proof-of-work before the single-use
+    // challenge token is consumed, so a distributed 6-digit guessing run
+    // costs the attacker a solve per attempt (the lockout alone only bounds
+    // one source). Verified BEFORE `consume_mfa_challenge` so a failed
+    // captcha never burns the challenge.
+    verify_kiwi_token(
+        &state.config,
+        &state.redis,
+        body.kiwi__token.as_deref(),
+        client_ip.as_deref().unwrap_or("unknown"),
+        Some("mfa-verify"),
+    )
+    .await?;
 
     // Single-use (F3): consume the challenge on this attempt regardless of
     // the outcome — a challenge token can never be retried after a failed
@@ -6073,6 +6107,7 @@ mod tests {
             region: None,
             issuer: None,
             kid: 1,
+            tenant: None,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
@@ -6186,6 +6221,7 @@ mod tests {
             region: None,
             issuer: None,
             kid: 1,
+            tenant: None,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
@@ -9266,6 +9302,178 @@ mod adversarial_auth_tests_2 {
         assert!(body
             .to_string()
             .contains("invalid or expired MFA challenge"));
+
+        fx.cleanup().await;
+    }
+
+    /// Mint + store + solve a REAL challenge for `scope` against the state's
+    /// Redis (mirrors the issuance route), for the JSON MFA gate test.
+    async fn mint_json_kiwi_token(state: &AppState, scope: &str, client_ip: &str) -> String {
+        let config = &state.config;
+        let kc_config = kiwicaptcha::ChallengeConfig {
+            secret_key: config.kiwi_secret_key.clone(),
+            algorithm: config.kiwi_algorithm,
+            m_kib: config.kiwi_argon_m_kib,
+            t: config.kiwi_argon_t,
+            p: config.kiwi_argon_p,
+            target_bits: config.kiwi_difficulty_bits,
+            argon2_target_bits: config.kiwi_argon2_difficulty_bits,
+            ttl_secs: config.kiwi_challenge_ttl_secs,
+            min_duration_ms: config.kiwi_min_duration_ms,
+            auto_tune: config.kiwi_auto_tune,
+            auto_tune_min_bits: config.kiwi_auto_tune_min_bits,
+            auto_tune_max_bits: config.kiwi_auto_tune_max_bits,
+            binding_mode: kiwicaptcha::BindingMode::Bound,
+            policy_version: 1,
+            region: None,
+            issuer: None,
+            kid: 1,
+            tenant: None,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        };
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let issued = kiwicaptcha::issue_challenge(
+            &kc_config,
+            scope,
+            client_ip,
+            now_unix,
+            now_unix * 1_000_000,
+            0,
+            None,
+        )
+        .expect("challenge issuance succeeds");
+        let record_json = serde_json::to_string(&issued.record).expect("record serializes");
+        let mut conn = state.redis.get().await.expect("redis connection");
+        let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+            &mut *conn,
+            format!("apexmail:kiwi:{}", issued.record.nonce),
+            record_json,
+            config.kiwi_challenge_ttl_secs,
+        )
+        .await
+        .expect("challenge stored");
+        drop(conn);
+        let counter = kiwicaptcha::solve_for_test(&issued.record).expect("solver finds a counter");
+        kiwicaptcha::SolutionToken {
+            nonce: issued.challenge.nonce.clone(),
+            counter,
+            duration_ms: 5000,
+            telemetry: json!({"me": 3, "ke": 2, "hc": 8, "dm": 8, "pl": 3, "et": [10, 25, 40, 90]}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: None,
+        }
+        .encode()
+    }
+
+    /// K2 wave: the JSON `/mfa/verify` twin carries the same `mfa-verify`
+    /// CAPTCHA gate as the SSR step — a missing or wrong-scope token is a
+    /// CAPTCHA refusal BEFORE the single-use challenge is consumed, and a
+    /// correct-scope token passes the gate to the challenge check.
+    #[tokio::test]
+    async fn mfa_verify_json_requires_a_scope_bound_captcha() {
+        let Some(fx) = fx("adv2_mfa_kiwi", 9).await else {
+            return;
+        };
+        // A captcha-enforcing state over the same DB/Redis fixtures. The
+        // handler is called DIRECTLY so the peer address rides the request
+        // as ConnectInfo (the challenge's IP binding is intrinsic, and the
+        // refreshed crate rejects non-IP binding inputs outright).
+        let mut config = rsa_test_config();
+        config.kiwi_enabled = true;
+        config.kiwi_secret_key = "adv2-mfa-kiwi-secret-0123456789abcdef".into();
+        config.kiwi_difficulty_bits = 8;
+        config.kiwi_enforce_telemetry = false; // the test solver is not a browser
+        let url = redis_url_for(9).expect("redis url for db 9");
+        let state = test_state_over_with_config_and_redis(fx.pool.clone(), config, &url).await;
+
+        // CSRF header the handler checks (no cookie binding on this route).
+        let mut headers = HeaderMap::new();
+        headers.insert("x-csrf-token", fx.csrf.parse().expect("csrf header"));
+        let ip = Some(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        let body = |token: Option<&str>| CompleteMfaChallengeRequest {
+            challenge_token: "unknown-token".into(),
+            mfa_code: "123456".into(),
+            recovery_code: None,
+            kiwi__token: token.map(str::to_string),
+        };
+
+        // No token: refused by the gate.
+        let error =
+            complete_mfa_challenge(State(state.clone()), ip, headers.clone(), Json(body(None)))
+                .await
+                .expect_err("a token-less JSON MFA verify must be refused");
+        match error {
+            ApiError::Validation(details) => assert!(
+                details.iter().any(|detail| detail.contains("CAPTCHA")),
+                "the refusal must name the CAPTCHA: {details:?}"
+            ),
+            other => panic!("expected a CAPTCHA validation refusal, got {other:?}"),
+        }
+
+        // A login-scope token is refused: the scope binding is what stops the
+        // password step's challenge being replayed on the second factor.
+        let login_token = mint_json_kiwi_token(&state, "login", "127.0.0.1").await;
+        let error = complete_mfa_challenge(
+            State(state.clone()),
+            ip,
+            headers.clone(),
+            Json(body(Some(&login_token))),
+        )
+        .await
+        .expect_err("a login-scope token must not satisfy the JSON MFA gate");
+        match error {
+            ApiError::Validation(details) => assert!(
+                details.iter().any(|detail| detail.contains("CAPTCHA")),
+                "the refusal must name the CAPTCHA: {details:?}"
+            ),
+            other => panic!("expected a CAPTCHA validation refusal, got {other:?}"),
+        }
+
+        // The correct scope passes the gate; the NEXT check (the unknown
+        // challenge token) answers, proving the captcha was accepted. The
+        // full TOTP success path on this endpoint is covered by the existing
+        // `complete_mfa_challenge_verify_is_single_use_and_accepts_recovery_
+        // codes` test (captcha disabled there).
+        let token = mint_json_kiwi_token(&state, "mfa-verify", "127.0.0.1").await;
+        let error = complete_mfa_challenge(
+            State(state.clone()),
+            ip,
+            headers.clone(),
+            Json(body(Some(&token))),
+        )
+        .await
+        .expect_err("the unknown challenge token must be refused after the gate");
+        match error {
+            ApiError::Unauthorized(message) => assert!(
+                message.contains("invalid or expired MFA challenge"),
+                "the post-gate refusal must be the challenge error, got {message:?}"
+            ),
+            other => panic!("expected the challenge refusal, got {other:?}"),
+        }
+
+        // Single-use: the same token replayed is refused by the gate.
+        let error = complete_mfa_challenge(
+            State(state.clone()),
+            ip,
+            headers.clone(),
+            Json(body(Some(&token))),
+        )
+        .await
+        .expect_err("a replayed captcha token must be refused");
+        match error {
+            ApiError::Validation(details) => assert!(
+                details.iter().any(|detail| detail.contains("CAPTCHA")),
+                "the replay refusal must name the CAPTCHA: {details:?}"
+            ),
+            other => panic!("expected a CAPTCHA validation refusal, got {other:?}"),
+        }
 
         fx.cleanup().await;
     }

@@ -21,23 +21,37 @@
 //! and never weaken or bypass the risk-v1 state contract.
 
 pub mod action;
+pub mod asn;
 pub mod breaker;
 pub mod calibration;
+pub mod calibration_v2;
 pub mod context;
+pub mod escalation;
 pub mod event;
+pub mod evidence;
+pub mod explanation;
 pub mod hysteresis;
 pub mod identity;
+pub mod identity_vector;
 pub mod keys;
+pub mod keyspace;
+pub mod marks;
 pub mod metrics;
 pub mod namespace;
 pub mod network;
+pub mod outcomes;
 pub mod policy;
+pub mod pricing;
 pub mod profile;
+pub mod quarantine;
 pub mod redis;
 pub mod resources;
 pub mod score;
+pub mod sharded;
 pub mod signals;
 pub mod store;
+pub mod target;
+pub mod trust;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -52,9 +66,10 @@ use crate::action::RiskAction;
 use crate::calibration::CalibrationStore;
 use crate::context::{RiskContext, RiskV2Context};
 use crate::event::{normalize_idempotency_key, RiskEventKind, RiskObservation};
+use crate::explanation::ExplainedDecision;
 use crate::identity::RiskIdentityFactory;
 use crate::keys::RiskKeys;
-use crate::metrics::Metrics;
+use crate::metrics::{FixedMetric, Metrics};
 use crate::network::NetworkClassifier;
 use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
@@ -63,6 +78,7 @@ use crate::signals::SignalVector;
 use crate::store::{
     Observed, OutcomeRegistration, RiskStateStore, SessionContextTagStore, SessionTlsTagStore,
 };
+use crate::target::TargetIdentifierResolver;
 
 /// Engine-level input error.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -70,14 +86,40 @@ pub enum RiskError {
     /// The caller idempotency key exceeds the 4096-byte contract limit.
     #[error("idempotency key must not exceed 4096 bytes (got {0})")]
     InvalidIdempotencyKey(usize),
+    /// The risk-v2 client-context tag exceeds the 64-byte contract bound
+    /// (the assessment input is rejected, never silently truncated).
+    #[error("client context tag must not exceed 64 bytes (got {0})")]
+    InvalidContextTag(usize),
+    /// The risk-v2 telemetry payload exceeds the 512-byte contract bound
+    /// (the assessment input is rejected, never silently truncated; the
+    /// published schema is protocol/telemetry-v1/payload.json).
+    #[error("telemetry payload must not exceed 512 bytes (got {0})")]
+    InvalidTelemetryPayload(usize),
+    /// The risk-v2 solve facts are half-present (a duration without a
+    /// rung key or the reverse): the pair rides together or not at all.
+    #[error("solve facts must carry both the duration and the rung key")]
+    InvalidSolveFacts,
     /// A confirmed outcome requires the decision_id of the assessed
     /// decision.
     #[error("confirmed outcomes require the decision_id of the assessed decision")]
     EmptyDecisionId,
+    /// The supplied inverse sampling probability is outside the
+    /// 1..=1_000_000 contract (0 would produce an infinite weight and a
+    /// value above 1_000_000 is not an inverse probability). PHP parity:
+    /// the mirror throws `InvalidArgumentException` before any store I/O.
+    #[error("sampling_probability_ppm must be within 1..=1000000")]
+    InvalidSamplingProbability,
     /// The calibration backend could not be reached; the confirm was not
     /// applied (callers treat calibration as best-effort).
     #[error("calibration backend failure: {0}")]
     Calibration(String),
+    /// Weighted calibration mode requires the caller's inverse sampling
+    /// probability at confirmation time. This is a caller configuration
+    /// error, not a backend failure: it is surfaced instead of being
+    /// masked as a duplicate no-op (PHP parity: the mirror throws
+    /// `InvalidArgumentException`).
+    #[error("weighted sampling requires a confirmation weight for decision {0}")]
+    CalibrationWeightRequired(String),
     /// The risk state backend could not serve the always-on outcome
     /// ledger operation (register/confirm/correct without calibration).
     #[error("risk state backend failure: {0}")]
@@ -89,6 +131,32 @@ pub enum RiskError {
     /// requires).
     #[error("confirmed outcomes must be recorded via confirmed_legitimate/confirmed_abuse (record_feedback takes non-confirmation events only)")]
     ConfirmationApiRequired,
+    /// An engine timing parameter is invalid: every epoch window and TTL
+    /// must be at least one second. A zero epoch divides by zero in the
+    /// observation pipeline.
+    #[error("{0} must be >= 1 (got {1})")]
+    InvalidTiming(&'static str, u64),
+    /// The risk master secret is shorter than the 16-byte minimum: an
+    /// empty or tiny master deterministically derives predictable keys.
+    #[error("the risk master secret must be at least 16 bytes (got {0})")]
+    InvalidMasterLength(usize),
+    /// A typed outcome handle is inadmissible: the identifier value
+    /// fails its byte-shape rule (a raw principal, target or session
+    /// identifier instead of the pseudonym), or the versioned mapping
+    /// table accepts no such handle dimension for the outcome.
+    #[error("invalid outcome handle: {0}")]
+    InvalidOutcomeHandle(String),
+}
+
+/// The engine-side inverse-probability contract: `Some(ppm)` must be
+/// within 1..=1_000_000 (the value is divided, so 0 would be infinite and
+/// above 1_000_000 is not an inverse probability); `None` means the caller
+/// supplied no weight and is always valid.
+fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
+    match ppm {
+        Some(p) if !(1..=1_000_000).contains(&p) => Err(RiskError::InvalidSamplingProbability),
+        _ => Ok(()),
+    }
 }
 
 /// The risk model generation implemented by this package.
@@ -116,6 +184,18 @@ pub const RISK_MODEL_REVISION: u32 = 17;
 /// [`RiskEngine::record_feedback`]); `model_revision` is the
 /// current model revision generation the decision was computed under
 /// (public JSON, bounded).
+///
+/// `quarantined` is the decision-plane quarantine disposition (change.md
+/// 1.3 and 3.3.4), never a ladder rung: it rides the Allow action only,
+/// set by the marks stage for a server-confirmed spam identity (mark
+/// kind `spamReported`) with a clean request. The decision passes as an
+/// ordinary allow (same rung, same pricing, byte-identical wire) while
+/// the app-facing surfaces carry the flag, so the application withholds
+/// the submission from publication. The precedence is severity
+/// monotonic: quarantine never overrides deny, step-up or any stronger
+/// plain action, and any later composed stage that raises the action
+/// above Allow drops the flag (see [`RiskDecision::without_quarantine`]
+/// and `crate::quarantine`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskDecision {
     pub score: u16,
@@ -130,6 +210,9 @@ pub struct RiskDecision {
     /// always-on outcome ledger (and, with calibration attached, the
     /// calibration receipt) for ConfirmedLegitimate/ConfirmedAbuse.
     pub decision_id: String,
+    /// The quarantine disposition: true only on top of
+    /// [`RiskAction::Allow`], only from the marks stage, never a rung.
+    pub quarantined: bool,
 }
 
 impl RiskDecision {
@@ -142,14 +225,35 @@ impl RiskDecision {
     pub fn reasons_vec(&self) -> Vec<RiskReason> {
         self.reasons.iter().flatten().copied().collect()
     }
+
+    /// The disposition label of the decision for the metrics plane: the
+    /// quarantine disposition counts as its own action label, wire
+    /// decisions keep their ladder name.
+    pub fn disposition_label(&self) -> &'static str {
+        if self.quarantined {
+            "quarantine"
+        } else {
+            self.action.as_str()
+        }
+    }
+
+    /// The decision after a composed stage that raised the action above
+    /// Allow: the severity-monotonic precedence drops the quarantine
+    /// disposition (the escalated action wins), everything else passes
+    /// through untouched.
+    pub fn without_quarantine(mut self) -> RiskDecision {
+        self.quarantined = false;
+        self
+    }
 }
 
 impl Serialize for RiskDecision {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let reasons: Vec<&str> = self.reasons.iter().flatten().map(|r| r.as_str()).collect();
-        let mut state = serializer.serialize_struct("RiskDecision", 8)?;
+        let mut state = serializer.serialize_struct("RiskDecision", 9)?;
         state.serialize_field("score", &self.score)?;
         state.serialize_field("action", self.action.as_str())?;
+        state.serialize_field("quarantined", &self.quarantined)?;
         state.serialize_field("reasons", &reasons)?;
         state.serialize_field("policy_version", &self.policy_version)?;
         state.serialize_field("model_revision", &self.model_revision)?;
@@ -298,15 +402,16 @@ impl ProcessEmergencyCap {
     ///
     /// # Panics
     ///
-    /// Panics if `process_per_second < 1` or `warmup_ramp_secs < 0.0`.
+    /// Panics if `process_per_second < 1`, or if `warmup_ramp_secs` is not
+    /// finite (NaN or either infinity) or is negative.
     pub fn with_capacity_and_ramp(
         process_per_second: u64,
         warmup_ramp_secs: f64,
     ) -> ProcessEmergencyCap {
         assert!(process_per_second >= 1, "process_per_second must be >= 1");
         assert!(
-            warmup_ramp_secs >= 0.0,
-            "warmup_ramp_secs must be >= 0 (0 disables the ramp)"
+            warmup_ramp_secs.is_finite() && warmup_ramp_secs >= 0.0,
+            "warmup_ramp_secs must be finite and >= 0 (0 disables the ramp)"
         );
         ProcessEmergencyCap {
             process_per_second,
@@ -390,6 +495,107 @@ impl ProcessEmergencyCap {
 /// `impl SessionTlsTagStore for MyStore {}`) to opt in — the default
 /// methods then provide the neutral v2 behavior. The built-in Redis store
 /// implements the real record surfaces.
+/// The engine timing configuration: epoch windows and TTLs, validated
+/// once at construction so no delayed division-by-zero or
+/// immediately-expired/persistent state can be configured. The contract
+/// defaults are 900 s epochs, 1800 s session TTL, 86400 s principal TTL
+/// and 60 s dedupe TTL.
+///
+/// The five fields are private and read through the accessors below:
+/// [`RiskTimingConfig::new`] is the only constructor, so a caller can
+/// never assemble an unvalidated configuration and hand it to
+/// [`RiskEngine::with_timing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RiskTimingConfig {
+    source_epoch_secs: u64,
+    subnet_epoch_secs: u64,
+    session_ttl_secs: u64,
+    principal_ttl_secs: u64,
+    dedupe_ttl_secs: u64,
+}
+
+impl Default for RiskTimingConfig {
+    fn default() -> Self {
+        RiskTimingConfig {
+            source_epoch_secs: 900,
+            subnet_epoch_secs: 900,
+            session_ttl_secs: 1800,
+            principal_ttl_secs: 86400,
+            dedupe_ttl_secs: 60,
+        }
+    }
+}
+
+impl RiskTimingConfig {
+    /// The largest accepted timing value: one year in seconds. The
+    /// observation pipeline narrows epochs to `i64` seconds, so the
+    /// bound keeps every accepted value representable and refuses
+    /// nonsense configurations instead of wrapping them.
+    pub const MAX_SECS: u64 = 366 * 24 * 60 * 60;
+
+    /// Builds a validated timing configuration. Every parameter must be
+    /// within `1..=MAX_SECS`: a zero epoch divides by zero in the
+    /// observation pipeline, a zero TTL expires or persists risk state
+    /// immediately, and a value beyond the bound would wrap into a
+    /// negative epoch window when narrowed to `i64`.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidTiming`] names the first parameter outside
+    /// the range.
+    pub fn new(
+        source_epoch_secs: u64,
+        subnet_epoch_secs: u64,
+        session_ttl_secs: u64,
+        principal_ttl_secs: u64,
+        dedupe_ttl_secs: u64,
+    ) -> Result<RiskTimingConfig, RiskError> {
+        for (name, value) in [
+            ("source_epoch_secs", source_epoch_secs),
+            ("subnet_epoch_secs", subnet_epoch_secs),
+            ("session_ttl_secs", session_ttl_secs),
+            ("principal_ttl_secs", principal_ttl_secs),
+            ("dedupe_ttl_secs", dedupe_ttl_secs),
+        ] {
+            if !(1..=Self::MAX_SECS).contains(&value) {
+                return Err(RiskError::InvalidTiming(name, value));
+            }
+        }
+        Ok(RiskTimingConfig {
+            source_epoch_secs,
+            subnet_epoch_secs,
+            session_ttl_secs,
+            principal_ttl_secs,
+            dedupe_ttl_secs,
+        })
+    }
+
+    /// The source identity epoch window in seconds.
+    pub fn source_epoch_secs(&self) -> u64 {
+        self.source_epoch_secs
+    }
+
+    /// The subnet identity epoch window in seconds.
+    pub fn subnet_epoch_secs(&self) -> u64 {
+        self.subnet_epoch_secs
+    }
+
+    /// The session state lifetime in seconds.
+    pub fn session_ttl_secs(&self) -> u64 {
+        self.session_ttl_secs
+    }
+
+    /// The principal state lifetime in seconds.
+    pub fn principal_ttl_secs(&self) -> u64 {
+        self.principal_ttl_secs
+    }
+
+    /// The dedupe-window lifetime in seconds.
+    pub fn dedupe_ttl_secs(&self) -> u64 {
+        self.dedupe_ttl_secs
+    }
+}
+
 pub struct RiskEngine<
     S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
     N: NetworkClassifier,
@@ -402,11 +608,9 @@ pub struct RiskEngine<
     keys: RiskKeys,
     identity: RiskIdentityFactory,
     breaker: breaker::CircuitBreaker,
-    pub source_epoch_secs: u64,
-    pub subnet_epoch_secs: u64,
-    pub session_ttl_secs: u64,
-    pub principal_ttl_secs: u64,
-    pub dedupe_ttl_secs: u64,
+    /// Validated timing configuration: private, so a caller cannot set a
+    /// zero epoch after construction (use [`RiskEngine::with_timing`]).
+    timing: RiskTimingConfig,
     pub saturations: Saturations,
     limiter: ProcessEmergencyCap,
     calibration: Option<Arc<dyn CalibrationStore>>,
@@ -414,6 +618,52 @@ pub struct RiskEngine<
     current_global_level: AtomicU8,
     enable_global_pressure: bool,
     hysteresis: crate::hysteresis::ScopeActionHysteresis,
+    /// Optional target-identifier resolver: when attached,
+    /// [`RiskEngine::resolve_target_id`] derives the target pseudonym of
+    /// an assessment. The pseudonym is the live key of the
+    /// target-dimension state (failure counter + spread HLLs): the
+    /// outcomes facade reports authentication failures against it and
+    /// the marks stage reads the attacked-target record back, so the
+    /// decision path protects the account. The observation wire itself
+    /// stays frozen.
+    target_resolver: Option<Arc<dyn TargetIdentifierResolver>>,
+    /// Optional marks reader: when attached, the decisive attacker stage
+    /// ([`crate::marks::apply`]) runs after the policy decision on every
+    /// assessment, consulting the request's marks view. Absent by default
+    /// so the decision path is byte-identical for existing consumers.
+    marks_reader: Option<Arc<dyn crate::marks::MarksReader>>,
+    /// Optional price-context source: when attached, the continuous
+    /// pricing stage ([`crate::pricing::PriceModel::apply`]) runs after
+    /// the marks stage on every assessment, pricing the request against
+    /// its value class and its bucket trust with the observed global
+    /// pressure as the untrusted-scope pressure. Absent by default so
+    /// the decision path is byte-identical for existing consumers.
+    price_context: Option<Arc<dyn crate::pricing::PriceContextSource>>,
+    /// Optional decoy-escalation reader: when attached, the decoy
+    /// escalation stage ([`crate::escalation::apply`]) runs after the
+    /// marks stage on every assessment, raising a live session's price
+    /// by one rung. Absent by default so the decision path is
+    /// byte-identical for existing consumers.
+    decoy_escalation: Option<Arc<dyn crate::escalation::DecoyEscalationReader>>,
+    /// Optional context-bound trust source: when attached and the
+    /// request carries a session, the request's session-trust channel
+    /// input is the bucket-local credit ([`crate::trust::ContextBoundTrust`])
+    /// instead of the aggregate channel. Absent by default so the
+    /// decision path is byte-identical for existing consumers.
+    context_trust: Option<Arc<dyn crate::trust::ContextTrustSource>>,
+    /// Optional ASN dataset: when attached, the target-spread asn
+    /// element of an outcome report resolves through it; absent, the
+    /// same element resolves to the unlisted-namespace bucket of the
+    /// source address ([`crate::asn::unlisted_bucket_for`]). Either way
+    /// the element is never empty when a report carries a context, so
+    /// distinct network origins count toward spread.
+    asn_dataset: Option<Arc<crate::asn::AsnDataset>>,
+    /// Optional principal first-seen network tag store (P0-1): when
+    /// attached, a login whose network bucket is novel for the principal
+    /// (and whose account carries no prior trusted network) forces the
+    /// interactive step-up before any session credit. Absent by default
+    /// so the decision path is byte-identical for existing consumers.
+    principal_networks: Option<Arc<dyn crate::store::PrincipalNetworkTagStore>>,
 }
 
 impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
@@ -437,11 +687,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             identity: RiskIdentityFactory::new(keys.clone()),
             keys,
             breaker: breaker::CircuitBreaker::default(),
-            source_epoch_secs: 900,
-            subnet_epoch_secs: 900,
-            session_ttl_secs: 1800,
-            principal_ttl_secs: 86400,
-            dedupe_ttl_secs: 60,
+            timing: RiskTimingConfig::default(),
             saturations: Saturations::default(),
             limiter: ProcessEmergencyCap::default(),
             calibration: None,
@@ -449,6 +695,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             current_global_level: AtomicU8::new(0),
             enable_global_pressure: true,
             hysteresis: crate::hysteresis::ScopeActionHysteresis::new(),
+            target_resolver: None,
+            marks_reader: None,
+            price_context: None,
+            decoy_escalation: None,
+            context_trust: None,
+            asn_dataset: None,
+            principal_networks: None,
         }
     }
 
@@ -478,6 +731,27 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self
     }
 
+    /// Applies a validated timing configuration and keeps the identity
+    /// factory's epoch windows in sync with it, so the engine and the
+    /// pseudonym epoch boundaries can never disagree. Build the argument
+    /// with [`RiskTimingConfig::new`], which rejects zero windows and
+    /// TTLs.
+    pub fn with_timing(mut self, timing: RiskTimingConfig) -> Self {
+        self.identity = RiskIdentityFactory::with_epochs(
+            self.keys.clone(),
+            i64::try_from(timing.source_epoch_secs()).expect("RiskTimingConfig bounded the epoch"),
+            i64::try_from(timing.subnet_epoch_secs()).expect("RiskTimingConfig bounded the epoch"),
+        )
+        .expect("RiskTimingConfig validated both epoch windows");
+        self.timing = timing;
+        self
+    }
+
+    /// The validated timing configuration (a copy).
+    pub fn timing(&self) -> RiskTimingConfig {
+        self.timing
+    }
+
     /// Attaches an outcome-feedback calibration store: every decision
     /// registers atomically (receipt + sampled denominator + outcome
     /// ledger — the ledger is always on, so confirmed outcomes work
@@ -487,6 +761,181 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_calibration(mut self, calibration: Arc<dyn CalibrationStore>) -> RiskEngine<S, N> {
         self.calibration = Some(calibration);
         self
+    }
+
+    /// Attaches the target-identifier resolver for the target-dimension
+    /// side channel ([`RiskEngine::resolve_target_id`]). No assessment
+    /// path reads the resolver: the risk-v1 observation wire stays frozen
+    /// and scoring stays untouched.
+    pub fn with_target_resolver(
+        mut self,
+        resolver: Arc<dyn TargetIdentifierResolver>,
+    ) -> RiskEngine<S, N> {
+        self.target_resolver = Some(resolver);
+        self
+    }
+
+    /// Attaches the marks reader of the decisive attacker stage: every
+    /// assessment then consults the request's marks view after the policy
+    /// decision (a marked own dimension floors the action at the maximum
+    /// challenge rung, a corroborated mark denies for the remaining mark
+    /// TTL, an attacked login target maps to StepUp). Without a reader
+    /// the assessment path is byte-identical to the unwired engine.
+    pub fn with_marks_reader(
+        mut self,
+        reader: Arc<dyn crate::marks::MarksReader>,
+    ) -> RiskEngine<S, N> {
+        self.marks_reader = Some(reader);
+        self
+    }
+
+    /// Attaches the price-context source of the continuous pricing stage
+    /// (change.md 3.3.1 and 3.3.2): every assessment is then priced after
+    /// the marks stage, with the request's value class and its bucket
+    /// trust in the current ASN bucket, and the observed global-pressure
+    /// signal as the untrusted-scope pressure. The priced rung may only
+    /// raise the composed action, and a trusted bucket keeps its price
+    /// within one rung under a full-pressure storm. Without a source the
+    /// assessment path is byte-identical to the unwired engine.
+    pub fn with_price_context(
+        mut self,
+        source: Arc<dyn crate::pricing::PriceContextSource>,
+    ) -> RiskEngine<S, N> {
+        self.price_context = Some(source);
+        self
+    }
+
+    /// Attaches the context-bound trust source of the trust stage: on
+    /// every assessment whose request carries a session, the request's
+    /// session-trust channel input is the session's bucket-local credit
+    /// (the ASN bucket resolved from the source IP through the source's
+    /// dataset) instead of the aggregate trust channel. A foreign
+    /// bucket earns nothing: the stolen-cookie fleet replaying a home
+    /// session from a thousand foreign networks reads zero credit
+    /// there, while the home record is never reduced. A read failure
+    /// floors the channel at zero, fail closed (never the aggregate).
+    /// Without a source the assessment path is byte-identical to the
+    /// unwired engine.
+    pub fn with_context_trust(mut self, source: Arc<dyn crate::trust::ContextTrustSource>) -> Self {
+        self.context_trust = Some(source);
+        self
+    }
+
+    /// Attaches the principal first-seen network tag store (P0-1
+    /// novel-network step-up): a login from a network bucket the
+    /// principal has never been established from forces the interactive
+    /// step-up before any session credit — the first-attempt valid
+    /// stuffing prevention. The tag record is written (SET NX) when a
+    /// session credit is actually granted (a completed step-up or an
+    /// established-network success), never on a bare password check, so
+    /// a retried stuffed login stays novel until the victim proves
+    /// themselves. Without a store the assessment path is byte-identical
+    /// to the unwired engine.
+    pub fn with_principal_networks(
+        mut self,
+        store: Arc<dyn crate::store::PrincipalNetworkTagStore>,
+    ) -> Self {
+        self.principal_networks = Some(store);
+        self
+    }
+
+    /// Attaches the deployment's ASN dataset (change.md 3.1.1): the
+    /// target-spread asn element of an outcome report then resolves
+    /// through it to the source address's listed or unlisted bucket.
+    /// Without a dataset the element resolves to the unlisted-namespace
+    /// bucket of the source address, so distinct origins still spread.
+    pub fn with_asn_dataset(
+        mut self,
+        dataset: Arc<crate::asn::AsnDataset>,
+    ) -> RiskEngine<S, N> {
+        self.asn_dataset = Some(dataset);
+        self
+    }
+
+    /// Attaches the decoy-escalation reader of the decoy escalation
+    /// stage (change.md 3.2.2): every assessment then consults the
+    /// session's escalation record after the marks stage, raising a live
+    /// record's price by exactly one rung (an escalation, never a block;
+    /// the window and the qualification gate live in the record and its
+    /// writer). Without a reader the assessment path is byte-identical
+    /// to the unwired engine.
+    pub fn with_decoy_escalation(
+        mut self,
+        reader: Arc<dyn crate::escalation::DecoyEscalationReader>,
+    ) -> RiskEngine<S, N> {
+        self.decoy_escalation = Some(reader);
+        self
+    }
+
+    /// The target pseudonym of one assessment, as an optional side
+    /// channel beside the frozen risk-v1 observation wire.
+    ///
+    /// The observation's Lua argv contract is frozen, so the target
+    /// dimension rides its own API instead of the observation struct: a
+    /// later plane consumes this HMAC and keys its state under it. The
+    /// resolver maps the scope to its configured form field and returns
+    /// the raw submitted value; this method normalizes it and returns
+    /// only the derived pseudonym. The raw and the normalized value never
+    /// leave this boundary, never reach the store, and never appear in
+    /// metrics.
+    ///
+    /// Returns `None` when no resolver is attached, the scope carries no
+    /// target field, the field value is empty, or the value normalizes to
+    /// the empty string: that assessment simply has no target dimension.
+    /// Scoring is untouched by this call.
+    pub fn resolve_target_id(&self, scope: u32, fields: &[(&str, &str)]) -> Option<String> {
+        let resolver = self.target_resolver.as_ref()?;
+        let raw = resolver.resolve(scope, fields)?;
+        let normalized = crate::target::normalize_target(&raw);
+        if normalized.is_empty() {
+            return None;
+        }
+        Some(crate::target::target_id(&self.keys, &normalized))
+    }
+
+    /// Assesses one PreIssue request and attaches the names-only
+    /// decision explanation (change.md 3.8.3) to the result: the top
+    /// contributing reasons, the identity dimension names involved, the
+    /// chosen action and, when a pricing stage is composed by the
+    /// caller, the rung name. Identical pipeline to
+    /// [`RiskEngine::assess_pre_issue`]; only the return type grows the
+    /// additive explanation field.
+    ///
+    /// The engine reports the dimensions it can see on the request:
+    /// source, subnet, the session and principal dimensions when the
+    /// context carries those identities, and the target dimension when
+    /// a target resolver is attached. The asn and agent dimensions
+    /// belong to the caller's
+    /// [`crate::identity_vector::IdentityVector`]; pass their names
+    /// through [`ExplainedDecision::new`] or
+    /// [`crate::explanation::DecisionExplanation::for_decision`] to
+    /// compose the full set.
+    /// No pseudonym value ever enters the explanation.
+    pub fn assess_pre_issue_with_explanation(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<ExplainedDecision, RiskError> {
+        let dimensions = self.explanation_dimensions(&ctx);
+        let decision = self.assess_pre_issue(ctx, idempotency_key)?;
+        Ok(ExplainedDecision::new(decision, &dimensions, None))
+    }
+
+    /// The identity dimension names the engine derives from the
+    /// assessment context alone (see
+    /// [`RiskEngine::assess_pre_issue_with_explanation`]).
+    fn explanation_dimensions(&self, ctx: &RiskContext<'_>) -> Vec<&'static str> {
+        let mut dimensions = vec!["source", "subnet"];
+        if ctx.session_id.is_some() {
+            dimensions.push("session");
+        }
+        if ctx.principal_id.is_some() {
+            dimensions.push("principal");
+        }
+        if self.target_resolver.is_some() {
+            dimensions.push("target");
+        }
+        dimensions
     }
 
     /// Policy version of the loaded snapshot.
@@ -538,7 +987,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// # Errors
     ///
     /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
-    /// 4096-byte contract limit.
+    /// 4096-byte contract limit; [`RiskError::InvalidContextTag`] when the
+    /// v2 client-context tag exceeds the 64-byte bound.
     pub fn assess_pre_issue_v2(
         &self,
         ctx: RiskContext<'_>,
@@ -549,6 +999,31 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self.assess_pre_issue_impl(ctx, Some(v2), idempotency_key, v2_weights)
     }
 
+    /// Rejects a risk-v2 context whose client-context tag exceeds the
+    /// 64-byte contract bound or whose telemetry payload exceeds the
+    /// 512-byte bound (fail-closed: the assessment input is rejected,
+    /// never silently truncated — a truncation would split one session's
+    /// identity across tag records), and a half-present solve-facts pair
+    /// (the duration and the rung key ride together or not at all). The
+    /// TLS tag keeps its documented over-bound handling (treated as
+    /// absent).
+    fn validate_v2_context(v2: &RiskV2Context) -> Result<(), RiskError> {
+        if let Some(tag) = v2.client_context_tag.as_deref() {
+            if tag.len() > crate::context::MAX_CONTEXT_TAG_BYTES {
+                return Err(RiskError::InvalidContextTag(tag.len()));
+            }
+        }
+        if let Some(payload) = v2.telemetry_payload.as_deref() {
+            if payload.len() > crate::context::MAX_TELEMETRY_PAYLOAD_BYTES {
+                return Err(RiskError::InvalidTelemetryPayload(payload.len()));
+            }
+        }
+        if v2.solve_ms.is_some() != v2.solve_rung.is_some() {
+            return Err(RiskError::InvalidSolveFacts);
+        }
+        Ok(())
+    }
+
     fn assess_pre_issue_impl(
         &self,
         ctx: RiskContext<'_>,
@@ -556,8 +1031,11 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
         v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
+        if let Some(v2) = v2 {
+            Self::validate_v2_context(v2)?;
+        }
         if !self.limiter.allow() {
-            self.metrics.incr("denied:limiter");
+            self.metrics.incr_fixed(FixedMetric::DeniedLimiter);
             let decision = RiskDecision {
                 score: 1000,
                 action: RiskAction::Deny,
@@ -568,9 +1046,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 retry_after_ms: Some(1000),
                 band: 10,
                 decision_id: String::new(),
+                quarantined: false,
             };
             self.record_decision_metrics(ctx.scope, &decision);
-            return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+            // A limiter hard-deny never reached the state backend; the
+            // ledger/receipt registration is skipped for the same reason
+            // (no backend call on a decision the backend never saw).
+            return Ok(self.finalize_degraded_decision(decision));
         }
         self.assess_inner(ctx, v2, idempotency_key, v2_weights)
     }
@@ -615,7 +1097,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// # Errors
     ///
     /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
-    /// 4096-byte contract limit.
+    /// 4096-byte contract limit; [`RiskError::InvalidContextTag`] when the
+    /// v2 client-context tag exceeds the 64-byte bound.
     pub fn reassess_v2(
         &self,
         ctx: RiskContext<'_>,
@@ -635,16 +1118,22 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
         v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
+        if let Some(v2) = v2 {
+            Self::validate_v2_context(v2)?;
+        }
         let now_ms = now_ms();
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
+        let observation =
+            self.build_observation(&ctx, now_ms, idempotency_key, None, None, None)?;
 
         if self.breaker.is_open() {
-            self.metrics.incr("degraded:breaker");
+            self.metrics.incr_fixed(FixedMetric::DegradedBreaker);
             let decision = self
                 .policy
                 .degraded_decision(ctx.scope, self.current_global_level());
             self.record_decision_metrics(ctx.scope, &decision);
-            return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+            // While the breaker is open the engine skips the state backend
+            // entirely — including the ledger registration.
+            return Ok(self.finalize_degraded_decision(decision));
         }
 
         // The pending outcome-ledger registration to fold into the
@@ -668,6 +1157,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot_hit: v2.map(|v2ctx| v2ctx.honeypot_hit).unwrap_or(false),
             v1_weights: self.policy.weights,
             v2_weights: effective_v2_weights,
+            target_id: None,
         });
 
         let start = Instant::now();
@@ -680,16 +1170,18 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let outcome = match consolidated {
             Err(_) => {
                 self.breaker.record_failure();
-                self.metrics.incr("degraded:store");
+                self.metrics.incr_fixed(FixedMetric::DegradedStore);
                 let decision = self
                     .policy
                     .degraded_decision(ctx.scope, self.current_global_level());
                 self.record_decision_metrics(ctx.scope, &decision);
-                return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+                // The store just failed on this assessment: no
+                // ledger/receipt registration against the failing backend.
+                return Ok(self.finalize_degraded_decision(decision));
             }
             Ok(Some(reply)) => {
                 self.metrics
-                    .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
+                    .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
                 let v2_signals = v2.map(|v2ctx| {
                     self.derive_v2_signals_from_records(
@@ -697,6 +1189,9 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         reply.existing_context_tag.as_deref(),
                         reply.existing_tls_tag.as_deref(),
                         ctx.event,
+                        reply.target_failures,
+                        reply.target_spread_sources,
+                        reply.target_spread_asns,
                     )
                 });
                 (reply.observed, v2_signals, registration.is_some())
@@ -709,19 +1204,26 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     Ok(o) => o,
                     Err(_) => {
                         self.breaker.record_failure();
-                        self.metrics.incr("degraded:store");
+                        self.metrics.incr_fixed(FixedMetric::DegradedStore);
                         let decision = self
                             .policy
                             .degraded_decision(ctx.scope, self.current_global_level());
                         self.record_decision_metrics(ctx.scope, &decision);
-                        return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+                        // The store just failed on this assessment: no
+                        // ledger/receipt registration against the failing
+                        // backend.
+                        return Ok(self.finalize_degraded_decision(decision));
                     }
                 };
                 self.metrics
-                    .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
+                    .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
-                let v2_signals = v2
-                    .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
+                let v2_signals = v2.map(|v2ctx| {
+                    // The fallback path has no consolidated reply: the
+                    // target counters stay zero here (the marks stage
+                    // still reads live TargetState on its own).
+                    self.derive_v2_signals(v2ctx, observation.session_id, ctx.event, 0, 0, 0)
+                });
                 (observed, v2_signals, false)
             }
         };
@@ -732,6 +1234,21 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // cooldown-deny check: the global channel is inert (the
         // per-source signals keep flowing).
         let mut vector = observed.vector;
+        // The context-bound trust stage: when the engine is wired with
+        // a trust source and the request carries a session, the
+        // request's session-trust channel input is the bucket-local
+        // credit instead of the aggregate. An unwired engine or a
+        // sessionless request keeps the aggregate; a failed read floors
+        // the channel at zero, fail closed.
+        if let Some(source) = &self.context_trust {
+            vector.trust_credit = match observation.session_id {
+                Some(session) => source
+                    .credit_for(&hex::encode(session), ctx.source_ip)
+                    .map(|credit| credit.credit)
+                    .unwrap_or(0),
+                None => 0,
+            };
+        }
         let global_level;
         let cooldown_until_ms;
         if self.enable_global_pressure {
@@ -771,8 +1288,128 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             now_ms,
             cooldown_until_ms,
             Some(&self.hysteresis),
+            hysteresis_client_key(&observation),
         );
         self.merge_contributor_reasons(&mut decision, &vector);
+        // The decisive attacker stage: additive, after the plain policy
+        // decision, and only when a marks reader is wired. An unreadable
+        // marks surface floors the request at the maximum challenge rung
+        // fail-closed instead of fabricating a deny. The quarantine
+        // selection (change.md 1.3 and 3.3.4) is part of the decision
+        // plane's posture: a server-confirmed spam identity with a clean
+        // request quarantines instead of escalating, wire-identical to
+        // The first-attempt prevention evidence (P0-1): the signals that
+        // stop a valid stolen credential on its very first attempt —
+        // before any failure has accumulated anywhere. The engine derives
+        // them beside the frozen risk-v1 wire and hands them to the marks
+        // stage (or applies the gate directly when no marks reader is
+        // wired). Novel-network and scope-pressure evidence are
+        // login-shaped (AuthenticationSuccess / first login); the
+        // breached-credential flag rides the v2 context like honeypot.
+        let first_attempt = self.first_attempt_evidence(
+            &ctx,
+            &observation,
+            v2,
+            &vector,
+            global_level,
+        );
+        // allow.
+        if let Some(reader) = self.marks_reader.as_ref() {
+            let request = crate::marks::MarksRequest {
+                scope: ctx.scope,
+                source_ip: ctx.source_ip,
+                session: observation.session_id.map(hex::encode),
+                principal: observation.principal_id.map(hex::encode),
+            };
+            let decoy_evidence =
+                v2.is_some_and(|context| context.honeypot_hit) || ctx.event.is_honeypot();
+            decision = match reader.request_marks(&request) {
+                Ok(view) => crate::marks::apply(
+                    decision,
+                    &view.with_first_attempt(first_attempt),
+                    crate::marks::corroborated(&vector, decoy_evidence),
+                    now_ms,
+                    reader.mark_ttl_ms(),
+                    &ctx.resources,
+                    true,
+                ),
+                Err(_) => crate::marks::apply_unreadable(decision, now_ms, &ctx.resources),
+            };
+        } else if first_attempt.requires_step_up() {
+            // No marks reader: the first-attempt gate still runs (a
+            // clean view with just the evidence), so the prevention
+            // never depends on the marks surface being wired.
+            let view = crate::marks::MarksView::default().with_first_attempt(first_attempt);
+            decision = crate::marks::apply(
+                decision,
+                &view,
+                crate::marks::corroborated(
+                    &vector,
+                    v2.is_some_and(|context| context.honeypot_hit) || ctx.event.is_honeypot(),
+                ),
+                now_ms,
+                crate::marks::DEFAULT_MARK_TTL_MS,
+                &ctx.resources,
+                true,
+            );
+        }
+        // The decoy escalation stage: additive, after the marks stage,
+        // and only when a decoy-escalation reader is wired. An unreadable
+        // escalation surface degrades to not-live (the stage is a
+        // temporary price raise, so a backend miss must never escalate).
+        if let Some(reader) = self.decoy_escalation.as_ref() {
+            let request = crate::escalation::DecoyEscalationRequest {
+                scope: ctx.scope,
+                source_ip: ctx.source_ip,
+                session: observation.session_id.map(hex::encode),
+            };
+            decision = crate::escalation::apply(
+                decision,
+                reader.escalation_live(request.session.as_deref()),
+            );
+            decision = drop_quarantine_on_escalation(decision);
+        }
+        // The evidence stage (change.md 3.2.1 and 3.2.3): additive,
+        // after the decoy escalation and before the pricing stage. It
+        // composes whenever the assessment carries evidence inputs (no
+        // separate wiring), and an absent or rejected payload is the
+        // neutral-unknown state: the stage passes the decision through
+        // byte-identically and may only raise.
+        if let Some(context) = v2 {
+            if context.telemetry_payload.is_some() || context.solve_ms.is_some() {
+                let inputs = crate::evidence::evidence_inputs(
+                    context.telemetry_payload.as_deref(),
+                    context.solve_ms,
+                    context.solve_rung.as_deref(),
+                );
+                decision = crate::evidence::apply(decision, &inputs, &ctx.resources);
+                decision = drop_quarantine_on_escalation(decision);
+            }
+        }
+        // The continuous pricing stage: additive, after the marks stage,
+        // and only when a price-context source is wired. The observed
+        // global-pressure signal is the untrusted-scope pressure, so the
+        // ramp is inert exactly when the global channel is disabled. An
+        // unreadable pricing surface prices the request fail-closed as an
+        // unproven identity (zero bucket credit, full ramp).
+        if let Some(source) = self.price_context.as_ref() {
+            let request = crate::pricing::PriceRequest {
+                scope: ctx.scope,
+                source_ip: ctx.source_ip,
+                session: observation.session_id.map(hex::encode),
+                principal: observation.principal_id.map(hex::encode),
+            };
+            let inputs = source
+                .price_inputs(&request)
+                .unwrap_or_else(|_| crate::pricing::PriceInputs::fail_closed());
+            decision = crate::pricing::PriceModel::apply(
+                decision,
+                &inputs,
+                vector.global_pressure,
+                &ctx.resources,
+            );
+            decision = drop_quarantine_on_escalation(decision);
+        }
         self.record_decision_metrics(ctx.scope, &decision);
         Ok(self.finalize_decision(ctx.scope, decision, decision_id, outcome_registered))
     }
@@ -799,6 +1436,9 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         v2: &RiskV2Context,
         session_id: Option<[u8; 16]>,
         event: RiskEventKind,
+        target_failures: u32,
+        target_spread_sources: u32,
+        target_spread_asns: u32,
     ) -> crate::signals::RiskV2Signals {
         let honeypot = if v2.honeypot_hit || event.is_honeypot() {
             1000
@@ -827,7 +1467,80 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot,
             session_inconsistency,
             tls_inconsistency,
+            target_failure_pressure: target_pressure_signal(target_failures),
+            target_spread: target_spread_signal(target_spread_sources.max(target_spread_asns)),
         }
+    }
+
+    /// The first-attempt prevention evidence (P0-1) of one assessment:
+    /// the signals that stop a valid stolen credential before any
+    /// failure has accumulated anywhere.
+    ///
+    /// - `novel_network`: on an AuthenticationSuccess / first login,
+    ///   the principal has never been seen from this network bucket (/64
+    ///   for IPv6, the IPv4 itself) OR the account carries no prior
+    ///   trusted network — the login cannot be vouched for by any
+    ///   network history, so the step-up must come before the session
+    ///   credit. A store without the record surface (or a failed read)
+    ///   degrades to neutral (never novel), like the session tags.
+    /// - `breached_credential`: the caller's v2 context asserts a
+    ///   known-breached credential (the same step-up-worthy shape as
+    ///   honeypot evidence).
+    /// - `scope_pressure`: global pressure is enabled and the scope
+    ///   failure-ratio pressure is running at/above
+    ///   [`crate::marks::SCOPE_PRESSURE_FLOOR`] /
+    ///   [`crate::marks::SCOPE_PRESSURE_LEVEL`] — every first-attempt
+    ///   login escalates, not only the attacked target's.
+    fn first_attempt_evidence(
+        &self,
+        ctx: &RiskContext<'_>,
+        observation: &crate::event::RiskObservation,
+        v2: Option<&RiskV2Context>,
+        vector: &crate::signals::SignalVector,
+        global_level: u8,
+    ) -> crate::marks::FirstAttemptEvidence {
+        use crate::marks::FirstAttemptEvidence;
+
+        let is_login = ctx.event == RiskEventKind::AuthenticationSuccess
+            || ctx.event == RiskEventKind::AuthenticationFailure;
+        let mut evidence = FirstAttemptEvidence::zero();
+
+        // Novel network: only on the login shape and only with a
+        // principal to address. The network bucket is the IPv4 address
+        // itself or the IPv6 /64 (identity::masked_network with a full
+        // IPv4 mask).
+        if is_login {
+            if let (Some(networks), Some(principal)) =
+                (&self.principal_networks, &observation.principal_id)
+            {
+                let principal_hex = hex::encode(principal);
+                let network = network_bucket(ctx.source_ip);
+                let seen = networks
+                    .principal_network_seen(&principal_hex, &network)
+                    .unwrap_or(None);
+                let trusted = networks
+                    .principal_has_trusted_network(&principal_hex)
+                    .unwrap_or(None);
+                // Novel when either first-attempt condition holds and
+                // the store answers definitively: the principal has
+                // never been seen from this network bucket, or the
+                // account carries no prior trusted network at all. A
+                // neutral answer (None — no surface / failed read)
+                // never fires, like the session tags.
+                evidence.novel_network =
+                    matches!(seen, Some(false)) || matches!(trusted, Some(false));
+            }
+            if self.enable_global_pressure
+                && (global_level >= crate::marks::SCOPE_PRESSURE_LEVEL
+                    || vector.global_pressure >= crate::marks::SCOPE_PRESSURE_FLOOR)
+            {
+                evidence.scope_pressure = true;
+            }
+        }
+        if v2.is_some_and(|context| context.breached_credential) {
+            evidence.breached_credential = true;
+        }
+        evidence
     }
 
     /// Derives the bounded risk-v2 signal vector from the tags recorded by
@@ -854,6 +1567,9 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         existing_context_tag: Option<&str>,
         existing_tls_tag: Option<&str>,
         event: RiskEventKind,
+        target_failures: u32,
+        target_spread_sources: u32,
+        target_spread_asns: u32,
     ) -> crate::signals::RiskV2Signals {
         let honeypot = if v2.honeypot_hit || event.is_honeypot() {
             1000
@@ -872,6 +1588,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot,
             session_inconsistency,
             tls_inconsistency,
+            target_failure_pressure: target_pressure_signal(target_failures),
+            target_spread: target_spread_signal(target_spread_sources.max(target_spread_asns)),
         }
     }
 
@@ -904,13 +1622,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         ) {
             return Err(RiskError::ConfirmationApiRequired);
         }
-        self.emit_feedback(event, ctx, idempotency_key, decision_id, None)
+        self.emit_feedback(event, ctx, idempotency_key, decision_id, None, None, None)
     }
 
     /// The shared feedback pipeline; `weight` is the calibrator's inverse
     /// sampling probability (only the confirmed* wrappers pass it — they
     /// bypass the [`RiskError::ConfirmationApiRequired`] guard of
-    /// [`RiskEngine::record_feedback`]).
+    /// [`RiskEngine::record_feedback`]). The pseudonym overrides carry
+    /// the typed outcomes API's pre-derived session/principal
+    /// pseudonyms: an outcome reported on an identity handle addresses
+    /// exactly the identity the caller named, so the observation rides
+    /// the handle's pseudonym instead of re-deriving the context's raw
+    /// identifier.
+    #[allow(clippy::too_many_arguments)]
     fn emit_feedback(
         &self,
         event: RiskEventKind,
@@ -918,9 +1642,25 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
         decision_id: Option<String>,
         weight: Option<f64>,
+        session_pseudonym: Option<&str>,
+        principal_pseudonym: Option<&str>,
     ) -> Result<EventReceipt, RiskError> {
         let now_ms = now_ms();
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
+        // The wrapper method's `event` is authoritative, exactly like the
+        // PHP mirror, whose buildObservation call overrides `ctx.event`:
+        // the booked observation and the idempotency-key dedupe domain
+        // must be the event the method names, never whatever the caller
+        // put in the context. Otherwise a PreIssue-labelled call with a
+        // ConfirmedLegitimate context would book a confirmation event
+        // without the outcome-ledger gate.
+        let observation = self.build_observation(
+            &ctx,
+            now_ms,
+            idempotency_key,
+            Some(event),
+            session_pseudonym,
+            principal_pseudonym,
+        )?;
 
         let confirmed = matches!(
             event,
@@ -939,27 +1679,58 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 // retry applies the outcome exactly once instead of
                 // amplifying it.
                 match self.confirm_outcome(&receipt_id, legitimate, weight) {
-                    Ok(0) | Err(_) => {
+                    // A caller configuration error (weighted mode without a
+                    // weight) must never masquerade as a duplicate no-op:
+                    // the PHP mirror throws, and silently booking nothing
+                    // would hide the misconfiguration forever.
+                    Err(RiskError::CalibrationWeightRequired(id)) => {
+                        return Err(RiskError::CalibrationWeightRequired(id));
+                    }
+                    // Reputation authorization: statuses 1 and 2 always;
+                    // status 3 (a capped label) only when the outcome is
+                    // abusive — a capped trust label must never mint
+                    // unlimited reputation credit (the v2 confirm's trust
+                    // caps return 4 for exactly that case). Status 0/4
+                    // and backend errors book nothing: the receipt/ledger
+                    // survives an error, so a retry applies the outcome
+                    // exactly once instead of amplifying it.
+                    Ok(status) => {
+                        let authorize = matches!(status, 1 | 2)
+                            || (status == 3 && !legitimate);
+                        if !authorize {
+                            return Ok(EventReceipt {
+                                event_id: observation.event_id,
+                                is_duplicate: true,
+                                signals: SignalVector::zero(),
+                            });
+                        }
+                    }
+                    Err(_) => {
                         return Ok(EventReceipt {
                             event_id: observation.event_id,
                             is_duplicate: true,
                             signals: SignalVector::zero(),
                         });
                     }
-                    Ok(_) => {}
                 }
             }
         }
 
-        let observed = self
-            .store
-            .observe(&observation)
-            .unwrap_or_else(|_| Observed {
-                vector: SignalVector::zero(),
-                global_level: 0,
-                cooldown_until_ms: 0,
-                is_duplicate: false,
-            });
+        let observed = match self.store.observe(&observation) {
+            Ok(o) => o,
+            Err(_) => {
+                // A feedback-path store failure feeds the circuit breaker
+                // exactly like an assessment-path failure (PHP parity): a
+                // wedged backend trips the breaker through either surface.
+                self.breaker.record_failure();
+                Observed {
+                    vector: SignalVector::zero(),
+                    global_level: 0,
+                    cooldown_until_ms: 0,
+                    is_duplicate: false,
+                }
+            }
+        };
 
         Ok(EventReceipt {
             event_id: observation.event_id,
@@ -980,11 +1751,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// Returns the shared accepted-outcome status (wire contract with PHP):
     /// `0` nothing consumed (missing / already confirmed / corrupt /
     /// unsampled-discard), `1` first confirmation with calibration
-    /// recorded, `2` first confirmation, deliberately unsampled. Only
-    /// statuses 1 and 2 authorize the first-party reputation event (see
-    /// [`RiskEngine::record_feedback`]); the reputation event itself is
-    /// booked separately. `weight` is the inverse sampling probability for
-    /// weighted sampling (default 1.0).
+    /// recorded, `2` first confirmation, deliberately unsampled, `3`
+    /// first confirmation with calibration withheld by the per-source
+    /// window cap, `4` first confirmation whose trust-granting reputation
+    /// credit is withheld by a trust cap. Reputation is authorized on 1
+    /// and 2 (and on 3 only for abuse labels); 4 never authorizes it
+    /// (see [`RiskEngine::record_feedback`]); the reputation event itself
+    /// is booked separately. `weight` is the inverse sampling probability
+    /// for weighted sampling (default 1.0).
     ///
     /// # Errors
     ///
@@ -997,13 +1771,30 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<u8, RiskError> {
+        self.confirm_outcome_for(decision_id, legitimate, weight, None)
+    }
+
+    /// Identity-aware confirmation: names the credited identity so the
+    /// per-identity trust cap applies on top of the per-source cap.
+    pub fn confirm_outcome_for(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+        identity: Option<&str>,
+    ) -> Result<u8, RiskError> {
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
         match &self.calibration {
             Some(calibration) => calibration
-                .confirm_outcome(decision_id, legitimate, weight)
-                .map_err(|e| RiskError::Calibration(e.to_string())),
+                .confirm_outcome_for(decision_id, legitimate, weight, identity)
+                .map_err(|e| match e {
+                    crate::calibration::CalibrationError::WeightRequired(id) => {
+                        RiskError::CalibrationWeightRequired(id)
+                    }
+                    other => RiskError::Calibration(other.to_string()),
+                }),
             None => self
                 .store
                 .confirm_outcome(decision_id, legitimate)
@@ -1088,6 +1879,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
+        reject_out_of_range_ppm(sampling_probability_ppm)?;
         let weight = sampling_probability_ppm.map(|ppm| 1_000_000.0 / ppm as f64);
         self.emit_feedback(
             RiskEventKind::ConfirmedLegitimate,
@@ -1095,6 +1887,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             idempotency_key,
             Some(decision_id.to_string()),
             weight,
+            None,
+            None,
         )
     }
 
@@ -1121,6 +1915,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
+        reject_out_of_range_ppm(sampling_probability_ppm)?;
         let weight = sampling_probability_ppm.map(|ppm| 1_000_000.0 / ppm as f64);
         self.emit_feedback(
             RiskEventKind::ConfirmedAbuse,
@@ -1128,6 +1923,112 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             idempotency_key,
             Some(decision_id.to_string()),
             weight,
+            None,
+            None,
+        )
+    }
+
+    /// The dedupe id of one typed outcome report: the exact
+    /// [`normalize_idempotency_key`] result the feedback pipeline books
+    /// under, so the long-memory mark write and the feedback event share
+    /// one idempotency domain. An absent or empty caller key returns `''`
+    /// (mark dedupe disabled — no marker key is written for a report
+    /// that cannot be retried).
+    pub(crate) fn derive_outcome_event_id(
+        &self,
+        idempotency_key: Option<&str>,
+        scope: u32,
+        event: RiskEventKind,
+    ) -> Result<String, RiskError> {
+        if idempotency_key.filter(|k| !k.is_empty()).is_none() {
+            return Ok(String::new());
+        }
+        normalize_idempotency_key(idempotency_key, scope, event, &self.keys.event)
+    }
+
+    /// The spread elements one outcome report contributes to the target
+    /// dimension's HLLs: a non-rotating element scoped to the target.
+    /// The source element is `HMAC(spread_key, target_id || '/' ||
+    /// /64-or-IPv4)` (the full IPv4 address, or the IPv6 /64) and the
+    /// ASN element `HMAC(spread_key, target_id || '/' || asn_bucket)`.
+    /// Both are keyed by the target-dimension HKDF key. The elements
+    /// never rotate with the 15-minute source epoch, so one IP cannot
+    /// mint a fresh "distinct source" every epoch and inflate the
+    /// spread into an elapsed-time meter. The ASN bucket is the
+    /// attached dataset's lookup, else the unlisted-namespace bucket —
+    /// see [`crate::asn::unlisted_bucket_for`]. An absent context
+    /// records no spread element.
+    pub(crate) fn target_spread_elements(
+        &self,
+        target_id: &str,
+        ctx: Option<&RiskContext<'_>>,
+    ) -> (String, String) {
+        let Some(ctx) = ctx else {
+            return (String::new(), String::new());
+        };
+        let net = crate::identity::masked_network(ctx.source_ip, 32, 64);
+        let mut source_msg = target_id.as_bytes().to_vec();
+        source_msg.extend_from_slice(b"/");
+        source_msg.extend_from_slice(&net);
+        let source = spread_element(&self.keys.target, &source_msg);
+        let asn_bucket = match self.asn_dataset.as_ref() {
+            Some(dataset) => dataset.bucket_id(ctx.source_ip),
+            None => crate::asn::unlisted_bucket_for(ctx.source_ip),
+        };
+        let mut asn_msg = target_id.as_bytes().to_vec();
+        asn_msg.extend_from_slice(b"/");
+        asn_msg.extend_from_slice(asn_bucket.as_bytes());
+        let asn = spread_element(&self.keys.target, &asn_msg);
+        (source, asn)
+    }
+
+    /// Registers one authentication failure against the target
+    /// dimension (the outcome-bridge write path of target-account
+    /// protection). Fails closed: a store error surfaces, never a silent
+    /// drop.
+    pub(crate) fn register_target_failure(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<(), RiskError> {
+        self.store
+            .register_target_failure(target_id, source, asn)
+            .map_err(|e| RiskError::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Resets the target's failure counter (step-up completed).
+    pub(crate) fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskError> {
+        self.store
+            .clear_target_failures(target_id)
+            .map_err(|e| RiskError::Store(e.to_string()))
+    }
+
+    /// The typed outcomes API's feedback entry: books the mapped risk-v1
+    /// event through the internal feedback pipeline, optionally riding
+    /// the handle's pre-derived session/principal pseudonyms (32-char
+    /// lowercase hex). The typed API itself is the server-side authority
+    /// here (an identity handle has no ledger entry to confirm first),
+    /// so the confirmation-event guard of
+    /// [`RiskEngine::record_feedback`] is deliberately absent; the
+    /// caller's idempotency key is the dedupe authority of the report.
+    pub(crate) fn record_outcome_feedback(
+        &self,
+        event: RiskEventKind,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+        session_pseudonym: Option<&str>,
+        principal_pseudonym: Option<&str>,
+    ) -> Result<EventReceipt, RiskError> {
+        self.emit_feedback(
+            event,
+            ctx,
+            idempotency_key,
+            None,
+            None,
+            session_pseudonym,
+            principal_pseudonym,
         )
     }
 
@@ -1187,17 +2088,51 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self.record_feedback(RiskEventKind::RiskDenied, ctx, idempotency_key, None)
     }
 
+    /// Builds the observation of one assessment or feedback event. The
+    /// pseudonym overrides carry the typed outcomes API's pre-derived
+    /// session/principal pseudonyms (32-char lowercase hex): when given,
+    /// the observation rides the caller's pseudonym verbatim instead of
+    /// deriving the context's raw identifier, so an outcome reported on
+    /// an identity handle names its subject exactly.
     fn build_observation(
         &self,
         ctx: &RiskContext<'_>,
         now_ms: u64,
         idempotency_key: Option<String>,
+        event_override: Option<RiskEventKind>,
+        session_pseudonym: Option<&str>,
+        principal_pseudonym: Option<&str>,
     ) -> Result<RiskObservation, RiskError> {
+        // The feedback wrappers pass the method's event; the assessment
+        // path passes None and takes the context's event. PHP parity:
+        // `buildObservation($c, …, $event)` with `$event ??= $c->event`.
+        let event = event_override.unwrap_or(ctx.event);
         let now_secs = (now_ms / 1000) as i64;
-        let src_epoch = now_secs / self.source_epoch_secs as i64;
-        let net_epoch = now_secs / self.subnet_epoch_secs as i64;
-        let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
-        let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
+        let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
+        let net_epoch = now_secs.div_euclid(self.timing.subnet_epoch_secs() as i64);
+        let decode_pseudonym =
+            |name: &str, value: Option<&str>| -> Result<Option<[u8; 16]>, RiskError> {
+                match value {
+                    None => Ok(None),
+                    Some(hex) => {
+                        let bytes = hex::decode(hex).map_err(|_| {
+                            RiskError::Store(format!("{name} pseudonym override is not valid hex"))
+                        })?;
+                        let raw: [u8; 16] = bytes.try_into().map_err(|_| {
+                            RiskError::Store(format!("{name} pseudonym override is not 16 bytes"))
+                        })?;
+                        Ok(Some(raw))
+                    }
+                }
+            };
+        let session_id = match decode_pseudonym("session", session_pseudonym)? {
+            Some(raw) => Some(raw),
+            None => ctx.session_id.map(|s| self.identity.session_id(s)),
+        };
+        let principal_id = match decode_pseudonym("principal", principal_pseudonym)? {
+            Some(raw) => Some(raw),
+            None => ctx.principal_id.map(|p| self.identity.principal_id(p)),
+        };
         // Canonical idempotency normalization shared with PHP: verbatim keys
         // become the lowercase hex of the hmac-sha256 MAC over event_key,
         // pack('N', scope), chr(event) and key — domain-separated per scope
@@ -1206,12 +2141,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let event_id = normalize_idempotency_key(
             idempotency_key.as_deref(),
             ctx.scope,
-            ctx.event,
+            event,
             &self.keys.event,
         )?;
 
         Ok(RiskObservation {
-            event: ctx.event,
+            event,
             scope: ctx.scope,
             source_epoch: src_epoch,
             source_id_prev: self
@@ -1252,6 +2187,16 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             out[i] = Some(*reason);
         }
         decision.reasons = out;
+    }
+
+    /// Assigns the decision_id only — no store or calibration call. The
+    /// degraded paths use this: the breaker is open, a store failed on
+    /// this assessment, or a limiter hard-denied without reaching the
+    /// state backend. The engine then skips the state backend entirely,
+    /// receipt/ledger registration included.
+    fn finalize_degraded_decision(&self, mut decision: RiskDecision) -> RiskDecision {
+        decision.decision_id = hex::encode(fresh_decision_id());
+        decision
     }
 
     /// Assigns the decision_id and registers the decision with its exact
@@ -1311,12 +2256,34 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     fn record_decision_metrics(&self, scope: u32, decision: &RiskDecision) {
-        self.metrics.incr(&format!(
-            "decisions:{scope}:{}:{}",
-            decision.action.as_str(),
-            decision.band
-        ));
+        // The disposition label: a quarantined decision counts as its own
+        // action label (its wire action stays allow), so the quarantine
+        // volume is observable without touching the ladder vocabulary.
+        self.metrics
+            .incr_decision(scope, decision.disposition_label(), decision.band);
     }
+}
+
+/// The severity-monotonic precedence of the composed pipeline: a
+/// quarantine disposition never survives an escalation. When a stage
+/// after the marks stage (decoy, evidence, pricing) raised the action
+/// above Allow, the raised action wins and the quarantine flag drops;
+/// an inert stage keeps the decision byte-identical, quarantine
+/// included.
+fn drop_quarantine_on_escalation(decision: RiskDecision) -> RiskDecision {
+    if decision.quarantined && decision.action != RiskAction::Allow {
+        decision.without_quarantine()
+    } else {
+        decision
+    }
+}
+
+/// The network bucket of a source address for the novel-network gate
+/// (P0-1): the IPv4 address itself, or the IPv6 /64 prefix. Stable,
+/// deployment-neutral spelling (family byte + masked packed bytes, hex)
+/// so both cores key the same bucket for the same address.
+fn network_bucket(ip: std::net::IpAddr) -> String {
+    hex::encode(crate::identity::masked_network(ip, 32, 64))
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -1332,6 +2299,18 @@ fn fresh_decision_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     thread_rng().fill_bytes(&mut id);
     id
+}
+
+/// The hysteresis client key: the session pseudonym when present, else
+/// the source pseudonym. One memory per scope and client keeps a burst on
+/// one client from steering another client's action selection.
+fn hysteresis_client_key(observation: &RiskObservation) -> &[u8] {
+    observation
+        .session_id
+        .as_ref()
+        .map_or(observation.source_id.as_bytes(), |session| {
+            session.as_slice()
+        })
 }
 
 /// The client-context tag to present to the consolidated assessment call:
@@ -1361,6 +2340,33 @@ fn presented_tls_tag(v2: Option<&RiskV2Context>, session_id: Option<[u8; 16]>) -
         return None;
     }
     Some(tag)
+}
+
+/// Bounded target-failure pressure: five failures (the attack threshold)
+/// saturates at 1000 so a stuffed target raises the numeric score before
+/// the marks stage escalates.
+fn target_pressure_signal(fails: u32) -> u16 {
+    crate::signals::normalize(fails.min(u32::from(u16::MAX)), 5)
+}
+
+/// Bounded target source+asn spread: twenty distinct sources saturate at
+/// 1000 so a wide spray raises the numeric score. The scored value is
+/// the wider of the two dimensions (never the sum).
+fn target_spread_signal(spread: u32) -> u16 {
+    crate::signals::normalize(spread.min(u32::from(u16::MAX)), 20)
+}
+
+/// The hex HLL element of one target-spread contribution: the first 16
+/// bytes of `HMAC-SHA256(spread_key, message)`, the same digest width
+/// the identity pseudonyms use.
+fn spread_element(key: &[u8], message: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(message);
+    let digest = mac.finalize().into_bytes();
+    hex::encode(&digest[..16])
 }
 
 #[cfg(test)]
@@ -1405,6 +2411,42 @@ mod tests {
 
     fn keys() -> RiskKeys {
         RiskKeys::from_master(&[0x42; 32])
+    }
+
+    #[test]
+    fn timing_config_validates_windows_and_ttls() {
+        assert!(matches!(
+            RiskTimingConfig::new(0, 900, 1800, 86400, 60),
+            Err(RiskError::InvalidTiming("source_epoch_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 0, 1800, 86400, 60),
+            Err(RiskError::InvalidTiming("subnet_epoch_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 0, 86400, 60),
+            Err(RiskError::InvalidTiming("session_ttl_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 1800, 0, 60),
+            Err(RiskError::InvalidTiming("principal_ttl_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 1800, 86400, 0),
+            Err(RiskError::InvalidTiming("dedupe_ttl_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(u64::MAX, 900, 1800, 86400, 60),
+            Err(RiskError::InvalidTiming("source_epoch_secs", u64::MAX))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 1800, 86400, u64::MAX),
+            Err(RiskError::InvalidTiming("dedupe_ttl_secs", u64::MAX))
+        ));
+        let ok = RiskTimingConfig::new(60, 120, 1800, 86400, 60).unwrap();
+        assert_eq!(ok.source_epoch_secs, 60);
+        assert_eq!(ok.subnet_epoch_secs, 120);
+        assert_eq!(RiskTimingConfig::MAX_SECS, 31_622_400);
     }
 
     fn classifier() -> CidrNetworkClassifier {
@@ -1480,6 +2522,7 @@ mod tests {
         vector: SignalVector,
         cooldown_until_ms: u64,
         calls: AtomicUsize,
+        register_calls: AtomicUsize,
         fail: bool,
         fail_calls: usize,
         outcomes: OutcomeLedger,
@@ -1492,6 +2535,7 @@ mod tests {
                 vector,
                 cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: false,
                 fail_calls: 0,
                 outcomes: OutcomeLedger::default(),
@@ -1504,6 +2548,7 @@ mod tests {
                 vector,
                 cooldown_until_ms,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: false,
                 fail_calls: 0,
                 outcomes: OutcomeLedger::default(),
@@ -1516,6 +2561,7 @@ mod tests {
                 vector: SignalVector::zero(),
                 cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: true,
                 fail_calls: usize::MAX,
                 outcomes: OutcomeLedger::default(),
@@ -1531,6 +2577,7 @@ mod tests {
                 },
                 cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: true,
                 fail_calls,
                 outcomes: OutcomeLedger::default(),
@@ -1559,6 +2606,7 @@ mod tests {
             _decision_hour: i64,
             _score: u32,
         ) -> Result<bool, RiskStoreError> {
+            self.register_calls.fetch_add(1, Ordering::Relaxed);
             Ok(self.outcomes.register(decision_id))
         }
 
@@ -1692,6 +2740,79 @@ mod tests {
     impl SessionContextTagStore for OscillatingStore {}
     impl SessionTlsTagStore for OscillatingStore {}
 
+    /// Store whose score depends on the observation's client: the bot
+    /// session scores at the Argon64 band, every other session at Allow.
+    struct PerClientScoreStore {
+        bot: [u8; 16],
+        outcomes: OutcomeLedger,
+    }
+
+    impl PerClientScoreStore {
+        fn new(bot: [u8; 16]) -> PerClientScoreStore {
+            PerClientScoreStore {
+                bot,
+                outcomes: OutcomeLedger::default(),
+            }
+        }
+    }
+
+    impl RiskStateStore for PerClientScoreStore {
+        fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            let vector = if o.session_id == Some(self.bot) {
+                SignalVector {
+                    source_fast: 900,
+                    bad_proof: 1000,
+                    issue_debt: 1000,
+                    malformed: 700,
+                    subnet_fast: 700,
+                    scope_switch: 700,
+                    ..Default::default()
+                }
+            } else {
+                SignalVector::zero()
+            };
+            Ok(Observed {
+                vector,
+                global_level: 0,
+                cooldown_until_ms: 0,
+                is_duplicate: false,
+            })
+        }
+
+        fn register_outcome(
+            &self,
+            decision_id: &str,
+            _scope: u32,
+            _decision_hour: i64,
+            _score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.register(decision_id))
+        }
+
+        fn confirm_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            Ok(self.outcomes.confirm(decision_id, legitimate))
+        }
+
+        fn correct_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.correct(decision_id, legitimate))
+        }
+
+        fn last_global_level(&self) -> u8 {
+            0
+        }
+    }
+
+    impl SessionContextTagStore for PerClientScoreStore {}
+    impl SessionTlsTagStore for PerClientScoreStore {}
+
     /// Store with the risk-v2 session first-tag record semantics (SET NX:
     /// the first tag a session presents is recorded and returned forever).
     #[derive(Default)]
@@ -1773,6 +2894,7 @@ mod tests {
             honeypot_hit,
             client_context_tag: tag.map(str::to_string),
             tls_tag: tls_tag.map(str::to_string),
+            ..Default::default()
         }
     }
 
@@ -1844,7 +2966,8 @@ mod tests {
     #[test]
     fn v2_session_client_context_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = b"session-bytes";
+        // A 16-byte session material: the decoded-cookie contract length.
+        let session: &[u8; 16] = &[0x31u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
             ..context()
@@ -1901,7 +3024,7 @@ mod tests {
         let no_tag = engine
             .assess_pre_issue_v2(
                 RiskContext {
-                    session_id: Some(b"session-bytes"),
+                    session_id: Some(&[0x51u8; 16]),
                     ..context()
                 },
                 &v2_context(false, None, None),
@@ -1918,7 +3041,7 @@ mod tests {
     #[test]
     fn v2_tls_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = b"tls-session-bytes";
+        let session: &[u8; 16] = &[0x32u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
             ..context()
@@ -1968,7 +3091,7 @@ mod tests {
     #[test]
     fn v2_absent_or_overbound_tls_tag_is_neutral() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = b"tls-absent-session";
+        let session: &[u8; 16] = &[0x33u8; 16];
 
         let first = engine
             .assess_pre_issue_v2(
@@ -2006,7 +3129,7 @@ mod tests {
         let first_overbound = engine
             .assess_pre_issue_v2(
                 RiskContext {
-                    session_id: Some(b"tls-overbound-session"),
+                    session_id: Some(&[0x52u8; 16]),
                     ..context()
                 },
                 &v2_context(false, None, Some(overbound.as_str())),
@@ -2021,7 +3144,7 @@ mod tests {
         let changed_overbound = engine
             .assess_pre_issue_v2(
                 RiskContext {
-                    session_id: Some(b"tls-overbound-session"),
+                    session_id: Some(&[0x52u8; 16]),
                     ..context()
                 },
                 &v2_context(false, None, Some("z".repeat(65).as_str())),
@@ -2207,7 +3330,7 @@ mod tests {
             register_calls.clone(),
         );
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        let session: [u8; 22] = *b"established-session-id";
+        let session: [u8; 16] = [0x34u8; 16];
 
         // Prime: the first assessment records the session tag records and
         // registers its own decision atomically.
@@ -2304,7 +3427,7 @@ mod tests {
         assert!(snapshot.iter().any(|(k, _)| k == "store:observe:count"));
     }
 
-    /// Engine-level wiring: the engine passes its per-process
+    /// Engine-level wiring: the engine passes its per-client
     /// scope-action hysteresis map into the policy, so an oscillating
     /// boundary score (449/451/449…) yields a stable action instead of a
     /// flip-flopping challenge profile.
@@ -2324,6 +3447,103 @@ mod tests {
                 "iteration {i}: the oscillating boundary score must not flip the profile"
             );
         }
+    }
+
+    /// Engine-level keying: the hysteresis memory follows the session
+    /// pseudonym, so the bot's Argon64 history never steers another
+    /// client's action in the same scope.
+    #[test]
+    fn scope_action_hysteresis_is_keyed_per_client() {
+        fn with_session(session: &[u8; 16]) -> RiskContext<'_> {
+            RiskContext {
+                session_id: Some(session),
+                ..context()
+            }
+        }
+        let identity = RiskIdentityFactory::new(keys());
+        let bot_pseudonym = identity.session_id(&[0xB0; 16]);
+        let legit: [u8; 16] = [0x41; 16];
+        let bot: [u8; 16] = [0xB0; 16];
+        let fresh: [u8; 16] = [0x42; 16];
+        let engine = RiskEngine::new(
+            PerClientScoreStore::new(bot_pseudonym),
+            classifier(),
+            policy(),
+            keys(),
+        );
+
+        // The legitimate client establishes an Allow history.
+        let first = engine.assess_pre_issue(with_session(&legit), None).unwrap();
+        assert_eq!(first.action, RiskAction::Allow);
+
+        // The bot's own key jumps straight to Argon64; a scope-wide
+        // memory would hold it at one band after the Allow history.
+        let attack = engine.assess_pre_issue(with_session(&bot), None).unwrap();
+        assert_eq!(attack.score, 921);
+        assert_eq!(attack.action, RiskAction::Argon64);
+
+        // The legitimate client still reads its own Allow entry.
+        let again = engine.assess_pre_issue(with_session(&legit), None).unwrap();
+        assert_eq!(again.action, RiskAction::Allow);
+
+        // A second fresh client after the bot keeps the plain mapping.
+        let later = engine.assess_pre_issue(with_session(&fresh), None).unwrap();
+        assert_eq!(later.action, RiskAction::Allow);
+    }
+
+    /// Engine-level keying fallback: with NO session, the hysteresis
+    /// memory follows the source pseudonym, so two different sources in
+    /// the same scope keep independent entries while each source's own
+    /// held action survives. A scope-keyed memory (the regression this
+    /// pins) would leak the first source's held action into the second's
+    /// fresh assessment.
+    #[test]
+    fn scope_action_hysteresis_falls_back_to_the_source_pseudonym() {
+        fn with_source(ip: &str) -> RiskContext<'static> {
+            RiskContext {
+                source_ip: ip.parse().expect("test IP parses"),
+                ..context()
+            }
+        }
+        let engine = RiskEngine::new(OscillatingStore::default(), classifier(), policy(), keys());
+
+        // Source A: 449 -> Sha18 (its own fresh entry).
+        let first = engine
+            .assess_pre_issue(with_source("203.0.113.27"), None)
+            .unwrap();
+        assert_eq!(first.score, 449);
+        assert_eq!(first.action, RiskAction::Sha18);
+
+        // Source B (different source pseudonym, same scope, no session):
+        // 451 must use the plain mapping (Sha20). A scope-keyed memory
+        // would hold A's Sha18 instead.
+        let second = engine
+            .assess_pre_issue(with_source("198.51.100.9"), None)
+            .unwrap();
+        assert_eq!(second.score, 451);
+        assert_eq!(
+            second.action,
+            RiskAction::Sha20,
+            "a second source must not inherit the first source's hysteresis"
+        );
+
+        // Source A still holds its own Sha18 entry: the same source is held.
+        let third = engine
+            .assess_pre_issue(with_source("203.0.113.27"), None)
+            .unwrap();
+        assert_eq!(third.score, 449);
+        assert_eq!(
+            third.action,
+            RiskAction::Sha18,
+            "the same source keeps its held action"
+        );
+
+        // And source B keeps its own entry too.
+        let fourth = engine
+            .assess_pre_issue(with_source("198.51.100.9"), None)
+            .unwrap();
+        assert_eq!(fourth.score, 451);
+        assert_eq!(fourth.action, RiskAction::Sha20);
     }
 
     #[test]
@@ -2540,6 +3760,47 @@ mod tests {
         );
     }
 
+    /// A non-finite ramp would turn the cap into permanent floor
+    /// throttling (the elapsed comparison never reaches an infinite
+    /// ramp), so the constructor refuses NaN.
+    #[test]
+    #[should_panic(expected = "warmup_ramp_secs must be finite and >= 0")]
+    fn warmup_ramp_rejects_nan() {
+        let _ = ProcessEmergencyCap::with_capacity_and_ramp(100, f64::NAN);
+    }
+
+    /// Positive infinity is the permanent-floor case: refused.
+    #[test]
+    #[should_panic(expected = "warmup_ramp_secs must be finite and >= 0")]
+    fn warmup_ramp_rejects_positive_infinity() {
+        let _ = ProcessEmergencyCap::with_capacity_and_ramp(100, f64::INFINITY);
+    }
+
+    /// Negative infinity is also outside the finite non-negative domain.
+    #[test]
+    #[should_panic(expected = "warmup_ramp_secs must be finite and >= 0")]
+    fn warmup_ramp_rejects_negative_infinity() {
+        let _ = ProcessEmergencyCap::with_capacity_and_ramp(100, f64::NEG_INFINITY);
+    }
+
+    /// Finite ramps still construct and still ramp: a huge finite value
+    /// is the long-ramp control (the floor rate applies at t=0).
+    #[test]
+    fn warmup_ramp_accepts_finite_values() {
+        for ramp in [0.0, 0.3, 10.0, 1.0e9] {
+            let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1000, ramp);
+            assert_eq!(limiter.warmup_ramp_secs(), ramp, "finite ramp accepted");
+        }
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1000, 1.0e9);
+        for _ in 0..100 {
+            assert!(limiter.allow(), "floor admission");
+        }
+        assert!(
+            !limiter.allow(),
+            "the floor+1th must be denied during the ramp"
+        );
+    }
+
     #[test]
     fn reassess_ignores_the_emergency_cap() {
         let store = MockStore::new(
@@ -2609,6 +3870,159 @@ mod tests {
             2,
             "open breaker must bypass the store"
         );
+    }
+
+    #[test]
+    fn degraded_paths_book_no_outcome_ledger_entry() {
+        // A limiter hard-deny never reached the state backend: no ledger
+        // registration against a backend that never saw the decision.
+        let store = MockStore::new(SignalVector::zero(), 0);
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1, 0.0);
+        assert!(limiter.allow(), "burn the single admission");
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            limiter,
+        );
+        let denied = engine.assess_pre_issue(context(), None).unwrap();
+        assert!(denied.has_reason(RiskReason::HardRateLimit));
+        assert_eq!(
+            engine.store.register_calls.load(Ordering::Relaxed),
+            0,
+            "a limiter hard-deny must book no ledger entry"
+        );
+
+        // A store failure on the assessment: the decision degrades and no
+        // registration runs against the failing backend.
+        let store = MockStore::failing();
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::new(2, 60_000),
+            ProcessEmergencyCap::new(),
+        );
+        let d1 = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(d1.action, RiskAction::Sha20);
+        assert_eq!(
+            engine.store.register_calls.load(Ordering::Relaxed),
+            0,
+            "a failed assessment must book no ledger entry"
+        );
+
+        // Breaker open (the two failures above): the store is skipped
+        // entirely, ledger registration included.
+        engine
+            .record_feedback(RiskEventKind::SolveSuccess, context(), None, None)
+            .unwrap();
+        // The feedback failure opened the breaker: the next assessment
+        // bypasses the store entirely (the two calls are d1 + the
+        // feedback observe).
+        let d2 = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(
+            engine.store.calls.load(Ordering::Relaxed),
+            2,
+            "d2 must be breaker-open degraded (no new store call)"
+        );
+        assert_eq!(d2.action, RiskAction::Sha20);
+        assert_eq!(
+            engine.store.register_calls.load(Ordering::Relaxed),
+            0,
+            "an open breaker must book no ledger entry"
+        );
+    }
+
+    #[test]
+    fn feedback_store_failure_feeds_the_breaker() {
+        // Two feedback-path store failures open the breaker (PHP parity):
+        // a wedged backend trips the breaker through either surface.
+        let store = MockStore::failing();
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::new(2, 60_000),
+            ProcessEmergencyCap::new(),
+        );
+
+        let receipt = engine
+            .record_feedback(RiskEventKind::SolveSuccess, context(), None, None)
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+        assert!(!engine.breaker.is_open(), "one failure must not open");
+
+        let _ = engine
+            .record_feedback(RiskEventKind::SolveSuccess, context(), None, None)
+            .unwrap();
+        assert!(
+            engine.breaker.is_open(),
+            "two feedback-path failures must open the breaker"
+        );
+
+        // The next assessment degrades without touching the store.
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(decision.action, RiskAction::Sha20);
+        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn client_context_tag_is_bounded_to_64_bytes_fail_closed() {
+        let engine = RiskEngine::new(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+        );
+
+        // 64 bytes: accepted.
+        let ok = engine
+            .assess_pre_issue_v2(
+                context(),
+                &v2_context(false, Some(&"x".repeat(64)), None),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(ok.score, 100);
+
+        // 65 bytes: the assessment input is rejected — never a silent
+        // truncation (which would split one session's identity across tag
+        // records).
+        assert!(matches!(
+            engine.assess_pre_issue_v2(
+                context(),
+                &v2_context(false, Some(&"x".repeat(65)), None),
+                None,
+                None
+            ),
+            Err(RiskError::InvalidContextTag(65))
+        ));
+        assert!(matches!(
+            engine.reassess_v2(
+                context(),
+                &v2_context(false, Some(&"x".repeat(65)), None),
+                None,
+                None
+            ),
+            Err(RiskError::InvalidContextTag(65))
+        ));
+
+        // The TLS tag keeps its documented over-bound handling: treated as
+        // absent (no record written), never a rejection.
+        let tls = engine
+            .assess_pre_issue_v2(
+                context(),
+                &v2_context(false, None, Some(&"t".repeat(65))),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(tls.score, 100, "an over-bound TLS tag is absent-neutral");
     }
 
     #[test]
@@ -2707,7 +4121,7 @@ mod tests {
         let sess_ctx = RiskContext::new(
             1,
             "203.0.113.27".parse().unwrap(),
-            Some(b"sess"),
+            Some(&[0x35u8; 16]),
             Some(b"principal-1"),
             RiskEventKind::ConfirmedAbuse,
             NetworkFlags::default(),
@@ -2734,7 +4148,7 @@ mod tests {
                 &keys().session,
                 b"sess",
                 0,
-                b"sess"
+                &[0x35u8; 16]
             ))
         );
         assert_eq!(
@@ -2831,9 +4245,10 @@ mod tests {
             json.get("decision_id").is_none(),
             "decision_id must never leak into the serialized decision"
         );
-        // 8 public fields: score, action, reasons, policy_version,
-        // model_revision, global_level, retry_after_ms, band.
-        assert_eq!(json.as_object().unwrap().len(), 8);
+        // 9 public fields: score, action, quarantined, reasons,
+        // policy_version, model_revision, global_level, retry_after_ms,
+        // band.
+        assert_eq!(json.as_object().unwrap().len(), 9);
         assert_eq!(json["model_revision"], 17);
     }
 
@@ -3669,5 +5084,100 @@ mod tests {
         let denied = blocked_engine.assess_pre_issue(blocked_ctx, None).unwrap();
         assert!(denied.has_reason(RiskReason::LocalNetworkRisk));
         assert_eq!(denied.action, RiskAction::Deny);
+    }
+
+    /// The decisive attacker stage on the engine's public assess surface:
+    /// with a marks reader wired, a marked session escalates the assessed
+    /// action to the maximum challenge rung; without a reader the same
+    /// assessment keeps the plain action (the wiring is opt-in and
+    /// byte-identical when absent).
+    #[test]
+    fn marks_reader_wiring_escalates_only_when_attached() {
+        struct MarkedSessionReader {
+            requests: Mutex<Vec<crate::marks::MarksRequest>>,
+        }
+        impl crate::marks::MarksReader for MarkedSessionReader {
+            fn request_marks(
+                &self,
+                request: &crate::marks::MarksRequest,
+            ) -> Result<crate::marks::MarksView, RiskError> {
+                self.requests.lock().unwrap().push(request.clone());
+                let view = match &request.session {
+                    Some(_session) => {
+                        let now = crate::now_ms() as i64;
+                        crate::marks::MarksView::from_parts(
+                            vec![(
+                                crate::outcomes::MarkDimension::Session,
+                                crate::outcomes::MarkRecord {
+                                    kind: "accountBanned".to_string(),
+                                    last_kind: "accountBanned".to_string(),
+                                    count: 1,
+                                    first_ms: now,
+                                    last_ms: now,
+                                },
+                            )],
+                            None,
+                        )
+                    }
+                    None => crate::marks::MarksView::default(),
+                };
+                Ok(view)
+            }
+            fn mark_ttl_ms(&self) -> u64 {
+                crate::marks::DEFAULT_MARK_TTL_MS
+            }
+        }
+
+        let session = [0x33u8; 16];
+        let plain_engine = RiskEngine::with_components(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            ProcessEmergencyCap::default(),
+        );
+        let ctx = || {
+            RiskContext::new(
+                1,
+                "203.0.113.27".parse().unwrap(),
+                Some(&session),
+                None,
+                RiskEventKind::PreIssue,
+                NetworkFlags::default(),
+                ResourcePressure::default(),
+            )
+        };
+        let plain = plain_engine.assess_pre_issue(ctx(), None).unwrap();
+        assert_eq!(plain.action, RiskAction::Allow);
+
+        let reader = std::sync::Arc::new(MarkedSessionReader {
+            requests: Mutex::new(Vec::new()),
+        });
+        let wired = RiskEngine::with_components(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            ProcessEmergencyCap::default(),
+        )
+        .with_marks_reader(reader.clone());
+        // The session is marked through the reader, so the wired
+        // assessment floors at the maximum rung with its reason, while the
+        // unwired engine keeps the plain action for the same request.
+        let escalated = wired.assess_pre_issue(ctx(), None).unwrap();
+        assert_eq!(escalated.action, RiskAction::Argon64);
+        assert!(escalated.has_reason(RiskReason::MarkedIdentity));
+        let untouched = plain_engine.assess_pre_issue(ctx(), None).unwrap();
+        assert_eq!(untouched.action, RiskAction::Allow);
+        // The engine handed the reader the derived session pseudonym (32
+        // hex chars), never the raw cookie bytes.
+        let requests = reader.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let session_id = requests[0].session.as_deref().expect("session present");
+        assert_eq!(session_id.len(), 32);
+        assert!(session_id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(session_id, hex::encode(session));
     }
 }

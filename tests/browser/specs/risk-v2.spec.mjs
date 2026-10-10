@@ -55,9 +55,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(typeof body.client_context).toBe('string');
     // The server's accepted bounded pattern.
     expect(body.client_context).toMatch(/^[a-z0-9+_,=:-]{1,64}$/);
-    // The coarse capabilities: viewport class, touch class, language
-    // family and timezone class.
-    expect(body.client_context).toMatch(/v[123]/);
+    // The coarse capabilities: touch class, language family and
+    // timezone class. The viewport is deliberately excluded from the
+    // consistency tag (rotation/resize would flag legitimate users).
     expect(body.client_context).toMatch(/t[01]/);
     expect(body.client_context).toMatch(/l[a-z]{2,3}/);
     expect(body.client_context).toMatch(/z[0-4]/);
@@ -77,6 +77,44 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     // or screen-size signal with the challenge request.
     expect(body.client_context).toBeUndefined();
     // No decoy markers when no decoy was rendered.
+    expect(body.decoy_field).toBeUndefined();
+    expect(body.honeypot).toBeUndefined();
+  });
+
+  test('coarse context: the files-tier opt-in never fetches the risk module before issuance, and client_context still rides the request', async ({ page }) => {
+    // The coarse client-context descriptor moved into the eager core:
+    // with data-kiwi-risk-context="coarse" the files-tier widget must
+    // send the challenge request immediately — no data-kiwi-risk-src
+    // module fetch of its own before the issuance — while
+    // the request body still carries the coarse descriptor. The module
+    // is fetched exactly once after issuance: a glue-less files page
+    // dispatches its SHA-256 solve to the worker at the solve phase
+    // (every required module load stays post-issuance).
+    const riskRequests = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/assets/risk.')) riskRequests.push(req.url());
+    });
+    const challengeSeen = page.waitForRequest(
+      (r) => r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'),
+      { timeout: 30_000 }
+    );
+    await page.goto('/?assets=files&risk-context=coarse&capture=ccfiles');
+    await challengeSeen;
+    // At the moment of issuance the risk module must not even be in
+    // flight: the coarse opt-in is fully served by the eager core.
+    expect(riskRequests, 'no risk-module fetch may precede the challenge request').toEqual([]);
+
+    await solve(page);
+    // The worker dispatch of the glue-less SHA-256 solve loads the risk
+    // module exactly once, strictly after the issuance (never before).
+    expect(riskRequests, 'the glue-less SHA-256 solve must load the risk module exactly once, after issuance').toHaveLength(1);
+    const body = JSON.parse(await readCapture(page, 'ccfiles'));
+    expect(body, 'the challenge request must be captured').toBeTruthy();
+    expect(typeof body.client_context).toBe('string');
+    expect(body.client_context).toMatch(/^[a-z0-9+_,=:-]{1,64}$/);
+    expect(body.client_context).toMatch(/t[01]/);
+    expect(body.client_context).toMatch(/l[a-z]{2,3}/);
+    expect(body.client_context).toMatch(/z[0-4]/);
     expect(body.decoy_field).toBeUndefined();
     expect(body.honeypot).toBeUndefined();
   });
@@ -117,12 +155,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
   test('filling the decoy input then submitting sends the decoy markers', async ({ page }) => {
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-    // The lazy risk module (widget-risk.js) is embedded on every
-    // production inline page (the bundle's form_div_layout.html.twig
-    // embeds it after the driver: the adaptive-risk solve tier +
-    // armed-evidence machinery, a decoy can be armed per response); the
-    // fixture page mirrors that exact inline-tier shape.
-    const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
 <div class="kiwi-container" id="kiwicaptcha-root" data-kiwi-endpoint="/challenge?decoy=1&capture=d1" data-kiwi-scope="login">
@@ -178,16 +211,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     });
 
     const widgetId = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
-    // ttl=3 ⇒ the credential expires ~3s after the solve. Poll the ACTUAL
-    // condition — the driver's own expiry state — instead of sleeping past
-    // the TTL (audit F19): robust under load, and it cannot pass before the
-    // expiry has really flipped.
-    await expect
-      .poll(
-        async () => page.evaluate((wid) => window.KiwiCaptcha.isExpired(wid), widgetId),
-        { timeout: 15_000 },
-      )
-      .toBe(true);
+    await page.waitForTimeout(3500);
+    const expired = await page.evaluate((wid) => window.KiwiCaptcha.isExpired(wid), widgetId);
+    expect(expired).toBe(true);
     // The fresh decoy name is captured from the re-solve's challenge
     // response (registered before the re-solve fetch fires).
     const freshNameP = challengeDecoyName(page);

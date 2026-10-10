@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
+
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\VerificationAdmissionGate;
 
 /**
@@ -25,9 +28,15 @@ use KiwiCaptcha\VerificationAdmissionGate;
  * never releases it, but its lease expires after `LEASE_MS` and is reaped by
  * the next acquire, with no watchdog counter to drift and no DECR race.
  *
- * Key: `kiwicaptcha:argon2:leases:<namespace>`, one lease set per
- * deployment; the namespace is sanitized to [A-Za-z0-9_.-] (defaults to
- * 'default' when empty).
+ * Keys: the one hash-tagged family root
+ * `{kiwicaptcha:argon2:leases:n_<digest>}` (the digest of the raw
+ * namespace) names every script key.
+ * The members are `:global` (the lease set), `:sem:waiters` (the
+ * saturation gauge) and `:scope:<sha256(scope)>` (each per-scope set).
+ * All of them occupy one Redis Cluster slot, so the multi-key scripts
+ * never hit a cross-slot refusal. One family per deployment, the
+ * namespace sanitized to [A-Za-z0-9_.-] (defaults to 'default' when
+ * empty).
  *
  * A `maxConcurrent` <= 0 disables the cap: acquire() returns the sentinel
  * token 'disabled' and release() no-ops; the verifier's lease lifecycle
@@ -35,8 +44,15 @@ use KiwiCaptcha\VerificationAdmissionGate;
  */
 final class RedisAdmissionSemaphore implements VerificationAdmissionGate
 {
-    /** Default lease lifetime in ms; expired leases are reaped by the next acquire. */
-    private const DEFAULT_LEASE_MS = 45_000;
+    /**
+     * Default lease lifetime in ms; expired leases are reaped by the
+     * next acquire. Must exceed the SiteVerify ownership lease (60 s,
+     * the documented maximum verification window): a derivation that
+     * outlives the 45 s legacy default would have its slot reaped while
+     * still running, oversubscribing the Argon cap. 90 s leaves the
+     * documented window plus a safety margin.
+     */
+    private const DEFAULT_LEASE_MS = 90_000;
 
     /**
      * Atomic acquire with the bounded saturation-pressure counter and the
@@ -154,6 +170,9 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
 return redis.call('ZCARD', KEYS[1])
 LUA;
 
+    /** The hash-tagged key family root every script key derives from (one Cluster slot). */
+    private readonly string $root;
+
     private readonly string $key;
 
     /** The saturation-pressure counter key — same hash tag as the lease set (Cluster safe). */
@@ -215,6 +234,7 @@ LUA;
         private readonly int $leaseMs = self::DEFAULT_LEASE_MS,
         private readonly int $saturationPressureCap = 64,
         private readonly int $maxPerScope = 8,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
         if ($leaseMs < 1_000) {
             throw new \InvalidArgumentException('leaseMs must be >= 1000');
@@ -225,12 +245,22 @@ LUA;
         if ($maxPerScope < 1) {
             throw new \InvalidArgumentException('maxPerScope must be >= 1');
         }
-        $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
-        $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
-        // The saturation counter must live in the same hash slot as the
-        // lease set (one EVAL script touches both keys), so it is
-        // hash-tagged with the lease key's tag family.
-        $this->waitersKey = '{kiwicaptcha:argon2:leases:'.$suffix.'}:sem:waiters';
+        // The tag content is a digest of the complete raw namespace:
+        // replacement-sanitizing first would fold distinct namespaces
+        // (tenant/a and tenant:a, two project directories differing in
+        // a separator byte) onto one lease family. An unset namespace
+        // shares the named default's deployment scope by choice.
+        $tag = RedisNamespace::deriveOr($namespace, 'default', $namespaceKeyVersion);
+        // One hash-tagged root names the whole key family: every key any
+        // script touches (the global lease set, the saturation counter,
+        // each per-scope set) is derived from it with a plain suffix, so
+        // the family is structurally confined to one Cluster slot — a
+        // derived key cannot forget its tag. Lease sets live at most one
+        // lease lifetime, so the prior key shape simply expires away
+        // rather than needing a migration.
+        $this->root = '{kiwicaptcha:argon2:leases:'.$tag.'}';
+        $this->key = $this->root.':global';
+        $this->waitersKey = $this->root.':sem:waiters';
     }
 
     /**
@@ -294,7 +324,7 @@ LUA;
         // into the key. The token carries the hashed scope suffix so
         // release() can remove the lease from both sets.
             $scopeSuffix = hash('sha256', $scope);
-            $scopeKey = '{'.$this->key.'}:'.$scopeSuffix;
+            $scopeKey = $this->root.':scope:'.$scopeSuffix;
             $token .= '.'.$scopeSuffix;
             $hasScope = true;
         }
@@ -341,7 +371,7 @@ LUA;
         if ($sep !== false) {
             $scope = substr($lease, $sep + 1);
             if ($scope !== '') {
-                $scopeKey = '{'.$this->key.'}:'.$scope;
+                $scopeKey = $this->root.':scope:'.$scope;
                 $hasScope = true;
             }
         }
@@ -380,18 +410,24 @@ LUA;
 
     /**
      * Run a Lua script against whichever client implementation is in use.
+     * The script rides the typed seam's ordinary mutation lane,
+     * {@see RedisSecurityCommandExecutor::executeMutation()}: an
+     * admission lease is a non-final mutation (a claim/release, never a
+     * terminal security transition). Under ha_authority pinned_primary
+     * it therefore serves within the guard's verification window
+     * instead of being classified by the plain-EVAL shape as
+     * security-final (which would force an INFO + pin revalidation
+     * round trip per acquisition). Without the wrapper the lane
+     * declaration is inert and the packing is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args
      */
     private function eval(string $script, array $keys, array $args): mixed
     {
-        if ($this->client instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->client->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->client->eval($script, \count($keys), ...$keys, ...$args);
+        return ($this->luaSeam ??= new RedisSecurityCommandExecutor($this->client))
+            ->executeMutation($script, $keys, $args);
     }
+
+    private ?RedisSecurityCommandExecutor $luaSeam = null;
 }

@@ -43,10 +43,19 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * signed-expiry guard. A past-expiry record whose key is still live is
  * stale and fails closed, the mirror of the Array store's liveRecord()
  * sweep.
+ *
+ * The same const also defines the ONE live-chain authority,
+ * `readLiveChainForObligation(key, expectedObligationId, now)`: the
+ * key-lifetime, strict-decode, v2-schema, obligation-identity and
+ * signed-expiry checks in one call returning 'absent' / 'corrupt' /
+ * 'expired' / the validated record. The chain live-read and the
+ * obligation-guarded post-solve acceptance both consult it, so the two
+ * surfaces can never drift into two different definitions of a live
+ * chain.
  */
 final class ChainV2LuaPredicate
 {
-    /** @var string the Lua functions `isValidChainRecord(rec)`, `chainKeyLifetimeMissing(ttl)` and `chainRecordExpired(rec, now)` */
+    /** @var string the Lua functions `isValidChainRecord(rec)`, `chainKeyLifetimeMissing(ttl)`, `chainRecordExpired(rec, now)` and `readLiveChainForObligation(key, expectedObligationId, now)` */
     public const LUA = <<<'LUA'
 local function isKiwiInteger(x)
   return type(x) == 'number' and x == math.floor(x)
@@ -72,7 +81,7 @@ local function isValidChainRecord(rec)
   -- deny-unknown-fields rule: a renamed or extra key (e.g. a
   -- requestBinding spelled differently) is a corrupt or foreign record
   -- and fails closed, exactly like the PHP decoder.
-  local knownKeys = { v = true, stage1Nonce = true, scope = true, obligationId = true, requiredAction = true, requiredRank = true, policyVersion = true, chainDepth = true, state = true, owner = true, leaseUntil = true, stage2Nonce = true, requestBinding = true, expiresAt = true }
+  local knownKeys = { v = true, stage1Nonce = true, scope = true, obligationId = true, requiredAction = true, requiredRank = true, policyVersion = true, chainDepth = true, state = true, owner = true, leaseUntil = true, stage2Nonce = true, requestBinding = true, expiresAt = true, requirementGeneration = true, reservedRequirementGeneration = true }
   for k in pairs(rec) do
     if not knownKeys[k] then
       return false
@@ -112,6 +121,23 @@ local function isValidChainRecord(rec)
   if rec['chainDepth'] ~= 2 then
     return false
   end
+  -- The monotonic requirement generation: every requirement raise
+  -- increments it, and a reservation records the generation it was
+  -- taken against, so an issuance can never install a challenge minted
+  -- for a weaker requirement.
+  local requirementGeneration = rec['requirementGeneration']
+  if requirementGeneration == nil then
+    -- The field is ABSENT: the legacy shape written before the
+    -- generation existed. It decodes as logical generation 1 and heals
+    -- (materializes the canonical field) on its first transition, so an
+    -- in-flight chain survives the upgrade. An EXPLICIT null is NOT the
+    -- legacy shape: the canonical writer never emits a null generation,
+    -- so null is corrupt.
+    requirementGeneration = 1
+  elseif requirementGeneration == cjson.null
+    or not isKiwiInteger(requirementGeneration) or requirementGeneration < 1 then
+    return false
+  end
   local state = rec['state']
   if state ~= 'available' and state ~= 'reserved' and state ~= 'issued'
     and state ~= 'verified' and state ~= 'completed'
@@ -120,6 +146,11 @@ local function isValidChainRecord(rec)
   end
   local owner = rec['owner']
   local leaseUntil = rec['leaseUntil']
+  local reservedGeneration = rec['reservedRequirementGeneration']
+  if reservedGeneration ~= nil and reservedGeneration ~= cjson.null
+    and (not isKiwiInteger(reservedGeneration) or reservedGeneration < 1) then
+    return false
+  end
   if state == 'reserved' then
     if type(owner) ~= 'string' or owner == '' then
       return false
@@ -127,11 +158,21 @@ local function isValidChainRecord(rec)
     if not isKiwiInteger(leaseUntil) then
       return false
     end
+    -- ABSENT on a legacy reservation means the reservation was taken
+    -- against logical generation 1; an explicit null in the reserved
+    -- state is corrupt (the canonical writer always materializes the
+    -- snapshot).
+    if reservedGeneration == cjson.null then
+      return false
+    end
   else
     if owner ~= nil and owner ~= cjson.null then
       return false
     end
     if leaseUntil ~= nil and leaseUntil ~= cjson.null then
+      return false
+    end
+    if reservedGeneration ~= nil and reservedGeneration ~= cjson.null then
       return false
     end
   end
@@ -158,12 +199,17 @@ local function isValidChainRecord(rec)
   end
   return true
 end
--- The key-lifetime guard shared by every mutating transition: a chain
--- key WITHOUT a TTL is corrupted state (the signed-ticket lifetime was
--- stripped); a transition must never manufacture a lifetime from the
--- configured TTL, it fails closed like the reservation does.
-local function chainKeyLifetimeMissing(ttl)
-  return ttl <= 0
+-- The key-lifetime guard shared by every transition and read, over the
+-- PTTL sentinels: a PRESENT chain key with PTTL -1 (no lifetime) is
+-- corrupted state (the signed-ticket lifetime was stripped) and a
+-- transition must never manufacture one from the configured TTL. The
+-- sentinels are exact — a live key with a sub-second remainder
+-- legitimately reports PTTL 0 and is LIVE, never corrupt; -2 means the
+-- key is absent (callers check existence first; defensively it is still
+-- "no lifetime"), and any other negative value is impossible.
+local function chainKeyLifetimeMissing(pttl)
+  if pttl == nil then return true end
+  return pttl < 0
 end
 -- The signed-expiry guard: an expired-but-live record (the key still
 -- exists while the record's own expiresAt lapsed) is stale, the same
@@ -171,6 +217,34 @@ end
 -- after isValidChainRecord, so expiresAt is a known integer.
 local function chainRecordExpired(rec, now)
   return rec['expiresAt'] <= now
+end
+-- The ONE live-chain authority shared by every read that gates on a
+-- chain record: the chain live-read itself and the obligation-guarded
+-- post-solve acceptance. The key must exist, carry a lifetime, strictly
+-- decode, satisfy the v2 schema, belong to the EXPECTED obligation and
+-- hold a not-yet-passed signed expiry. Answers the string 'absent',
+-- 'corrupt' or 'expired', or the validated record table. Mapping
+-- equality (the obligation key still points at the chain id the caller
+-- observed) remains part of the enclosing atomic script, because it
+-- couples a second key. A caller must treat 'corrupt' as fail-closed
+-- corruption with zero writes, never as absent: corrupt state is never
+-- healed. Call after PersistedJsonLuaPredicate::LUA is in scope
+-- (decodeUniqueObject) and after isValidChainRecord was defined.
+local function readLiveChainForObligation(key, expectedObligationId, now)
+  local existing = redis.call('GET', key)
+  if not existing then return 'absent' end
+  -- A PRESENT empty value is corruption, never absence: it must not be
+  -- healed into fresh state by a caller's missing path.
+  if existing == '' then return 'corrupt' end
+  if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', key))) then return 'corrupt' end
+  local rec = decodeUniqueObject(existing)
+  if rec == nil or not isValidChainRecord(rec) then return 'corrupt' end
+  -- The binding invariant at the read boundary: a consulted chain must
+  -- BE the expected transaction's chain, or the state (a corrupted
+  -- mapping, a foreign record) is corrupt with zero writes.
+  if rec['obligationId'] ~= expectedObligationId then return 'corrupt' end
+  if chainRecordExpired(rec, now) then return 'expired' end
+  return rec
 end
 LUA;
 }

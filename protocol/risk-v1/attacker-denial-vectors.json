@@ -1,0 +1,204 @@
+{
+    "version": 1,
+    "namespace": "d",
+    "mark_ttl_ms": 7776000000,
+    "policy": {
+        "version": 3,
+        "weights": {
+            "source_fast": 190, "source_slow": 110, "subnet_fast": 80,
+            "issue_debt": 150, "bad_proof": 220, "malformed": 260,
+            "replay": 320, "action_failure": 120, "scope_switch": 60,
+            "global_pressure": 170, "network_risk": 100,
+            "trust_credit": 130, "principal_credit": 100
+        },
+        "scopes": {
+            "1": { "base_risk": 100, "minimum": "allow", "post_solve_check": true, "degraded": "sha20" },
+            "2": { "base_risk": 150, "minimum": "sha16", "post_solve_check": true, "degraded": "sha20" },
+            "3": { "base_risk": 200, "minimum": "argon32", "post_solve_check": true, "degraded": "argon16" }
+        },
+        "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }
+    },
+    "vectors": [
+        {
+            "why": "unmarked baseline: the stage changes nothing",
+            "scope": 1, "score": 500, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {}, "target_mark": null, "corroborated": false,
+            "expected_action": "sha20", "expected_retry_after_ms": null, "expected_reasons": []
+        },
+        {
+            "why": "floor interaction baseline: the level-2 floor applies untouched without marks",
+            "scope": 1, "score": 100, "global_level": 2, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {}, "target_mark": null, "corroborated": false,
+            "expected_action": "sha18", "expected_retry_after_ms": null, "expected_reasons": []
+        },
+        {
+            "why": "a marked session escalates to the maximum challenge rung",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a marked principal dimension escalates identically",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "principal": { "kind": "accountBanned", "count": 2, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a marked asn bucket escalates identically",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "asn": { "kind": "fraudConfirmed", "count": 3, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a marked agent dimension escalates identically",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "agent": { "kind": "chargeback", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a marked identity under the level-3 global floor still reaches the rung",
+            "scope": 1, "score": 100, "global_level": 3, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a plain deny band stays a deny; the mark only adds its reason",
+            "scope": 1, "score": 980, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "deny", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a plain step-up keeps its rank above the rung",
+            "scope": 1, "score": 950, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "step_up", "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a saturated argon backend re-escalates the mark rung to the interactive step-up",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 0, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "step_up", "expected_retry_after_ms": null,
+            "expected_reasons": ["marked_identity", "capacity_pressure"]
+        },
+        {
+            "why": "a marked session with corroborating bad-proof evidence denies for the remaining mark TTL (saturated retry hint)",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000001000,
+            "signals": { "bad_proof": 400 }, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "fraudConfirmed", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "deny", "expected_retry_after_ms": 4294967295,
+            "expected_reasons": ["corroborated_abuse", "invalid_proofs"]
+        },
+        {
+            "why": "a near-expiry corroborated mark leaves a short exact retry hint",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1707775995000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "fraudConfirmed", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "deny", "expected_retry_after_ms": 5000, "expected_reasons": ["corroborated_abuse"]
+        },
+        {
+            "why": "the freshest of two corroborated marks owns the deny window",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1707776044000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000040000, "last_ms": 1700000040000 },
+                "asn": { "kind": "accountBanned", "count": 1, "first_ms": 1700000052000, "last_ms": 1700000052000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "deny", "expected_retry_after_ms": 8000, "expected_reasons": ["corroborated_abuse"]
+        },
+        {
+            "why": "a corroborated mark past its TTL window is inert",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1707776060000,
+            "signals": { "bad_proof": 400 }, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "fraudConfirmed", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "allow", "expected_retry_after_ms": null, "expected_reasons": ["invalid_proofs"]
+        },
+        {
+            "why": "corroborating evidence without any mark leaves the plain decision",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": { "bad_proof": 400 }, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {}, "target_mark": null, "corroborated": true,
+            "expected_action": "allow", "expected_retry_after_ms": null, "expected_reasons": ["invalid_proofs"]
+        },
+        {
+            "why": "an attacked target maps a claiming login to exactly the interactive step-up",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {},
+            "target_mark": { "kind": "fraudConfirmed", "count": 4, "first_ms": 1700000000000, "last_ms": 1700000000000 },
+            "corroborated": false,
+            "expected_action": "step_up", "expected_retry_after_ms": null, "expected_reasons": ["target_under_attack"]
+        },
+        {
+            "why": "a strong plain band for the victim still tops out at the step-up",
+            "scope": 1, "score": 900, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {},
+            "target_mark": { "kind": "fraudConfirmed", "count": 4, "first_ms": 1700000000000, "last_ms": 1700000000000 },
+            "corroborated": true,
+            "expected_action": "step_up", "expected_retry_after_ms": null, "expected_reasons": ["target_under_attack"]
+        },
+        {
+            "why": "a different claimant presents no target: the plain allow stands",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {}, "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_retry_after_ms": null, "expected_reasons": []
+        },
+        {
+            "why": "the corroborated deny on the attacker's own dimensions wins over the target step-up",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": { "bad_proof": 400 }, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "fraudConfirmed", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": { "kind": "fraudConfirmed", "count": 4, "first_ms": 1700000000000, "last_ms": 1700000000000 },
+            "corroborated": true,
+            "expected_action": "deny", "expected_retry_after_ms": 4294967295,
+            "expected_reasons": ["corroborated_abuse", "target_under_attack", "invalid_proofs"]
+        }
+    ]
+}

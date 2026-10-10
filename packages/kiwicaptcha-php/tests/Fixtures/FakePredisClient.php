@@ -12,29 +12,37 @@ namespace KiwiCaptcha\Tests\Fixtures;
  * RedisStorage sends (get, set, del, eval, exists, wait). It emulates
  * the Lua scripts' semantics:
  *
- *  - consume-transition script: marks the stored record consumed (keeps
- *    it) and returns {json, consumed_now, consumed_before, result_json};
- *    the one-shot transition, not a delete. A cancelled record is never
- *    consumable: the script reports it as missing (nil), and the
- *    pending-envelope guard refuses a pending record that already
- *    carries a terminal or claim field (consumed_result,
- *    operation_identity, resume_owner / resume_until), mirroring the
- *    real Lua's raw-marker check.
- *  - cancel-transition script: flips a pending record to the terminal
- *    cancelled marker (kept until its TTL) and returns
- *    {state: cancelled-now | cancelled | consumed}; missing is nil.
- *  - delete-if-pending script: missing / deleted-pending / cancelled
- *    (kept) / consumed (kept, verbatim).
- *  - commit-result script: stores {valid, binding} on a consumed record
- *    without a result yet; returns 1/0. With a non-empty ARGV[4] (the
- *    resume claim owner), the claim is a fencing precondition: the
- *    envelope must carry a live claim owned by exactly that token,
- *    otherwise 2 without a write. The successful write clears the
- *    claim fields in the same transition.
- *  - resume-derivation claim script: splices `resume_owner` /
- *    `resume_until` into the record envelope (ONE key) only for a
- *    consumed, resultless, unclaimed record (returns the owner; nil
- *    otherwise).
+     *  - consume-transition script: marks the stored record consumed (keeps
+     *    it) and returns {json, consumed_now, consumed_before, result_json,
+     *    identity_spliced}; the one-shot transition, not a delete. A
+     *    cancelled record is never consumable: the script reports it as
+     *    missing (nil), and the pending-envelope guard refuses a pending
+     *    record that already carries a terminal or claim field
+     *    (consumed_result, operation_identity, resume_owner /
+     *    resume_until), mirroring the real Lua's raw-marker check. A key
+     *    without an expiry row (the real PTTL < 0, a persistent foreign
+     *    key) is refused untouched, and a non-empty identity argument
+     *    that finds no `"operation_identity":null` marker reports the
+     *    splice count 0 instead of silently recording the identity.
+     *  - cancel-transition script: flips a pending record to the terminal
+     *    cancelled marker (kept until its TTL) and returns
+     *    {state: cancelled-now | cancelled | consumed}; missing is nil,
+     *    and a key without an expiry row is refused untouched.
+     *  - delete-if-pending script: missing / deleted-pending / cancelled
+     *    (kept) / consumed (kept, verbatim).
+     *  - commit-result script: stores {valid, binding} on a consumed record
+     *    without a result yet; returns 1/0. With a non-empty ARGV[4] (the
+     *    resume claim owner), the claim is a fencing precondition. The
+     *    envelope must carry a live claim owned by exactly that token
+     *    (the `resume_until` lease is epoch microseconds on the
+     *    microsecond clock), otherwise 2 without a write. The successful
+     *    write clears the claim fields in the same transition. A key
+     *    without an expiry row is refused with 0 untouched.
+     *  - resume-derivation claim script: splices `resume_owner` /
+     *    `resume_until` (epoch microseconds, now + ttl seconds) into the
+     *    record envelope (ONE key) only for a consumed, resultless,
+     *    unclaimed, expiry-bearing record (returns the owner; nil
+     *    otherwise).
  *  - resume-derivation claim release script: compare-and-delete of the
  *    embedded claim fields (1 when the owner matches, 0 otherwise).
  *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0; a real
@@ -64,6 +72,18 @@ final class FakePredisClient extends \Predis\Client
 
     /** @var array<string, int> */
     public array $expirations = [];
+
+    /**
+     * Keys written by a raw SET with no EX/SETEX TTL — the fake's
+     * stand-in for a persistent key (the real PTTL -1). The mutating
+     * Lua transitions refuse these untouched; the default (a key the
+     * registry has no row for) is an expiry-bearing key, so a caller
+     * that copies {@see FakePredisClient::$store} between fakes keeps
+     * the expiry-bearing semantics the real store() wrote.
+     *
+     * @var array<string, true>
+     */
+    public array $noExpiry = [];
 
     /** Number of replicas the WAIT command reports as acknowledging. */
     public int $waitAck = 0;
@@ -230,6 +250,11 @@ final class FakePredisClient extends \Predis\Client
         $this->store[$key] = (string) $arguments[1];
         if (($arguments[2] ?? null) === 'EX') {
             $this->expirations[$key] = (int) $arguments[3];
+            unset($this->noExpiry[$key]);
+        } else {
+            // A raw SET with no TTL leaves the key persistent.
+            $this->noExpiry[$key] = true;
+            unset($this->expirations[$key]);
         }
 
         return true;
@@ -246,6 +271,7 @@ final class FakePredisClient extends \Predis\Client
         $key = (string) $arguments[0];
         $this->store[$key] = (string) ($arguments[2] ?? '');
         $this->expirations[$key] = (int) ($arguments[1] ?? 0);
+        unset($this->noExpiry[$key]);
 
         return true;
     }
@@ -255,8 +281,9 @@ final class FakePredisClient extends \Predis\Client
     {
         $removed = 0;
         foreach ($arguments as $key) {
-            if (isset($this->store[(string) $key])) {
-                unset($this->store[(string) $key]);
+            $k = (string) $key;
+            if (isset($this->store[$k])) {
+                unset($this->store[$k], $this->expirations[$k], $this->noExpiry[$k]);
                 $removed++;
             }
         }
@@ -338,10 +365,15 @@ final class FakePredisClient extends \Predis\Client
         // Consume transition: mark consumed, keep the record. ARGV[1] is
         // the JSON-escaped operation identity ('' = none); it lands in
         // the same write as the state flip, mirroring the real Lua
-        // splice. A cancelled record is never consumable: the transition
-        // reports it as missing (nil), mirroring the real Lua's failed
-        // pending-marker splice.
-        if (str_starts_with($script, '-- kiwicaptcha consume transition')) {
+        // splice, and the splice count rides the reply's fifth element —
+        // a non-empty identity that finds no `"operation_identity":null`
+        // marker reports 0, never a silent drop. A cancelled record is
+        // never consumable: the transition reports it as missing (nil),
+        // mirroring the real Lua's failed pending-marker splice. A key
+        // without an expiry (the fake's expirations registry has no row,
+        // the real PTTL < 0) is refused untouched, mirroring the
+        // persistent-key refusal.
+        if (str_contains($script, '-- kiwicaptcha consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return null;
@@ -360,7 +392,7 @@ final class FakePredisClient extends \Predis\Client
             if (($obj['state'] ?? 'pending') === 'consumed') {
                 $res = $obj['consumed_result'] ?? null;
 
-                return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : ''];
+                return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : '', 0];
             }
             if (($obj['state'] ?? 'pending') !== 'pending') {
                 // Any other state marker is never consumable, mirroring
@@ -379,15 +411,23 @@ final class FakePredisClient extends \Predis\Client
                 || isset($obj['resume_until'])) {
                 return null;
             }
+            if (!$this->hasExpiry($key)) {
+                // A persistent foreign key (PTTL < 0): refused untouched.
+                return false;
+            }
             $obj['state'] = 'consumed';
+            $spliced = 0;
             if (($args[0] ?? '') !== '') {
-                $obj['operation_identity'] = json_decode((string) $args[0], true, flags: JSON_THROW_ON_ERROR);
+                if (\array_key_exists('operation_identity', $obj) && $obj['operation_identity'] === null) {
+                    $obj['operation_identity'] = json_decode((string) $args[0], true, flags: JSON_THROW_ON_ERROR);
+                    $spliced = 1;
+                }
             }
             $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
             // The winner receives the updated bytes (the identity rides
             // back on its own ConsumedRecord, mirroring the real Lua).
-            return [$this->store[$key], 1, 0, ''];
+            return [$this->store[$key], 1, 0, '', $spliced];
         }
 
         // Delete-if-pending (atomic cleanup): missing reports missing;
@@ -395,7 +435,7 @@ final class FakePredisClient extends \Predis\Client
         // record is returned verbatim and kept too (dead but retained
         // until its TTL); only a pending record is deleted — mirroring
         // the real Lua.
-        if (str_starts_with($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
+        if (str_contains($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return ['missing'];
@@ -427,10 +467,12 @@ final class FakePredisClient extends \Predis\Client
         // Cancel transition (atomic pending -> cancelled): a missing
         // record is nil, a consumed record is finalized and never
         // cancellable ('consumed'), an already-cancelled record is
-        // idempotent ('cancelled'), and a pending record is flipped to
-        // the terminal cancelled marker and kept ('cancelled-now') —
-        // mirroring the real Lua splice.
-        if (str_starts_with($script, '-- kiwicaptcha cancel transition')) {
+        // idempotent ('cancelled'), a key without an expiry (the fake's
+        // expirations registry has no row, the real PTTL < 0) is refused
+        // untouched, and a pending record is flipped to the terminal
+        // cancelled marker and kept ('cancelled-now') — mirroring the
+        // real Lua splice.
+        if (str_contains($script, '-- kiwicaptcha cancel transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return null;
@@ -448,6 +490,10 @@ final class FakePredisClient extends \Predis\Client
             if (($obj['state'] ?? 'pending') === 'cancelled') {
                 return ['cancelled'];
             }
+            if (!$this->hasExpiry($key)) {
+                // A persistent foreign key (PTTL < 0): refused untouched.
+                return false;
+            }
             $obj['state'] = 'cancelled';
             $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
@@ -455,15 +501,21 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // Commit result: only on a consumed record without a
-        // result yet. ARGV = [valid, binding, has_binding, claim_owner].
+        // result yet. ARGV = [valid, binding, has_binding, claim_owner, mac].
         // With a non-empty ARGV[4] (the resume claim owner), the claim
         // is a fencing precondition: the envelope must carry a live
         // claim owned by exactly that token (ownership lost returns 2,
-        // no write), and the successful write clears the claim fields
-        // in the same transition.
-        if (str_starts_with($script, '-- kiwicaptcha commit result')) {
+        // no write; the lease expiry `resume_until` is epoch
+        // microseconds, compared on the microsecond clock), and the
+        // successful write clears the claim fields in the same
+        // transition. A key without an expiry is refused with 0
+        // untouched, mirroring the persistent-key refusal.
+        if (str_contains($script, '-- kiwicaptcha commit result')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
+                return 0;
+            }
+            if (!$this->hasExpiry($key)) {
                 return 0;
             }
             try {
@@ -480,13 +532,19 @@ final class FakePredisClient extends \Predis\Client
             $owner = $args[3] ?? '';
             if ($owner !== '') {
                 $until = $obj['resume_until'] ?? null;
-                if (($obj['resume_owner'] ?? null) !== $owner || !\is_int($until) || $until <= time()) {
+                if (($obj['resume_owner'] ?? null) !== $owner || !\is_int($until) || $until <= (int) (microtime(true) * 1_000_000)) {
                     return 2;
                 }
-            }            $obj['consumed_result'] = [
+            }
+            $obj['consumed_result'] = [
                 'valid' => ($args[0] ?? '0') === '1',
                 'binding' => ($args[2] ?? '0') === '1' ? (string) ($args[1] ?? '') : null,
             ];
+            // ARGV[5]: the server-state MAC over the result, stored when
+            // non-empty (the authenticated commit).
+            if (($args[4] ?? '') !== '') {
+                $obj['consumed_result']['mac'] = (string) $args[4];
+            }
             if ($owner !== '') {
                 unset($obj['resume_owner'], $obj['resume_until']);
             }
@@ -497,17 +555,22 @@ final class FakePredisClient extends \Predis\Client
 
         // Resume-derivation claim: KEYS = [record] only, ARGV =
         // [owner, ttl]. The claim is refused (nil) for a missing,
-        // not-consumed, committed or cancelled record, or while a live
-        // claim is held; otherwise `resume_owner` / `resume_until`
-        // (now + ttl, epoch seconds) are spliced into the envelope,
-        // mirroring the real single-key Lua.
-        if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim')) {
-            if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim release')) {
+        // not-consumed, committed, cancelled or expiry-less (persistent)
+        // record, or while a live claim is held; otherwise
+        // `resume_owner` / `resume_until` (now + ttl, epoch MICROseconds)
+        // are spliced into the envelope, mirroring the real single-key
+        // Lua's true-seconds lease.
+        if (str_contains($script, '-- kiwicaptcha resume-derivation claim')) {
+            if (str_contains($script, '-- kiwicaptcha resume-derivation claim release')) {
                 // Compare-and-delete release: the embedded claim fields
                 // are cleared only when they still hold exactly this
-                // owner.
+                // owner. A key without an expiry is refused with 0
+                // untouched, mirroring the persistent-key refusal.
                 $key = (string) $keys[0];
                 if (!isset($this->store[$key])) {
+                    return 0;
+                }
+                if (!$this->hasExpiry($key)) {
                     return 0;
                 }
                 try {
@@ -527,6 +590,9 @@ final class FakePredisClient extends \Predis\Client
             if (!isset($this->store[$key])) {
                 return null;
             }
+            if (!$this->hasExpiry($key)) {
+                return null;
+            }
             try {
                 $obj = json_decode($this->store[$key], true, flags: JSON_THROW_ON_ERROR);
             } catch (\JsonException) {
@@ -538,17 +604,28 @@ final class FakePredisClient extends \Predis\Client
             if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
                 return null;
             }
-            $now = time();
-            if (isset($obj['resume_owner']) && isset($obj['resume_until']) && $obj['resume_until'] > $now) {
+            $nowUs = (int) (microtime(true) * 1_000_000);
+            if (isset($obj['resume_owner']) && isset($obj['resume_until']) && $obj['resume_until'] > $nowUs) {
                 return null;
             }
             $obj['resume_owner'] = (string) ($args[0] ?? '');
-            $obj['resume_until'] = $now + (int) ($args[1] ?? 0);
+            $obj['resume_until'] = $nowUs + (int) ($args[1] ?? 0) * 1_000_000;
             $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
             return $args[0] ?? null;
         }
 
         return null;
+    }
+
+    /**
+     * Whether the key carries an expiry (the fake's stand-in for PTTL >=
+     * 0): only a key explicitly written without a TTL (a raw SET, the
+     * {@see FakePredisClient::$noExpiry} registry) is persistent; every
+     * other present key is expiry-bearing, the state store() writes.
+     */
+    private function hasExpiry(string $key): bool
+    {
+        return !($this->noExpiry[$key] ?? false);
     }
 }

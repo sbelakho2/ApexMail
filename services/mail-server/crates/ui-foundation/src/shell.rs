@@ -1378,6 +1378,26 @@ mod tests {
         assert!(web.contains("<details"));
         assert!(web.contains("id=\"mobile-sidebar\""));
         assert!(web.contains("<summary"));
+        // Closed state must occupy ONLY the summary control. The drawer
+        // shell is not a full-height fixed box when closed (that hit area
+        // intercepted content); dimensions/background live on the open
+        // panel (`.apex-mobile-nav[open] .apex-mobile-nav-panel`).
+        assert!(
+            web.contains("class=\"apex-mobile-nav md:hidden\""),
+            "closed shell carries no fixed/full-height box: {web}"
+        );
+        assert!(
+            !web.contains("apex-mobile-nav md:hidden fixed inset-y-0"),
+            "closed drawer must not be a full-height fixed panel: {web}"
+        );
+        assert!(
+            web.contains("class=\"apex-mobile-nav-panel\""),
+            "panel class drives the open-only drawer CSS: {web}"
+        );
+        assert!(
+            web.contains("fixed left-4 top-3"),
+            "the summary control is the only fixed hit area when closed: {web}"
+        );
     }
 
     fn web_shell_reference() -> WebDashboardShell<'static> {
@@ -1689,5 +1709,46 @@ mod deferred_shell_tests {
         // The active-state highlighting matches the path prefix.
         let active = render_web_sidebar("/settings/suppressions", "tok");
         assert!(active.contains("aria-current=\"page\""));
+    }
+
+    /// System contract: every shell wordmark is the marketing two-tone
+    /// lockup — brand red "Apex" + near-black "Mail".
+    #[test]
+    fn shell_wordmarks_are_two_tone_brand_and_ink() {
+        let web = WebDashboardShell {
+            sidebar_collapsed: false,
+            mobile_menu_open: false,
+            child_html: "",
+            header: ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "AM",
+                user_context: None,
+                mobile_menu_open: false,
+            },
+            impersonation_banner: None,
+            toast_surface: None,
+            current_path: "/dashboard",
+            csrf_token: "tok",
+        }
+        .render_html();
+        assert!(web.contains("text-brand-600\">Apex"), "{web}");
+        assert!(web.contains("text-surface-950\">Mail"), "{web}");
+        assert!(!web.contains("text-primary\">Apex"), "{web}");
+
+        let cp = ControlPlaneShell {
+            mobile_menu_open: false,
+            user_role: "admin",
+            page_title: "T",
+            page_description: "D",
+            banners: Vec::new(),
+            child_html: "",
+            current_path: "/cp",
+            csrf_token: "tok",
+            user_context: None,
+        }
+        .render_html();
+        assert!(cp.contains("text-brand-600\">Apex"), "{cp}");
+        assert!(cp.contains("text-surface-950\">Mail"), "{cp}");
     }
 }

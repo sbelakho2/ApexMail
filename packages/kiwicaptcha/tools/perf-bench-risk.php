@@ -136,6 +136,103 @@ function percentile(array $samples, float $q): float
     return $samples[max(0, $index)];
 }
 
+/** The Redis version behind a DSN, or null when it cannot be read. */
+function redisVersionOrNull(string $url): ?string
+{
+    try {
+        $client = new \Predis\Client($url, ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $info = (array) $client->info('server');
+        // Predis has returned both a flat section and a server-nested
+        // shape across versions; accept both.
+        $section = isset($info['Server']) && is_array($info['Server']) ? $info['Server'] : $info;
+        $version = $section['redis_version'] ?? null;
+
+        return is_string($version) && $version !== '' ? $version : null;
+    } catch (\Throwable) {
+        return null;
+    }
+}
+
+/** A DSN with any credentials removed, safe to retain. */
+function redactedRedisUrl(string $url): string
+{
+    $parts = parse_url($url);
+    if (!is_array($parts)) {
+        return 'redis://<unparseable>';
+    }
+    $auth = isset($parts['user']) ? '<redacted>@' : '';
+    $scheme = $parts['scheme'] ?? 'redis';
+    $host = $parts['host'] ?? '127.0.0.1';
+    $port = isset($parts['port']) ? ':'.$parts['port'] : '';
+
+    return $scheme.'://'.$auth.$host.$port;
+}
+
+/** The host CPU model, best effort and platform tolerant. */
+function cpuModel(): string
+{
+    if (is_readable('/proc/cpuinfo')) {
+        $cpuinfo = (string) file_get_contents('/proc/cpuinfo');
+        if (preg_match('/^model name\s*:\s*(.+)$/m', $cpuinfo, $m) === 1) {
+            return trim($m[1]);
+        }
+    }
+    $brand = trim((string) @shell_exec('sysctl -n machdep.cpu.brand_string 2>/dev/null'));
+
+    return $brand !== '' ? $brand : php_uname('m');
+}
+
+/**
+ * The retained, auditable record of a controlled latency run: command,
+ * configuration, environment, source commit and
+ * the measured distribution with its ratchet verdict. Written with
+ * --json-out so a quiet-host run can be kept as qualification evidence
+ * instead of living only in a terminal scrollback.
+ */
+function riskLatencyRecord(array $argv, string $mode, array $fields): array
+{
+    $repoRoot = dirname(__DIR__, 3);
+    $commit = trim((string) @shell_exec('git -C '.escapeshellarg($repoRoot).' rev-parse HEAD 2>/dev/null'));
+    $porcelain = trim((string) @shell_exec('git -C '.escapeshellarg($repoRoot).' status --porcelain --untracked-files=no 2>/dev/null'));
+    $cpuCount = (int) trim((string) @shell_exec('getconf _NPROCESSORS_ONLN 2>/dev/null'));
+
+    return array_merge([
+        'schema' => 'kiwicaptcha.perf-risk-latency/1',
+        'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
+        'mode' => $mode,
+        'command' => array_values($argv),
+        'environment' => [
+            'php_version' => PHP_VERSION,
+            'php_sapi' => PHP_SAPI,
+            'os' => php_uname('s').' '.php_uname('r').' '.php_uname('m'),
+            'cpu' => cpuModel(),
+            'cpu_count' => $cpuCount > 0 ? $cpuCount : null,
+        ],
+        'source' => [
+            'commit' => $commit !== '' ? $commit : null,
+            'dirty' => $porcelain !== '',
+        ],
+    ], $fields);
+}
+
+function writeRiskLatencyJson(?string $path, array $record): void
+{
+    if ($path === null) {
+        return;
+    }
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0777, true) && !is_dir($dir)) {
+        fwrite(STDERR, "perf-bench-risk: cannot create the --json-out directory $dir\n");
+        exit(1);
+    }
+    $json = json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false || @file_put_contents($path, $json."\n") === false) {
+        fwrite(STDERR, "perf-bench-risk: cannot write the --json-out record $path\n");
+        exit(1);
+    }
+    printf("perf-bench-risk: retained the run record in %s\n", $path);
+}
+
 function redisUrlFromArgs(array $argv): string
 {
     foreach ($argv as $i => $arg) {
@@ -193,6 +290,7 @@ function buildRedisRiskController(string $url, string $prefix, string $namespace
     $classifier = new CidrNetworkClassifier([]);
     $policy = RiskPolicy::fromConfig([
         'version' => RiskPolicy::CONTRACT_VERSION,
+        'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
         'weights' => [],
         'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
     ]);
@@ -283,7 +381,7 @@ function runRedisPhase(int $workers, int $perWorker, string $prefix, string $nam
         $outFiles[] = $outFile;
         $cmd = [PHP_BINARY, __FILE__, '--worker', (string) $id, $outFile, $prefix, $namespace, (string) $perWorker, $url];
         $pipes = [];
-        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes); // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
+        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         if (!is_resource($proc)) {
             fwrite(STDERR, "perf-bench-risk: cannot spawn worker $id\n");
             exit(1);
@@ -353,9 +451,13 @@ if ($workerIndex !== false) {
 $redisMode = in_array('--redis', $argv, true);
 $redisUpdate = $redisMode && in_array('--update-baseline', $argv, true);
 $baselineOut = null;
+$jsonOut = null;
 foreach ($argv as $i => $arg) {
     if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
         $baselineOut = $argv[$i + 1];
+    }
+    if ($arg === '--json-out' && isset($argv[$i + 1])) {
+        $jsonOut = $argv[$i + 1];
     }
 }
 $workers = REDIS_WORKERS;
@@ -395,6 +497,31 @@ if ($redisMode) {
     $p95 = percentile($r['samples'], 95);
     $ops = $r['windowMs'] > 0 ? (int) round($r['n'] / ($r['windowMs'] / 1000.0)) : 0;
     printf("perf-bench-risk: real-Redis concurrent risk-enabled issuance p50 %.3f ms p95 %.3f ms (n=%d); throughput %d req/s\n", $p50, $p95, $r['n'], $ops);
+    $redisRecord = static function (string $verdict, ?float $baseline, ?float $limit) use ($argv, $p50, $p95, $ops, $r, $workers, $perWorker, $url): array {
+        return riskLatencyRecord($argv, 'redis_concurrent', [
+            'configuration' => [
+                'workers' => $workers,
+                'per_worker' => $perWorker,
+                'warmup' => REDIS_WARMUP,
+            ],
+            'redis' => [
+                'url' => redactedRedisUrl($url),
+                'version' => redisVersionOrNull($url),
+            ],
+            'measurement' => [
+                'n' => $r['n'],
+                'p50_ms' => $p50,
+                'p95_ms' => $p95,
+                'throughput_requests_per_second' => $ops,
+            ],
+            'ratchet' => [
+                'baseline_p95_ms' => $baseline,
+                'multiplier' => RATCHET,
+                'limit_p95_ms' => $limit,
+                'verdict' => $verdict,
+            ],
+        ]);
+    };
     if ($baselineOut !== null) {
         try {
             perf_baseline_emit($baselineOut, ['bench_risk', 'redis_concurrent'], [
@@ -407,30 +534,33 @@ if ($redisMode) {
             ]);
             printf("perf-bench-risk: baseline record updated in %s\n", $baselineOut);
         } catch (\Throwable $e) {
+            writeRiskLatencyJson($jsonOut, $redisRecord('baseline_write_failed', null, null));
             fwrite(STDERR, 'perf-bench-risk: cannot write the baseline record: '.$e->getMessage()."\n");
             exit(1);
         }
     }
     if ($redisUpdate) {
+        writeRiskLatencyJson($jsonOut, $redisRecord('updated_baseline', null, null));
         printf("perf-bench-risk: record these values with --baseline-out: p50 %.3f p95 %.3f\n", $p50, $p95);
         exit(0);
     }
     $baselineP95 = perf_baseline_float($baselineFile, ['bench_risk', 'redis_concurrent', 'p95_ms']);
     if ($baselineP95 <= 0.0) {
-        if (!perf_baseline_missing('perf-bench-risk', 'real-Redis concurrent risk-enabled issuance')) {
-            exit(1);
-        }
-        exit(0);
+        $missingVerdict = perf_baseline_missing('perf-bench-risk', 'real-Redis concurrent risk-enabled issuance') ? 'missing_baseline' : 'missing_baseline_failed';
+        writeRiskLatencyJson($jsonOut, $redisRecord($missingVerdict, null, null));
+        exit($missingVerdict === 'missing_baseline' ? 0 : 1);
     }
     if ($p95 > $baselineP95 * RATCHET) {
+        writeRiskLatencyJson($jsonOut, $redisRecord('failed', $baselineP95, $baselineP95 * RATCHET));
         fwrite(STDERR, sprintf("perf-bench-risk FAILED: real-Redis risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, $baselineP95 * RATCHET, $baselineP95));
         exit(1);
     }
+    writeRiskLatencyJson($jsonOut, $redisRecord('ok', $baselineP95, $baselineP95 * RATCHET));
     echo "perf-bench-risk: OK (real-Redis p95 within the 3x noisy-runner-tolerant ratchet)\n";
     exit(0);
 }
 
-$secret = '0123456789abcdef0123456789abcdef'; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
+$secret = '0123456789abcdef0123456789abcdef';
 $storage = new ArrayStorage();
 $issuer = new Issuer(new Config(
     secretKey: $secret,
@@ -442,6 +572,7 @@ $keys = RiskKeys::fromMaster($secret);
 $classifier = new CidrNetworkClassifier([]);
 $policy = RiskPolicy::fromConfig([
     'version' => RiskPolicy::CONTRACT_VERSION,
+        'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
     'weights' => [],
     'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
 ]);
@@ -476,6 +607,26 @@ $p50 = percentile($samples, 50);
 $p95 = percentile($samples, 95);
 printf("perf-bench-risk: risk-enabled controller issuance p50 %.3f ms p95 %.3f ms (n=%d)\n", $p50, $p95, count($samples));
 
+$inMemoryRecord = static function (string $verdict, ?float $baseline, ?float $limit) use ($argv, $p50, $p95, $samples): array {
+    return riskLatencyRecord($argv, 'in_memory', [
+        'configuration' => [
+            'warmup' => WARMUP,
+            'iterations' => ITERATIONS,
+        ],
+        'measurement' => [
+            'n' => count($samples),
+            'p50_ms' => $p50,
+            'p95_ms' => $p95,
+        ],
+        'ratchet' => [
+            'baseline_p95_ms' => $baseline,
+            'multiplier' => RATCHET,
+            'limit_p95_ms' => $limit,
+            'verdict' => $verdict,
+        ],
+    ]);
+};
+
 if ($baselineOut !== null) {
     try {
         perf_baseline_emit($baselineOut, ['bench_risk', 'in_memory'], [
@@ -485,25 +636,28 @@ if ($baselineOut !== null) {
         ]);
         printf("perf-bench-risk: baseline record updated in %s\n", $baselineOut);
     } catch (\Throwable $e) {
+        writeRiskLatencyJson($jsonOut, $inMemoryRecord('baseline_write_failed', null, null));
         fwrite(STDERR, 'perf-bench-risk: cannot write the baseline record: '.$e->getMessage()."\n");
         exit(1);
     }
 }
 
 if (in_array('--update-baseline', $argv, true)) {
+    writeRiskLatencyJson($jsonOut, $inMemoryRecord('updated_baseline', null, null));
     printf("perf-bench-risk: record these values with --baseline-out: p50 %.3f p95 %.3f\n", $p50, $p95);
     exit(0);
 }
 
 $baselineP95 = perf_baseline_float($baselineFile, ['bench_risk', 'in_memory', 'p95_ms']);
 if ($baselineP95 <= 0.0) {
-    if (!perf_baseline_missing('perf-bench-risk', 'risk-enabled controller issuance in-memory')) {
-        exit(1);
-    }
-    exit(0);
+    $missingVerdict = perf_baseline_missing('perf-bench-risk', 'risk-enabled controller issuance in-memory') ? 'missing_baseline' : 'missing_baseline_failed';
+    writeRiskLatencyJson($jsonOut, $inMemoryRecord($missingVerdict, null, null));
+    exit($missingVerdict === 'missing_baseline' ? 0 : 1);
 }
 if ($p95 > $baselineP95 * RATCHET) {
+    writeRiskLatencyJson($jsonOut, $inMemoryRecord('failed', $baselineP95, $baselineP95 * RATCHET));
     fwrite(STDERR, sprintf("perf-bench-risk FAILED: risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, $baselineP95 * RATCHET, $baselineP95));
     exit(1);
 }
+writeRiskLatencyJson($jsonOut, $inMemoryRecord('ok', $baselineP95, $baselineP95 * RATCHET));
 echo "perf-bench-risk: OK (p95 within the 3x noisy-runner-tolerant ratchet)\n";

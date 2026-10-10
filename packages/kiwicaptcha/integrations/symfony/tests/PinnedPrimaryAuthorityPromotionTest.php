@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use PHPUnit\Framework\TestCase;
@@ -185,7 +187,7 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         self::assertMatchesRegularExpression('/^[0-9a-f]{40}$/', (string) $pinnedRunId, 'the pinned run_id is the 40-hex Redis run_id');
         self::assertSame(
             'master|'.$pinnedRunId,
-            $clientA->get('{kiwi:'.self::NS.'}:authority:pin:storage'),
+            $clientA->get('{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'),
             'the initialize command pinned the serving identity to the per-authority namespace pin key',
         );
 
@@ -209,7 +211,7 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         self::assertNotSame($pinnedRunId, $observedRunId, 'a restarted Redis always regenerates its run_id');
         self::assertSame(
             'master|'.$pinnedRunId,
-            $clientB->get('{kiwi:'.self::NS.'}:authority:pin:storage'),
+            $clientB->get('{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'),
             'the pin survives the restart through the append-only file',
         );
         $guardB = new PinnedPrimaryAuthorityGuard($clientB, self::NS, 0, 'storage');
@@ -277,7 +279,7 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         $clientReplica = $this->client($replicaPort);
         self::assertSame(
             'master|'.$pinnedRunId,
-            $clientReplica->get('{kiwi:'.self::NS.'}:authority:pin:storage'),
+            $clientReplica->get('{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'),
             'the replica replicated the pin key',
         );
         $observedRole = $this->identityOf($clientReplica)['role'];

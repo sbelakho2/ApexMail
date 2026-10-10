@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Tests;
 
+use KiwiCaptcha\ChallengeRuntimeStateKind;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedOutcomeRecovery;
 use KiwiCaptcha\Issuer;
@@ -12,14 +13,16 @@ use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\Tests\Fixtures\RealRedisTestEnv;
+use KiwiCaptcha\Tests\Fixtures\ServerState;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
  * The deterministic storage-corruption fuzz over the real-Redis
- * envelope: every stored record state (pending, consumed-resultless,
- * committed-valid, committed-invalid, cancelled, claimed) is corrupted
- * field by field, plus fixed-seed random byte flips and truncations.
+ * envelope. Every stored record state is corrupted field by field:
+ * pending, consumed-resultless, committed-valid, committed-invalid,
+ * cancelled and claimed. Fixed-seed random byte flips and truncations
+ * are applied too.
  *
  * Every corruption must resolve to a typed fail-closed outcome. The
  * verifier never throws (no 500), never hangs (every derivation is the
@@ -39,14 +42,17 @@ use PHPUnit\Framework\TestCase;
  * / resume_owner / resume_until; only the consume transition may
  * introduce them). The state-flip resurrection of a consumed
  * (resultless, committed-valid, committed-invalid) record and the
- * coherent result-plus-identity forgery therefore fail closed. Two
- * surfaces remain and are pinned. A cancelled record carries only the
+ * coherent result-plus-identity forgery therefore fail closed. The
+ * server metadata (`issued_at_ns`, `hostname`) carries the
+ * record-metadata MAC, and every stored result carries the
+ * consumed-result MAC. A direct write onto an already-consumed record
+ * therefore fails closed. That covers a forged result, a re-targeted
+ * identity, a transplanted genuine result and any metadata rewrite. One surface remains and is pinned:
+ * rollback to older genuine state. A cancelled record carries only the
  * null markers, so flipping its state marker produces bytes
- * byte-identical to a genuine pending envelope. A direct write onto an
- * already-consumed record still replays through the identity-gated
- * stored-result surface. Every single-field canonical tamper stays
- * fail-closed, because the signed fields fail at the signature gate
- * before any semantic check.
+ * byte-identical to a genuine pending envelope, and no MAC over state
+ * can tell an old genuine value from the current one. Every
+ * single-field canonical tamper stays fail-closed.
  *
  * Runs in the real-Redis CI lane; skips without the published Redis
  * env, fails instead of skipping when KIWI_REQUIRE_REAL_REDIS_TESTS is
@@ -188,6 +194,25 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             'issued_at_ns within the skew window' => static function (array &$d): void {
                 $d['issued_at_ns'] = ((int) $d['issued_at'] + 100) * 1_000_000 - 1000;
             },
+            'issued_at_ns backdated one microsecond' => static function (array &$d): void {
+                $d['issued_at_ns'] = (int) $d['issued_at_ns'] - 1;
+            },
+            'server_mac foreign hex' => static function (array &$d): void {
+                $d['server_mac'] = str_repeat('ab', 32);
+            },
+            'server_mac upper-cased' => static function (array &$d): void {
+                $d['server_mac'] = strtoupper((string) $d['server_mac']);
+            },
+            'server_mac truncated' => static function (array &$d): void {
+                $d['server_mac'] = substr((string) $d['server_mac'], 0, 63);
+            },
+            'server_mac stripped' => static function (array &$d): void {
+                unset($d['server_mac']);
+            },
+            'hostname injected with the mac stripped' => static function (array &$d): void {
+                $d['hostname'] = 'evil.example.com';
+                unset($d['server_mac']);
+            },
         ];
     }
 
@@ -215,6 +240,24 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             'consumed_result forged invalid' => static function (array &$d): void {
                 $d['consumed_result'] = ['valid' => false, 'binding' => null];
             },
+            'consumed_result forged valid with a random mac' => static function (array &$d): void {
+                $d['consumed_result'] = ['valid' => true, 'binding' => null, 'mac' => bin2hex(random_bytes(32))];
+            },
+            'consumed_result mac stripped' => static function (array &$d): void {
+                if (\is_array($d['consumed_result'] ?? null)) {
+                    unset($d['consumed_result']['mac']);
+                }
+            },
+            'consumed_result verdict flipped under its mac' => static function (array &$d): void {
+                if (\is_array($d['consumed_result'] ?? null)) {
+                    $d['consumed_result']['valid'] = !($d['consumed_result']['valid'] ?? false);
+                }
+            },
+            'consumed_result binding rewritten under its mac' => static function (array &$d): void {
+                if (\is_array($d['consumed_result'] ?? null)) {
+                    $d['consumed_result']['binding'] = 'txn-forged';
+                }
+            },
             'consumed_result malformed shape' => static function (array &$d): void {
                 $d['consumed_result'] = ['valid' => 'yes'];
             },
@@ -234,10 +277,12 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
                 $d['resume_owner'] = 'not-hex!';
             },
             'resume_until in the past' => static function (array &$d): void {
+                // The lease expiry is epoch microseconds: a seconds-scale
+                // value is deep in the past on that clock.
                 $d['resume_until'] = $d['issued_at'] - 100;
             },
             'resume_until far future' => static function (array &$d): void {
-                $d['resume_until'] = $d['issued_at'] + 100_000;
+                $d['resume_until'] = $d['issued_at'] * 1_000_000 + 100_000 * 1_000_000;
             },
         ];
     }
@@ -263,18 +308,11 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
                 // are asserted explicitly by the dedicated tests: the
                 // state-marker flip to pending (refused by the
                 // pending-envelope guard on every carried-field
-                // envelope, with the cancelled boundary pinned), a
-                // forged operation identity on a committed-valid record
-                // (the inert stored grant), and a forged valid result on
-                // every state but committed-valid (the identity-gated
-                // stored-result surface).
+                // envelope, with the cancelled rollback boundary
+                // pinned). The forged result and the re-targeted
+                // identity are in the matrix: the consumed-result MAC
+                // refuses both on every state.
                 if ($label === 'state marker to pending') {
-                    continue;
-                }
-                if ($label === 'operation_identity foreign' && $state === 'committed_valid') {
-                    continue;
-                }
-                if ($label === 'consumed_result forged valid' && $state !== 'committed_valid') {
                     continue;
                 }
                 yield $state.': '.$label => [$state, $label, $tamper];
@@ -311,6 +349,182 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         return [$storage, $challenge->nonce, $token];
     }
 
+    public function testNestedStateMarkersNeverAlterTheTopLevelTransition(): void
+    {
+        // The whole-document byte search is gone: a nested
+        // `"state":"pending"` (or consumed) string can never drive,
+        // redirect or block a transition, and a duplicated top-level
+        // state key is refused outright.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+
+        // A top-level unknown state carrying a nested pending marker: the
+        // cleanup reports corrupt and never deletes, the transitions
+        // refuse, and the classifier fails closed.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode([
+            ...$this->envelope($nonce),
+            'state' => 'unknown',
+            'consumed_result' => ['valid' => true, 'binding' => null, 'state' => 'pending'],
+        ], JSON_THROW_ON_ERROR);
+        $this->client->set($this->prefix.$nonce, $raw, 'EX', 300);
+        self::assertSame('corrupt', $storage->deleteIfPending($nonce)->state, 'a nested pending marker never triggers the delete');
+        self::assertSame($raw, $this->client->get($this->prefix.$nonce), 'the unknown-state value is never mutated');
+        self::assertNull($storage->consumeWithOperationIdentity($nonce, self::IDENTITY), 'an unknown top-level state is never consumable');
+        self::assertSame(
+            ChallengeRuntimeStateKind::Missing,
+            $storage->runtimeState($nonce)->kind,
+            'an unknown top-level state fails closed as missing',
+        );
+
+        // A top-level pending state carrying a nested consumed marker: the
+        // delete follows the top-level state, and the consume refuses the
+        // forged carried result instead of installing it.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode([
+            ...$this->envelope($nonce),
+            'consumed_result' => ['valid' => true, 'binding' => null, 'state' => 'consumed'],
+        ], JSON_THROW_ON_ERROR);
+        $this->client->set($this->prefix.$nonce, $raw, 'EX', 300);
+        self::assertNull(
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
+            'a pending envelope carrying a result is refused, never installed',
+        );
+        self::assertSame('deleted-pending', $storage->deleteIfPending($nonce)->state, 'the top-level pending state drives the delete');
+
+        // A top-level pending record with a nested consumed marker in an
+        // unknown field: the consume flips the top-level state and leaves
+        // the nested bytes untouched.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $data = $this->envelope($nonce);
+        $data['extra'] = ['state' => 'consumed'];
+        $this->writeEnvelope($nonce, $data);
+        $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        $after = $this->envelope($nonce);
+        self::assertSame('consumed', $after['state'], 'the top-level state is the one that was flipped');
+        self::assertSame(['state' => 'consumed'], $after['extra'], 'the nested marker is untouched');
+
+        // A duplicated top-level state key: refused outright.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $duplicated = str_replace('"state":"pending"', '"state":"pending","state":"consumed"', $raw);
+        self::assertNotSame($raw, $duplicated);
+        $this->client->set($this->prefix.$nonce, $duplicated, 'EX', 300);
+        self::assertContains(
+            $storage->deleteIfPending($nonce)->state,
+            ['corrupt', 'consumed'],
+            'a duplicated top-level state key is never deleted as pending',
+        );
+        self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'the ambiguous value is never mutated');
+        self::assertNull(
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
+            'a duplicated top-level state key is ambiguous corruption: the consume refuses outright',
+        );
+        self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'no consumption writes anything');
+
+        // Marker text inside a string field is JSON-escaped, so no raw
+        // marker exists: the cleanup still deletes the pending record.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $data = $this->envelope($nonce);
+        $data['hostname'] = 'x\"state\":\"pending\"x';
+        $this->writeEnvelope($nonce, $data);
+        self::assertSame(
+            1,
+            substr_count((string) $this->client->get($this->prefix.$nonce), '"state":"pending"'),
+            'the escaped marker text adds no raw marker: only the top-level state field exists',
+        );
+        self::assertSame('deleted-pending', $storage->deleteIfPending($nonce)->state, 'an escaped marker in a string field never blocks the pending delete');
+    }
+
+    public function testEscapedKeyAliasesAreSemanticallyTheSameField(): void
+    {
+        // JSON object keys may carry escapes: "st\u0061te" IS the key
+        // `state` to every JSON decoder. An envelope carrying both a
+        // literal and an escaped spelling for one of the runtime fields
+        // is ambiguous (two semantic members for one field) and must
+        // never drive or be mutated by a transition.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+
+        // 1. A literal `state` plus an escaped alias, in both orders and
+        //    with equal or conflicting values: the consume must refuse,
+        //    the cleanup must never delete, and the bytes must survive.
+        $aliases = [
+            ['"state":"pending"', '"st\\u0061te":"consumed"'],
+            ['"st\\u0061te":"consumed"', '"state":"pending"'],
+            ['"state":"pending"', '"st\\u0061te":"pending"'],
+        ];
+        foreach ($aliases as [$literal, $escaped]) {
+            $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+            $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+            $ambiguous = str_replace('"state":"pending"', $literal.','.$escaped, $raw);
+            self::assertNotSame($raw, $ambiguous);
+            $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+
+            $result = $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+            self::assertTrue(
+                $result === null || !$result->consumedNow,
+                'a semantically duplicated state field is never freshly consumed',
+            );
+            self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the ambiguous value is never mutated');
+            self::assertContains(
+                $storage->deleteIfPending($nonce)->state,
+                ['corrupt', 'consumed', 'cancelled'],
+                'the cleanup never reports a pending delete for an ambiguous envelope',
+            );
+            self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the cleanup never mutates the ambiguous value');
+        }
+
+        // 2. An escaped alias for `operation_identity` (the consume splice
+        //    target): the transition must refuse rather than rewrite one
+        //    spelling while the decoder reads the other.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $ambiguous = str_replace(
+            '"operation_identity":null',
+            '"operation_identity":"op-1","op\\u0065ration_identity":null',
+            $raw,
+        );
+        self::assertNotSame($raw, $ambiguous);
+        $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+        self::assertNull(
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
+            'a semantically duplicated operation_identity is never consumable',
+        );
+        self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce));
+
+        // 3. An escaped alias for `consumed_result` on the commit path:
+        //    the commit must land on the semantic field or refuse, never
+        //    write a second semantic member.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        $raw = (string) $this->client->get($this->prefix.$nonce);
+        $ambiguous = str_replace(
+            '"consumed_result":null',
+            '"consumed_result":null,"consumed\\u005fresult":null',
+            $raw,
+        );
+        self::assertNotSame($raw, $ambiguous);
+        $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+        self::assertFalse($storage->commitResult($nonce, true, null), 'a semantically duplicated consumed_result refuses the commit');
+        self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the refused commit writes nothing');
+
+        // 4. A NON-ambiguous escaped-only spelling still works: the
+        //    scanner decodes the key token, so the semantic field is
+        //    found and spliced exactly.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $escapedOnly = str_replace('"state":"pending"', '"st\\u0061te":"pending"', $raw);
+        self::assertNotSame($raw, $escapedOnly);
+        $this->client->set($this->prefix.$nonce, $escapedOnly, 'EX', 300);
+        $consumed = $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        self::assertNotNull($consumed, 'an unambiguous escaped spelling is a supported envelope');
+        $after = (string) $this->client->get($this->prefix.$nonce);
+        self::assertSame('consumed', json_decode($after, true)['state'] ?? null, 'the semantic field was spliced');
+        self::assertStringContainsString('"st\\u0061te":"consumed"', $after, 'the splice preserves the escaped spelling in place');
+        self::assertStringNotContainsString('"state":"pending"', $after);
+    }
+
     /** Drive a record to one of the six base states. */
     private function prepareState(RedisStorage $storage, string $nonce, string $state): void
     {
@@ -327,9 +541,9 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             return;
         }
         if ($state === 'committed_valid') {
-            self::assertTrue($storage->commitResult($nonce, true, null), 'the valid commit must land');
+            self::assertTrue(ServerState::commit($storage, $nonce, true, null, null, self::SECRET), 'the valid commit must land');
         } elseif ($state === 'committed_invalid') {
-            self::assertTrue($storage->commitResult($nonce, false, null), 'the invalid commit must land');
+            self::assertTrue(ServerState::commit($storage, $nonce, false, null, null, self::SECRET), 'the invalid commit must land');
         } else {
             self::assertNotNull($storage->claimResumeDerivation($nonce), 'the claimed state must hold a lease');
         }
@@ -436,7 +650,7 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             && $identityOf($before) !== null
             && $resultValidOf($before) === true
             && $identityOf($after) === $identityOf($before)
-            && $resultValidOf($after) === true;
+            && ($after['consumed_result'] ?? null) === ($before['consumed_result'] ?? null);
         $verifier = $this->verifier($storage);
 
         $plain = $verifier->verify($token, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000);
@@ -499,8 +713,14 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         $tamper($after);
         $this->writeEnvelope($nonce, $after);
 
+        // Only the inert runtime labels may leave a pending record
+        // verifiable. A stripped record MAC on an m=1-signed issuance is
+        // no longer among them: the signed marker refuses it. A tamper
+        // that is a no-op on this state (a result-field rewrite on a
+        // record without a result) leaves the untampered outcome. Every
+        // metadata rewrite under the MAC fails closed.
         $mayVerify = $state === 'pending'
-            && (\in_array($label, ['hostname foreign', 'issued_at_ns within the skew window'], true)
+            && ($after === $before
                 || \in_array($label, self::pendingInertLabels(), true));
         $this->assertVerifierFailClosed($storage, $nonce, $token, $state, $label, $before, $after, $mayVerify);
         // The store-boundary probes run after the verifier assertions:
@@ -515,13 +735,13 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
 
     /**
      * The inert byte ranges of an envelope: the spans a flip may touch
-     * without changing any field the resolution reads. On every state
-     * these are the unsigned metadata values (the hostname value and
-     * the issued_at_ns digits). On a genuinely pending record the
-     * runtime envelope values (the consumed_result value, the
-     * operation_identity value and the claim lease values) are inert
-     * too, because the fresh derivation path reads none of them. The
-     * state marker itself is never inert: the raw-splice consume
+     * without changing any field the resolution reads. The server
+     * metadata (the hostname value and the issued_at_ns digits) is no
+     * longer inert: the record-metadata MAC covers it. On a genuinely
+     * pending record the runtime envelope values (the consumed_result
+     * value, the operation_identity value and the claim lease values)
+     * are inert, because the fresh derivation path reads none of them.
+     * The state marker itself is never inert: the raw-splice consume
      * transition depends on its exact bytes.
      *
      * @return list<array{0: int, 1: int}>
@@ -552,7 +772,7 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
 
             return $start;
         };
-        $markers = ['"hostname":', '"issued_at_ns":'];
+        $markers = [];
         if ($state === 'pending') {
             $markers[] = '"consumed_result":';
             $markers[] = '"operation_identity":';
@@ -697,10 +917,12 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             self::assertNotNull($bad->error, 'the wrong-proof outcome is typed');
         }
 
-        // The cancelled record is the remaining raw-write boundary: it
-        // carries only the null markers, so the flip produces bytes
-        // indistinguishable from a genuine pending envelope and the
-        // genuine proof re-derives. Pinned as the documented surface.
+        // The cancelled record is the remaining raw-write boundary, and
+        // it is a rollback: it carries only the null markers, so the
+        // flip produces bytes identical to the genuine pending envelope
+        // the issuer wrote (record MAC included), and the genuine proof
+        // re-derives. No MAC over state can tell an older genuine value
+        // from the current one. Pinned as the documented residual.
         [$storageC, $nonceC, $tokenC] = $this->issueAndSolve();
         $this->prepareState($storageC, $nonceC, 'cancelled');
         $dataC = $this->envelope($nonceC);
@@ -720,12 +942,12 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
      * installed: the record reads as missing, the identity-presented
      * verify fails closed, and the recovery API cannot replay anything.
      *
-     * The direct-write surface on an already-consumed record is
-     * unchanged and stays documented. The stored-result replay is
-     * identity-gated, protecting against a caller who holds the token
-     * rather than a writer who can rewrite the envelope. A
-     * single-field result forgery therefore replays only under the
-     * recorded identity, and the record stays terminal.
+     * The consumed-result MAC closes the direct-write surface on an
+     * already-consumed record. A forged result fails closed. So does a
+     * genuine result re-targeted to another identity, and one
+     * transplanted from another record. All of them resolve to
+     * MalformedRecord on every replay route: verify, resume and
+     * recovery.
      */
     public function testConsumePathResultAndIdentityForgeriesFailClosed(): void
     {
@@ -747,57 +969,175 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         $plain = $verifier->verify($token, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000);
         self::assertFalse($plain->isOk(), 'the plain verify on the refused envelope fails closed too');
         self::assertNotNull($plain->error, 'the plain outcome is typed');
-        $recovery = (new ConsumedOutcomeRecovery($storage))->recover($token, self::FOREIGN_IDENTITY);
+        $recovery = (new ConsumedOutcomeRecovery($storage, $verifier, self::SECRET))->recover($token, self::FOREIGN_IDENTITY);
         self::assertNull($recovery, 'the recovery API cannot replay the refused envelope');
 
-        // (ii) The direct-write surface on an already-consumed record
-        // stays the documented identity-gated stored-result replay.
-        [$storage2, $nonce2, $token2] = $this->issueAndSolve();
-        $this->prepareState($storage2, $nonce2, 'consumed_resultless');
-        $data2 = $this->envelope($nonce2);
-        $data2['consumed_result'] = ['valid' => true, 'binding' => null];
-        $this->writeEnvelope($nonce2, $data2);
+        // (ii) A direct write onto an already-consumed record: every
+        // forged or re-targeted stored success fails closed.
+        $at = (self::ISSUED_AT + 100) * 1_000_000;
+        $forgeries = [
+            'forged result without a mac' => static function (array &$d): void {
+                $d['consumed_result'] = ['valid' => true, 'binding' => null];
+            },
+            'forged result with a random mac' => static function (array &$d): void {
+                $d['consumed_result'] = ['valid' => true, 'binding' => null, 'mac' => bin2hex(random_bytes(32))];
+            },
+        ];
+        foreach ($forgeries as $label => $forge) {
+            [$storage2, $nonce2, $token2] = $this->issueAndSolve();
+            $this->prepareState($storage2, $nonce2, 'consumed_resultless');
+            $data2 = $this->envelope($nonce2);
+            $forge($data2);
+            $this->writeEnvelope($nonce2, $data2);
+            $this->assertForgedStoredSuccessRefused($storage2, $token2, self::IDENTITY, $label);
+        }
 
-        $verifier2 = $this->verifier($storage2);
-        $proven = $verifier2->verify($token2, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000, operationIdentity: self::IDENTITY);
-        self::assertTrue($proven->isOk(), 'DOCUMENTED: a forged stored result on an already-consumed resultless record replays under the recorded identity (the identity gate protects the caller, not the writer)');
-        self::assertTrue($proven->fromStoredResult, 'the grant is the stored-result replay of the forged result');
-        $denied = $verifier2->verify($token2, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000);
-        self::assertSame(VerifyError::AlreadyConsumed, $denied->error, 'without the identity the forged result still fails closed');
+        // A genuine committed success re-targeted to the attacker's
+        // identity. The MAC binds the recorded identity, so the rewrite
+        // must be refused.
+        [$storage3, $nonce3, $token3] = $this->issueAndSolve();
+        $this->prepareState($storage3, $nonce3, 'committed_valid');
+        $data3 = $this->envelope($nonce3);
+        self::assertMatchesRegularExpression('/^[0-9a-f]{64}$/', (string) ($data3['consumed_result']['mac'] ?? ''), 'the genuine commit carries the consumed-result MAC');
+        $data3['operation_identity'] = self::FOREIGN_IDENTITY;
+        $this->writeEnvelope($nonce3, $data3);
+        $this->assertForgedStoredSuccessRefused($storage3, $token3, self::FOREIGN_IDENTITY, 're-targeted identity');
+        self::assertFalse($this->verifier($storage3)->verify($token3, self::SECRET, 'login', self::CLIENT_IP, $at, operationIdentity: self::IDENTITY)->isOk(), 'the original identity no longer matches the record either');
+
+        // A genuine committed success transplanted onto another
+        // consumed record under the same identity: the MAC binds the
+        // record's challenge.
+        [$storage4, $nonce4, $token4] = $this->issueAndSolve();
+        $this->prepareState($storage4, $nonce4, 'consumed_resultless');
+        $data4 = $this->envelope($nonce4);
+        $data4['consumed_result'] = $this->envelope($nonce3)['consumed_result'];
+        $this->writeEnvelope($nonce4, $data4);
+        $this->assertForgedStoredSuccessRefused($storage4, $token4, self::IDENTITY, 'transplanted genuine result');
+
+        // Control: the genuine commit replays to the recorded identity.
+        [$storage5, $nonce5, $token5] = $this->issueAndSolve();
+        $this->prepareState($storage5, $nonce5, 'committed_valid');
+        $genuine = $this->verifier($storage5)->verify($token5, self::SECRET, 'login', self::CLIENT_IP, $at, operationIdentity: self::IDENTITY);
+        self::assertTrue($genuine->isOk() && $genuine->fromStoredResult, 'control: the genuine stored success replays, got '.$genuine->code());
     }
 
-    // ── 4. the documented unsigned metadata surface ─────────────────────
+    private function assertForgedStoredSuccessRefused(RedisStorage $storage, string $token, string $identity, string $label): void
+    {
+        $at = (self::ISSUED_AT + 100) * 1_000_000;
+        $verifier = $this->verifier($storage);
+        $verify = $verifier->verify($token, self::SECRET, 'login', self::CLIENT_IP, $at, operationIdentity: $identity);
+        self::assertSame(VerifyError::MalformedRecord, $verify->error, $label.': verify() must refuse the forged stored success, got '.$verify->code());
+        $resume = $verifier->resumeConsumedOperation($token, self::SECRET, $identity, 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::MalformedRecord, $resume->error, $label.': resumeConsumedOperation() must refuse it, got '.$resume->code());
+        $recovered = (new ConsumedOutcomeRecovery($storage, $verifier, self::SECRET))->recover($token, $identity);
+        self::assertSame(VerifyError::MalformedRecord, $recovered?->error, $label.': ConsumedOutcomeRecovery must refuse it');
+        $unverified = (new ConsumedOutcomeRecovery($storage))->recover($token, $identity);
+        self::assertFalse($unverified?->isOk() ?? false, $label.': recovery without the verifier fails closed on a capable storage');
+        $denied = $verifier->verify($token, self::SECRET, 'login', self::CLIENT_IP, $at);
+        self::assertFalse($denied->isOk(), $label.': without the identity it fails closed too');
+    }
+
+    // ── 4. the authenticated server metadata ────────────────────────────
 
     /**
-     * The hostname and the issued_at_ns value are server-side metadata
-     * outside the signed payload by design (documented in the record
-     * class): a tamper confined to them leaves the authenticated core
-     * intact, so the genuine proof verifies. Zeroing issued_at_ns is
-     * the malformed corner, and beyond the skew bound the receipt is
-     * physically impossible (TooFast) on a timing-enforcing issuance.
+     * The hostname and issued_at_ns are outside the challenge HMAC but
+     * covered by the record-metadata MAC: any rewrite fails at the
+     * record-signature gate. A stripped MAC on a record signed with the
+     * m=1 marker fails closed (BadSignature). The only floorless path is
+     * a record whose canonical was signed without the marker. An absent
+     * MAC there still verifies but reports neither a duration nor a
+     * hostname, so a writer can suppress that evidence, never fabricate
+     * it.
      */
-    public function testUnsignedMetadataTamperIsTheDocumentedSurface(): void
+    public function testServerMetadataTamperFailsClosedUnderTheRecordMac(): void
     {
+        $at = (self::ISSUED_AT + 100) * 1_000_000;
         [$storage, $nonce, $token] = $this->issueAndSolve();
         $data = $this->envelope($nonce);
         $data['hostname'] = 'evil.example.com';
         $this->writeEnvelope($nonce, $data);
-        $outcome = $this->verifier($storage)->verify($token, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000);
-        self::assertTrue($outcome->isOk(), 'the hostname is unsigned server metadata; the genuine proof verifies');
+        $outcome = $this->verifier($storage)->verify($token, self::SECRET, 'login', self::CLIENT_IP, $at);
+        self::assertSame(VerifyError::BadSignature, $outcome->error, 'a rewritten hostname fails the record-metadata MAC');
 
         [$storage2, $nonce2, $token2] = $this->issueAndSolve();
         $data2 = $this->envelope($nonce2);
         $data2['issued_at_ns'] = 0;
         $this->writeEnvelope($nonce2, $data2);
-        $zeroed = $this->verifier($storage2)->verify($token2, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000);
-        self::assertSame(VerifyError::MalformedRecord, $zeroed->error, 'a zeroed issuance clock is malformed');
+        $zeroed = $this->verifier($storage2)->verify($token2, self::SECRET, 'login', self::CLIENT_IP, $at);
+        self::assertContains($zeroed->error, [VerifyError::MalformedRecord, VerifyError::BadSignature], 'a zeroed issuance clock fails closed');
 
-        [$storage3, $nonce3, $token3] = $this->issueAndSolve(minDurationMs: 5);
-        $data3 = $this->envelope($nonce3);
-        $data3['issued_at_ns'] = ((int) $data3['issued_at'] + 100) * 1_000_000 + 6_000_000;
-        $this->writeEnvelope($nonce3, $data3);
-        $tooFast = $this->verifier($storage3)->verify($token3, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000);
-        self::assertSame(VerifyError::TooFast, $tooFast->error, 'a receipt beyond the skew bound is physically impossible');
+        foreach ([
+            'backdated a minute under a floor' => -60_000_000,
+            'moved into the skew window' => 6_000_000,
+        ] as $label => $shiftUs) {
+            [$storage3, $nonce3, $token3] = $this->issueAndSolve(minDurationMs: 5);
+            $data3 = $this->envelope($nonce3);
+            $data3['issued_at_ns'] = (int) $data3['issued_at_ns'] + $shiftUs;
+            $this->writeEnvelope($nonce3, $data3);
+            $shifted = $this->verifier($storage3)->verify($token3, self::SECRET, 'login', self::CLIENT_IP, $at);
+            self::assertSame(VerifyError::BadSignature, $shifted->error, $label.': the rewritten clock fails the record-metadata MAC');
+        }
+
+        [$storage4, $nonce4, $token4] = $this->issueAndSolve(minDurationMs: 5);
+        $data4 = $this->envelope($nonce4);
+        unset($data4['server_mac']);
+        $data4['issued_at_ns'] = (int) $data4['issued_at_ns'] - 60_000_000;
+        $this->writeEnvelope($nonce4, $data4);
+        $stripped = $this->verifier($storage4)->verify($token4, self::SECRET, 'login', self::CLIENT_IP, $at);
+        self::assertSame(VerifyError::BadSignature, $stripped->error, 'a stripped MAC breaks the signed m=1 marker');
+
+        // The documented floorless path: a record signed without the
+        // marker accepts an absent MAC. The production issuer always
+        // seals one, so the test re-signs the canonical without it.
+        [$storage5, $nonce5, $token5] = $this->issueAndSolve();
+        $record5 = $storage5->find($nonce5);
+        self::assertNotNull($record5);
+        $data5 = $this->envelope($nonce5);
+        unset($data5['server_mac']);
+        $canonical5 = Issuer::canonicalPayload(
+            $record5->protocolVersion,
+            $record5->nonce,
+            $record5->scope,
+            $record5->bindingTag,
+            $record5->issuedAt,
+            $record5->expiresAt,
+            $record5->algorithm,
+            $record5->mKib,
+            $record5->t,
+            $record5->p,
+            $record5->targetBits,
+            $record5->salt,
+            $record5->minDurationMs,
+            $record5->region,
+            $record5->policyVersion ?? 1,
+            $record5->requestBinding,
+            $record5->issuer,
+            $record5->kid ?? 1,
+            $record5->decoyField,
+            $record5->executionVersion,
+            $record5->executionCommitment,
+            $record5->rswModulusSha256,
+        );
+        $data5['challenge'] = base64_encode($canonical5).'.'.Issuer::signPayloadV2($canonical5, self::SECRET);
+        $data5['prefix'] = $data5['challenge'].'|'.$data5['salt'].'|';
+        $data5['hostname'] = 'evil.example.com';
+        $data5['issued_at_ns'] = (int) $data5['issued_at_ns'] - 60_000_000;
+        $this->writeEnvelope($nonce5, $data5);
+        // The re-signed canonical changes the prefix, so re-solve the
+        // counter against it.
+        $saltBytes5 = base64_decode((string) $data5['salt'], true);
+        $counter5 = 0;
+        do {
+            $hash = hash('sha256', $data5['prefix'].$counter5.$saltBytes5, true);
+            $counter5++;
+        } while (Verifier::leadingZeroBits($hash) < (int) $data5['target_bits']);
+        $token5 = SolutionToken::create($nonce5, $counter5 - 1, 5000, [])->encode();
+        $record5 = $storage5->find($nonce5);
+        self::assertNotNull($record5);
+        self::assertNull($this->verifier($storage5)->authenticatedHostname($record5, self::SECRET), 'an unauthenticated hostname is never reported');
+        $floorless = $this->verifier($storage5)->verify($token5, self::SECRET, 'login', self::CLIENT_IP, $at);
+        self::assertTrue($floorless->isOk(), 'a floorless record without the MAC still verifies: '.$floorless->code());
+        self::assertNull($floorless->solveDurationMs(), 'an unauthenticated clock reports no duration');
     }
 
     // ── 5. the token-corruption corners ─────────────────────────────────
@@ -838,7 +1178,7 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
 
         [$storage3, $nonce3, $token3] = $this->issueAndSolve();
         $storage3->consumeWithOperationIdentity($nonce3, self::IDENTITY);
-        self::assertTrue($storage3->commitResult($nonce3, true, null));
+        self::assertTrue(ServerState::commit($storage3, $nonce3, true, null, null, self::SECRET));
         $parts3 = explode('.', base64_decode($token3, true), 4);
         $wrongToken3 = base64_encode(sprintf('%s.%d.%s.%s', $parts3[0], (int) $parts3[1] + 1, $parts3[2], $parts3[3]));
         $replay = $this->verifier($storage3)->verify($wrongToken3, self::SECRET, 'login', self::CLIENT_IP, (self::ISSUED_AT + 100) * 1_000_000, operationIdentity: self::IDENTITY);

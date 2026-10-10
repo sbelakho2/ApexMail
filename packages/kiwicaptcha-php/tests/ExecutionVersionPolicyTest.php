@@ -56,7 +56,8 @@ final class ExecutionVersionPolicyTest extends TestCase
 
     public function testBinaryMaxDefaultsToTheGeneratorMaximum(): void
     {
-        $policy = new ExecutionVersionPolicy(5, 5);
+        $max = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
+        $policy = new ExecutionVersionPolicy($max, $max);
 
         self::assertSame(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, $policy->effectiveAvailableTier(), 'the generator maximum is the ceiling of the effective tier');
     }

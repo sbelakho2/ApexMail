@@ -37,6 +37,8 @@ final class RiskV2ScoringTest extends TestCase
             'honeypot' => 200,
             'session_inconsistency' => 120,
             'tls' => 80,
+            'target_failure_pressure' => 160,
+            'target_spread' => 100,
         ], (new RiskV2Weights())->toArray());
     }
 

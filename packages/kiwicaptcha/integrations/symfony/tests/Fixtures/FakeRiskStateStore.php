@@ -28,6 +28,16 @@ final class FakeRiskStateStore implements RiskStateStoreInterface, SessionContex
     /** When true, observe() throws (simulates a state backend outage). */
     public bool $throwing = false;
 
+    /**
+     * When >= 1, observe() throws on that 1-based observation number
+     * only (simulates an outage that begins after the request's earlier
+     * risk reads, e.g. exactly on the post-issuance feedback).
+     */
+    public int $throwAtObservation = -1;
+
+    /** 1-based counter of observe() calls that reached the store. */
+    private int $observationCount = 0;
+
     public function __construct(private ?SignalVector $vector = null)
     {
     }
@@ -41,6 +51,10 @@ final class FakeRiskStateStore implements RiskStateStoreInterface, SessionContex
     {
         if ($this->throwing) {
             throw new RiskStoreException('simulated risk state backend outage');
+        }
+        ++$this->observationCount;
+        if ($this->throwAtObservation === $this->observationCount) {
+            throw new RiskStoreException('simulated risk state backend outage on observation #'.$this->observationCount);
         }
         $this->observations[] = $observation;
 

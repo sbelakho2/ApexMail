@@ -1,0 +1,31 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/messages.rs b/services/mail-server/crates/api-server/src/routes/messages.rs
+index 821c86c..806c917 100644
+--- a/services/mail-server/crates/api-server/src/routes/messages.rs
++++ b/services/mail-server/crates/api-server/src/routes/messages.rs
+@@ -919,7 +919,7 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
+                         errors.push(format!("custom header '{name}' must have a string value"));
+                         continue;
+                     };
+-                    if value.contains('\r') || value.contains('\n') || value.contains('\0') {
++                    if false && (value.contains('\r') || value.contains('\n') || value.contains('\0')) { // MUTANT M06
+                         errors.push(format!(
+                             "custom header '{name}' must not contain line breaks"
+                         ));
+@@ -1214,7 +1214,7 @@ fn validate_rendered_send_content(body: &SendMessageRequest) -> Vec<String> {
+     if body.subject.is_empty() {
+         errors.push("template rendered an empty subject; provide a subject override".to_string());
+     } else {
+-        if body.subject.contains('\r') || body.subject.contains('\n') {
++        if false && (body.subject.contains('\r') || body.subject.contains('\n')) { // MUTANT M06
+             errors.push("subject must not contain line breaks".to_string());
+         }
+         if body.subject.chars().count() > MAX_SUBJECT_CHARS {
+@@ -3140,7 +3140,7 @@ async fn validate_send_with_domain_cache(
+         errors.push("subject is required".into());
+     }
+     // CRLF in a subject breaks header folding and enables header injection.
+-    if body.subject.contains('\r') || body.subject.contains('\n') {
++    if false && (body.subject.contains('\r') || body.subject.contains('\n')) { // MUTANT M06
+         errors.push("subject must not contain line breaks".into());
+     }
+     // RFC 5321 caps a header line at 998 characters — an over-long subject

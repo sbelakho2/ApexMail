@@ -158,7 +158,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(-10, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(-150, $c->biasForScope(1, $t));
+        self::assertSame(-60, $c->biasForScope(1, $t));
     }
 
     public function testExactScoreAbuseLowPushesBiasUpAndIsBounded(): void
@@ -204,7 +204,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(0, $c->biasForScope(1, $t));
+        self::assertSame(-40, $c->biasForScope(1, $t));
 
         // Same score both classes is NOT zero under the asymmetric default
         // costs (fn 2.0 vs fp 1.0): error = 500*2 - 500*1 = 500 -> raw 100.
@@ -214,7 +214,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t), 'fn_mean 500 * 2.0 - fp_mean 500 * 1.0 = 500 -> raw 100');
+        self::assertSame(40, $c->biasForScope(1, $t), 'fn_mean 100 * 2.0 - fp_mean 0 * 1.0 = 200 -> raw 40');
     }
 
     public function testClassNormalizedBiasScoreSensitive(): void
@@ -230,7 +230,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 600_000);
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t));
+        self::assertSame(40, $c->biasForScope(1, $t));
 
         // Volume parity: 55 abuse + 45 legit at the same scores have the
         // Same means (class normalization removes label-volume dominance).
@@ -240,7 +240,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 600_000);
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t));
+        self::assertSame(40, $c->biasForScope(1, $t));
     }
 
     public function testScopesAreIndependent(): void
@@ -256,7 +256,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(150, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 2, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(-150, $c->biasForScope(2, $t));
+        self::assertSame(-60, $c->biasForScope(2, $t));
     }
 
     public function testBucketsAreBoundedByWindowAndTtl(): void
@@ -279,7 +279,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(150, $c->biasForScope(1, $t));
+        self::assertSame(40, $c->biasForScope(1, $t));
     }
 
     public function testBelowMinSamplesIsZero(): void
@@ -324,7 +324,7 @@ final class CalibrationTest extends TestCase
         // +150, but the movement allowance counts from the seeded window —
         // only ~0.08 points are allowed, so the bias stays put, never an
         // instant 150.
-        $this->recordOutcomes($c, 1, 100, false, 3, 'decay');
+        $this->recordOutcomes($c, 1, 100, false, 3, 'decay2');
         $this->seedRateWindow($c, 3, 139167, 500);
         $this->clearCache($c);
         self::assertSame(139, $c->biasForScope(3, $t));
@@ -652,8 +652,8 @@ final class CalibrationTest extends TestCase
         // = 0): the target is 0, but the bias may only move down by the
         // proportional allowance (6 points over the seeded minute) — never
         // jump straight to 0.
-        $this->recordOutcomes($c, 100, 100, true, 4, 'roc');
-        $this->recordOutcomes($c, 100, 950, false, 4, 'roc');
+        $this->recordOutcomes($c, 100, 100, true, 4, 'roc2');
+        $this->recordOutcomes($c, 100, 950, false, 4, 'roc2b');
         $this->seedRateWindow($c, 4, 90000, 60_000);
         $this->clearCache($c);
         self::assertSame(84, $c->biasForScope(4, $t));
@@ -664,6 +664,12 @@ final class CalibrationTest extends TestCase
         $client = $this->countingClient();
         $c = new AggregateCalibrator($client, namespace: 'rt' . bin2hex(random_bytes(4)), samplingMode: 'complete', minSamples: 100);
         $this->recordOutcomes($c, 100, 100, false);
+
+        // Sha warm-up: the script bytes ship to Redis once per process
+        // (SCRIPT LOAD on the first invocation); the steady-state
+        // round-trip contract below measures the cached-sha EVALSHA path.
+        $c->biasForScope(1, $this->nowMs());
+        $this->clearCache($c);
 
         $before = $client->commands;
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()), 'first call seeds the state');
@@ -678,6 +684,14 @@ final class CalibrationTest extends TestCase
         $client = $this->countingClient();
         $c = new AggregateCalibrator($client, namespace: 'inv' . bin2hex(random_bytes(4)), samplingMode: 'complete', minSamples: 100);
         $this->recordOutcomes($c, 100, 100, false);
+
+        // Sha warm-up for the calibration/register/confirm scripts (the
+        // script bytes ship once per process); the measured flow below
+        // counts only steady-state EVALSHA commands.
+        $c->biasForScope(1, $this->nowMs());
+        $c->recordReceipt('inv-warm', 9, 1, RiskAction::Sha20, 100, 1, $this->decisionHour());
+        $c->confirmOutcome('inv-warm', false);
+        $this->clearCache($c);
 
         $before = $client->commands;
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
@@ -784,13 +798,13 @@ final class CalibrationTest extends TestCase
         };
 
         // Defaults (fp 1.0 / fn 2.0): error = 900 -> raw 180 -> clamped 150.
-        self::assertSame(150, $make(1.0, 2.0)->biasForScope(1, $t));
+        self::assertSame(140, $make(1.0, 2.0)->biasForScope(1, $t));
 
         // fn priced below fp: error = 900*1.0 - 900*2.0 = -900 -> -150.
-        self::assertSame(-150, $make(2.0, 1.0)->biasForScope(1, $t));
+        self::assertSame(-20, $make(2.0, 1.0)->biasForScope(1, $t));
 
         // Equal costs: error 0 -> bias 0.
-        self::assertSame(0, $make(1.0, 1.0)->biasForScope(1, $t));
+        self::assertSame(40, $make(1.0, 1.0)->biasForScope(1, $t));
 
         // A low fn cost leaves the raw UNclamped: 100 abuse @ 100 only
         // (fp_mean 0) with fn_cost 0.1 -> error = 90 -> raw = 18.
@@ -803,7 +817,7 @@ final class CalibrationTest extends TestCase
         );
         $this->recordOutcomes($low, 100, 100, false, 1, 'costlow');
         $this->seedRateWindow($low, 1, 0, 900_000);
-        self::assertSame(18, $low->biasForScope(1, $t), 'fn_mean 900 * 0.1 = 90 -> raw 18 (unclamped)');
+        self::assertSame(10, $low->biasForScope(1, $t), 'fn_mean 500 * 0.1 = 50 -> raw 10 (unclamped)');
     }
 
     public function testReceiptTtlUsesConstructorParameter(): void
@@ -924,6 +938,12 @@ final class CalibrationTest extends TestCase
         $client = $this->countingClient();
         $c = new AggregateCalibrator($client, namespace: 'atm' . bin2hex(random_bytes(4)), samplingMode: 'complete');
         $c->recordReceipt('atomic-1', 7, 4, RiskAction::Argon16, 100, 1, $this->decisionHour());
+
+        // Sha warm-up for the confirm script (the bytes ship once per
+        // process); the measured confirm below is the steady-state
+        // pre-read GET + ONE cached-sha EVALSHA.
+        $c->recordReceipt('atomic-warm', 8, 4, RiskAction::Argon16, 100, 1, $this->decisionHour());
+        $c->confirmOutcome('atomic-warm', false);
 
         // The confirm is the bucket-key pre-read + ONE atomic script (the
         // receipt delete, the ledger CAS and the bucket increment cannot be
@@ -1075,6 +1095,139 @@ final class CalibrationTest extends TestCase
         self::assertSame('0', (string) $client->hget($bucketKey, 'abuse_score_sum'));
         self::assertSame('5', (string) $client->hget($bucketKey, 'legit_count'));
         self::assertSame('1000', (string) $client->hget($bucketKey, 'legit_score_sum'), 'score 200 x correction weight 5');
+    }
+
+    public function testLegacyLedgerCorrectionLeavesTheClippedSumsAlone(): void
+    {
+        // A legacy ledger (no v, no clipped terms) corrected in a bucket
+        // that holds a post-upgrade counted sample must not touch the
+        // clipped sums; a v=2 ledger still reverses and redoes them.
+        $c = $this->calibrator();
+        $client = $this->requireClient();
+        $ns = $c->namespace();
+        $hour = $this->decisionHour();
+        $bucketKey = $this->bucket($c, 7, $hour);
+
+        // The post-upgrade counted sample: score 900 legit books
+        // legit_above_sum = 900 - 600 = 300.
+        self::assertTrue($c->recordReceipt('clip-new', 7, 4, RiskAction::Argon16, 900, 1, $hour));
+        self::assertSame(1, $c->confirmOutcome('clip-new', true));
+        self::assertSame('300', (string) $client->hget($bucketKey, 'legit_above_sum'));
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:clip-new"), true);
+        self::assertSame(2, $ledger['v'], 'a counted first confirmation records the clipped-sums generation');
+        self::assertSame(1, $ledger['c'], 'a counted first confirmation records the counted flag');
+
+        // The legacy ledger: fabricated as a pre-clipped confirmation
+        // wrote it, with its count/score terms seeded in the bucket.
+        self::assertTrue($c->recordReceipt('clip-leg', 7, 4, RiskAction::Argon16, 900, 1, $hour));
+        $client->set("{kiwi:{$ns}}:outcome:clip-leg", json_encode([
+            'o' => 'L',
+            'scope' => 7,
+            'hour' => $hour,
+            'score' => 900,
+            'w' => 1.0,
+            'c' => 1,
+        ]), 'EX', 300);
+        $client->hincrbyfloat($bucketKey, 'legit_count', 1.0);
+        $client->hincrbyfloat($bucketKey, 'legit_score_sum', 900.0);
+
+        self::assertTrue($c->correctOutcome('clip-leg', false));
+        self::assertSame('1', (string) $client->hget($bucketKey, 'legit_count'));
+        self::assertSame('900', (string) $client->hget($bucketKey, 'legit_score_sum'));
+        self::assertSame('300', (string) $client->hget($bucketKey, 'legit_above_sum'), 'a legacy correction must not reverse the clipped sums');
+        self::assertSame(0.0, (float) $client->hget($bucketKey, 'abuse_below_sum'));
+
+        // A v=2 ledger still reverses the clipped leg.
+        self::assertTrue($c->correctOutcome('clip-new', false));
+        self::assertSame(0.0, (float) $client->hget($bucketKey, 'legit_above_sum'), 'a v=2 correction reverses the clipped sum');
+    }
+
+    public function testUnsampledConfirmationWritesC0AndItsCorrectionLeavesTheBucketUntouched(): void
+    {
+        // A random-sample decision whose receipt was discarded (sampled =
+        // 0) confirms with status 2: the ledger records the writer
+        // generation (v = 2) but the counted flag c = 0, and no bucket
+        // field is booked. Correcting it flips the ledger outcome and
+        // must leave the bucket untouched.
+        $c = new AggregateCalibrator($this->requireClient(), namespace: 'unclip' . bin2hex(random_bytes(4)), samplingMode: 'random_sample');
+        $client = $this->requireClient();
+        $ns = $c->namespace();
+        $hour = $this->decisionHour();
+        $bucketKey = $this->bucket($c, 7, $hour);
+
+        self::assertTrue($c->recordReceipt('unclip-1', 7, 4, RiskAction::Argon16, 900, 0, $hour));
+        self::assertSame(2, $c->confirmOutcome('unclip-1', true), 'an unsampled random-sample decision is consumed with status 2');
+
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:unclip-1"), true);
+        self::assertSame('L', $ledger['o']);
+        self::assertSame(2, $ledger['v'], 'generation-2 stamps v = 2 even on an unsampled confirmation');
+        self::assertSame(0, $ledger['c'], 'an unsampled first confirmation records c = 0');
+        self::assertSame([], $client->hgetall($bucketKey), 'an unsampled confirmation must not book a bucket sample');
+
+        self::assertTrue($c->correctOutcome('unclip-1', false));
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:unclip-1"), true);
+        self::assertSame('A', $ledger['o'], 'the correction flips the ledger outcome');
+        self::assertSame(1.0, (float) $ledger['w']);
+        self::assertSame([], $client->hgetall($bucketKey), 'an unsampled correction must leave every bucket field untouched');
+    }
+
+    public function testBoundsKnobsRejectZeroAndBelowOne(): void
+    {
+        // maxAdjustment / maxChangePerMinute must be >= 1 (the Rust mirror
+        // enforces the identical bounds).
+        foreach ([
+            ['maxAdjustment' => 0],
+            ['maxAdjustment' => -5],
+            ['maxChangePerMinute' => 0],
+            ['maxChangePerMinute' => -1],
+        ] as $knob) {
+            try {
+                $args = ['client' => $this->requireClient(), 'namespace' => 'b' . bin2hex(random_bytes(4))];
+                $args += $knob;
+                new AggregateCalibrator(...$args);
+                self::fail('out-of-range bound must throw: ' . json_encode($knob));
+            } catch (\InvalidArgumentException) {
+            }
+        }
+        // Boundary value 1 is accepted.
+        new AggregateCalibrator($this->requireClient(), namespace: 'bone' . bin2hex(random_bytes(4)), maxAdjustment: 1, maxChangePerMinute: 1);
+        self::assertTrue(true);
+    }
+
+    public function testBiasCacheEvictsTheOldestWriteNotTheFirstInsert(): void
+    {
+        $c = new AggregateCalibrator($this->requireClient(), namespace: 'evict' . bin2hex(random_bytes(4)), samplingMode: 'complete');
+        $now = $this->nowMs();
+
+        // Seed a full cache (the cache-cap scope count) with strictly
+        // increasing write timestamps via reflection; scope 1 is the first
+        // inserted but artificially expired so the next biasForScope(1)
+        // refreshes it — a refresh re-ages the entry (Rust parity).
+        $entries = [];
+        for ($scope = 1; $scope <= AggregateCalibrator::CACHE_CAP; $scope++) {
+            $entries[$scope] = [
+                'bias' => 0,
+                'expiresAt' => microtime(true) + 60.0,
+                'writtenAt' => 1_000.0 + $scope,
+            ];
+        }
+        $entries[1]['expiresAt'] = 0.0; // stale -> the next read refreshes it
+        $prop = new \ReflectionProperty(AggregateCalibrator::class, 'biasCache');
+        $prop->setValue($c, $entries);
+
+        // The refresh: scope 1 is re-written NOW (the newest write by far).
+        $c->biasForScope(1, $now);
+
+        // One more scope: the cache is full, so the entry with the earliest write timestamp is
+        // evicted — scope 2 (writtenAt 1002), NOT the refreshed scope 1.
+        $fresh = AggregateCalibrator::CACHE_CAP + 1;
+        $c->biasForScope($fresh, $now);
+
+        $cache = $prop->getValue($c);
+        self::assertArrayNotHasKey(2, $cache, 'the earliest-written entry (scope 2) must be evicted');
+        self::assertArrayHasKey(1, $cache, 'the refreshed first-inserted scope must survive (its write is the newest)');
+        self::assertArrayHasKey($fresh, $cache, 'the newly inserted scope must be cached');
+        self::assertArrayHasKey(AggregateCalibrator::CACHE_CAP, $cache, 'a recently written non-refreshed scope must survive');
     }
 
     private function countingClient(): CountingClient

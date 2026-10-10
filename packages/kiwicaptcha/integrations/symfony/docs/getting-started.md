@@ -237,6 +237,8 @@ base-uri 'none';
 form-action 'self'
 ```
 
+<!-- The root README mirrors this script-src and style-src pair; update both together. -->
+
 `connect-src 'self'` means even a future JS regression cannot exfiltrate.
 At runtime the driver refuses cross-origin challenge endpoints.
 
@@ -248,7 +250,9 @@ Worker directive per asset mode:
   the page-issued digest, then the content-addressed URL is loaded by
   the browser APIs. `worker-src 'self'` is required; `blob:` is never
   allowed. The stylesheet link, the driver script and the lazy runtime
-  and worker fetches are covered by `style-src 'self'`,
+  and worker fetches (the memory-hard solve tier, and the SHA-256
+  solve on a page without the wasm glue, which dispatches through the
+  same worker) are covered by `style-src 'self'`,
   `script-src 'self'` and `connect-src 'self'`.
 - `inline` (compatibility / zero-request tier): the driver builds the
   worker from a Blob URL of local code, so this tier needs

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
@@ -67,8 +69,8 @@ final class KiwiCaptchaHaInitializeCommandTest extends TestCase
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[OK] the storage authority is pinned', $display);
-        self::assertStringContainsString('{kiwi:'.self::NS.'}:authority:pin:storage -> master|'.self::RUN_ID_A, $display);
-        self::assertSame('master|'.self::RUN_ID_A, $fake->strings['{kiwi:'.self::NS.'}:authority:pin:storage'] ?? null);
+        self::assertStringContainsString('{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage -> master|'.self::RUN_ID_A, $display);
+        self::assertSame('master|'.self::RUN_ID_A, $fake->strings['{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'] ?? null);
     }
 
     public function testInitializeRefusesAnExistingPinWithoutForce(): void
@@ -99,7 +101,7 @@ final class KiwiCaptchaHaInitializeCommandTest extends TestCase
 
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
         self::assertStringContainsString('-> master|'.self::RUN_ID_B, $tester->getDisplay());
-        self::assertSame('master|'.self::RUN_ID_B, $fake->strings['{kiwi:'.self::NS.'}:authority:pin:storage'] ?? null);
+        self::assertSame('master|'.self::RUN_ID_B, $fake->strings['{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'] ?? null);
     }
 
     public function testInitializeCoversEveryDistinctAuthority(): void
@@ -113,8 +115,8 @@ final class KiwiCaptchaHaInitializeCommandTest extends TestCase
         $tester->execute([]);
 
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
-        self::assertStringContainsString('{kiwi:'.self::NS.'}:authority:pin:storage -> master|'.self::RUN_ID_A, $tester->getDisplay());
-        self::assertStringContainsString('{kiwi:'.self::NS.'}:authority:pin:risk -> master|'.self::RUN_ID_A, $tester->getDisplay());
+        self::assertStringContainsString('{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage -> master|'.self::RUN_ID_A, $tester->getDisplay());
+        self::assertStringContainsString('{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:risk -> master|'.self::RUN_ID_A, $tester->getDisplay());
     }
 
     public function testInitializeRefusesWhenTheExpectedIdentityDisagreesWithTheServer(): void

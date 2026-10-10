@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Controller\KiwiMetricsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use Symfony\Component\Config\Loader\Loader;
 use Symfony\Component\Routing\Route;
@@ -42,6 +43,12 @@ use Symfony\Component\Routing\RouteCollection;
  *                                       security-policy state are all
  *                                       compatible; risk.health.enabled
  *                                       defaults true).
+ *  - GET   {prefix}/metrics            (the Prometheus text exporter,
+ *                                       registered only when
+ *                                       risk.metrics.secret is configured;
+ *                                       the exporter authenticates with
+ *                                       the same secret, so the route
+ *                                       stays absent when it is null).
  *
  * Loaded either automatically (the extension prepends
  * src/Resources/config/routes.php as the app's framework.router.resource when
@@ -57,6 +64,7 @@ final class KiwiCaptchaRouteLoader extends Loader
     public function __construct(
         private readonly string $routePrefix,
         private readonly bool $healthEnabled = true,
+        private readonly bool $metricsEnabled = false,
     ) {
     }
 
@@ -165,6 +173,23 @@ final class KiwiCaptchaRouteLoader extends Loader
             $routes->add('kiwicaptcha_health_ready', new Route(
                 $prefix.'/health/ready',
                 ['_controller' => [KiwiHealthController::class, 'ready']],
+                [],
+                [],
+                '',
+                [],
+                ['GET'],
+            ));
+        }
+
+        // The metrics exporter route follows its own secret: registered
+        // only when risk.metrics.secret is configured (an env
+        // placeholder counts, and an empty resolved secret makes the
+        // controller itself answer 404), so a deployment without the
+        // knob never exposes the endpoint at all.
+        if ($this->metricsEnabled) {
+            $routes->add('kiwicaptcha_metrics', new Route(
+                $prefix.'/metrics',
+                ['_controller' => [KiwiMetricsController::class, 'metrics']],
                 [],
                 [],
                 '',

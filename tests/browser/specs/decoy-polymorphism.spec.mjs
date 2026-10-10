@@ -149,7 +149,7 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
       } else if (strategy.id === 3) {
         expect(facts.position).toBe('absolute');
         expect(facts.left).toBe('-9999px');
-        expect(facts.autocomplete).toBe('new-password');
+        expect(facts.autocomplete).toBe('off');
         expect(facts.wrapped).toBe(false);
       } else if (strategy.id === 4) {
         expect(facts.hiddenAttr).toBe(true);
@@ -177,12 +177,7 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
     // speed.
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-    // The lazy risk module (widget-risk.js) is embedded on every
-    // production inline page (the bundle's form_div_layout.html.twig
-    // embeds it after the driver); the fixture page mirrors that exact
-    // inline-tier shape (the argon2id solve tier and the decoy render
-    // both live in it).
-    const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
 <div class="kiwi-container" id="kiwicaptcha-root" data-kiwi-endpoint="/challenge?decoy=1&strategy=5" data-kiwi-scope="login" data-kiwi-algorithm="argon2id">

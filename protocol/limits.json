@@ -1,0 +1,22 @@
+{
+  "$schema": "kiwicaptcha.limits/1",
+  "format_version": 1,
+  "description": "The single authoritative register of shared security and solver limits. Every value is a policy ceiling or floor that PHP, Rust and the browser must enforce identically: a drift in any one implementation is a fleet-visible split (a solve the browser mints but a server refuses, or a key PHP accepts and Rust rejects). tools/ci/limits-parity-check.sh reads each implementation's own constant declarations and fails on ANY pairwise difference with this manifest, exactly like the execution-v1 register gate. Update this file deliberately, then every implementation in the same change.",
+  "sha_max_target_bits": 20,
+  "solver_max_hashes": 20000000,
+  "argon2_max_target_bits": 10,
+  "argon2_max_m_kib": 65536,
+  "argon2_max_t_issuance": 6,
+  "argon2_max_t_verification": 16,
+  "ttl_max_secs": 300,
+  "rsw_t_min": 10000,
+  "rsw_t_max": 300000,
+  "token_max_duration_ms": 3600000,
+  "min_master_bytes": 32,
+  "min_execution_key_bytes": 32,
+  "execution_max_version": 6,
+  "execution_max_program_base64": 4096,
+  "execution_max_ops": 24,
+  "worker_protocol_version": 2,
+  "worker_protocol_id": "2026-09-r1"
+}

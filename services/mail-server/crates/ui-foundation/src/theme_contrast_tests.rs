@@ -222,4 +222,29 @@ mod pale_tint_detector_tests {
             1
         );
     }
+
+    /// `.text-primary` paints `rgb(var(--accent-text))`. If the token is
+    /// missing every "red" emphasis (including the wordmark's old markup)
+    /// collapses to inherited ink. The token must exist in the stylesheet.
+    #[test]
+    fn accent_text_token_is_defined_for_text_primary() {
+        let sheet = include_str!("../assets/globals.css");
+        assert!(
+            sheet.contains("--accent-text:"),
+            "globals.css must define --accent-text for .text-primary"
+        );
+        // The brand-600 red used by the two-tone wordmark must stay defined.
+        assert!(
+            sheet.contains("--brand-600:"),
+            "globals.css must define --brand-600 for text-brand-600"
+        );
+        assert!(
+            sheet.contains(".text-brand-600"),
+            "globals.css must expose the .text-brand-600 utility"
+        );
+        assert!(
+            sheet.contains(".text-surface-950"),
+            "globals.css must expose the .text-surface-950 utility"
+        );
+    }
 }

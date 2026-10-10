@@ -17,6 +17,28 @@ pub enum RiskStoreError {
     ScriptError(String),
     #[error("risk state backend timeout: {0}")]
     Timeout(String),
+    /// A caller-supplied identifier (decision id) is not safe as a Redis
+    /// key component: empty, a control character, or one of the key
+    /// structure bytes `:`/`}`. Mirrors the PHP
+    /// `RedisRiskStateStore::assertKeySafeIdentifier` rule.
+    #[error("invalid identifier: {0}")]
+    InvalidIdentifier(String),
+    /// The namespace's recorded keyspace mode does not match the mode
+    /// this store was built in (Plane 7): a namespace carries exactly
+    /// one layout, recorded in its `{kiwi:<ns>}:mode` marker, and a store
+    /// built for the other layout is refused instead of silently
+    /// addressing the wrong key families.
+    #[error(
+        "keyspace mode mismatch for namespace {namespace}: the marker says {stored} but this store is built for {expected}"
+    )]
+    KeyspaceModeMismatch {
+        /// The encoded namespace whose marker refused the store.
+        namespace: String,
+        /// The marker's recorded mode.
+        stored: String,
+        /// The mode the refused store was built for.
+        expected: String,
+    },
 }
 
 /// The full reply of one store application: the signal vector plus the
@@ -73,6 +95,11 @@ pub struct OutcomeRegistration {
     pub v1_weights: RiskWeights,
     /// The exact risk-v2 weights the engine scores with.
     pub v2_weights: RiskV2Weights,
+    /// The target pseudonym this assessment protects (None = no target
+    /// dimension). When set, the consolidated script maintains the
+    /// target failure counter and spread HLLs and reports them back so
+    /// the score can react.
+    pub target_id: Option<String>,
 }
 
 /// The full reply of one consolidated assessment.
@@ -90,6 +117,36 @@ pub struct AssessV2Reply {
     /// no registration was requested or the decision is already
     /// registered (SET NX collision).
     pub registration_status: bool,
+    /// The target's decayed authentication-failure count at assessment
+    /// time (0 when the observation carries no target).
+    pub target_failures: u32,
+    /// The distinct-source spread of failures against the target
+    /// (0 when the observation carries no target). Kept separate from
+    /// the ASN spread — the two are never summed.
+    pub target_spread_sources: u32,
+    /// The distinct-ASN spread of failures against the target
+    /// (0 when the observation carries no target).
+    pub target_spread_asns: u32,
+}
+
+/// The live target-dimension state (change.md 3.2.1): the leaky-bucket
+/// authentication-failure counter of one target plus its source and asn
+/// spreads. Compiled into the marks stage's attacked-target record by
+/// [`crate::marks::MarksView::read`]; written by the outcome-bridge
+/// path when a failure is reported against a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TargetState {
+    /// The decayed failure count (one failure leaks per minute).
+    pub fails: u32,
+    /// The first recorded failure of the retained window (epoch ms).
+    pub first_ms: i64,
+    /// The most recent failure (epoch ms).
+    pub last_ms: i64,
+    /// The distinct-source spread (its own HyperLogLog; never summed
+    /// with the ASN spread).
+    pub spread_sources: u32,
+    /// The distinct-ASN spread (its own HyperLogLog).
+    pub spread_asns: u32,
 }
 
 /// Risk state store: applies an observation (event_id dedupe) and returns
@@ -189,6 +246,47 @@ pub trait RiskStateStore {
     ) -> Result<Option<AssessV2Reply>, RiskStoreError> {
         Ok(None)
     }
+
+    /// Registers one authentication failure against the target
+    /// dimension (`target_failure.lua`): increments the target's leaky
+    /// failure counter and PFADDs the failing source/asn spread
+    /// elements. The outcome-bridge write path of target-account
+    /// protection — failures are stored by the engine state, never by
+    /// callers. Stores without the capability record nothing (the
+    /// neutral state), exactly like the session-tag seams.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn register_target_failure(
+        &self,
+        _target_id: &str,
+        _source: &str,
+        _asn: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        Ok(TargetState::default())
+    }
+
+    /// Resets the target's failure counter (step-up completed: the
+    /// account owner proved themselves, so a legitimate user is not
+    /// stepped up twice). The spread HLLs keep their history.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn clear_target_failures(&self, _target_id: &str) -> Result<(), RiskStoreError> {
+        Ok(())
+    }
+
+    /// The live target-dimension state of one target (the decayed
+    /// failure count and the source+asn spread).
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn read_target_state(&self, _target_id: &str) -> Result<TargetState, RiskStoreError> {
+        Ok(TargetState::default())
+    }
 }
 
 /// Optional risk-v2 capability: records the session's first-seen
@@ -264,6 +362,70 @@ pub trait SessionTlsTagStore {
         _session_id: &[u8; 16],
         _tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
+        Ok(None)
+    }
+}
+
+/// Optional risk-v2 capability: the principal's first-seen network tag
+/// records (one per principal, network-bucket pair, SET NX).
+///
+/// Kept out of the [`RiskStateStore`] trait for the same reason as the
+/// session tags — existing implementations compile unchanged — and
+/// wired into the engine beside the frozen wire via
+/// `RiskEngine::with_principal_networks`. The default implementation
+/// reports no record surface and the engine degrades the novel-network
+/// gate to neutral (never novel), never breaking an assessment.
+///
+/// The record marks a network bucket as established for the principal
+/// (written when the session credit is granted — a completed step-up
+/// from that network), so a bare password check never vouches for the
+/// network and a retried stuffed login stays novel until the victim
+/// really proves themselves.
+pub trait PrincipalNetworkTagStore: Send + Sync {
+    /// Whether the principal has been seen (established) from this
+    /// network bucket: `Ok(Sometrue)` = seen before, `Ok(Somefalse)`
+    /// = never seen (the first-attempt novel-network signal),
+    /// `Ok(None)` = no record surface (neutral: never novel).
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn principal_network_seen(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Ok(None)
+    }
+
+    /// Records the first-seen network tag for the (principal, network)
+    /// pair (SET NX, first write wins). Called when a session credit is
+    /// granted for a login from this network. Answers whether the record
+    /// was newly created.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn record_principal_network_tag(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<bool, RiskStoreError> {
+        Ok(false)
+    }
+
+    /// Whether the account carries ANY established network: the "no
+    /// prior trusted network" half of the novel-network gate.
+    /// `Ok(Sometrue)` = the account has a trusted network,
+    /// `Ok(Somefalse)` = none, `Ok(None)` = no record surface.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn principal_has_trusted_network(
+        &self,
+        _principal_id: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
         Ok(None)
     }
 }

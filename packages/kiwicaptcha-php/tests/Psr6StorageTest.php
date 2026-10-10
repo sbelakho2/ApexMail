@@ -20,7 +20,43 @@ use PHPUnit\Framework\TestCase;
  */
 final class Psr6StorageTest extends TestCase
 {
+
+    /**
+     * The wire nonce of a logical fixture label. The record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes.
+     * That is the strict serde twin. Logical labels map to it here and
+     * the storage keys stay readable at the call sites.
+     */
+    private static function wn(string $logical): string
+    {
+        return \KiwiCaptcha\Tests\Support\WireFixture::nonce($logical);
+    }
     private function makeRecord(string $nonce = 'nonce-1'): ChallengeRecord
+    {
+        return new ChallengeRecord(
+            nonce: self::wn($nonce),
+            scope: 'login',
+            bindingTag: 'abc123',
+            issuedAt: 1_800_000_000,
+            expiresAt: 1_800_000_120,
+            algorithm: PoWAlgorithm::Sha256,
+            mKib: 0,
+            t: 1,
+            p: 1,
+            targetBits: 8,
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
+            challenge: 'challenge',
+            minDurationMs: 0,
+        );
+    }
+
+    /**
+     * The same fixture with the nonce taken verbatim (no label
+     * mapping): for nonces crafted to contain specific base64
+     * characters ('+', '/'), the wire spelling under test is the point.
+     */
+    private function verbatimRecord(string $nonce): ChallengeRecord
     {
         return new ChallengeRecord(
             nonce: $nonce,
@@ -33,8 +69,8 @@ final class Psr6StorageTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
             challenge: 'challenge',
             minDurationMs: 0,
         );
@@ -54,10 +90,10 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consume('nonce-1');
+        $consumed = $storage->consume(self::wn('nonce-1'));
 
         self::assertNotNull($consumed);
-        self::assertSame('nonce-1', $consumed->record->nonce);
+        self::assertSame(self::wn('nonce-1'), $consumed->record->nonce);
         self::assertTrue($consumed->consumedNow);
     }
 
@@ -68,20 +104,20 @@ final class Psr6StorageTest extends TestCase
         // consumed marker instead of a missing record.
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
-        $storage->consume('nonce-1'); // first call wins the transition
+        $storage->consume(self::wn('nonce-1')); // first call wins the transition
 
-        $retry = $storage->consume('nonce-1');
+        $retry = $storage->consume(self::wn('nonce-1'));
         self::assertNotNull($retry, 'the consumed record is kept — replay protection is the marker, not absence');
         self::assertTrue($retry->consumedBefore);
-        self::assertNotNull($storage->find('nonce-1'), 'find must still see the consumed record');
-        self::assertTrue($storage->commitResult('nonce-1', true, null), 'commit on a consumed record without result must succeed');
+        self::assertNotNull($storage->find(self::wn('nonce-1')), 'find must still see the consumed record');
+        self::assertTrue($storage->commitResult(self::wn('nonce-1'), true, null), 'commit on a consumed record without result must succeed');
     }
 
     public function testConsumeOnMissingNonceReturnsNull(): void
     {
         $storage = new Psr6Storage($this->makePool());
 
-        self::assertNull($storage->consume('never-stored'));
+        self::assertNull($storage->consume(self::wn('never-stored')));
     }
 
     public function testFindDoesNotConsume(): void
@@ -89,8 +125,8 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        self::assertNotNull($storage->find('nonce-1'));
-        self::assertNotNull($storage->find('nonce-1'), 'find must not transition');
+        self::assertNotNull($storage->find(self::wn('nonce-1')));
+        self::assertNotNull($storage->find(self::wn('nonce-1')), 'find must not transition');
     }
 
     public function testStoreReplacesExistingRecord(): void
@@ -99,11 +135,11 @@ final class Psr6StorageTest extends TestCase
         $storage->store($this->makeRecord('n'));
         $storage->store($this->makeRecord('n'));
 
-        $consumed = $storage->consume('n');
+        $consumed = $storage->consume(self::wn('n'));
 
         self::assertNotNull($consumed);
-        self::assertSame('n', $consumed->record->nonce);
-        self::assertNotNull($storage->consume('n'), 'the replaced record is consumed, not deleted');
+        self::assertSame(self::wn('n'), $consumed->record->nonce);
+        self::assertNotNull($storage->consume(self::wn('n')), 'the replaced record is consumed, not deleted');
     }
 
     public function testDeleteRemovesRecord(): void
@@ -111,9 +147,9 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        $storage->delete('nonce-1');
+        $storage->delete(self::wn('nonce-1'));
 
-        self::assertNull($storage->find('nonce-1'));
+        self::assertNull($storage->find(self::wn('nonce-1')));
     }
 
     public function testCommitResultStoresAndRejectsSecondCommit(): void
@@ -121,12 +157,12 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        self::assertFalse($storage->commitResult('nonce-1', true, 'txn'), 'commit on a pending record must fail');
-        $storage->consume('nonce-1');
-        self::assertTrue($storage->commitResult('nonce-1', true, 'txn'));
-        self::assertFalse($storage->commitResult('nonce-1', false, null), 'a second commit must be rejected');
+        self::assertFalse($storage->commitResult(self::wn('nonce-1'), true, 'txn'), 'commit on a pending record must fail');
+        $storage->consume(self::wn('nonce-1'));
+        self::assertTrue($storage->commitResult(self::wn('nonce-1'), true, 'txn'));
+        self::assertFalse($storage->commitResult(self::wn('nonce-1'), false, null), 'a second commit must be rejected');
 
-        $retry = $storage->consume('nonce-1');
+        $retry = $storage->consume(self::wn('nonce-1'));
         self::assertNotNull($retry);
         self::assertTrue($retry->consumedBefore);
         self::assertNotNull($retry->consumedResult, 'the committed result must ride back on the retry');
@@ -139,7 +175,7 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consume('nonce-1');
+        $consumed = $storage->consume(self::wn('nonce-1'));
 
         self::assertSame('login', $consumed?->record->scope);
         self::assertSame(PoWAlgorithm::Sha256, $consumed?->record->algorithm);
@@ -150,18 +186,18 @@ final class Psr6StorageTest extends TestCase
     {
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
-        self::assertNull($storage->inspectConsumedEnvelope('nonce-1'), 'a pending record has no consumed envelope');
+        self::assertNull($storage->inspectConsumedEnvelope(self::wn('nonce-1')), 'a pending record has no consumed envelope');
 
-        $consumed = $storage->consume('nonce-1');
+        $consumed = $storage->consume(self::wn('nonce-1'));
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow);
-        $storage->commitResult('nonce-1', true, 'txn');
+        $storage->commitResult(self::wn('nonce-1'), true, 'txn');
 
         // The retained envelope stays readable without any capability
         // claim: the diagnostic inspection reports the consumed flag and
         // the committed result (the identity is always null — this
         // backend does not offer the identity-aware consume).
-        $state = $storage->inspectConsumedEnvelope('nonce-1');
+        $state = $storage->inspectConsumedEnvelope(self::wn('nonce-1'));
         self::assertNotNull($state, 'inspectConsumedEnvelope() must read the stored consumed envelope');
         self::assertTrue($state->consumedBefore);
         self::assertFalse($state->consumedNow, 'the read-only inspection performs no transition');
@@ -254,7 +290,7 @@ final class Psr6StorageTest extends TestCase
         $record = $this->makeRecord('ns-rec');
         $writer->store($record);
 
-        $loaded = $reader->consume('ns-rec');
+        $loaded = $reader->consume(self::wn('ns-rec'));
 
         self::assertNotNull($loaded);
         self::assertSame($record->issuedAtNs, $loaded->record->issuedAtNs);
@@ -265,12 +301,12 @@ final class Psr6StorageTest extends TestCase
         // base64 of bytes containing 0xFB.. yields '/' — a PSR-6-reserved
         // character that strict pools reject in keys. The hashed cache key
         // must make such nonces work.
-        $nonce = base64_encode(hex2bin('fbffefc0d0e0f0a0b0c0d0e0f0010203'));
+        $nonce = base64_encode(hex2bin('fbffefc0d0e0f0a0b0c0d0e0f0010203fbffefc0d0e0f0a0b0c0d0e0f0010203'));
         self::assertStringContainsString('/', $nonce, 'fixture must actually contain /');
 
         $pool = $this->makePool();
         $storage = new Psr6Storage($pool);
-        $record = $this->makeRecord($nonce);
+        $record = $this->verbatimRecord($nonce);
         $storage->store($record);
 
         self::assertNotNull($storage->find($nonce));
@@ -281,12 +317,12 @@ final class Psr6StorageTest extends TestCase
 
     public function testNonceContainingPlusRoundTrips(): void
     {
-        $nonce = base64_encode(hex2bin('fbfedec0d0e0f0a0b0c0d0e0f0010203'));
+        $nonce = base64_encode(hex2bin('fbfedec0d0e0f0a0b0c0d0e0f0010203fbfedec0d0e0f0a0b0c0d0e0f0010203'));
         self::assertStringContainsString('+', $nonce, 'fixture must actually contain +');
 
         $pool = $this->makePool();
         $storage = new Psr6Storage($pool);
-        $record = $this->makeRecord($nonce);
+        $record = $this->verbatimRecord($nonce);
         $storage->store($record);
 
         self::assertNotNull($storage->find($nonce));
@@ -370,7 +406,7 @@ final class Psr6StorageTest extends TestCase
             self::assertStringContainsString('save() === false', $e->getMessage());
         }
         self::assertSame(1, $pool->saveCalls);
-        self::assertNull($storage->find('nonce-1'), 'nothing was handed out that a verifier could later accept');
+        self::assertNull($storage->find(self::wn('nonce-1')), 'nothing was handed out that a verifier could later accept');
     }
 
     public function testConsumeThrowsWhenTheTransitionSaveFails(): void
@@ -385,17 +421,17 @@ final class Psr6StorageTest extends TestCase
         $storage->store($this->makeRecord());
 
         try {
-            $storage->consume('nonce-1');
+            $storage->consume(self::wn('nonce-1'));
             self::fail('consume() must throw when the transition save fails');
         } catch (\KiwiCaptcha\Storage\StorageWriteException $e) {
             self::assertStringContainsString('save() === false', $e->getMessage());
         }
         self::assertSame(2, $pool->saveCalls);
-        self::assertNotNull($storage->find('nonce-1'), 'the record is still there — the failed flip never persisted');
+        self::assertNotNull($storage->find(self::wn('nonce-1')), 'the record is still there — the failed flip never persisted');
 
         // The pool recovered: the retry wins the transition normally,
         // proving the record was left pending rather than consumed.
-        $retry = $storage->consume('nonce-1');
+        $retry = $storage->consume(self::wn('nonce-1'));
         self::assertNotNull($retry);
         self::assertTrue($retry->consumedNow, 'the retry over the recovered pool wins the transition normally');
         self::assertFalse($retry->consumedBefore);
@@ -408,7 +444,7 @@ final class Psr6StorageTest extends TestCase
         $pool = new \KiwiCaptcha\Tests\Fixtures\FailingSavePool();
         $storage = new Psr6Storage($pool);
 
-        self::assertFalse($storage->commitResult('nonce-1', true, null), 'a failed commit save returns false, it does not throw');
+        self::assertFalse($storage->commitResult(self::wn('nonce-1'), true, null), 'a failed commit save returns false, it does not throw');
     }
 
     public function testVerifierMapsAFailedConsumeSaveToTheTypedIndeterminateOutcome(): void

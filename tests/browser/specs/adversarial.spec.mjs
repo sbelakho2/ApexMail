@@ -89,9 +89,6 @@ function failingCounter(prefix, salt, targetBits, preferred) {
 async function serveWidgetPage(page, attrs) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-  // The lazy risk module (widget-risk.js) is embedded on every production
-  // inline page (the bundle's form_div_layout.html.twig embeds it after
-  // the driver); the fixture page mirrors that exact inline-tier shape.
   const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
   const attrStr = Object.entries(attrs)
     .map(([k, v]) => ` ${k}="${v}"`)
@@ -287,10 +284,7 @@ test.describe('KiwiCaptcha adversarial client-side protocol', () => {
     });
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-    // The lazy risk module (widget-risk.js) is embedded on every
-    // production inline page (the bundle's form_div_layout.html.twig);
-    // the fixture page mirrors that exact inline-tier shape.
-    const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     await page.route('https://evil.test/frame.html', (route) =>
       route.fulfill({
         contentType: 'text/html',
@@ -454,7 +448,12 @@ test.describe('KiwiCaptcha adversarial submission validation', () => {
     const legit = Number(decodeToken(token).split('.')[1]);
     const below = failingCounter(challenges[0].prefix, challenges[0].salt, challenges[0].targetBits, legit - 1);
     const cases = [
-      { label: 'counter at the solver maximum', counter: 5000000, code: 'malformed_token' },
+      // The solver counter ceiling is 20,000,000 (protocol/limits.json,
+      // unified across PHP/Rust in the shared-limits change): the decoder
+      // rejects the cap itself outright — the largest counter a real solve
+      // can mint is 19,999,999 — while an in-range but forged counter
+      // (e.g. 5,000,000) merely fails the proof and reads insufficient_work.
+      { label: 'counter at the solver maximum', counter: 20000000, code: 'malformed_token' },
       { label: 'counter far above the solver maximum', counter: 999999999, code: 'malformed_token' },
       { label: 'counter below the target', counter: below, code: 'insufficient_work' },
     ];
@@ -624,26 +623,13 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
     const gate = new Promise((r) => {
       release = r;
     });
-    // Resolves once the late response has fully settled at the network
-    // layer: `sent=true` when the fulfill was delivered, `false` when the
-    // page had already aborted the fetch so nothing was delivered at all.
-    // Either way this event — not a fixed sleep (audit F19) — is the
-    // "the late response had its chance" boundary the assertions below
-    // are anchored on.
-    let settleLateResponse;
-    const lateResponseSettled = new Promise((r) => {
-      settleLateResponse = r;
-    });
     await page.route('**/challenge', async (route) => {
       calls++;
       if (calls === 1) {
         await gate;
-        let sent = false;
         try {
           await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"late"}' });
-          sent = true;
         } catch (e) {}
-        settleLateResponse(sent);
         return;
       }
       await route.continue();
@@ -658,15 +644,11 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
       window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
     });
     release();
-    const lateWasDelivered = await lateResponseSettled;
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+    await page.waitForTimeout(1200);
     await expect(page.locator('[data-kiwi-token]'), 'the late response must never write a token').toHaveValue('');
-    if (lateWasDelivered) {
-      // The 503 arrived after the abort: the widget must still be idle and
-      // tokenless, and the driver must have surfaced its manual retry.
-      await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
-      await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
-    }
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
     await page.locator('[data-kiwi-retry]').click();
     await solve(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();
@@ -726,7 +708,9 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          nonce: 'exhaust-adv-' + calls,
+          // The canonical server nonce shape (44 chars, one padding =)
+          // keeps the forged challenge inside the validation contract.
+          nonce: ('exhaustadv' + calls).padEnd(43, 'a') + '=',
           salt: btoa(String(calls).padStart(16, '0')),
           prefix: 'x',
           algorithm: 'argon2id',

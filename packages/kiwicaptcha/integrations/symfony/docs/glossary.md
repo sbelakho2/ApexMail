@@ -13,8 +13,8 @@ usage.
 - **solution token** — the client-submitted value carrying the challenge
   nonce, the solver counter, the client-reported duration, and the
   telemetry fields. Verification decodes it, re-derives the proof, and
-  consumes the challenge. A counter above the 5M-hash solver ceiling is
-  rejected at decode time.
+  consumes the challenge. A counter above the 20,000,000-hash solver
+  ceiling is rejected at decode time.
 
 - **nonce** — the 256-bit random challenge identifier, the canonical jti
   of the consumed record. It keys the stored challenge, the

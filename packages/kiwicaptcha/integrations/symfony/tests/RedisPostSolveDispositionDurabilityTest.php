@@ -277,6 +277,60 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         // waitReplicas = 0 stays supported on any client.
         self::assertInstanceOf(RedisPostSolveDispositionStore::class, new RedisPostSolveDispositionStore($client, self::NAMESPACE, 300));
     }
+
+    /**
+     * The RESP2 missing-reply contract of the Lua layer is a static
+     * invariant no in-memory PHP fake can observe (the fake interprets
+     * the scripts by marker and mirrors the guard with PHP null). Pin
+     * it at the source: a variable assigned from `redis.call(...)` must
+     * never be compared with `== nil` inside an immediately following
+     * conditional. RESP2 converts a missing bulk/array reply to Lua
+     * `false`, so that branch never fires. The scan covers every
+     * PHP/RS/Lua source in the repository, with vendor, target and
+     * node_modules excluded.
+     */
+    public function testLuaTreatsAMissingRedisReplyAsFalseNeverNil(): void
+    {
+        $root = \dirname(__DIR__, 5);
+        $pattern = '/local\s+(\w+)\s*=\s*redis\.call\([^)]*\)[^\n]*\n\s*if\s+\1\s*==\s*nil/';
+        $offenders = [];
+
+        foreach (['packages', 'protocol'] as $top) {
+            $base = $root.DIRECTORY_SEPARATOR.$top;
+            if (!is_dir($base)) {
+                continue;
+            }
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveCallbackFilterIterator(
+                    new \RecursiveDirectoryIterator($base, \FilesystemIterator::SKIP_DOTS),
+                    static function (\SplFileInfo $file): bool {
+                        if (!$file->isDir()) {
+                            return true;
+                        }
+                        $name = $file->getFilename();
+
+                        // Vendor/build trees and hidden dirs (.git etc.).
+                        return !\in_array($name, ['vendor', 'node_modules', 'target'], true)
+                            && !str_starts_with($name, '.');
+                    },
+                ),
+            );
+            foreach ($iterator as $file) {
+                /** @var \SplFileInfo $file */
+                if (!\in_array($file->getExtension(), ['php', 'rs', 'lua'], true)) {
+                    continue;
+                }
+                $contents = (string) file_get_contents($file->getPathname());
+                $count = preg_match_all($pattern, $contents);
+                if ($count > 0) {
+                    $offenders[] = $file->getPathname().' ('.$count.')';
+                }
+            }
+        }
+
+        self::assertSame([], $offenders, 'a variable assigned from redis.call() is compared with == nil; RESP2 missing replies are Lua false, so the branch never fires');
+        self::assertStringContainsString('if not mapped then', (string) file_get_contents((new \ReflectionClass(RedisPostSolveDispositionStore::class))->getFileName()), 'the post-solve guard must use the RESP2-correct `not mapped` idiom');
+    }
 }
 
 /**
@@ -379,6 +433,10 @@ final class DispositionWaitRedisFake extends \Predis\Client
         if (str_contains($script, 'Post-solve disposition finalize')) {
             return $this->luaFinalize($keys, $args);
         }
+        if (str_contains($script, 'Post-solve disposition live read')) {
+            // The fake keeps no key lifetimes: a present record is live.
+            return $this->strings[(string) $keys[0]] ?? false;
+        }
 
         throw new \LogicException('unexpected script');
     }
@@ -397,6 +455,7 @@ final class DispositionWaitRedisFake extends \Predis\Client
         $snapshotChainId = (string) ($args[5] ?? '');
         $guardEnabled = ($args[6] ?? '0') === '1';
         $resolvedChainId = (string) ($args[7] ?? '');
+        $legacyObligation = ($args[9] ?? '0') === '1';
         $now = (int) floor($this->clockMs / 1000);
         $existing = $this->strings[$recordKey] ?? null;
         if ($existing === null) {
@@ -428,6 +487,9 @@ final class DispositionWaitRedisFake extends \Predis\Client
         }
         if (($rec['state'] ?? null) === 'complete') {
             if ($guardEnabled && ($rec['disposition']['kind'] ?? null) === 'pass') {
+                if ($legacyObligation) {
+                    return (string) json_encode(['status' => 'complete', 'record' => $rec, 'guard' => 'obligation-changed'], JSON_THROW_ON_ERROR);
+                }
                 $guard = $this->guardOutcome($obligationKey, $chainKey, $snapshotChainId, $nonce, $resolvedChainId);
                 if ($guard !== null) {
                     return (string) json_encode(['status' => 'complete', 'record' => $rec, 'guard' => $guard], JSON_THROW_ON_ERROR);

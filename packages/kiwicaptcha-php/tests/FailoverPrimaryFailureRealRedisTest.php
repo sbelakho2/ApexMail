@@ -12,6 +12,7 @@ use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
+use KiwiCaptcha\Tests\Fixtures\ServerState;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
@@ -106,7 +107,7 @@ final class FailoverPrimaryFailureRealRedisTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolve($client, $prefix);
         $identity = 'op-'.hash('sha256', 'primary-failure-missing');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
         $client->del($prefix.$record->nonce);
 
         $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->verify(
@@ -135,7 +136,7 @@ final class FailoverPrimaryFailureRealRedisTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolve($client, $prefix);
         $identity = 'op-'.hash('sha256', 'primary-failure-vanished');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, 'txn-'.$identity), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, 'txn-'.$identity), 'the committed stored success lands');
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
         $replay = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $identity);
@@ -190,7 +191,7 @@ final class FailoverPrimaryFailureRealRedisTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolve($client, $prefix);
         $identity = 'op-'.hash('sha256', 'primary-failure-fence');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $barriered = new RedisStorage($client, $prefix, waitReplicas: 1, waitTimeoutMs: 100);
         $fencedOut = (new Verifier($barriered, now: static fn (): int => self::ISSUED_AT))->verify(

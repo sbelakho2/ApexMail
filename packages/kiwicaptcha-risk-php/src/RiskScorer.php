@@ -63,6 +63,8 @@ final class RiskScorer
         $risk += self::weighted($v2->honeypot, $w2->honeypot);
         $risk += self::weighted($v2->sessionInconsistency, $w2->sessionInconsistency);
         $risk += self::weighted($v2->tlsInconsistency, $w2->tls);
+        $risk += self::weighted($v2->targetFailurePressure, $w2->targetFailurePressure);
+        $risk += self::weighted($v2->targetSpread, $w2->targetSpread);
 
         return max(0, min(1000, $risk));
     }

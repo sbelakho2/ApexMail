@@ -429,222 +429,1128 @@
       "expected_score": 1000
     }
   ],
+  "policy_parse_rejects": [
+    {
+      "name": "missing global_floors",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        }
+      }
+    },
+    {
+      "name": "short global_floors (4 entries)",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": {
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "4": "sha20"
+        }
+      }
+    },
+    {
+      "name": "level 0 not allow",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": {
+          "0": "sha16",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "4": "sha20"
+        }
+      }
+    },
+    {
+      "name": "out-of-range level 5",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": {
+          "0": "allow",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "4": "sha20",
+          "5": "deny"
+        }
+      }
+    },
+    {
+      "name": "global_floors not an object",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": "sha20"
+      }
+    },
+    {
+      "name": "weight_float",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190.0
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": false,
+            "degraded": "allow"
+          }
+        },
+        "global_floors": {
+          "0": "allow",
+          "1": "allow",
+          "2": "allow",
+          "3": "allow",
+          "4": "allow"
+        }
+      }
+    },
+    {
+      "name": "weight_string",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": "190"
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": false,
+            "degraded": "allow"
+          }
+        },
+        "global_floors": {
+          "0": "allow",
+          "1": "allow",
+          "2": "allow",
+          "3": "allow",
+          "4": "allow"
+        }
+      }
+    },
+    {
+      "name": "base_risk_float",
+      "config": {
+        "version": 3,
+        "weights": {},
+        "scopes": {
+          "1": {
+            "base_risk": 100.0,
+            "minimum": "allow",
+            "post_solve_check": false,
+            "degraded": "allow"
+          }
+        },
+        "global_floors": {
+          "0": "allow",
+          "1": "allow",
+          "2": "allow",
+          "3": "allow",
+          "4": "allow"
+        }
+      }
+    },
+    {
+      "name": "base_risk_string",
+      "config": {
+        "version": 3,
+        "weights": {},
+        "scopes": {
+          "1": {
+            "base_risk": "100",
+            "minimum": "allow",
+            "post_solve_check": false,
+            "degraded": "allow"
+          }
+        },
+        "global_floors": {
+          "0": "allow",
+          "1": "allow",
+          "2": "allow",
+          "3": "allow",
+          "4": "allow"
+        }
+      }
+    }
+  ],
+  "malformed_policy_vectors": {
+    "malformed_policy_scopes": [
+      {
+        "key": "1admin",
+        "why": "trailing garbage collapses onto scope 1 under (int) coercion"
+      },
+      {
+        "key": "01",
+        "why": "non-canonical leading zero"
+      },
+      {
+        "key": "+1",
+        "why": "signed spelling"
+      },
+      {
+        "key": "4294967296",
+        "why": "u32 overflow"
+      },
+      {
+        "key": "0",
+        "why": "zero id"
+      },
+      {
+        "key": "-1",
+        "why": "negative id"
+      },
+      {
+        "key": "1.5",
+        "why": "fractional id"
+      }
+    ],
+    "malformed_policy_flags": [
+      {
+        "value": "false",
+        "why": "string truthiness coerces to true under (bool)"
+      },
+      {
+        "value": "true",
+        "why": "string spelling of a boolean"
+      },
+      {
+        "value": 1,
+        "why": "integer truthiness"
+      }
+    ],
+    "malformed_global_floor_values": [
+      {
+        "level": "1",
+        "value": 1,
+        "why": "integer action value"
+      },
+      {
+        "level": "2",
+        "value": true,
+        "why": "boolean action value"
+      },
+      {
+        "level": "3",
+        "value": [
+          "sha20"
+        ],
+        "why": "array action value"
+      },
+      {
+        "level": "4",
+        "value": {
+          "action": "sha20"
+        },
+        "why": "object action value"
+      }
+    ],
+    "malformed_global_floor_sets": [
+      {
+        "floors": {
+          "0": "allow",
+          "1": "sha16",
+          "01": "deny",
+          "2": "sha18",
+          "3": "sha20"
+        },
+        "why": "non-canonical level spelling: '01' and '1' name one logical level, so level 4 is absent while the object has five members"
+      },
+      {
+        "floors": {
+          "0": "allow",
+          "1": "sha16",
+          "+1": "deny",
+          "2": "sha18",
+          "3": "sha20"
+        },
+        "why": "signed level spelling: '+1' is not a canonical level key"
+      },
+      {
+        "floors": {
+          "0": "allow",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "04": "sha20"
+        },
+        "why": "leading-zero level spelling: '04' is not a canonical level key and level 4 is absent"
+      },
+      {
+        "floors": {
+          "0": "allow",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20"
+        },
+        "why": "four entries: the level set is incomplete"
+      },
+      {
+        "floors": {
+          "0": "allow",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "5": "sha20"
+        },
+        "why": "out-of-range level '5'"
+      }
+    ]
+  },
+  "reason_vectors": [
+    {
+      "why": "weighted contributors are ordered by contribution descending",
+      "score": 0,
+      "weights": {
+        "source_fast": 300,
+        "source_slow": 100,
+        "subnet_fast": 200,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 500,
+        "source_slow": 500,
+        "subnet_fast": 500,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": [
+        "source_burst",
+        "network_burst",
+        "source_sustained"
+      ]
+    },
+    {
+      "why": "equal contributions keep the SignalVector order (stable tie ordering)",
+      "score": 0,
+      "weights": {
+        "source_fast": 500,
+        "source_slow": 200,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 200,
+        "source_slow": 500,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": [
+        "source_burst",
+        "source_sustained"
+      ]
+    },
+    {
+      "why": "a hard-policy reason deduplicates with its own contributor",
+      "score": 0,
+      "weights": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 300,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 900,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": [
+        "replay_traffic"
+      ]
+    },
+    {
+      "why": "the reason list is capped at the top four contributors",
+      "score": 0,
+      "weights": {
+        "source_fast": 100,
+        "source_slow": 100,
+        "subnet_fast": 100,
+        "issue_debt": 100,
+        "bad_proof": 100,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 900,
+        "source_slow": 800,
+        "subnet_fast": 700,
+        "issue_debt": 600,
+        "bad_proof": 500,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": [
+        "source_burst",
+        "source_sustained",
+        "network_burst",
+        "challenge_debt"
+      ]
+    },
+    {
+      "why": "the Argon capacity downgrade joins the reasons before the contributors",
+      "score": 700,
+      "weights": {
+        "source_fast": 100,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 500,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 100,
+      "global_level": 0,
+      "expected_reasons": [
+        "capacity_pressure",
+        "source_burst"
+      ]
+    },
+    {
+      "why": "no contributor is surfaced below a positive integer contribution",
+      "score": 0,
+      "weights": {
+        "source_fast": 100,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 9,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": []
+    },
+    {
+      "why": "velocity alone floors the action at argon32 (shared-IPv4 corroboration rule) and never hard-denies",
+      "score": 0,
+      "weights": {
+        "source_fast": 300,
+        "source_slow": 100,
+        "subnet_fast": 200,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 950,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": [
+        "hard_rate_limit",
+        "source_burst"
+      ],
+      "expected_action": "argon32"
+    },
+    {
+      "why": "velocity corroborated by bad_proof at its floor restores the hard deny",
+      "score": 0,
+      "weights": {
+        "source_fast": 300,
+        "source_slow": 100,
+        "subnet_fast": 200,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 950,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 300,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "expected_reasons": [
+        "hard_rate_limit",
+        "source_burst"
+      ],
+      "expected_action": "deny"
+    }
+  ],
+  "consumed_result_vectors": [
+    {
+      "result": {
+        "valid": true,
+        "binding": null
+      },
+      "accepted": true,
+      "why": "canonical boolean form"
+    },
+    {
+      "result": {
+        "valid": false,
+        "binding": "txn-1"
+      },
+      "accepted": true,
+      "why": "canonical boolean form with a binding"
+    },
+    {
+      "result": {
+        "valid": true
+      },
+      "accepted": true,
+      "why": "binding absent, which decodes as null in both languages"
+    },
+    {
+      "result": {
+        "valid": 1,
+        "binding": null
+      },
+      "accepted": true,
+      "why": "legacy integer true"
+    },
+    {
+      "result": {
+        "valid": 0,
+        "binding": "txn-1"
+      },
+      "accepted": true,
+      "why": "legacy integer false"
+    },
+    {
+      "result": {
+        "valid": "1",
+        "binding": null
+      },
+      "accepted": false,
+      "why": "string truthiness is never a boolean"
+    },
+    {
+      "result": {
+        "valid": 1.9,
+        "binding": null
+      },
+      "accepted": false,
+      "why": "non-integral number"
+    },
+    {
+      "result": {
+        "valid": 2,
+        "binding": null
+      },
+      "accepted": false,
+      "why": "out-of-range integer"
+    },
+    {
+      "result": {
+        "valid": -1,
+        "binding": null
+      },
+      "accepted": false,
+      "why": "negative integer"
+    },
+    {
+      "result": {
+        "valid": null,
+        "binding": null
+      },
+      "accepted": false,
+      "why": "null valid"
+    },
+    {
+      "result": {
+        "valid": true,
+        "binding": null,
+        "extra": 1
+      },
+      "accepted": false,
+      "why": "unknown key"
+    },
+    {
+      "result": {
+        "valid": true,
+        "binding": 7
+      },
+      "accepted": false,
+      "why": "non-string binding"
+    },
+    {
+      "result": [
+        true,
+        null
+      ],
+      "accepted": false,
+      "why": "array result, never an object"
+    }
+  ],
   "namespace_vectors": [
-  {
-    "raw": "prod",
-    "version": 1,
-    "derived": "prod",
-    "observation_keys": [
-      "{kiwi:prod}:risk:src:1700000000:bb22",
-      "{kiwi:prod}:risk:src:1699999999:aa11",
-      "{kiwi:prod}:risk:src:1700000001:cc33",
-      "{kiwi:prod}:risk:net:1700000900:ee55",
-      "{kiwi:prod}:risk:net:1700000899:dd44",
-      "{kiwi:prod}:risk:net:1700000901:ff66",
-      "{kiwi:prod}:risk:session:00000000000000000000000000000000",
-      "{kiwi:prod}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:prod}:risk:global",
-      "{kiwi:prod}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:prod}:outcome:dec-1"
+    {
+      "raw": "prod",
+      "version": 1,
+      "derived": "prod",
+      "observation_keys": [
+        "{kiwi:prod}:risk:src:1700000000:bb22",
+        "{kiwi:prod}:risk:src:1699999999:aa11",
+        "{kiwi:prod}:risk:src:1700000001:cc33",
+        "{kiwi:prod}:risk:net:1700000900:ee55",
+        "{kiwi:prod}:risk:net:1700000899:dd44",
+        "{kiwi:prod}:risk:net:1700000901:ff66",
+        "{kiwi:prod}:risk:session:00000000000000000000000000000000",
+        "{kiwi:prod}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:prod}:risk:global",
+        "{kiwi:prod}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:prod}:outcome:dec-1"
+    },
+    {
+      "raw": "tenant/a",
+      "version": 1,
+      "derived": "tenant_a",
+      "observation_keys": [
+        "{kiwi:tenant_a}:risk:src:1700000000:bb22",
+        "{kiwi:tenant_a}:risk:src:1699999999:aa11",
+        "{kiwi:tenant_a}:risk:src:1700000001:cc33",
+        "{kiwi:tenant_a}:risk:net:1700000900:ee55",
+        "{kiwi:tenant_a}:risk:net:1700000899:dd44",
+        "{kiwi:tenant_a}:risk:net:1700000901:ff66",
+        "{kiwi:tenant_a}:risk:session:00000000000000000000000000000000",
+        "{kiwi:tenant_a}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:tenant_a}:risk:global",
+        "{kiwi:tenant_a}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:tenant_a}:outcome:dec-1"
+    },
+    {
+      "raw": "tenant:a",
+      "version": 1,
+      "derived": "tenant_a",
+      "observation_keys": [
+        "{kiwi:tenant_a}:risk:src:1700000000:bb22",
+        "{kiwi:tenant_a}:risk:src:1699999999:aa11",
+        "{kiwi:tenant_a}:risk:src:1700000001:cc33",
+        "{kiwi:tenant_a}:risk:net:1700000900:ee55",
+        "{kiwi:tenant_a}:risk:net:1700000899:dd44",
+        "{kiwi:tenant_a}:risk:net:1700000901:ff66",
+        "{kiwi:tenant_a}:risk:session:00000000000000000000000000000000",
+        "{kiwi:tenant_a}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:tenant_a}:risk:global",
+        "{kiwi:tenant_a}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:tenant_a}:outcome:dec-1"
+    },
+    {
+      "raw": "/a/b_c",
+      "version": 1,
+      "derived": "_a_b_c",
+      "observation_keys": [
+        "{kiwi:_a_b_c}:risk:src:1700000000:bb22",
+        "{kiwi:_a_b_c}:risk:src:1699999999:aa11",
+        "{kiwi:_a_b_c}:risk:src:1700000001:cc33",
+        "{kiwi:_a_b_c}:risk:net:1700000900:ee55",
+        "{kiwi:_a_b_c}:risk:net:1700000899:dd44",
+        "{kiwi:_a_b_c}:risk:net:1700000901:ff66",
+        "{kiwi:_a_b_c}:risk:session:00000000000000000000000000000000",
+        "{kiwi:_a_b_c}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:_a_b_c}:risk:global",
+        "{kiwi:_a_b_c}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:_a_b_c}:outcome:dec-1"
+    },
+    {
+      "raw": "/a_b/c",
+      "version": 1,
+      "derived": "_a_b_c",
+      "observation_keys": [
+        "{kiwi:_a_b_c}:risk:src:1700000000:bb22",
+        "{kiwi:_a_b_c}:risk:src:1699999999:aa11",
+        "{kiwi:_a_b_c}:risk:src:1700000001:cc33",
+        "{kiwi:_a_b_c}:risk:net:1700000900:ee55",
+        "{kiwi:_a_b_c}:risk:net:1700000899:dd44",
+        "{kiwi:_a_b_c}:risk:net:1700000901:ff66",
+        "{kiwi:_a_b_c}:risk:session:00000000000000000000000000000000",
+        "{kiwi:_a_b_c}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:_a_b_c}:risk:global",
+        "{kiwi:_a_b_c}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:_a_b_c}:outcome:dec-1"
+    },
+    {
+      "raw": "tënänt/日本",
+      "version": 1,
+      "derived": "t__n__nt_______",
+      "observation_keys": [
+        "{kiwi:t__n__nt_______}:risk:src:1700000000:bb22",
+        "{kiwi:t__n__nt_______}:risk:src:1699999999:aa11",
+        "{kiwi:t__n__nt_______}:risk:src:1700000001:cc33",
+        "{kiwi:t__n__nt_______}:risk:net:1700000900:ee55",
+        "{kiwi:t__n__nt_______}:risk:net:1700000899:dd44",
+        "{kiwi:t__n__nt_______}:risk:net:1700000901:ff66",
+        "{kiwi:t__n__nt_______}:risk:session:00000000000000000000000000000000",
+        "{kiwi:t__n__nt_______}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:t__n__nt_______}:risk:global",
+        "{kiwi:t__n__nt_______}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:t__n__nt_______}:outcome:dec-1"
+    },
+    {
+      "raw": "prod",
+      "version": 2,
+      "derived": "n_6754af9632a2745e85c293e5aac08633",
+      "observation_keys": [
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1700000000:bb22",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1699999999:aa11",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1700000001:cc33",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000900:ee55",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000899:dd44",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000901:ff66",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:session:00000000000000000000000000000000",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:global",
+        "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:n_6754af9632a2745e85c293e5aac08633}:outcome:dec-1"
+    },
+    {
+      "raw": "tenant/a",
+      "version": 2,
+      "derived": "n_584a11c77f870c594a006addb001b6af",
+      "observation_keys": [
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1700000000:bb22",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1699999999:aa11",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1700000001:cc33",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000900:ee55",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000899:dd44",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000901:ff66",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:session:00000000000000000000000000000000",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:global",
+        "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:n_584a11c77f870c594a006addb001b6af}:outcome:dec-1"
+    },
+    {
+      "raw": "tenant:a",
+      "version": 2,
+      "derived": "n_17a3e3a826ddc810fcba7c515438c955",
+      "observation_keys": [
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1700000000:bb22",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1699999999:aa11",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1700000001:cc33",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000900:ee55",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000899:dd44",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000901:ff66",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:session:00000000000000000000000000000000",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:global",
+        "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:outcome:dec-1"
+    },
+    {
+      "raw": "/a/b_c",
+      "version": 2,
+      "derived": "n_df04c2002ded3c11edb9c0bb36718086",
+      "observation_keys": [
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1700000000:bb22",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1699999999:aa11",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1700000001:cc33",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000900:ee55",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000899:dd44",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000901:ff66",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:session:00000000000000000000000000000000",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:global",
+        "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:outcome:dec-1"
+    },
+    {
+      "raw": "/a_b/c",
+      "version": 2,
+      "derived": "n_a6812404345a6b15a24d92f8ad62d205",
+      "observation_keys": [
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1700000000:bb22",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1699999999:aa11",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1700000001:cc33",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000900:ee55",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000899:dd44",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000901:ff66",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:session:00000000000000000000000000000000",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:global",
+        "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:outcome:dec-1"
+    },
+    {
+      "raw": "tënänt/日本",
+      "version": 2,
+      "derived": "n_b48c4fcfb774fee4fc5f08704b886099",
+      "observation_keys": [
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1700000000:bb22",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1699999999:aa11",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1700000001:cc33",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000900:ee55",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000899:dd44",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000901:ff66",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:session:00000000000000000000000000000000",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:principal:00000000000000000000000000000000",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:global",
+        "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:dedupe:0123abcd"
+      ],
+      "outcome_ledger_key": "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:outcome:dec-1"
+    }
+  ],
+  "invalid_store_configuration": {
+    "note": "The store-configuration invariants both language boundaries enforce identically: every state/session/principal/dedupe/outcome TTL, epoch window and hysteresis window must be a positive integer (>= 1) and every saturation must be positive. A non-positive value would write a persistent risk hash (the Lua save() zero-skip), issue an invalid `SET ... EX 0`, immediately delete the record, or produce nonsensical epoch behaviour. The PHP RedisRiskStateStore constructor throws InvalidArgumentException and the Rust RedisRiskStateStore::with_options panics for every vector here.",
+    "defaults": {
+      "state_ttl_secs": 1800,
+      "dedupe_ttl_secs": 60,
+      "hysteresis_ms": 60000,
+      "session_ttl_secs": 1800,
+      "principal_ttl_secs": 86400,
+      "outcome_ttl_secs": 86400
+    },
+    "vectors": [
+      {
+        "name": "state_ttl_zero",
+        "knob": "state_ttl_secs",
+        "value": 0
+      },
+      {
+        "name": "state_ttl_negative",
+        "knob": "state_ttl_secs",
+        "value": -1
+      },
+      {
+        "name": "session_ttl_zero",
+        "knob": "session_ttl_secs",
+        "value": 0
+      },
+      {
+        "name": "principal_ttl_zero",
+        "knob": "principal_ttl_secs",
+        "value": 0
+      },
+      {
+        "name": "dedupe_ttl_zero",
+        "knob": "dedupe_ttl_secs",
+        "value": 0
+      },
+      {
+        "name": "outcome_ttl_zero",
+        "knob": "outcome_ttl_secs",
+        "value": 0
+      },
+      {
+        "name": "hysteresis_zero",
+        "knob": "hysteresis_ms",
+        "value": 0
+      },
+      {
+        "name": "saturation_zero",
+        "knob": "saturation_0",
+        "value": 0
+      }
+    ]
   },
-  {
-    "raw": "tenant/a",
-    "version": 1,
-    "derived": "tenant_a",
-    "observation_keys": [
-      "{kiwi:tenant_a}:risk:src:1700000000:bb22",
-      "{kiwi:tenant_a}:risk:src:1699999999:aa11",
-      "{kiwi:tenant_a}:risk:src:1700000001:cc33",
-      "{kiwi:tenant_a}:risk:net:1700000900:ee55",
-      "{kiwi:tenant_a}:risk:net:1700000899:dd44",
-      "{kiwi:tenant_a}:risk:net:1700000901:ff66",
-      "{kiwi:tenant_a}:risk:session:00000000000000000000000000000000",
-      "{kiwi:tenant_a}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:tenant_a}:risk:global",
-      "{kiwi:tenant_a}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:tenant_a}:outcome:dec-1"
-  },
-  {
-    "raw": "tenant:a",
-    "version": 1,
-    "derived": "tenant_a",
-    "observation_keys": [
-      "{kiwi:tenant_a}:risk:src:1700000000:bb22",
-      "{kiwi:tenant_a}:risk:src:1699999999:aa11",
-      "{kiwi:tenant_a}:risk:src:1700000001:cc33",
-      "{kiwi:tenant_a}:risk:net:1700000900:ee55",
-      "{kiwi:tenant_a}:risk:net:1700000899:dd44",
-      "{kiwi:tenant_a}:risk:net:1700000901:ff66",
-      "{kiwi:tenant_a}:risk:session:00000000000000000000000000000000",
-      "{kiwi:tenant_a}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:tenant_a}:risk:global",
-      "{kiwi:tenant_a}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:tenant_a}:outcome:dec-1"
-  },
-  {
-    "raw": "/a/b_c",
-    "version": 1,
-    "derived": "_a_b_c",
-    "observation_keys": [
-      "{kiwi:_a_b_c}:risk:src:1700000000:bb22",
-      "{kiwi:_a_b_c}:risk:src:1699999999:aa11",
-      "{kiwi:_a_b_c}:risk:src:1700000001:cc33",
-      "{kiwi:_a_b_c}:risk:net:1700000900:ee55",
-      "{kiwi:_a_b_c}:risk:net:1700000899:dd44",
-      "{kiwi:_a_b_c}:risk:net:1700000901:ff66",
-      "{kiwi:_a_b_c}:risk:session:00000000000000000000000000000000",
-      "{kiwi:_a_b_c}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:_a_b_c}:risk:global",
-      "{kiwi:_a_b_c}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:_a_b_c}:outcome:dec-1"
-  },
-  {
-    "raw": "/a_b/c",
-    "version": 1,
-    "derived": "_a_b_c",
-    "observation_keys": [
-      "{kiwi:_a_b_c}:risk:src:1700000000:bb22",
-      "{kiwi:_a_b_c}:risk:src:1699999999:aa11",
-      "{kiwi:_a_b_c}:risk:src:1700000001:cc33",
-      "{kiwi:_a_b_c}:risk:net:1700000900:ee55",
-      "{kiwi:_a_b_c}:risk:net:1700000899:dd44",
-      "{kiwi:_a_b_c}:risk:net:1700000901:ff66",
-      "{kiwi:_a_b_c}:risk:session:00000000000000000000000000000000",
-      "{kiwi:_a_b_c}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:_a_b_c}:risk:global",
-      "{kiwi:_a_b_c}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:_a_b_c}:outcome:dec-1"
-  },
-  {
-    "raw": "tënänt/日本",
-    "version": 1,
-    "derived": "t__n__nt_______",
-    "observation_keys": [
-      "{kiwi:t__n__nt_______}:risk:src:1700000000:bb22",
-      "{kiwi:t__n__nt_______}:risk:src:1699999999:aa11",
-      "{kiwi:t__n__nt_______}:risk:src:1700000001:cc33",
-      "{kiwi:t__n__nt_______}:risk:net:1700000900:ee55",
-      "{kiwi:t__n__nt_______}:risk:net:1700000899:dd44",
-      "{kiwi:t__n__nt_______}:risk:net:1700000901:ff66",
-      "{kiwi:t__n__nt_______}:risk:session:00000000000000000000000000000000",
-      "{kiwi:t__n__nt_______}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:t__n__nt_______}:risk:global",
-      "{kiwi:t__n__nt_______}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:t__n__nt_______}:outcome:dec-1"
-  },
-  {
-    "raw": "prod",
-    "version": 2,
-    "derived": "n_6754af9632a2745e85c293e5aac08633",
-    "observation_keys": [
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1700000000:bb22",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1699999999:aa11",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1700000001:cc33",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000900:ee55",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000899:dd44",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000901:ff66",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:session:00000000000000000000000000000000",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:global",
-      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:n_6754af9632a2745e85c293e5aac08633}:outcome:dec-1"
-  },
-  {
-    "raw": "tenant/a",
-    "version": 2,
-    "derived": "n_584a11c77f870c594a006addb001b6af",
-    "observation_keys": [
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1700000000:bb22",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1699999999:aa11",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1700000001:cc33",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000900:ee55",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000899:dd44",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000901:ff66",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:session:00000000000000000000000000000000",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:global",
-      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:n_584a11c77f870c594a006addb001b6af}:outcome:dec-1"
-  },
-  {
-    "raw": "tenant:a",
-    "version": 2,
-    "derived": "n_17a3e3a826ddc810fcba7c515438c955",
-    "observation_keys": [
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1700000000:bb22",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1699999999:aa11",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1700000001:cc33",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000900:ee55",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000899:dd44",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000901:ff66",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:session:00000000000000000000000000000000",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:global",
-      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:outcome:dec-1"
-  },
-  {
-    "raw": "/a/b_c",
-    "version": 2,
-    "derived": "n_df04c2002ded3c11edb9c0bb36718086",
-    "observation_keys": [
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1700000000:bb22",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1699999999:aa11",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1700000001:cc33",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000900:ee55",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000899:dd44",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000901:ff66",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:session:00000000000000000000000000000000",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:global",
-      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:outcome:dec-1"
-  },
-  {
-    "raw": "/a_b/c",
-    "version": 2,
-    "derived": "n_a6812404345a6b15a24d92f8ad62d205",
-    "observation_keys": [
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1700000000:bb22",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1699999999:aa11",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1700000001:cc33",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000900:ee55",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000899:dd44",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000901:ff66",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:session:00000000000000000000000000000000",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:global",
-      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:outcome:dec-1"
-  },
-  {
-    "raw": "tënänt/日本",
-    "version": 2,
-    "derived": "n_b48c4fcfb774fee4fc5f08704b886099",
-    "observation_keys": [
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1700000000:bb22",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1699999999:aa11",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1700000001:cc33",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000900:ee55",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000899:dd44",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000901:ff66",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:session:00000000000000000000000000000000",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:principal:00000000000000000000000000000000",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:global",
-      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:dedupe:0123abcd"
-    ],
-    "outcome_ledger_key": "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:outcome:dec-1"
+  "identity_vectors": {
+    "note": "The canonical ephemeral-identity derivations shared by the PHP and Rust engines (README item 8). master_key is a 32-byte ASCII test master; both sides derive the per-context HKDF-SHA256 keys from it. The session vector pins the representation contract: cookie_hex is the browser representation (32 lowercase hex chars) and cookie_raw_hex is the decoded 16-byte material the HMAC must bind, so an implementation that HMACs the ASCII hex bytes derives a different expected_session_id and fails. expected_session_id is the first 16 bytes of HMAC-SHA256(session key, \"kiwi-risk-id-v1\\0sess\\0\" + epoch 0 big-endian + cookie_raw_hex bytes), hex-encoded. The source_ipv6 vector pins the /64 source masking added for IPv6 abuse-history retention.",
+    "master_key": "0123456789abcdef0123456789abcdef",
+    "session": {
+      "cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+      "cookie_raw_hex": "5ae1a4b8c0d1e2f30011223344556677",
+      "expected_session_id": "43248f0c5a95b9f183940f7af43f5161"
+    },
+    "principal": {
+      "material_utf8": "principal-42",
+      "expected_id": "83df3fc18cbcb30a3dca26d12ee95b05"
+    },
+    "source": {
+      "ip": "203.0.113.27",
+      "epoch": 1700000000,
+      "expected_id": "06bb7418c1364ffac3fdbae6333d6bfa"
+    },
+    "subnet": {
+      "ip": "203.0.113.27",
+      "epoch": 1700000000,
+      "expected_id": "2e857abbd6138664831e7e8d6caef168"
+    },
+    "source_ipv6": {
+      "ip": "2001:db8:1:2::99",
+      "sibling_ip": "2001:db8:1:2:ffff::1",
+      "other_ip": "2001:db8:1:3::99",
+      "epoch": 1700000000,
+      "expected_id": "03f32f73fec168cb16cca98897f3ac4d",
+      "expected_other_id": "a358995cd42933b2324489f20829ad16",
+      "note": "The source pseudonym is keyed by the IPv6 /64 (the full IPv4 address for v4): two hosts in the same /64 share the source pseudonym (expected_id) and a different /64 derives a different one (expected_other_id). This matches the server-side source budget (Issuer::canonicalSourceFamily) and prevents a /128-keyed source from rotating addresses for a fresh identity."
+    }
   }
-]
 }

@@ -74,14 +74,7 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
 
     public function classify(string $ip): NetworkFlags
     {
-        $bytes = @inet_pton($ip);
-        if ($bytes === false) {
-            throw new \InvalidArgumentException(sprintf('Invalid IP address: %s', $ip));
-        }
-        // IPv4-mapped IPv6 normalizes to the IPv4 form.
-        if (strlen($bytes) === 16 && substr($bytes, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff") {
-            $bytes = substr($bytes, 12, 4);
-        }
+        $bytes = self::normalizeFamilyBytes(self::packIp($ip, sprintf('Invalid IP address: %s', $ip)));
         $family = strlen($bytes) === 4 ? '4' : '6';
         $bits = strlen($bytes) * 8;
 
@@ -151,16 +144,29 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
         }
         $addr = substr($cidr, 0, $slash);
         $prefixRaw = substr($cidr, $slash + 1);
-        $prefix = filter_var($prefixRaw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
-        if ($prefix === false) {
+        // Canonical spelling only: `FILTER_VALIDATE_INT` trims surrounding
+        // whitespace and rejects leading zeros, while Rust's u8::parse
+        // trims nothing but accepts "+24"/"024"; the explicit canonical
+        // grammar makes both cores load the same operator config.
+        if (preg_match('/^(0|[1-9][0-9]*)$/D', $prefixRaw) !== 1) {
             throw new \InvalidArgumentException(sprintf('Invalid CIDR prefix: %s', $cidr));
         }
-        $bytes = @inet_pton($addr);
-        if ($bytes === false) {
-            throw new \InvalidArgumentException(sprintf('Invalid CIDR network address: %s', $cidr));
-        }
-        if (strlen($bytes) === 16 && substr($bytes, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff") {
-            $bytes = substr($bytes, 12, 4);
+        $prefix = (int) $prefixRaw;
+        $rawBytes = self::packIp($addr, sprintf('Invalid CIDR network address: %s', $cidr));
+        $bytes = self::normalizeFamilyBytes($rawBytes);
+        // A v6 spelling that canonicalizes to IPv4 (the mapped
+        // ::ffff:a.b.c.d form or the deprecated compatible ::a.b.c.d
+        // form, exactly the fold the walk applies) is stored as a v4
+        // entry with the prefix shifted by 96. Without this, an entry
+        // like ::ffff:192.0.2.0/120 was inserted into the v6 trie and
+        // could never match 192.0.2.x while a genuine v6 address under
+        // the same /32 was flagged; a prefix below /96 cannot address a
+        // v4 network and is refused.
+        if (\strlen($rawBytes) === 16 && \strlen($bytes) === 4) {
+            if ($prefix < 96) {
+                throw new \InvalidArgumentException(sprintf('Mapped IPv4 CIDR prefix %d is below /96: %s', $prefix, $cidr));
+            }
+            $prefix -= 96;
         }
         $maxBits = strlen($bytes) * 8;
         if ($prefix > $maxBits) {
@@ -206,5 +212,77 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
                 localRiskBucket: $blocked ? 255 : 0,
             ),
         ];
+    }
+
+    /**
+     * inet_pton with the classifier's input contract: zone ids and
+     * leading-zero dotted-quad octets are refused before the parser sees
+     * them, and the null-byte ValueError is mapped onto the documented
+     * InvalidArgumentException. The same rules guard the risk identity
+     * factory, so one literal cannot classify in one layer and fail in
+     * the other.
+     */
+    private static function packIp(string $ip, string $message): string
+    {
+        if (str_contains($ip, '%') || self::hasLeadingZeroOctet($ip)) {
+            throw new \InvalidArgumentException($message);
+        }
+        try {
+            $bytes = @inet_pton($ip);
+        } catch (\ValueError $e) {
+            throw new \InvalidArgumentException($message, 0, $e);
+        }
+        if ($bytes === false) {
+            throw new \InvalidArgumentException($message);
+        }
+
+        return $bytes;
+    }
+
+    /**
+     * IPv4-mapped and IPv4-compatible IPv6 addresses normalize to the
+     * 4-byte IPv4 form, except the unspecified :: and the loopback ::1.
+     * The risk identity factory applies the identical rule, so classify()
+     * and canonicalIp() never disagree on the family.
+     */
+    private static function normalizeFamilyBytes(string $bytes): string
+    {
+        if (strlen($bytes) !== 16) {
+            return $bytes;
+        }
+        $low = substr($bytes, 12, 4);
+        if (substr($bytes, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff") {
+            return $low;
+        }
+        if (substr($bytes, 0, 12) === str_repeat("\x00", 12)
+            && $low !== "\x00\x00\x00\x00"
+            && $low !== "\x00\x00\x00\x01") {
+            return $low;
+        }
+
+        return $bytes;
+    }
+
+    /**
+     * True when the literal carries a dotted-quad with a leading-zero
+     * octet (203.0.113.027, 0177.0.0.1); a single 0 octet stays valid.
+     */
+    private static function hasLeadingZeroOctet(string $ip): bool
+    {
+        if (!str_contains($ip, '.')) {
+            return false;
+        }
+        $colon = strrpos($ip, ':');
+        $quad = $colon === false ? $ip : substr($ip, $colon + 1);
+        if (preg_match('/^[0-9.]+$/', $quad) !== 1) {
+            return false;
+        }
+        foreach (explode('.', $quad) as $octet) {
+            if (strlen($octet) > 1 && $octet[0] === '0') {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

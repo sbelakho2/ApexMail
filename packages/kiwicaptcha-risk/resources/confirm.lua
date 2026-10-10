@@ -3,7 +3,7 @@
 --
 -- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     3
---   max Redis calls:      8 (2 GET + 1 DEL + 1 SET + 2 HINCRBYFLOAT +
+--   max Redis calls:      9 (2 GET + 1 DEL + 1 SET + 3 HINCRBYFLOAT +
 --                           1 EXPIRE + 1 HINCRBY)
 --   max collection cardinality: none (cjson decodes of the bounded
 --                           receipt/ledger strings only)
@@ -12,8 +12,25 @@
 --          {"scope","band","action","decision_hour","score","sampled"})
 -- KEYS[2]  DECISION-TIME calibration bucket for (receipt.scope,
 --          receipt.decision_hour) — confirmed outcomes are bucketed by
---          when the DECISION was made, never by confirmation time
--- KEYS[3]  outcome ledger entry (STRING, JSON {"o","scope","hour","score","w"})
+--          when the DECISION was made, never by confirmation time.
+--          Alongside the score sums it accumulates the per-sample clipped
+--          distances from the decision boundary T (BOUNDARY_T = 600, the
+--          sha20→argon16 edge in action.rs): legit_above_sum and
+--          abuse_below_sum, which calibration.lua averages.
+-- KEYS[3]  outcome ledger entry (STRING, JSON
+--          {"o","scope","hour","score","w","c","v"}), where `c` records
+--          whether THIS confirmation contributed a calibration sample
+--          (1) or was deliberately unsampled (0). correction.lua uses it
+--          to reverse bucket contributions exactly once; a legacy
+--          ledger without `c` reads as 0. `v` marks the writer
+--          generation: this (generation-2) writer sets v = 2 on EVERY
+--          first confirmation it writes, counted or deliberately
+--          unsampled (c=0). correction.lua reverses the clipped
+--          legit_above_sum / abuse_below_sum legs only for a counted
+--          v=2 sample (ledger.c == 1 AND ledger.v == 2); an unsampled
+--          ledger (c=0) only flips the outcome, and a legacy ledger
+--          (no v) only reverses the count/score sums, never the
+--          clipped legs.
 -- ARGV[1]  sampling mode: 0 = complete, 1 = random_sample, 2 = weighted
 -- ARGV[2]  weight (decimal string; required and validated when mode == 2)
 -- ARGV[3]  legitimate (0 = abuse, 1 = legitimate)
@@ -22,7 +39,11 @@
 -- ARGV[6]  expected scope (must equal receipt.scope)
 -- ARGV[7]  expected decision_hour (must equal receipt.decision_hour)
 --
--- ALL arguments are validated BEFORE any deletion or state change. The
+-- ALL arguments are validated BEFORE any read or deletion or state
+-- change (a corrupt receipt must not be deleted, and no ledger/bucket
+-- mutation may happen, when an argument is malformed): the sampling
+-- mode, the weighted-mode weight, the legitimate flag (exactly the
+-- canonical 0/1 strings) and both TTLs. The
 -- OUTCOME LEDGER is the exactly-once authority (always on, independent of
 -- calibration): PENDING -> LEGITIMATE/ABUSE exactly once; a second
 -- confirmation returns 0. Calibration is a downstream observer of the
@@ -39,6 +60,47 @@
 -- Invariant: one real-world outcome -> at most ONE reputation mutation
 -- (callers gate on status 1|2) and ZERO or ONE calibration sample.
 
+-- The decision boundary T shared with action.rs/score.rs: the first
+-- score of the Argon16 band (sha20 ends at 599). The clipped sums below
+-- measure a sample's distance on the wrong side of it.
+local BOUNDARY_T = 600
+
+local EXPIRY_CEILING_SECS = 2147483647
+
+local function ttl_out_of_bounds(value)
+    if value == nil or value < 1 or value > EXPIRY_CEILING_SECS then
+        return true
+    end
+    return value ~= math.floor(value)
+end
+
+-- ALL arguments are validated here, BEFORE the first read or write.
+local mode = tonumber(ARGV[1])
+if mode ~= 0 and mode ~= 1 and mode ~= 2 then
+    return redis.error_reply('invalid calibration mode')
+end
+
+local weight = 1
+if mode == 2 then
+    weight = tonumber(ARGV[2])
+    if not weight or weight <= 0 or weight ~= weight or weight == math.huge then
+        return redis.error_reply('invalid calibration weight')
+    end
+end
+
+if ARGV[3] ~= '0' and ARGV[3] ~= '1' then
+    return redis.error_reply('invalid legitimate flag')
+end
+
+local bucket_ttl = tonumber(ARGV[4])
+if ttl_out_of_bounds(bucket_ttl) then
+    return redis.error_reply('confirm: bucket_ttl_s must be a positive integer no greater than 2147483647')
+end
+local ledger_ttl = tonumber(ARGV[5])
+if ttl_out_of_bounds(ledger_ttl) then
+    return redis.error_reply('confirm: outcome_ttl_s must be a positive integer no greater than 2147483647')
+end
+
 local raw = redis.call('GET', KEYS[1])
 if not raw then
     return 0
@@ -51,19 +113,6 @@ end
 if tonumber(receipt.scope) ~= tonumber(ARGV[6])
    or tonumber(receipt.decision_hour or 0) ~= tonumber(ARGV[7]) then
     return 0
-end
-
-local mode = tonumber(ARGV[1])
-if mode ~= 0 and mode ~= 1 and mode ~= 2 then
-    return redis.error_reply('invalid calibration mode')
-end
-
-local weight = 1
-if mode == 2 then
-    weight = tonumber(ARGV[2])
-    if not weight or weight <= 0 or weight ~= weight or weight == math.huge then
-        return redis.error_reply('invalid calibration weight')
-    end
 end
 
 local ledger_raw = redis.call('GET', KEYS[3])
@@ -81,25 +130,63 @@ if mode == 1 and not sampled then
     status = 2
 end
 
-local outcome = tonumber(ARGV[3]) == 1 and 'L' or 'A'
+local outcome = ARGV[3] == '1' and 'L' or 'A'
+
+-- Score read + clamp here (before any mutation): the product guard below
+-- needs the exact bounded score 0..1000.
+local score = tonumber(receipt.score or 0)
+if score < 0 then score = 0 end
+if score > 1000 then score = 1000 end
+
+-- PRODUCT GUARD (pre-mutation, the calibration.lua non-finite-guard style):
+-- a finite-but-huge weight (>= ~1.7e305) makes score * weight overflow to
+-- +Inf, and HINCRBYFLOAT errors on a non-finite increment — AFTER the
+-- receipt DEL / ledger SET, with no rollback. Any product that is NaN or
+-- beyond ±1e100 (score is bounded 0..1000, so a legitimate product is
+-- bounded by ~1e100 for any weight a caller could legitimately supply as
+-- an inverse sampling probability) rejects the whole confirmation BEFORE
+-- the receipt is consumed, leaving every key untouched for a retry with a
+-- sane weight.
+if status == 1 then
+    local product = score * weight
+    if not (product == product) or product > 1e100 or product < -1e100 then
+        return redis.error_reply('invalid calibration weight product')
+    end
+end
 
 redis.call('DEL', KEYS[1])
 ledger.o = outcome
 ledger.w = weight
-redis.call('SET', KEYS[3], cjson.encode(ledger), 'EX', tonumber(ARGV[5]))
+-- The sample marker: exactly the confirmations that contributed a bucket
+-- sample (status 1) are reversible; an unsampled confirmation (status 2)
+-- must never reverse or re-add bucket contributions for a DIFFERENT
+-- decision (`c` reads as 0 on legacy ledgers).
+ledger.c = status == 1 and 1 or 0
+-- The writer-generation marker: EVERY first confirmation written by
+-- this (generation-2) writer sets v = 2, counted or deliberately
+-- unsampled (c=0). It records the writer, not that clipped terms were
+-- written: correction.lua reverses and redoes the clipped
+-- legit_above_sum / abuse_below_sum terms only when the sample was
+-- counted (c == 1) AND v == 2. An unsampled or legacy ledger never has
+-- its clipped legs reversed.
+ledger.v = 2
+redis.call('SET', KEYS[3], cjson.encode(ledger), 'EX', ledger_ttl)
 
 if status == 1 then
-    local score = tonumber(receipt.score or 0)
-    if score < 0 then score = 0 end
-    if score > 1000 then score = 1000 end
     if outcome == 'L' then
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_count', weight)
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_score_sum', score * weight)
+        local above = score - BOUNDARY_T
+        if above < 0 then above = 0 end
+        redis.call('HINCRBYFLOAT', KEYS[2], 'legit_above_sum', above * weight)
     else
         redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_count', weight)
         redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_score_sum', score * weight)
+        local below = BOUNDARY_T - score
+        if below < 0 then below = 0 end
+        redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_below_sum', below * weight)
     end
-    redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+    redis.call('EXPIRE', KEYS[2], bucket_ttl)
     if mode == 1 then
         redis.call('HINCRBY', KEYS[2], 'sample_resolved', 1)
     end

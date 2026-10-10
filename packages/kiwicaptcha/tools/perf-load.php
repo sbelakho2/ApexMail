@@ -293,6 +293,7 @@ function workerMode(array $argv, $out): int
             $keys = \KiwiCaptcha\Risk\RiskKeys::fromMaster($config->secretKey);
             $policy = \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
                 'version' => \KiwiCaptcha\Risk\RiskPolicy::CONTRACT_VERSION,
+        'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
                 'weights' => [],
                 'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
             ]);
@@ -358,7 +359,7 @@ function runPhase(string $phase, int $workers, int $perWorker, string $prefix, s
             $cmd[] = $poolFile;
         }
         $pipes = [];
-        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes); // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
+        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         if (!is_resource($proc)) {
             fwrite(STDERR, "perf-load: cannot spawn worker $id\n");
             exit(1);

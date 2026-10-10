@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KiwiCaptcha · Spiral Lock</title>
+  <link rel="stylesheet" href="../../kiwicaptcha-wasm/assets/widget.css">
+  <style>
+    :root { --page:#f5f7fa; --surface:#fff; --ink:#202733; --muted:#616b7b; --line:#dce1e8; --accent:#1663c7; --soft:#edf2f9; color-scheme:light; }
+    :root[data-theme="dark"] { --page:#0d1219; --surface:#161b22; --ink:#eff2f6; --muted:#a9b1bd; --line:#313945; --accent:#80b5ff; --soft:#1b2738; color-scheme:dark; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font:14px/1.6 Inter,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    button, select { font:inherit; }
+    button { cursor:pointer; }
+    button:focus-visible, select:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .wrap { max-width:1100px; margin:0 auto; padding:0 32px; }
+    header { border-bottom:1px solid var(--line); background:var(--surface); }
+    nav { min-height:80px; display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    .brand { display:flex; align-items:center; gap:12px; font-size:20px; font-weight:700; letter-spacing:-.04em; }
+    .brand .mark { width:32px; height:32px; }
+    .nav-end { display:flex; align-items:center; gap:16px; }
+    .version, .eyebrow { font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.09em; text-transform:uppercase; }
+    .version { color:var(--muted); }
+    .theme { min-height:40px; min-width:40px; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--ink); padding:7px 12px; }
+    .hero { padding:58px 0 34px; display:grid; grid-template-columns:1fr 1fr; align-items:center; gap:48px; }
+    .eyebrow { color:var(--accent); margin:0 0 18px; }
+    h1 { font-size:clamp(34px,4.4vw,52px); line-height:1.09; letter-spacing:-.055em; font-weight:650; margin:0 0 20px; max-width:10ch; }
+    .intro { color:var(--muted); max-width:39ch; font-size:15px; margin:0; }
+    .principles { display:flex; flex-wrap:wrap; gap:8px; margin:24px 0 0; }
+    .principles span { padding:4px 9px; border:1px solid var(--line); border-radius:6px; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); }
+    .specimen { padding:28px; background:var(--surface); border:1px solid var(--line); border-radius:22px; }
+    .specimen-head { display:flex; justify-content:space-between; align-items:center; gap:16px; padding-bottom:22px; border-bottom:1px solid var(--line); }
+    .specimen-head strong { font-weight:600; font-size:13px; }
+    .specimen-head span { font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); }
+    .widget-stage { min-height:204px; display:flex; justify-content:center; align-items:center; padding:28px 0; }
+    .widget-stage .kiwi-container { transition:max-width 180ms ease; }
+    .controls { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .controls label { color:var(--muted); font-size:11px; display:flex; flex-direction:column; gap:5px; }
+    select { width:100%; min-width:0; min-height:40px; background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:6px 9px; }
+    .preview-note { color:var(--muted); font-size:11px; margin:18px 0 0; }
+    .section-head { display:flex; justify-content:space-between; gap:16px; align-items:baseline; margin:16px 0; }
+    h2 { font-size:17px; font-weight:600; letter-spacing:-.025em; margin:0; }
+    .section-head p { font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); margin:0; }
+    .states { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .state-card { background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:18px; }
+    .state-card>p { color:var(--muted); font-size:11px; margin:0 0 14px; }
+    .state-card .kiwi-widget { padding:12px; gap:10px; border-radius:12px; }
+    .state-card .kiwi-icon-wrapper { width:30px; height:30px; flex-basis:30px; border-radius:9px; }
+    .state-card .kiwi-icon-wrapper svg { width:22px; height:22px; }
+    .state-card .kiwi-label { font-size:13px; }
+    .state-card .kiwi-timer { display:none; }
+    .optics { margin:28px 0 0; padding:24px 28px; background:var(--surface); border:1px solid var(--line); border-radius:16px; display:grid; grid-template-columns:1fr 1.8fr; align-items:center; gap:28px; }
+    .optics p { color:var(--muted); font-size:12px; margin:8px 0 0; max-width:32ch; }
+    .sizes { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    .size { display:flex; flex-direction:column; align-items:center; gap:12px; min-width:0; }
+    .size .mark { display:flex; align-items:center; height:64px; }
+    .size span { color:var(--muted); font:10px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .mark svg { width:100%; height:100%; display:block; }
+    footer { display:flex; justify-content:space-between; gap:16px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; padding:24px 0 32px; }
+    @media(max-width:780px) { .wrap{padding:0 20px}.hero{grid-template-columns:1fr;gap:28px;padding-top:34px}h1{max-width:16ch}.intro{max-width:52ch}.states{grid-template-columns:1fr}.state-card .kiwi-container{max-width:none}.optics{grid-template-columns:1fr}.version{display:none} }
+    @media(max-width:420px) { .wrap{padding:0 16px}.specimen{padding:18px}.brand{font-size:18px}.controls{gap:8px}.optics{padding:20px}.sizes{gap:8px}footer{flex-direction:column;gap:8px} }
+    @media(prefers-reduced-motion:reduce) { .widget-stage .kiwi-container{transition:none} }
+  </style>
+</head>
+<body>
+  <header><nav class="wrap" aria-label="Brand preview"><div class="brand"><span class="mark" data-size="32" aria-hidden="true"></span>KiwiCaptcha</div><div class="nav-end"><span class="version">Spiral Lock · v2</span><button class="theme" type="button" id="theme" aria-pressed="false">Dark theme</button></div></nav></header>
+  <main class="wrap">
+    <section class="hero" aria-labelledby="headline">
+      <div><p class="eyebrow">Computation → access</p><h1 id="headline">Security that stays out of the way.</h1><p class="intro">A quiet interface for a serious security engine. Automatic proof-of-work, clear status, and a simple path back when a check needs another try.</p><div class="principles"><span>Self-hosted</span><span>Monochrome mark</span><span>No puzzles</span></div></div>
+      <div class="specimen">
+        <div class="specimen-head"><strong>Verification widget</strong><span>INTERACTIVE PREVIEW</span></div>
+        <div class="widget-stage" id="stage"></div>
+        <div class="controls">
+          <label for="state">State<select id="state"><option value="done">Verified</option><option value="connecting">Connecting</option><option value="solving">Verifying</option><option value="failed">Failed</option><option value="expired">Expired</option><option value="kiwi:worker-unavailable">Unavailable</option><option value="kiwi:solver-mismatch">Version mismatch</option><option value="pending">Ready</option></select></label>
+          <label for="width">Container<select id="width"><option value="352">352 px · default</option><option value="320">320 px</option><option value="280">280 px</option><option value="240">240 px · compact</option></select></label>
+          <label for="language">Language<select id="language"><option value="en">English</option><option value="de">Deutsch</option><option value="fr">Français</option><option value="pt">Português</option><option value="pl">Polski</option><option value="ar">العربية</option></select></label>
+          <label for="scale">Text size<select id="scale"><option value="1">100%</option><option value="2">200%</option></select></label>
+        </div>
+        <p class="preview-note">Design preview. States are simulated; no proof or token is issued.</p>
+      </div>
+    </section>
+    <div class="section-head"><h2>Clear at every step.</h2><p>Status · work · recovery</p></div>
+    <section class="states" aria-label="Verification state examples">
+      <article class="state-card"><p>01 / Working quietly</p><div data-example="solving"></div></article>
+      <article class="state-card"><p>02 / Proof complete</p><div data-example="done"></div></article>
+      <article class="state-card"><p>03 / A clear next step</p><div data-example="expired"></div></article>
+    </section>
+    <section class="optics" aria-labelledby="optics-title"><div><h2 id="optics-title">One mark. Every size.</h2><p>A raised shackle and an open spiral. The same two strokes from favicon to wordmark.</p></div><div class="sizes"> <div class="size"><div class="mark" data-size="16" aria-hidden="true"></div><span>16 px</span></div><div class="size"><div class="mark" data-size="20" aria-hidden="true"></div><span>20 px</span></div><div class="size"><div class="mark" data-size="24" aria-hidden="true"></div><span>24 px</span></div><div class="size"><div class="mark" data-size="32" aria-hidden="true"></div><span>32 px</span></div><div class="size"><div class="mark" data-size="48" aria-hidden="true"></div><span>48 px</span></div><div class="size"><div class="mark" data-size="64" aria-hidden="true"></div><span>64 px</span></div></div></section>
+  </main>
+  <div class="wrap"><footer><span>KiwiCaptcha / Bel Consulting OÜ</span><span>Two strokes. Zero effects. currentColor.</span></footer></div>
+  <template id="mark-template"><!-- kiwi-mark:start -->
+<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M32 42 C32 35 43 35 43 42 C43 51 29 54 23 46 C16 36 25 28 35 29 C47 29 54 38 53 46 C52 56 43 60 31 59 C17 58 9 51 10 41 C10 33 16 28 21 28"/>
+    <path d="M22 25 V16 A10 10 0 0 1 42 16 V25"/>
+  </g>
+</svg>
+  <!-- kiwi-mark:end --></template>
+  <script>window.__kiwiCaptchaCore = { register: (name, module) => { if (name === 'locales') window.__kiwiPreviewLocales = module; } };</script>
+  <script src="../../kiwicaptcha-wasm/assets/widget-locales.js"></script>
+  <script>
+    const localeModule = window.__kiwiPreviewLocales;
+    delete window.__kiwiCaptchaCore;
+    delete window.__kiwiPreviewLocales;
+    const english = {
+      dir:'ltr', label:'Security Check', statusConnecting:'Connecting…', statusVerifying:'Verifying…', statusVerified:'Verification complete', statusFailed:'Verification failed', statusExpired:'Verification expired', statusWorkerUnavailable:'Check could not start', statusSolverMismatch:'Solver version mismatch',
+      badgeIdle:'Idle', badgeWait:'Wait', badgeWorking:'Working', badgeSuccess:'Success', badgeFailed:'Failed', badgeExpired:'Expired', badgeUnavailable:'Unavailable', badgeVersionError:'Version Error',
+      hintProtected:'Protected by KiwiCaptcha', hintVerified:'Proof-of-work verified locally.', hintClickRetry:'The connection failed. Press Retry to try again.', hintExpired:'The check expired. Press Retry to run it again.', hintWorker:'The security check could not start on this device. Press Retry to try again.', hintSolver:'The solver worker is out of date. Reload the page to load the current version.', retryButton:'Retry'
+    };
+    const states = {
+      pending:['label','badgeIdle','hintProtected'], connecting:['statusConnecting','badgeWait','hintProtected'], solving:['statusVerifying','badgeWorking','hintProtected'], done:['statusVerified','badgeSuccess','hintVerified'], failed:['statusFailed','badgeFailed','hintClickRetry'], expired:['statusExpired','badgeExpired','hintExpired'], 'kiwi:worker-unavailable':['statusWorkerUnavailable','badgeUnavailable','hintWorker'], 'kiwi:solver-mismatch':['statusSolverMismatch','badgeVersionError','hintSolver']
+    };
+    function mark() { const svg = document.querySelector('#mark-template').content.querySelector('svg').cloneNode(true); svg.setAttribute('aria-hidden','true'); svg.setAttribute('focusable','false'); return svg; }
+    function widget(state, lang='en') {
+      const pack = lang === 'en' ? english : localeModule.packs[lang];
+      const [label,badge,hint] = states[state];
+      const node = document.createElement('div'); node.className='kiwi-container';
+      node.innerHTML='<div class="kiwi-widget" role="group"><div class="kiwi-icon-wrapper" aria-hidden="true"></div><div class="kiwi-main"><div class="kiwi-top"><span class="kiwi-label"></span><span class="kiwi-badge"></span></div><div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar"></div></div><div class="kiwi-bottom"><p class="kiwi-info"></p><span class="kiwi-timer"></span><button class="kiwi-retry" type="button"></button></div></div></div>';
+      const card=node.firstElementChild; card.dataset.state=state; card.lang=lang; card.dir=pack.dir; card.setAttribute('aria-label',pack.label);
+      node.querySelector('.kiwi-icon-wrapper').appendChild(mark());
+      node.querySelector('.kiwi-label').textContent=pack[label]; node.querySelector('.kiwi-badge').textContent=pack[badge];
+      node.querySelector('.kiwi-info').textContent=pack[hint].replace('{msg}', pack.errConnection || 'connection');
+      node.querySelector('.kiwi-bar').dataset.progress=state==='done'?'100':state==='solving'?'40':'0';
+      if (state==='done') node.querySelector('.kiwi-timer').textContent='2:58';
+      const retry=node.querySelector('.kiwi-retry'); retry.textContent=pack.retryButton;
+      retry.addEventListener('click',()=>{document.querySelector('#state').value='connecting';render();});
+      return node;
+    }
+    function render() {
+      const stage=document.querySelector('#stage'); const node=widget(document.querySelector('#state').value,document.querySelector('#language').value);
+      node.style.maxWidth=document.querySelector('#width').value+'px'; node.style.setProperty('--kiwi-font-scale',document.querySelector('#scale').value); stage.replaceChildren(node);
+    }
+    document.querySelectorAll('[data-size]').forEach((el)=>{const svg=mark();svg.style.width=el.dataset.size+'px';svg.style.height=el.dataset.size+'px';el.appendChild(svg);});
+    document.querySelectorAll('[data-example]').forEach((el)=>el.appendChild(widget(el.dataset.example)));
+    document.querySelectorAll('.controls select').forEach((el)=>el.addEventListener('change',render));
+    document.querySelector('#theme').addEventListener('click',(event)=>{const dark=document.documentElement.dataset.theme!=='dark';document.documentElement.dataset.theme=dark?'dark':'light';event.currentTarget.setAttribute('aria-pressed',String(dark));event.currentTarget.textContent=dark?'Light theme':'Dark theme';});
+    render();
+  </script>
+</body>
+</html>

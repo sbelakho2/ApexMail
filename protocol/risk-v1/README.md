@@ -6,9 +6,7 @@ The Rust implementation (`packages/kiwicaptcha-risk`) and the PHP
 implementation (`packages/kiwicaptcha-risk-php`) MUST be byte-for-byte
 identical in:
 
-1) `RiskEventKind` — fixed enum, values 1..17 (the risk-v1 core; the
-   additive risk-v2 kinds 18..21 are documented in the "Risk Protocol v2
-   (additive)" section below):
+1) `RiskEventKind` — fixed enum, values 1..17:
 
    | value | name |
    |-------|------|
@@ -63,15 +61,6 @@ identical in:
 
    `Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 < Argon64 < StepUp < Deny`
 
-   Policy grammar (both parsers, identical acceptance set): the policy
-   config carries `global_floors` as the five canonical levels `0..4`,
-   each declared exactly once, with level 0 = `allow`. A missing,
-   partial, non-canonical or duplicated level is refused — neither
-   implementation substitutes a default for an operator-omitted level (a
-   silent substitution could swap an intended floor for a different
-   action), and a config one language refuses to load is never accepted
-   by the other.
-
    Default score bands (configurable in policy, hard floors on top):
 
    | band | action |
@@ -113,15 +102,27 @@ identical in:
                epoch.to_be_bytes() || material)
    ```
 
-   - source material: canonical IP bytes (family byte 0x04/0x06 + packed
-     bytes; IPv4-mapped IPv6 normalized to IPv4); context `b"src"`;
-     epoch = floor(now / 900).
+   - source material: canonical IP bytes with IPv6 masked to its /64
+     (family byte 0x04 or 0x06 + packed bytes, the bytes after the
+     prefix zeroed; IPv4 keeps the full address). A host controls at
+     least a /64, so a /128-keyed source would let it rotate addresses
+     for a fresh pseudonym on every request. IPv4-mapped IPv6 and the
+     deprecated IPv4-compatible `0::/96` form `::a.b.c.d` — excluding
+     the unspecified `::` and the loopback `::1` — normalize to the
+     4-byte IPv4 family first. The context is `b"src"`; the epoch is
+     floor(now / 900).
    - subnet material: masked canonical network (IPv4 /24, IPv6 /56) in the
      same family+bytes form; context `b"net"`; epoch = floor(now / 900).
    - session: HMAC over the raw 16-byte session cookie value; context
      `b"sess"`; no epoch.
    - principal: HMAC over the application principal ID bytes; context
      `b"prin"`; no epoch.
+
+    Rotation: only the source and subnet pseudonyms rotate with their
+    epochs. Session pseudonyms are stable for the lifetime of the session
+    cookie or its record TTL, and principal pseudonyms for the principal
+    TTL (`principal_ttl_s`, default 24 h). There is no per-request
+    rotation for either stable identity.
 
 9) State: leaky fixed-point counters (1000 = one unit) with the canonical
    Lua in `risk-v1.lua` (embedded verbatim by both implementations, loaded via
@@ -143,9 +144,67 @@ identical in:
 
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
+- `hysteresis-vectors.json`: shared scope-action hysteresis edge-fallback
+  vectors (authoritative). Both implementations iterate the identical
+  steps and must select identical actions.
+- `target-vectors.json`: shared target-identifier vectors (authoritative).
+    Both implementations run every input through the identical versioned
+    normalization pipeline and must derive the identical HMAC pseudonym.
+- `asn-vectors.json`: shared ASN-resolution vectors (authoritative).
+    Both implementations load the versioned sample dataset
+    (`protocol/asn/sample-asn.tsv`, digest pinned in the corpus) and must
+    resolve every query IP to the identical bucket id, with the identical
+    valid/malformed row accounting.
+- `trust-vectors.json`: shared context-bound-trust vectors
+    (authoritative). Both implementations must derive the identical
+    bucket id and credit decision (applied credit, home verdict) for
+    every recorded raw trust value.
 - `risk-v1.lua` — canonical Redis state script (authoritative, embedded).
-- `assess_v2.lua` — consolidated risk-v1+v2 assessment script
-  (authoritative, embedded; see the "Risk Protocol v2 (additive)" section).
+- `assess_v2.lua`: canonical consolidated assessment script (the full
+  risk-v1 observation plus the risk-v2 first-seen session tag records and
+  the outcome-ledger registration in ONE atomic invocation; authoritative,
+  embedded verbatim by both packages).
+- `calibration.lua`, `confirm.lua`, `correction.lua`,
+  `register_decision.lua`, `sampling_metrics.lua`,
+  `outcome_register.lua`, `outcome_confirm.lua`, `outcome_correct.lua`:
+  canonical calibration / outcome-ledger scripts (authoritative, embedded
+  verbatim by both packages).
+- `marks.lua`: the canonical long-memory outcome-mark write (one atomic
+  hash update under a refreshed whole-key TTL; authoritative, embedded
+  verbatim by both packages).
+- `trust.lua`: the canonical context-bound session-trust record (one
+  atomic read, credit or decay of `trust[session][asn_bucket]` under a
+  refreshed whole-key TTL aligned with the session dimension;
+  authoritative, embedded verbatim by both packages).
+- `outcomes-vectors.json`: shared typed-outcome mapping vectors
+  (authoritative). Both implementations resolve every vector to the
+  identical event channel, ledger action, mark behavior and polarity
+  decision.
+- `pricing-vectors.json`: shared continuous-pricing vectors
+  (authoritative). The header records the price model's consts table,
+  which both implementations must equal byte for byte, and every vector
+  carries the risk, value class, bucket trust and scope pressure inputs
+  plus the expected work score and ladder rung. Both implementations
+  (`RISK_PRICING_VECTORS_PATH` overrides the location) must resolve
+  every vector identically. The corpus ships 100000 vectors (grid
+  corners, a band-edge sweep and seeded interior draws) in the columnar
+  schema version 2; the committed generator at
+  packages/kiwicaptcha-risk-php/tools/gen-pricing-vectors.php
+  reproduces it and self-checks the previously shipped corpus
+- `quarantine-vectors.json`: shared quarantine-selection vectors
+  (authoritative). Quarantine is a decision disposition of the marks
+  stage, never a ladder rung: a server-confirmed spam identity (every
+  in-TTL own mark of the spamReported kind) with a clean request and a
+  plain Allow decision quarantines, wire-identical to allow. Every
+  vector carries the plain decision inputs plus the marks view and must
+  resolve to the identical action, quarantine flag, retry hint and
+  ordered reason list. The severity-monotonic precedence (deny, the
+  non-spam rung floor, the target step-up ceiling and any plain action
+  above Allow all outrank quarantine; an expired mark is inert) is part
+  of the pinned surface. Both implementations read the corpus with the
+  selection armed (the engine posture); the legacy
+  `attacker-denial-vectors.json` corpus keeps pinning the deny and rung
+  rules of the same stage with the selection off.
 
 12. Request vs feedback: only `PreIssue` (1) counts as a request. It
    increments `rf`/`rs` and the scope-switch channel. Feedback events
@@ -180,17 +239,29 @@ Files:
     `{kiwi:<ns>}:cal:receipt:<decision_id>` (EX = receipt TTL, default 300):
     `{"scope","band","action","score","sampled"}` — no IP or identity.
     Confirmation is atomic via the canonical `confirm.lua` (GET receipt →
-    validate → DEL receipt → `HINCRBYFLOAT` bucket → `EXPIRE` → return
-    scope); a confirmed outcome is either fully recorded or not consumed.
-    Bias is exact score calibration on class-normalized means. fp_mean =
-    legit_score_sum/legit_count, fn_mean = (abuse_count*1000 −
-    abuse_score_sum)/abuse_count, and error = fn_mean·fn_cost −
-    fp_mean·fp_cost. raw = (error*2)/10, clamped to ±max_adjustment, and
-    moved toward the
-    target through the proportional per-minute rate limiter (milli-points,
-    max change per minute). Below min_samples the target is 0 but the path
-    is still rate-limited. Applied to the score before band mapping in both
-    languages.
+    validate → DEL receipt → ledger CAS → `HINCRBYFLOAT` bucket →
+    `EXPIRE` → return status 0/1/2); a confirmed outcome is either fully
+    recorded or not consumed.
+    Bias is boundary-relative exact score calibration on class-normalized
+    means. T = 600 is the decision boundary where the default ladder
+    leaves the sha20 band and enters the first Argon band
+    (`action.rs`/`score.rs`). fp_mean = Σ max(0, legit_score − T) /
+    legit_count and fn_mean = Σ max(0, T − abuse_score) / abuse_count,
+    then error = fn_mean·fn_cost − fp_mean·fp_cost. The clipped sums
+    (`legit_above_sum`, `abuse_below_sum`) are accumulated at confirmation
+    for every counted sample and reversed/redone by correction only for a
+    counted v=2 sample (`ledger.c == 1` AND `ledger.v == 2`); an unsampled
+    (c=0) or legacy (no v) ledger leaves them untouched. A legacy bucket
+    without them contributes 0. raw = (error*2)/10, clamped to
+    ±max_adjustment, and moved toward the target through the proportional
+    per-minute rate limiter (milli-points, max change per minute). Below
+    min_samples the target is 0 but the path is still rate-limited.
+    Applied to the score before band mapping in both languages.
+
+    Label sources: only human- or support-verified outcomes may feed
+    `confirmOutcome`, never an automatic success signal such as any
+    successful login. A credentialed attacker can otherwise manufacture
+    "legitimate" labels and pull the calibration bias down.
     Sampling contract: at assessment time the engine marks each receipt
     `sampled` (mode complete → always; random_sample →
     random < sampling_probability_ppm; weighted → always, the application
@@ -201,20 +272,35 @@ Files:
 
 17. Outcome ledger (always on, independent of calibration):
     `{kiwi:<ns>}:outcome:<decision_id>` holds the decision's outcome state
-    as JSON `{"o":"P|L|A","scope","hour","score","w"}` (pending /
-    legitimate / abuse, exact decision score, recorded weight), EX =
-    outcome receipt TTL. Registration is atomic with the calibration
-    receipt + sample denominator (register_decision.lua: SET receipt NX
-    EX + pending ledger + sample_total `INCR` in the decision-hour
-    bucket); when calibration is disabled the store still registers the
-    ledger (outcome_register.lua). Confirmation performs a pending -> L/A
+    as JSON `{"o":"P|L|A","scope","hour","score","w","c","v"}` (pending /
+    legitimate / abuse, exact decision score, recorded weight, counted
+    flag `c`, writer generation `v`), EX = outcome receipt TTL. Registration is atomic with the
+    calibration receipt + sample denominator (register_decision.lua:
+    validate → SET receipt NX EX → pending ledger `SET NX EX` → gated
+    sample_total `INCR`). The ledger NX means a late re-registration can
+    never reset an authoritative L/A ledger to pending. When the ledger
+    already exists, the just-created receipt is removed and no second
+    denominator is booked. When calibration is disabled the store still
+    registers the ledger (outcome_register.lua). Confirmation performs a pending -> L/A
     CAS exactly once (confirm.lua / outcome_confirm.lua) and returns the
-    shared status 0/1/2. Reputation mutation is gated on 1|2, so
+    shared status 0/1/2; the confirm preserves the ledger's stored TTL
+    (`SET ... KEEPTTL`) instead of re-arming it. Reputation mutation is gated on 1|2, so
     ConfirmedLegitimate/ConfirmedAbuse work identically with or without
     calibration, and webhook retries can never amplify reputation.
-    Corrections flip the ledger (correction.lua / outcome_correct.lua):
-    the original bucket contribution is reversed using the recorded
-    weight and the corrected contribution added (clamped at zero). The
+    Corrections flip the ledger (correction.lua / outcome_correct.lua).
+    Arguments are validated first, and a pending ledger is refused: the
+    confirmation is the only transition out of pending. Only a counted
+    sample (`c == 1`; a missing marker reads as 0) reverses the original
+    bucket contribution, using the recorded weight, and adds the
+    corrected one (clamped at zero), so an unsampled decision never
+    deletes another decision's sample. The clipped legs are reversed and
+    redone only for a counted v=2 sample (`c == 1` AND `v == 2`). The
+    generation-2 writer stamps `v = 2` on every first confirmation it
+    writes, counted or deliberately unsampled c=0. A legacy ledger
+    (no `v`) reverses the count/score sums without touching the clipped
+    legs. `outcome_correct.lua` preserves
+    the stored TTL (`SET ... KEEPTTL`) instead of extending it on every
+    correction. The
     corrected outcome is authoritative for future events while the prior
     ephemeral reputation pressure decays naturally, so no synthetic
     identities are created. `record_feedback` rejects confirmation events
@@ -241,57 +327,57 @@ Files:
 
 20. Scope ids are u32 (1..=4294967295; 0 rejected) in both languages.
 
-## Risk Protocol v2 (additive)
+21. Policy table: the score bands are configurable, and the shared
+    `global_floors` plus per-scope `minimum`/`degraded` rows clamp the
+    result. A scope id the table does not list uses the `default_scope`
+    row (base risk 100, minimum/degraded sha20 unless the operator
+    overrides it) — never Allow. Velocity (`source_fast >= 950`)
+    records the HardRateLimit reason. It floors the action at Argon32.
+    A hard deny needs corroboration from another hard signal:
+    `bad_proof`, `malformed` or `replay >= 300`. A shared IPv4 address
+    (carrier NAT, office, campus) therefore cannot be denied on volume
+    alone, and a saturated argon backend re-escalates the floor to
+    StepUp.
 
-Risk-v2 extends the fixed enum additively — values 1..17 keep their
-risk-v1 meaning and are never renumbered. Both implementations
-(`packages/kiwicaptcha-risk/src/event.rs`,
-`packages/kiwicaptcha-risk-php/src/RiskEventKind.php`) ship 21 kinds;
-the PHP enum mirrors the Rust one kind-for-kind.
+22. ASN resolution (dataset plane): a free, redistributable dataset (a
+    public routing-table export or the free IPtoASN dataset) ships as a
+    versioned tab-separated file and is loaded from local disk; no
+    network call, no paid feed, ever. The loader accepts the
+    `first_ip last_ip asn` row shape, the extended
+    `first_ip last_ip asn cc registry allocated` shape and the
+    registry-first `registry first_ip last_ip asn cc allocated` shape.
+    Rows are read once into sorted interval tables and resolved by
+    binary search; a malformed row (unparsable IP, mixed family,
+    reversed range, an ASN outside 1..4294967294) is skipped and
+    counted, never fatal. Addresses follow the canonical IP rules of
+    item 8, so a v4-mapped or v4-compatible IPv6 resolves as its IPv4
+    address. Every load exposes the sha256 of the file bytes, the file
+    mtime (the doctor prints digest and age) and the row counts. Hot
+    reload parses the new file fully off to the side, optionally
+    verifies a caller-supplied digest and swaps the table atomically,
+    so a torn or rejected reload never serves a half-swapped table.
+    The reserved unlisted namespace encodes an unknown ASN as its own
+    bucket per prefix: `u4/<decimal /16 prefix>` for IPv4 and
+    `u6/<8 lowercase hex of the /32 prefix>` for IPv6; a listed ASN
+    encodes as `a<decimal asn>` (canonical decimal, no leading zeros).
+    Both cores mirror the identical grammar and the shared
+    `asn-vectors.json` pins it.
 
-| value | name | semantics |
-|-------|------|-----------|
-| 18 | HoneypotTriggered | A server-issued honeypot trap was filled by the client. |
-| 19 | DecoyEndpointTouched | A decoy (honeypot) endpoint was touched. |
-| 20 | DecoyFieldSubmitted | A server-issued decoy form field was submitted. |
-| 21 | ChallengeCancelled | A server-issued challenge was cancelled before any verification. |
-
-Semantics:
-
-- **18–20 (honeypot/decoy evidence)** ride the same observation path as
-  risk-v1 events (idempotency domain separation, dedupe receipt), but the
-  state script treats them as no-ops (like `RiskDenied`): the honeypot
-  signal itself is scored from the risk-v2 context, never from accumulated
-  state.
-- **21 (ChallengeCancelled)** is risk-neutral: the state script applies NO
-  change, so an issued-and-abandoned challenge keeps its issue-debt
-  contribution (`iss`), which decays naturally and is repaid only by an
-  actual `SolveSuccess`. The cancellation is a resource-lifecycle
-  operation (the record is terminalized and live-cap bookkeeping freed),
-  never a debt refund — cancellation is client-influenceable (the endpoint
-  accepts possession of a pending nonce), so it must never erase the
-  issued-but-unsolved signal. The kind is kept for replay/compat
-  compatibility.
-
-### `assess_v2.lua`
-
-The directory also ships `assess_v2.lua` — the consolidated assessment
-script (v4 semantics) used by both implementations (embedded by the Rust
-store and loaded by the PHP `RedisRiskStateStore`). ONE atomic assessment
-call performs the full risk-v1 observation plus the risk-v2 first-seen
-session records and the outcome-ledger registration:
-
-- The v1 observation body is byte-identical to `risk-v1.lua` — the v1
-  contract (13-signal vector, weights, fixed-point semantics) is
-  unchanged. The script only extends the key set, the argv set and the
-  return with the two ephemeral session records and the pending
-  outcome-ledger entry.
-- Additions over the v1 script: KEYS[11] session first-seen
-  client-context tag record (SET NX, first write wins), KEYS[12] session
-  first-seen trusted-edge TLS tag record (SET NX), KEYS[13] pending
-  outcome-ledger entry (SET NX EX, mirroring `outcome_register.lua`
-  byte-for-byte). Event kinds accepted: 1..21.
-- Script bounds: at most 13 keys touched and 26 fixed-cost Redis calls
-  (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE + 3 GET + 4 SET); no KEYS/SCAN/
-  EVAL nesting and no iteration over attacker-sized collections, so the
-  runtime is O(1) in state size regardless of traffic volume.
+23. Context-bound trust: trust earned by a session is stored per ASN
+    bucket, `trust[session][asn_bucket]`, through the canonical
+    `trust.lua` record (`trust:{kiwi:<ns>}:<session>:<bucket>`, the
+    session-dimension TTL, fixed-point trust leaking at 2 units per
+    second and clamped at the 10000 ceiling). A session presenting from
+    a bucket where it earned nothing gets zero credit there, full
+    credit in its home bucket(s): the applied credit is the bucket
+    local record alone (normalized with the identical
+    `floor(value * 1000 / saturation)` rule, saturation 10000). The
+    read op is pure, so a foreign presentation never reduces home
+    credit and a genuine home to mobile commute keeps trust. This
+    defeats shared-cookie botnets: a trusted cookie replayed from a
+    thousand foreign networks earns nothing. The risk-v1 observation
+    argv stays frozen, so the bucket layer rides an additive store
+    surface (like the marks). The assessment plane swaps the aggregate
+    session trust contribution for the bucket local credit when the
+    request context carries the session's ASN bucket, and the shared
+    `trust-vectors.json` pins the decisions both cores must derive.

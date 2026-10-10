@@ -34,8 +34,8 @@ final class ProtocolV2Test extends TestCase
                 't' => 1,
                 'p' => 1,
                 'targetBits' => 8,
-                'salt' => 'c2FsdA==',
-                'prefix' => 'prefix',
+                'salt' => 'c2FsdHNhbHRzYWx0c2FsdA==',
+                'prefix' => 'challenge|c2FsdHNhbHRzYWx0c2FsdA==|',
                 'challenge' => 'challenge',
                 'minDurationMs' => 0,
             ], $overrides)
@@ -96,6 +96,7 @@ final class ProtocolV2Test extends TestCase
     public function testCanonicalPayloadExactFormat(): void
     {
         $canonical = Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -114,7 +115,7 @@ final class ProtocolV2Test extends TestCase
         // unset), policy_version, request_binding (empty when unset),
         // issuer (empty when unset), and the final kid segment (default
         // 1), byte-identical to the Rust canonical_signing_input_v2.
-        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1', $canonical);
+        self::assertSame('v4|2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1', $canonical);
     }
 
     public function testCanonicalPayloadCarriesIssuerThenKidAsFinalSegments(): void
@@ -123,6 +124,7 @@ final class ProtocolV2Test extends TestCase
         // final canonical field; issuer "prod" + kid 3 end the canonical
         // with |prod|3.
         $canonical = Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -142,12 +144,13 @@ final class ProtocolV2Test extends TestCase
             3,
         );
 
-        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||2|txn-1|prod|3', $canonical);
+        self::assertSame('v4|2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||2|txn-1|prod|3', $canonical);
     }
 
     public function testCanonicalPayloadKidDefaultsToOne(): void
     {
         $canonical = Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -162,7 +165,7 @@ final class ProtocolV2Test extends TestCase
             5,
         );
 
-        self::assertStringEndsWith('|1', $canonical, 'kid defaults to 1 and is always the final canonical field');
+        self::assertStringEndsWith('|1', $canonical, 'kid defaults to 1 and is the final base canonical field');
     }
 
     public function testNewRecordDefaultsToProtocolV2(): void
@@ -240,12 +243,13 @@ final class ProtocolV2Test extends TestCase
         $issuer = new \KiwiCaptcha\Issuer($config, $storage);
         $challenge = $issuer->issue('login', '192.168.1.5');
 
-        // The signed v2 canonical must carry an empty binding-tag
-        // segment (v2|nonce|scope|binding_tag|...).
+        // The signed revision-4 canonical must carry an empty
+        // binding-tag segment
+        // (v4|protocol_version|nonce|scope|binding_tag|...).
         $canonical = base64_decode(explode('.', $challenge->challenge)[0], true);
         $parts = explode('|', (string) $canonical);
-        self::assertSame('v2', $parts[0]);
-        self::assertSame('', $parts[3], 'binding-mode none must produce an empty binding tag');
+        self::assertSame('v4', $parts[0]);
+        self::assertSame('', $parts[4], 'binding-mode none must produce an empty binding tag');
 
         $verifier = new \KiwiCaptcha\Verifier($storage);
         $counter = 0;

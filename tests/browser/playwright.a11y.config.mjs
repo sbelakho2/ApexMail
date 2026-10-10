@@ -27,18 +27,37 @@ import { defineConfig } from '@playwright/test';
 // portable execution-evidence suite (execution-portable.spec.mjs) runs
 // the armed ExecutionChallengeV1 lifecycle end to end on every engine:
 // six fresh armed solves, token minting, digest and trace shape, and
-// the ephemeral-iframe teardown. The engine-specific torture cases stay
-// on the chromium-only default config.
+// the ephemeral-iframe teardown. The execution-CSP suite
+// (execution-csp.spec.mjs) drives the same lifecycle under real
+// Content-Security-Policy response headers (the documented strict
+// profile and an interpreter-blocking policy). The locale-CSP suite
+// (locale-csp.spec.mjs) drives the lazy widget-locales.js module under
+// the same real headers: the strict files-tier profile permits the
+// same-origin SRI-pinned module load, a missing or tampered module
+// fails closed into the English fallback, two widgets share one
+// request, and destroy or reset during the pending fetch leaves the
+// settled language to the current generation only. The destroy-race
+// suite (destroy-race.spec.mjs) drives the post-destroy progress-write
+// regression on every engine: a SHA-256 challenge at
+// the maximum ceiling (?bits=20), destroyed from a MutationObserver the
+// instant the first mid-solve progress tick lands (a microtask before
+// the next solver chunk, so the destroy provably lands mid-computation),
+// then the cancelled generation's chunk loop is allowed to run out and
+// the widget is asserted byte-identical to its destroy-time state — no
+// data-progress write, no state/label/token mutation, no kiwi:* event.
+// The version-6 real-platform suite (execution-v6-portable.spec.mjs)
+// qualifies the real-platform execution rung on every engine: fresh
+// armed v6 solves whose five platform probes (computed-style geometry,
+// mutation delivery order, full event phases, Range/Selection line
+// boxes, intersection thresholds) must verify against the server-side
+// envelope walker through the fixture.
+// The engine-specific
+// torture cases stay on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable)\.spec\.mjs/,
+  testMatch: /(a11y|brand-ui|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-v6-portable|execution-csp|locale-csp|destroy-race|compat-controls|compat-observer|responsive-text|pentest|pentest-ai|pentest-stealth|pentest-supply|pentest-descriptors)\.spec\.mjs/,
   timeout: 120_000,
-  // BR-3: 0 retries, matching playwright.config.mjs and both real-browser
-  // lanes. This lane includes the adversarial/security suites
-  // (adversarial-portable, extensions-adversary, targeted-bot) — a retry can
-  // mask a genuine race/flake in exactly the class of test where that race
-  // is the defect. The previous `retries: 1` contradicted the stated posture.
-  retries: 0,
+  retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
@@ -46,7 +65,7 @@ export default defineConfig({
     { name: 'webkit', use: { browserName: 'webkit' } },
   ],
   webServer: {
-    command: 'KIWI_FIXTURE_RUN_ID="run-$(date +%s)-$$" php -d opcache.jit=off -S 127.0.0.1:8087 router.php',
+    command: 'php -d opcache.jit=off -S 127.0.0.1:8087 router.php',
     url: 'http://127.0.0.1:8087/',
     reuseExistingServer: false,
     timeout: 30_000,

@@ -27,10 +27,11 @@ Byte-for-byte compatible with the reference implementation in
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))`.
   Every record field that shapes verification is covered by the HMAC, so
   a tampered record cannot pass.
-- Protocol v3/v4 extensions: a decoy-armed issuance appends
-  `|decoy_field` after `kid` (protocol 3); an execution-armed issuance
-  additionally appends `|execution_version|execution_commitment`, the
-  hex SHA-256 of the stored program (protocol 4). Armed issuance writes
+- Protocol v3/v4 extensions: a decoy-armed issuance appends the
+  tagged `|d={decoy_field}` segment after `kid` (protocol 3); an
+  execution-armed issuance additionally appends the tagged
+  `|e={execution_version},{execution_commitment}` segment, the hex
+  SHA-256 of the stored program (protocol 4). Armed issuance writes
   the higher version, and older verifiers reject the new version as
   unknown — the capability is inferable from `protocol_version`.
 - prefix = `challenge + "|" + salt + "|"`, with salt = base64 of 16 random bytes.
@@ -54,16 +55,23 @@ Byte-for-byte compatible with the reference implementation in
   `t >= 1`). PHP `Config` throws at construction and Rust issuance
   validates, so cross-language verification always works. SHA-256 mode has
   no such constraint.
-- counter bound: the browser/WASM solver caps at 5,000,000 hashes, so
-  `SolutionToken::decode()` rejects any counter longer than 7 digits or
-  above 5,000,000 (`counter exceeds solver maximum`). A huge counter is an
-  abuse probe rather than a solution.
+- counter bound: the browser/WASM solver caps its search at 20,000,000
+  hashes, so `SolutionToken::decode()` rejects any counter with more than 8
+  canonical digits or at/above 20,000,000 (`counter exceeds solver
+  maximum`). A huge counter is an abuse probe rather than a solution.
 - record validation: every field is validated on the verify path,
   including scope, TTL, binding, the algorithm-specific parameter profile
   (Argon2id `t >= 3 && p == 1`, `m_kib >= 8`, the verifier's structural
   minimum; issuance recommends 8192+ KiB, e.g. 8192 low-memory shared
   hosting or 65536 desktop), and the PoW result. Malformed or
   out-of-profile records fail closed with a distinguishable error.
+- Argon2id memory profile space: `Config` accepts only power-of-two
+  `mKib` values within 8..=65536 KiB (8192 low-memory, 16384/32768/65536
+  the named rungs), rejected at configuration time — never per request.
+  The restriction is protocol-wide so every verifier, including log2-only
+  bindings (e.g. Elixir's `argon2_elixir`), can rederive what any profile
+  mints; the verifier's structural record ceilings keep accepting any
+  signed 8..=65536 record.
 - clock skew tolerance: verification absorbs up to 5 s of host-clock
   skew (`Verifier::SKEW_TOLERANCE_US`) for the server-measured
   minimum-duration floor. A receipt time preceding issuance beyond the
@@ -172,7 +180,10 @@ $config = new Config(
     targetBits: 18,   // the ordinary default; 20 is the elevated rung (adaptive risk escalation)
 );
 
-// Argon2id mode requires t >= 3 and p == 1 (Config throws otherwise).
+// Argon2id mode requires t >= 3 and p == 1 (Config throws otherwise),
+// and mKib must be a power of two within 8..=65536 — the protocol
+// profile space every verifier can rederive (Config rejects others at
+// configuration time).
 // Recommended profiles: 8192 KiB low-memory (shared hosting) or 65536 KiB
 // desktop, always t: 3, p: 1:
 // $config = new Config(

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
+
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use Psr\Cache\CacheItemPoolInterface;
 
 /**
@@ -17,7 +20,7 @@ use Psr\Cache\CacheItemPoolInterface;
  * Three backends, in priority order:
  *
  *  1. Redis (atomic, cross-worker): when a Redis client is available, a
- *     single Lua script implements the audit's atomic sliding window for both
+ *     single Lua script implements the atomic sliding window for both
  *     the per-client ZSET and the deployment-global ZSET. `TIME` (the Redis
  *     server clock) drives the window, so all PHP-FPM workers share one
  *     consistent window and the enforcement is an exact gate. Redis is the
@@ -143,24 +146,40 @@ final class IssuanceRateLimiter
     private const GLOBAL_CACHE_KEY = 'kr_global';
 
     /**
-     * The namespace budget inside a PSR-6 key: the spec only guarantees
-     * implementations support keys up to 64 chars, and the namespaced
-     * shapes below are built to stay within that floor.
+     * The namespace segment of a PSR-6 key: a 24-hex digest of the
+     * complete namespace. A sanitized truncation is not injective.
+     * The sanitizer folds '-' and '_' onto one segment, and a prefix
+     * budget merges every namespace sharing its first bytes, so two
+     * deployments on one shared pool could consume each other's
+     * per-client and global budgets. The digest distinguishes every
+     * distinct namespace, uses only the PSR-6-guaranteed hex alphabet,
+     * and keeps the per-client key inside the 64-character portability
+     * bound the spec guarantees: 'kr_' + 24 segment hex + '_' + 36
+     * identity hex.
      */
-    private const NS_KEY_BUDGET = 20;
-
     /**
-     * The namespace segment of a PSR-6 key: the already sanitized
-     * namespace, truncated to the key budget, with any character outside
-     * PSR-6's guaranteed-supported set, A-Z a-z 0-9 _ . — note the
-     * namespace sanitizer permits '-', which Redis keys allow but strict
-     * pools may reject — folded to '_'. Two deployments whose sanitized
-     * prefixes agree after this mapping share a key segment. Distinct
-     * deployments on one shared pool must differ within it.
+     * The Redis key-family tag: the encoded namespace of the configured
+     * key version, or the legacy literal when no namespace is configured
+     * (the shared no-namespace family an operator opts into by leaving
+     * the discriminator empty).
      */
-    private static function namespaceKeySegment(string $namespace): string
+    private function rlTag(): string
     {
-        return (string) preg_replace('/[^A-Za-z0-9_.]/', '_', substr($namespace, 0, self::NS_KEY_BUDGET));
+        return $this->namespace !== '' ? RedisNamespace::derive($this->namespace, $this->namespaceKeyVersion) : '';
+    }
+
+    private function namespaceKeySegment(string $namespace): string
+    {
+        // The PSR-6 segment is derived from the same encoded namespace
+        // as the Redis tag, so the two families agree on the deployment
+        // identity. The legacy key version keeps its historical shape:
+        // the first 24 hex chars of the SHA-256 of the sanitized
+        // namespace. The digest version strips the `n_` prefix.
+        $derived = RedisNamespace::derive($namespace, $this->namespaceKeyVersion);
+
+        return $this->namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+            ? substr($derived, 2, 24)
+            : substr(hash('sha256', $derived), 0, 24);
     }
 
     /**
@@ -176,12 +195,12 @@ final class IssuanceRateLimiter
      * namespaced key vs a legacy 'kr_global'/'kr_'-hex key) can ever
      * collide.
      */
-    private static function cacheKey(string $identity, string $namespace): string
+    private function cacheKey(string $identity, string $namespace): string
     {
         if ($namespace === '') {
             return self::CACHE_KEY_PREFIX.substr($identity, 0, 60);
         }
-        $ns = self::namespaceKeySegment($namespace);
+        $ns = $this->namespaceKeySegment($namespace);
 
         // 64 - 'kr_' - ns - '_' hex chars, floored at a still-safe 160
         // bits of the keyed HMAC (the identity is 256-bit; truncation
@@ -218,7 +237,8 @@ final class IssuanceRateLimiter
      *              cap: at most globalMax members ever coexist, whatever
      *              the window length or request volume).
      *   ARGV[1]  = per-client max.
-     *   ARGV[2]  = global max.
+     *   ARGV[2]  = global max; 0 disables the global window entirely
+     *              (no global member is written).
      *   ARGV[3]  = window in ms.
      *   ARGV[4]  = unique request id, the per-client member.
      *   ARGV[5]  = unique request id, the global member (the same
@@ -243,14 +263,21 @@ final class IssuanceRateLimiter
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[3])
+-- ARGV[2] = 0 disables the global window entirely: the global ZSET is
+-- neither pruned, counted nor written, so a disabled cap can never grow
+-- an unbounded deployment-wide set (the cardinality doc bounds it only
+-- when the cap is live).
+local globalEnabled = tonumber(ARGV[2]) > 0
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+if globalEnabled then redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff) end
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
+if globalEnabled and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[1], now, ARGV[4])
-redis.call('ZADD', KEYS[2], now, ARGV[5])
+if globalEnabled then
+    redis.call('ZADD', KEYS[2], now, ARGV[5])
+    redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
+end
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
-redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
@@ -275,16 +302,21 @@ LUA;
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[3])
+-- ARGV[2] = 0 disables the global window entirely (no global member is
+-- written; see LIMIT_SCRIPT).
+local globalEnabled = tonumber(ARGV[2]) > 0
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff)
+if globalEnabled then redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff) end
 if redis.call('ZCARD', KEYS[1]) + redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[2]) then return -1 end
+if globalEnabled and redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[2], now, ARGV[4])
-redis.call('ZADD', KEYS[3], now, ARGV[5])
+if globalEnabled then
+    redis.call('ZADD', KEYS[3], now, ARGV[5])
+    redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
+end
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
-redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
@@ -329,6 +361,7 @@ LUA;
         private readonly int $globalMax = 0,
         string $namespace = '',
         private readonly int $rateLimitRotationSecs = 0,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
         // A sliding window can cross at most ONE rotation boundary, so the
         // two-epoch (current + previous) accounting is only exact when the
@@ -340,11 +373,20 @@ LUA;
                 'a rotation shorter than the window would drop live hits from older epochs'
             );
         }
-        $this->namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: '';
+        // The namespace stays RAW: it is an identity discriminator,
+        // and both key families derive their Redis-safe segment from
+        // the complete original bytes (a digest), never from a
+        // replacement-sanitized value that would fold distinct
+        // namespaces onto one key family.
+        $this->namespace = $namespace;
+        $this->namespaceKeyVersion = $namespaceKeyVersion;
     }
 
-    /** @var string sanitized deployment namespace for Redis keys */
+    /** @var string raw deployment namespace (digested per key family, never sanitized) */
     private readonly string $namespace;
+
+    /** The key-version contract of the namespace derivation. */
+    private readonly int $namespaceKeyVersion;
 
     /**
      * @return bool true when the request may proceed
@@ -381,22 +423,7 @@ LUA;
             // deployment — see the class docblock).
             return $this->checkLocalGlobalOnly();
         }
-        // An unknown client IP must never bypass the limit: bucket it with
-        // the other unidentifiable clients instead (conservative, shared
-        // budget). The IP itself is never used as a key — only the HMAC.
-        // The identity is derived from canonical IP bytes (inet_pton with
-        // IPv4-mapped-IPv6 normalization), so two textual spellings of the
-        // same address (e.g. "2001:db8::1" vs "2001:0db8:0:0:0:0:0:1")
-        // produce the same pseudonym — matching the challenge binding tag.
-        if ($clientIp === '') {
-            $identity = 'unknown';
-        } else {
-            try {
-                $identity = \KiwiCaptcha\Issuer::canonicalIpFamily($clientIp);
-            } catch (\InvalidArgumentException) {
-                $identity = 'unknown';
-            }
-        }
+        $identity = $this->perClientIdentity($clientIp);
 
         if ($this->rateLimitRotationSecs > 0) {
             // Epoch-rotated pseudonym: HMAC(pepper, "kiwi-rate-v2|epoch|
@@ -460,19 +487,53 @@ LUA;
         return hash_hmac('sha256', 'kiwi-rate-v2|'.$epoch.'|'.$identity, $this->pepper);
     }
 
+    /**
+     * The per-client limiter identity of one reported address.
+     *
+     * An unknown or unparseable address must never bypass the limit: it
+     * is bucketed with the other unidentifiable clients ('unknown',
+     * conservative shared budget). The IP itself is never a key — only
+     * its HMAC under the configured pepper.
+     *
+     * IPv4 is keyed by the full address; IPv6 is keyed by the /64
+     * prefix. A host controls at least a /64, so a /128-keyed budget
+     * lets it rotate source addresses and take a fresh per-request
+     * budget on every request (only the deployment-wide cap would
+     * remain). The /64 bucket restores a meaningful per-client limit
+     * while the canonical-bytes derivation still folds equivalent
+     * spellings and IPv4-mapped forms exactly like the challenge
+     * binding tag. The binding tag itself keeps the full /128.
+     */
+    private function perClientIdentity(string $clientIp): string
+    {
+        if ($clientIp === '') {
+            return 'unknown';
+        }
+        try {
+            // The shared source identity: full IPv4, /64 IPv6 (the same
+            // derivation OutstandingChallenges and the risk source
+            // pseudonym use, so every layer keys one address the same
+            // way).
+            return \KiwiCaptcha\Issuer::canonicalSourceFamily($clientIp);
+        } catch (\InvalidArgumentException) {
+            return 'unknown';
+        }
+    }
+
     private function checkRedisRotated(string $identityPrev, string $identityCur): int
     {
         // Only the client keys are epoch-rotated. The global key contains
         // no client identity and is shared by every client — rotating it
         // would silently turn the deployment-wide budget into per-client
         // budgets.
-        $clientPrev = '{kiwi:rl:'.$this->namespace.'}:client:'.$identityPrev;
-        $clientCur = '{kiwi:rl:'.$this->namespace.'}:client:'.$identityCur;
-        $global = '{kiwi:rl:'.$this->namespace.'}:global';
+        $tag = $this->rlTag();
+        $clientPrev = '{kiwi:rl:'.$tag.'}:client:'.$identityPrev;
+        $clientCur = '{kiwi:rl:'.$tag.'}:client:'.$identityCur;
+        $global = '{kiwi:rl:'.$tag.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
-        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : 0;
 
         $result = $this->eval(self::LIMIT_SCRIPT_ROTATED, [$clientPrev, $clientCur, $global], [
             (string) $clientMax,
@@ -511,9 +572,9 @@ LUA;
 
     private function checkRedisGlobalOnly(): int
     {
-        $globalKey = '{kiwi:rl:'.$this->namespace.'}:global';
+        $globalKey = '{kiwi:rl:'.$this->rlTag().'}:global';
         $windowMs = $this->windowSecs * 1000;
-        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : 0;
         $requestId = bin2hex(random_bytes(16));
 
         $result = $this->eval(self::LIMIT_SCRIPT_GLOBAL_ONLY, [$globalKey], [
@@ -637,7 +698,7 @@ LUA;
     {
         $now = $this->now();
 
-        $item = $this->pool->getItem(self::cacheKey($key, $this->namespace));
+        $item = $this->pool->getItem($this->cacheKey($key, $this->namespace));
         $state = $item->isHit() ? $item->get() : null;
         $hits = $this->prune(\is_array($state) ? $this->timestamps($state) : [], $now);
 
@@ -696,8 +757,8 @@ LUA;
     {
         $now = $this->now();
 
-        $itemPrev = $this->pool->getItem(self::cacheKey($identityPrev, $this->namespace));
-        $itemCur = $this->pool->getItem(self::cacheKey($identityCur, $this->namespace));
+        $itemPrev = $this->pool->getItem($this->cacheKey($identityPrev, $this->namespace));
+        $itemCur = $this->pool->getItem($this->cacheKey($identityCur, $this->namespace));
         $prevState = $itemPrev->isHit() ? $itemPrev->get() : null;
         $curState = $itemCur->isHit() ? $itemCur->get() : null;
         $prevHits = $this->prune(\is_array($prevState) ? $this->timestamps($prevState) : [], $now);
@@ -733,12 +794,13 @@ LUA;
 
     private function checkRedis(string $identity): int
     {
-        $clientKey = '{kiwi:rl:'.$this->namespace.'}:client:'.$identity;
-        $globalKey = '{kiwi:rl:'.$this->namespace.'}:global';
+        $tag = $this->rlTag();
+        $clientKey = '{kiwi:rl:'.$tag.'}:client:'.$identity;
+        $globalKey = '{kiwi:rl:'.$tag.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
-        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : 0;
 
         $result = $this->eval(self::LIMIT_SCRIPT, [$clientKey, $globalKey], [
             (string) $clientMax,
@@ -848,18 +910,23 @@ LUA;
 
     /**
      * Run a Lua script against whichever client implementation is in use.
+     * The script rides the typed seam's ordinary mutation lane,
+     * {@see RedisSecurityCommandExecutor::executeMutation()}: a
+     * rate-limit window is a non-final mutation. Under ha_authority
+     * pinned_primary it therefore serves within the guard's
+     * verification window, instead of being classified by the
+     * plain-EVAL shape as security-final (which would force an INFO +
+     * pin revalidation round trip per request). Without the wrapper
+     * the lane declaration is inert and the packing is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args
      */
     private function eval(string $script, array $keys, array $args): mixed
     {
-        if ($this->redis instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->redis->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
+        return ($this->luaSeam ??= new RedisSecurityCommandExecutor($this->redis))
+            ->executeMutation($script, $keys, $args);
     }
+
+    private ?RedisSecurityCommandExecutor $luaSeam = null;
 }

@@ -1,7 +1,9 @@
 //! Ephemeral identity derivation, byte-identical with the risk-v1 contract.
 //!
 //! - `canonical_ip`: family byte `0x04`/`0x06` + packed bytes; IPv4-mapped
-//!   IPv6 (`::ffff:a.b.c.d`) is normalized to the 4-byte IPv4 form.
+//!   IPv6 (`::ffff:a.b.c.d`) and the deprecated IPv4-compatible `0::/96`
+//!   form (`::a.b.c.d`, excluding `::` and `::1`) are normalized to the
+//!   4-byte IPv4 form.
 //! - `pseudonym`: first 16 bytes of
 //!   `HMAC-SHA256(key, "kiwi-risk-id-v1\0" || context || "\0" ||
 //!    epoch.to_be_bytes() || material)` (epoch big-endian 8 bytes).
@@ -14,12 +16,19 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use crate::keys::RiskKeys;
+use crate::RiskError;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// The ASN dimension's rotation window in seconds (six hours), per the
+/// risk-v2 identity contract file `protocol/risk-v2/identity.json`.
+pub const ASN_EPOCH_SECS: i64 = 21_600;
+
 /// Canonical IP form: family byte (`0x04`/`0x06`) + packed bytes.
 ///
-/// IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form.
+/// IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form, and so
+/// do the deprecated IPv4-compatible ones (`::a.b.c.d`), except the
+/// unspecified `::` and the loopback `::1`.
 pub fn canonical_ip(ip: IpAddr) -> Vec<u8> {
     match ip {
         IpAddr::V4(v4) => {
@@ -32,8 +41,10 @@ pub fn canonical_ip(ip: IpAddr) -> Vec<u8> {
             let octets = v6.octets();
             let mapped =
                 octets[..10].iter().all(|b| *b == 0) && octets[10] == 0xff && octets[11] == 0xff;
+            let low = u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+            let compatible = octets[..12].iter().all(|b| *b == 0) && low != 0 && low != 1;
             let mut out = Vec::with_capacity(17);
-            if mapped {
+            if mapped || compatible {
                 out.push(0x04);
                 out.extend_from_slice(&octets[12..]);
             } else {
@@ -101,6 +112,24 @@ pub fn masked_network(ip: IpAddr, ipv4_prefix: u8, ipv6_prefix: u8) -> Vec<u8> {
 /// Derives the epoch-scoped source/subnet pseudonyms and the stable
 /// session/principal pseudonyms, mirroring the PHP `RiskIdentityFactory`.
 ///
+/// # Rotation
+///
+/// Only the source and subnet pseudonyms rotate with their epochs:
+/// source epochs follow `source_epoch_secs` (default 900 s) and subnet
+/// epochs `subnet_epoch_secs`. Session pseudonyms are stable for the
+/// lifetime of the session cookie or its record TTL, and principal
+/// pseudonyms for the principal TTL (`principal_ttl_s`, default 24 h).
+/// There is no per-request rotation for either stable identity.
+///
+/// # Rotation
+///
+/// Only the source and subnet pseudonyms rotate with their epochs:
+/// source epochs follow `source_epoch_secs` (default 900 s) and subnet
+/// epochs `subnet_epoch_secs`. Session pseudonyms are stable for the
+/// lifetime of the session cookie or its record TTL, and principal
+/// pseudonyms for the principal TTL (`principal_ttl_s`, default 24 h).
+/// There is no per-request rotation for either stable identity.
+///
 /// Every epoch key MUST use the pseudonym HMAC'd with ITS OWN epoch: the
 /// engine builds prev/current/next ids at `floor(now/900)-1`,
 /// `floor(now/900)`, `floor(now/900)+1` and the store addresses
@@ -129,35 +158,61 @@ impl RiskIdentityFactory {
 
     /// Builds a factory with explicit epoch windows (tests and alternate
     /// deployments); the network masks stay at the contract defaults.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidTiming`] when either window is below one
+    /// second: a zero window divides by zero in `source_id`/`subnet_id`.
     pub fn with_epochs(
         keys: RiskKeys,
         source_epoch_secs: i64,
         subnet_epoch_secs: i64,
-    ) -> RiskIdentityFactory {
+    ) -> Result<RiskIdentityFactory, RiskError> {
+        if source_epoch_secs < 1 {
+            return Err(RiskError::InvalidTiming(
+                "source_epoch_secs",
+                source_epoch_secs.max(0) as u64,
+            ));
+        }
+        if subnet_epoch_secs < 1 {
+            return Err(RiskError::InvalidTiming(
+                "subnet_epoch_secs",
+                subnet_epoch_secs.max(0) as u64,
+            ));
+        }
         let mut factory = RiskIdentityFactory::new(keys);
         factory.source_epoch_secs = source_epoch_secs;
         factory.subnet_epoch_secs = subnet_epoch_secs;
-        factory
+        Ok(factory)
     }
 
-    /// Source pseudonym (hex) for the current epoch at `now_secs`.
+    /// Source pseudonym (hex) for the current epoch at `now_secs`,
+    /// with floor division so negative times never alias the epoch-0
+    /// bucket.
     pub fn source_id(&self, ip: IpAddr, now_secs: i64) -> String {
-        self.source_id_for_epoch(ip, now_secs / self.source_epoch_secs)
+        self.source_id_for_epoch(ip, now_secs.div_euclid(self.source_epoch_secs))
     }
 
-    /// Subnet pseudonym (hex) for the current epoch at `now_secs`.
+    /// Subnet pseudonym (hex) for the current epoch at `now_secs`,
+    /// with floor division so negative times never alias the epoch-0
+    /// bucket.
     pub fn subnet_id(&self, ip: IpAddr, now_secs: i64) -> String {
-        self.subnet_id_for_epoch(ip, now_secs / self.subnet_epoch_secs)
+        self.subnet_id_for_epoch(ip, now_secs.div_euclid(self.subnet_epoch_secs))
     }
 
     /// Source pseudonym (hex) for an explicit epoch: context `b"src"`,
-    /// material = family byte + packed IP.
+    /// material = the shared source identity, `masked_network(ip, 32,
+    /// 64)` — the full IPv4 address, or the IPv6 /64. A host controls at
+    /// least a /64, so a /128-keyed source would let it rotate addresses
+    /// for a fresh pseudonym on every request; the /64 matches the PHP
+    /// `RiskIdentityFactory::sourceId()` and every server-side source
+    /// budget (`Issuer::canonicalSourceFamily`).
     pub fn source_id_for_epoch(&self, ip: IpAddr, epoch: i64) -> String {
         hex::encode(pseudonym(
             &self.keys.source,
             b"src",
             epoch,
-            &canonical_ip(ip),
+            &masked_network(ip, 32, 64),
         ))
     }
 
@@ -173,13 +228,60 @@ impl RiskIdentityFactory {
     }
 
     /// Session pseudonym (context `b"sess"`, no epoch): 16 raw bytes.
-    pub fn session_id(&self, raw: &[u8]) -> [u8; 16] {
+    ///
+    /// The material is the decoded 16-byte session cookie value: the
+    /// browser carries the cookie as 32 lowercase hex chars and the caller
+    /// decodes them before this call, matching the PHP derivation.
+    pub fn session_id(&self, raw: &[u8; 16]) -> [u8; 16] {
         pseudonym(&self.keys.session, b"sess", 0, raw)
     }
 
     /// Principal pseudonym (context `b"prin"`, no epoch): 16 raw bytes.
     pub fn principal_id(&self, raw: &[u8]) -> [u8; 16] {
         pseudonym(&self.keys.principal, b"prin", 0, raw)
+    }
+
+    /// ASN pseudonym (hex) for the epoch covering `now_secs`: context
+    /// `b"asn"`, material = the ASN bucket id string, keyed by the
+    /// subnet HKDF key. The context string and the six-hour rotation
+    /// window are declared by the risk-v2 identity contract file
+    /// (`protocol/risk-v2/identity.json`), which is their source of
+    /// truth; the derivation itself mirrors the source/subnet epoch
+    /// pattern above (floor division, epoch big-endian in the HMAC
+    /// slot). The bucket id comes from the free ASN dataset and never
+    /// identifies a single host.
+    pub fn asn_id(&self, bucket: &str, now_secs: i64) -> String {
+        hex::encode(pseudonym(
+            &self.keys.subnet,
+            b"asn",
+            now_secs.div_euclid(ASN_EPOCH_SECS),
+            bucket.as_bytes(),
+        ))
+    }
+
+    /// Agent pseudonym (raw 16 bytes): context `b"agent"`, no epoch,
+    /// keyed by the principal HKDF key. The material is the configured
+    /// verified-agent key id, a deployment identifier with no per-user
+    /// cardinality. The context string and the key assignment are
+    /// declared by the risk-v2 identity contract file, which is their
+    /// source of truth.
+    pub fn agent_id(&self, agent_key_id: &str) -> [u8; 16] {
+        pseudonym(&self.keys.principal, b"agent", 0, agent_key_id.as_bytes())
+    }
+
+    /// Target pseudonym: the full 32-byte HMAC-SHA256 (64 lowercase hex
+    /// chars) over a normalized target identifier. The message mirrors
+    /// the shared pseudonym framing with context `b"tgt"` and the target
+    /// pipeline version in the epoch slot (`"kiwi-risk-id-v1\0tgt\0" ||
+    /// version.to_be_bytes() || normalized`), keyed by the master-derived
+    /// target key. Unlike the 16-byte identity pseudonyms this digest is
+    /// kept whole: the target dimension is keyed by the full digest, and
+    /// the version stamp means a pipeline change can never collide with
+    /// pseudonyms derived under an earlier pipeline. The caller passes
+    /// only the output of [`crate::target::normalize_target`] forward;
+    /// the normalized value itself never leaves this boundary.
+    pub fn target_id(&self, normalized: &str) -> String {
+        crate::target::target_id(&self.keys, normalized)
     }
 }
 
@@ -207,6 +309,21 @@ mod tests {
     fn canonical_ip_v4_mapped_v6_normalizes_to_v4() {
         let ip: IpAddr = "::ffff:203.0.113.27".parse().unwrap();
         assert_eq!(canonical_ip(ip), vec![0x04, 203, 0, 113, 27]);
+    }
+
+    #[test]
+    fn canonical_ip_v4_compatible_v6_normalizes_to_v4_except_unspecified_and_loopback() {
+        let compat: IpAddr = "::203.0.113.27".parse().unwrap();
+        assert_eq!(canonical_ip(compat), vec![0x04, 203, 0, 113, 27]);
+
+        let mut unspecified = vec![0u8; 17];
+        unspecified[0] = 0x06;
+        assert_eq!(canonical_ip("::".parse().unwrap()), unspecified);
+
+        let mut loopback = vec![0u8; 17];
+        loopback[0] = 0x06;
+        loopback[16] = 1;
+        assert_eq!(canonical_ip("::1".parse().unwrap()), loopback);
     }
 
     #[test]
@@ -332,9 +449,10 @@ mod tests {
         assert_eq!(factory.subnet_id(ip, 7 * 900 + 42), net_cur);
 
         // Session/principal are epoch-free raw pseudonyms.
+        let session_raw = [0x5au8; 16];
         assert_eq!(
-            factory.session_id(b"raw"),
-            pseudonym(&keys.session, b"sess", 0, b"raw")
+            factory.session_id(&session_raw),
+            pseudonym(&keys.session, b"sess", 0, &session_raw)
         );
         assert_eq!(
             factory.principal_id(b"raw"),
@@ -343,9 +461,22 @@ mod tests {
     }
 
     #[test]
+    fn with_epochs_rejects_zero_windows() {
+        let keys = RiskKeys::from_master(&[0x42; 32]);
+        assert!(matches!(
+            RiskIdentityFactory::with_epochs(keys.clone(), 0, 900),
+            Err(RiskError::InvalidTiming("source_epoch_secs", 0))
+        ));
+        assert!(matches!(
+            RiskIdentityFactory::with_epochs(keys, 900, 0),
+            Err(RiskError::InvalidTiming("subnet_epoch_secs", 0))
+        ));
+    }
+
+    #[test]
     fn factory_with_epochs_changes_windows() {
         let keys = RiskKeys::from_master(&[0x42; 32]);
-        let factory = RiskIdentityFactory::with_epochs(keys, 60, 120);
+        let factory = RiskIdentityFactory::with_epochs(keys, 60, 120).unwrap();
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         // now_secs 125: source epoch 125/60 = 2, subnet epoch 125/120 = 1.
         assert_eq!(
@@ -355,6 +486,74 @@ mod tests {
         assert_eq!(
             factory.subnet_id(ip, 125),
             factory.subnet_id_for_epoch(ip, 1)
+        );
+    }
+
+    #[test]
+    fn golden_identity_vectors_match_the_shared_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let vectors = &doc["identity_vectors"];
+        let master = vectors["master_key"].as_str().unwrap().as_bytes();
+        let factory = RiskIdentityFactory::new(RiskKeys::from_master(master));
+
+        // The session vector pins the representation contract: the HMAC
+        // binds the decoded 16 bytes, never the ASCII hex representation.
+        let cookie_hex = vectors["session"]["cookie_hex"].as_str().unwrap();
+        let raw = hex::decode(cookie_hex).unwrap();
+        assert_eq!(
+            vectors["session"]["cookie_raw_hex"].as_str().unwrap(),
+            cookie_hex,
+            "the fixture states both representations of the same 16 bytes"
+        );
+        assert_eq!(
+            hex::encode(factory.session_id((&raw[..]).try_into().unwrap())),
+            vectors["session"]["expected_session_id"].as_str().unwrap()
+        );
+
+        let principal = vectors["principal"]["material_utf8"].as_str().unwrap();
+        assert_eq!(
+            hex::encode(factory.principal_id(principal.as_bytes())),
+            vectors["principal"]["expected_id"].as_str().unwrap()
+        );
+
+        let ip: IpAddr = vectors["source"]["ip"].as_str().unwrap().parse().unwrap();
+        let epoch = vectors["source"]["epoch"].as_i64().unwrap();
+        assert_eq!(
+            factory.source_id_for_epoch(ip, epoch),
+            vectors["source"]["expected_id"].as_str().unwrap()
+        );
+        let net_ip: IpAddr = vectors["subnet"]["ip"].as_str().unwrap().parse().unwrap();
+        let net_epoch = vectors["subnet"]["epoch"].as_i64().unwrap();
+        assert_eq!(
+            factory.subnet_id_for_epoch(net_ip, net_epoch),
+            vectors["subnet"]["expected_id"].as_str().unwrap()
+        );
+
+        // The IPv6 source is masked to its /64: two hosts in one /64
+        // share the source pseudonym, a different /64 does not.
+        let v6 = &vectors["source_ipv6"];
+        let v6_epoch = v6["epoch"].as_i64().unwrap();
+        let v6_ip: IpAddr = v6["ip"].as_str().unwrap().parse().unwrap();
+        let sibling: IpAddr = v6["sibling_ip"].as_str().unwrap().parse().unwrap();
+        let other: IpAddr = v6["other_ip"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            factory.source_id_for_epoch(v6_ip, v6_epoch),
+            v6["expected_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            factory.source_id_for_epoch(v6_ip, v6_epoch),
+            factory.source_id_for_epoch(sibling, v6_epoch),
+            "a /64 sibling must share the source pseudonym"
+        );
+        assert_eq!(
+            factory.source_id_for_epoch(other, v6_epoch),
+            v6["expected_other_id"].as_str().unwrap(),
+            "a different /64 must derive a different source pseudonym"
         );
     }
 }

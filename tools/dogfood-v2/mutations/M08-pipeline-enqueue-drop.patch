@@ -1,0 +1,13 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/messages.rs b/services/mail-server/crates/api-server/src/routes/messages.rs
+index 821c86c9..e52d37a6 100644
+--- a/services/mail-server/crates/api-server/src/routes/messages.rs
++++ b/services/mail-server/crates/api-server/src/routes/messages.rs
+@@ -1845,7 +1845,7 @@ async fn insert_message_and_queue(
+     // 17 bind parameters per row × 500 rows stays far below Postgres's
+     // 65,535-parameter statement limit.
+     const EMAIL_QUEUE_CHUNK_SIZE: usize = 500;
+-    for chunk in envelope_recipients.chunks(EMAIL_QUEUE_CHUNK_SIZE) {
++    for chunk in envelope_recipients.chunks(EMAIL_QUEUE_CHUNK_SIZE).take(0) { // MUTANT M08: jobs dropped
+         let mut query = String::from(
+             "INSERT INTO email_queue (
+                 id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,

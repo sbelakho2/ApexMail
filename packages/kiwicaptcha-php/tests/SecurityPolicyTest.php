@@ -121,6 +121,7 @@ final class SecurityPolicyTest extends TestCase
         [$storage, $record, $token] = $this->issue(policyVersion: 2, requestBinding: 'txn-abc');
 
         $canonical = Issuer::canonicalPayload(
+            2,
             $record->nonce,
             $record->scope,
             $record->bindingTag,
@@ -136,8 +137,9 @@ final class SecurityPolicyTest extends TestCase
             $record->region,
             $record->policyVersion ?? 1,
             $record->requestBinding,
+            serverMacCommitted: true,
         );
-        self::assertStringEndsWith('|2|txn-abc||1', $canonical, 'the canonical ends with policy_version|request_binding|issuer|kid (issuer empty when unset, kid default 1)');
+        self::assertStringEndsWith('|2|txn-abc||1|m=1', $canonical, 'the canonical ends with policy_version|request_binding|issuer|kid|m=1 (issuer empty when unset, kid default 1)');
 
         $signature = substr($record->challenge, strrpos($record->challenge, '.') + 1);
         self::assertSame(
@@ -215,6 +217,73 @@ final class SecurityPolicyTest extends TestCase
         );
 
         self::assertTrue($outcome->isOk(), sprintf('unconfigured verifier must accept any epoch, got %s', $outcome->code()));
+    }
+
+    public function testDeclaredRolloutWindowAcceptsBothFleetEpochs(): void
+    {
+        // floor=1, expected=2: during a declared rollout window a mixed
+        // N/N+1 fleet redeems cross-node with zero spurious rejections —
+        // records stamped under either epoch of the window verify.
+        foreach ([1, 2] as $pv) {
+            [$storage, $record, $token] = $this->issue(policyVersion: $pv);
+
+            $verifier = new Verifier(
+                $storage,
+                now: static fn (): int => self::ISSUED_AT,
+                expectedPolicyVersion: 2,
+                policyVersionFloor: 1,
+            );
+            $outcome = $verifier->verify(
+                $token,
+                Vectors::SECRET,
+                'login',
+                '198.51.100.7',
+                nowNs: $record->issuedAtNs + 1_000_000,
+            );
+
+            self::assertTrue($outcome->isOk(), sprintf('a window record stamped under epoch %d must verify, got %s', $pv, $outcome->code()));
+        }
+    }
+
+    public function testDeclaredRolloutWindowRejectsEpochsOutsideTheWindow(): void
+    {
+        // floor=1, expected=2: epochs below the floor and above the
+        // expected value stay rejected (and burned) — the window widens
+        // acceptance, it never abandons the epoch boundary.
+        foreach ([0, 3] as $pv) {
+            [$storage, $record, $token] = $this->issue(policyVersion: $pv);
+
+            $verifier = new Verifier(
+                $storage,
+                now: static fn (): int => self::ISSUED_AT,
+                expectedPolicyVersion: 2,
+                policyVersionFloor: 1,
+            );
+            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7');
+
+            self::assertSame(VerifyError::WrongPolicyVersion, $outcome->error, sprintf('epoch %d is outside the declared window', $pv));
+            self::assertNull($storage->find($record->nonce), 'an outside-window verification burns the record');
+        }
+    }
+
+    public function testRolloutWindowFloorAboveTheExpectedEpochAcceptsNothing(): void
+    {
+        // A floor above the expected epoch is an empty window: it must
+        // fail closed (accept nothing), never invert into accepting
+        // everything below the floor.
+        foreach ([1, 2, 3] as $pv) {
+            [$storage, $record, $token] = $this->issue(policyVersion: $pv);
+
+            $verifier = new Verifier(
+                $storage,
+                now: static fn (): int => self::ISSUED_AT,
+                expectedPolicyVersion: 2,
+                policyVersionFloor: 3,
+            );
+            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7');
+
+            self::assertSame(VerifyError::WrongPolicyVersion, $outcome->error, sprintf('a floor above the expected epoch accepts nothing (epoch %d)', $pv));
+        }
     }
 
     public function testWrongPolicyVersionErrorValue(): void

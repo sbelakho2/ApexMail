@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+<head>
+  <title>Acme guestbook</title>
+</head>
+<body>
+  <form method="post" action="/comments">
+    <textarea name="message" rows="4"></textarea>
+    <altcha-widget name="altcha" challengeurl="https://api.acme.test/altcha-challenge"></altcha-widget>
+    <div class="frc-captcha" data-sitekey="FCMGEMUD2KTDSQ5H" data-start="auto"></div>
+    <button type="submit">Post comment</button>
+  </form>
+</body>
+</html>

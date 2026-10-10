@@ -76,6 +76,134 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         }
     }
 
+    /**
+     * @return iterable<string, array{0: string}>
+     */
+    public static function provideRawDuplicateAliases(): iterable
+    {
+        // The literal spelling first, then the escaped alias — and the
+        // reverse. Every pair carries conflicting values so a collapsed
+        // decode would silently pick one semantic value.
+        yield 'state literal-first' => ['"state":"available","st\\u0061te":"denied"'];
+        yield 'state alias-first' => ['"st\\u0061te":"denied","state":"available"'];
+        yield 'requiredAction literal-first' => ['"requiredAction":"sha16","required\\u0041ction":"argon64"'];
+        yield 'requiredAction alias-first' => ['"required\\u0041ction":"argon64","requiredAction":"sha16"'];
+        yield 'requiredRank literal-first' => ['"requiredRank":1,"requiredR\\u0061nk":6'];
+        yield 'requiredRank alias-first' => ['"requiredR\\u0061nk":6,"requiredRank":1'];
+        yield 'stage2Nonce literal-first' => ['"stage2Nonce":null,"stage2N\\u006fnce":"forged"'];
+        yield 'stage2Nonce alias-first' => ['"stage2N\\u006fnce":"forged","stage2Nonce":null'];
+        yield 'requirementGeneration literal-first' => ['"requirementGeneration":1,"requirementGener\\u0061tion":9'];
+        yield 'requirementGeneration alias-first' => ['"requirementGener\\u0061tion":9,"requirementGeneration":1'];
+    }
+
+    /**
+     * @dataProvider provideRawDuplicateAliases
+     */
+    public function testSemanticDuplicateChainMembersAreRefusedBeforeCollapse(string $duplicate): void
+    {
+        // The strict persisted-JSON authority rejects the document before
+        // the JSON decoder's collapsed object is trusted: the create-or-get,
+        // the read and every transition fail closed with zero writes, and
+        // the ambiguous bytes and the obligation mapping are preserved. A
+        // terminal denial can never be represented to the state machine as
+        // available through an escaped alias.
+        $store = $this->store();
+        $service = $this->service();
+        $requirement = $service->requireStage2(
+            ChainStateWalk::S1_NONCE,
+            'login',
+            'txn-dup',
+            1,
+            \KiwiCaptcha\Risk\RiskAction::Sha16,
+            time() + 300,
+        );
+        $recordKey = $this->chainKey($requirement->chainId);
+        $raw = (string) $this->client->get($recordKey);
+        $ambiguous = match (true) {
+            str_contains($duplicate, '"stage2Nonce"'),
+            str_contains($duplicate, '"stage2N\\u006fnce"') => str_replace('"stage2Nonce":null', $duplicate, $raw),
+            str_contains($duplicate, '"requirementGeneration"'),
+            str_contains($duplicate, '"requirementGener\\u0061tion"') => str_replace('"requirementGeneration":1', $duplicate, $raw),
+            str_contains($duplicate, '"requiredAction"'),
+            str_contains($duplicate, '"required\\u0041ction"') => str_replace('"requiredAction":"sha16"', $duplicate, $raw),
+            str_contains($duplicate, '"requiredRank"'),
+            str_contains($duplicate, '"requiredR\\u0061nk"') => str_replace('"requiredRank":1', $duplicate, $raw),
+            default => str_replace('"state":"available"', $duplicate, $raw),
+        };
+        self::assertNotSame($raw, $ambiguous, 'the duplicate is injected');
+        $this->client->set($recordKey, $ambiguous, 'EX', 300);
+        $obligationId = $service->obligationIdFor('login', 'txn-dup', 1);
+
+        try {
+            $store->read($requirement->chainId);
+            self::fail('a semantically duplicated chain record must fail closed at the read');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            $store->createOrGetObligation($obligationId, 'chain-fresh-dup', ChainStateWalk::S1_NONCE, 'login', 'txn-dup', 'sha16', 1, 1, time() + 300, 300);
+            self::fail('the create-or-get must refuse an ambiguous pointed-at chain, never heal');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        self::assertSame($requirement->chainId, $this->client->get($this->obligationKey($obligationId)), 'the mapping is preserved');
+        self::assertSame($ambiguous, $this->client->get($recordKey), 'the ambiguous bytes are never mutated');
+        try {
+            $store->reserve($requirement->chainId, 'owner-a', 15);
+            self::fail('the reservation must refuse the ambiguous record');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected: the strict read fails closed before the transition
+        }
+        self::assertSame($ambiguous, $this->client->get($recordKey), 'the refused reservation writes nothing');
+    }
+
+    public function testACrossTransactionObligationMappingFailsClosedOnRealRedis(): void
+    {
+        // The Lua binding invariant, proven on the real script: a
+        // corrupted mapping pointing transaction A's obligation at
+        // transaction B's valid chain fails closed with zero writes, and
+        // a stronger reassessment never raises the foreign chain.
+        $store = $this->store();
+        $service = $this->service();
+        $a = $service->requireStage2(ChainStateWalk::S1_NONCE, 'login', 'txn-a', 1, \KiwiCaptcha\Risk\RiskAction::Sha16, time() + 300);
+        $b = $service->requireStage2(ChainStateWalk::S1_NONCE, 'login', 'txn-b', 1, \KiwiCaptcha\Risk\RiskAction::Sha16, time() + 300);
+        $obligationA = $service->obligationIdFor('login', 'txn-a', 1);
+        $chainAKey = $this->chainKey($a->chainId);
+        $chainBKey = $this->chainKey($b->chainId);
+        $beforeA = (string) $this->client->get($chainAKey);
+        $beforeB = (string) $this->client->get($chainBKey);
+
+        $this->client->set($this->obligationKey($obligationA), $b->chainId, 'EX', 300);
+        try {
+            $store->createOrGetObligation(
+                $obligationA,
+                bin2hex(random_bytes(16)),
+                ChainStateWalk::S1_NONCE,
+                'login',
+                'txn-a',
+                'argon64',
+                \KiwiCaptcha\Risk\RiskAction::Argon64->rank(),
+                1,
+                time() + 300,
+                300,
+            );
+            self::fail('the real Lua must refuse a cross-transaction mapping');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        self::assertSame($beforeA, $this->client->get($chainAKey), 'chain A is untouched');
+        self::assertSame($beforeB, $this->client->get($chainBKey), 'chain B is untouched');
+        $bRecord = json_decode($beforeB, true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(1, $bRecord['requirementGeneration'], 'the foreign chain was never raised');
+        self::assertSame('sha16', $bRecord['requiredAction']);
+        try {
+            $service->findOpenRequirement('login', 'txn-a', 1);
+            self::fail('the service must refuse to resume a foreign chain');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private function store(): RedisChainedChallengeStateStore
@@ -123,6 +251,7 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
     {
         $boundaries = [
             'read' => static fn () => $store->read($chainId),
+            'obligationChainId' => static fn () => $store->obligationChainId($obligationId),
             'reserve' => static fn () => $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15),
             'markIssued' => static fn () => $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
             'markVerified' => static fn () => $store->markVerified($chainId, ChainStateWalk::NONCES[0]),
@@ -150,26 +279,39 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
      * The heal assertion: the create-or-get repairs the corrupt mapping
      * with a fresh chain, strictly decodable and schema-coherent.
      */
-    private function assertMappingHeals(TransactionalChainedChallengeStateStore $store, string $obligationId, string $freshChainId, string $context): void
+    /**
+     * corrupt state is never healed: the create-or-get fails closed with
+     * zero writes, the corrupt bytes are preserved and the obligation
+     * mapping still points at the corrupt chain. Only a genuinely
+     * missing or signed-expired record may repair the mapping.
+     */
+    private function assertMappingIsPreserved(TransactionalChainedChallengeStateStore $store, string $obligationId, string $remainsChainId, string $context): void
     {
-        $repaired = $store->createOrGetObligation(
-            $obligationId,
-            $freshChainId,
-            ChainStateWalk::S1_NONCE,
-            'login',
-            'txn-alpha',
-            'sha16',
-            1,
-            1,
-            time() + 300,
-            300,
-        );
-        self::assertSame($freshChainId, $repaired, $context.': the create-or-get heals the corrupt mapping with a fresh chain');
-        self::assertSame($freshChainId, $store->obligationChainId($obligationId), $context.': the obligation now points at the fresh chain');
-        $fresh = $store->read($freshChainId);
-        self::assertIsArray($fresh, $context.': the healed chain strictly decodes');
-        self::assertSame('available', $fresh['state'], $context.': the healed chain is available');
-        ChainModel::assertSchemaInvariants($this->modelForRecord($fresh), $context.' healed');
+        try {
+            $store->createOrGetObligation(
+                $obligationId,
+                'chain-fresh-'.$context,
+                ChainStateWalk::S1_NONCE,
+                'login',
+                'txn-alpha',
+                'sha16',
+                1,
+                1,
+                time() + 300,
+                300,
+            );
+            self::fail($context.': a corrupt pointed-at chain must fail closed, never heal');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            self::assertSame($remainsChainId, $store->obligationChainId($obligationId), $context.': the obligation still points at the corrupt chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped and no fresh chain exists.
+        }
+        self::assertNull($store->read('chain-fresh-'.$context), $context.': no fresh chain was created');
     }
 
     /** @param array<string, mixed> $record */
@@ -253,7 +395,7 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
      * @param \Closure $tamper
      */
     #[DataProvider('fieldTamperProvider')]
-    public function testEveryChainFieldTamperFailsClosedAndTheMappingHeals(string $state, string $label, \Closure $tamper): void
+    public function testEveryChainFieldTamperFailsClosedAndTheMappingIsPreserved(string $state, string $label, \Closure $tamper): void
     {
         $store = $this->store();
         $service = $this->service();
@@ -268,8 +410,16 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         $this->client->set($this->chainKey($requirement->chainId), (string) json_encode($tampered, JSON_THROW_ON_ERROR), 'EX', 300);
 
         $this->assertEveryBoundaryFailsClosed($store, $requirement->chainId, $obligationId, 'redis '.$state.' '.$label);
-        self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the refusals leave the mapping alone');
-        $this->assertMappingHeals($store, $obligationId, 'chain-healed-'.$state.'-'.$label, 'redis');
+        try {
+            self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the refusals leave the mapping alone');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped.
+        }
+        $rawAfter = $this->client->get($this->chainKey($requirement->chainId));
+        self::assertSame($tampered, json_decode((string) $rawAfter, true, 8, JSON_THROW_ON_ERROR), 'the refusals leave the corrupt bytes alone');
+        $this->assertMappingIsPreserved($store, $obligationId, $requirement->chainId, 'redis-'.$state.'-'.$label);
 
         // The Array mirror observes the identical machine: same throws,
         // same heal.
@@ -282,7 +432,7 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         (new \ReflectionObject($array))->getProperty('records')->setValue($array, $records);
 
         $this->assertEveryBoundaryFailsClosed($array, $arrayRequirement->chainId, $obligationId, 'array '.$state.' '.$label);
-        $this->assertMappingHeals($array, $obligationId, 'array-healed-'.$state.'-'.$label, 'array');
+        $this->assertMappingIsPreserved($array, $obligationId, $arrayRequirement->chainId, 'array-'.$state.'-'.$label);
     }
 
     // ── 2. the fixed-seed random byte flips ─────────────────────────────
@@ -327,36 +477,61 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
      * The flip outcome contract: every boundary resolves the documented
      * exception or the documented vocabulary, a decodable record keeps
      * the schema invariants, and the mapping resolves to a
-     * strict-decodable chain. A flip that renames an optional key is
-     * rejected by the strict decode: validateState() and the Lua
-     * predicate both deny unknown fields, so the record fails closed
-     * and the create-or-get heals the corrupt mapping with a fresh
-     * chain. The wire decode can never surface an undefined-key warning,
-     * because a record reaching wire() always passed the deny-unknown
-     * gate.
+     * strict-decodable chain. A flip that stays contract-valid keeps its
+     * chain; a flip that corrupts the record fails closed (zero writes)
+     * and the mapping is preserved — corruption is never healed. Only a
+     * missing or signed-expired record repairs the mapping.
      */
     private function assertFlipOutcome(TransactionalChainedChallengeStateStore $store, string $chainId, string $obligationId, string $state, int $case): void
     {
         $context = sprintf('%s flip-%d', $state, $case);
         $read = $this->assertFlipBoundaries($store, $chainId, $obligationId, $context);
-        $fresh = 'chain-flip-healed-'.$state.'-'.$case;
-        $repaired = $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, time() + 300, 300);
-        $postRead = $repaired === $fresh ? $store->read($fresh) : $store->read($chainId);
+        $fresh = 'chain-flip-fresh-'.$state.'-'.$case;
         if (\is_array($read)) {
             ChainModel::assertSchemaInvariants($this->modelForRecord($read), $context.' decodable record');
-        }
-        self::assertSame($repaired, $store->obligationChainId($obligationId), $context.': the obligation resolves to the returned chain');
-        self::assertIsArray($postRead, $context.': the resolved chain strictly decodes');
-        if ($repaired === $fresh) {
-            // The mapping was corrupt or missing: the create-or-get
-            // healed it with the fresh chain.
-            self::assertSame('available', $postRead['state'], $context.': the healed chain is available');
-        } else {
             // The flipped record stayed strictly valid: the create-or-get
             // keeps the live obligation on its existing chain, and the
             // record keeps the schema invariants.
-            self::assertSame($chainId, $repaired, $context.': a still-valid flipped record keeps its chain');
-            ChainModel::assertSchemaInvariants($this->modelForRecord($postRead), $context.' kept record');
+            try {
+                $returned = $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, time() + 300, 300);
+            } catch (MalformedChainedChallengeStateException) {
+                // A flip inside the transaction identity (scope, binding,
+                // policy epoch) makes the record foreign to this
+                // obligation: the binding invariant classifies it as
+                // corrupt with zero writes. That is a valid fail-closed
+                // outcome for a decodable flip.
+                self::assertNull($store->read($fresh), $context.': no fresh chain was created');
+                self::assertSame($chainId, $store->obligationChainId($obligationId), $context.': the mapping is preserved');
+
+                return;
+            }
+            // The boundary sweep itself may have legitimately terminalized
+            // the chain and cleared the obligation (markVerified deletes
+            // the mapping), so the create-or-get either keeps the existing
+            // chain or creates the fresh one; nothing else.
+            self::assertContains($returned, [$chainId, $fresh], $context.': the create-or-get resolves the existing or a fresh chain');
+            if ($returned === $fresh) {
+                self::assertSame('available', $store->read($fresh)['state'] ?? null, $context.': the fresh chain is available');
+            } else {
+                self::assertSame($chainId, $store->obligationChainId($obligationId), $context.': the mapping is unchanged');
+            }
+        } else {
+            // The flip corrupted the record: the create-or-get fails
+            // closed with zero writes and the mapping is preserved.
+            try {
+                $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, time() + 300, 300);
+                self::fail($context.': a corrupt flip must fail closed, never heal');
+            } catch (MalformedChainedChallengeStateException) {
+                // expected
+            }
+            try {
+                self::assertSame($chainId, $store->obligationChainId($obligationId), $context.': the mapping still points at the corrupt chain');
+            } catch (MalformedChainedChallengeStateException) {
+                // A validating obligation read may throw on the corrupt
+                // chain instead of reporting the id: either way the
+                // mapping was NOT dropped and no fresh chain exists.
+            }
+            self::assertNull($store->read($fresh), $context.': no fresh chain was created');
         }
     }
 
@@ -450,6 +625,7 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         $record2['state'] = 'available';
         $record2['owner'] = null;
         $record2['leaseUntil'] = null;
+        $record2['reservedRequirementGeneration'] = null;
         $record2['requiredAction'] = 'argon64';
         $record2['requiredRank'] = 6;
         $this->client->set($this->chainKey($chainId), (string) json_encode($record2, JSON_THROW_ON_ERROR), 'EX', 300);

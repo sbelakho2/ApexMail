@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\Authority;
 
 use KiwiCaptcha\AuthoritySafety;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use KiwiCaptcha\AuthoritySafetyClassifier;
 
 /**
@@ -85,6 +87,16 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     private readonly string $pinKey;
 
     /**
+     * The legacy pin key on the digest key version: the pin recorded
+     * before the namespace cutover. A missing primary pin whose legacy pin
+     * exists is explicitly migrated to the primary key before any
+     * comparison, so the cutover can never silently orphan the pin.
+     * Null on the legacy key version, where the primary key already is
+     * the legacy key.
+     */
+    private readonly ?string $legacyPinKey;
+
+    /**
      * The identity ("role|run_id") this process established or last
      * observed as pinned, or null before the first verification. Once
      * non-null, a missing pin key is a refusal (never a silent re-pin).
@@ -113,9 +125,10 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
      *        reads/writes go through this client, never through the
      *        passed client of {@see assertServeEligible()}. A guarded
      *        wrapper would otherwise recurse into its own check.
-     * @param string                $namespace       the deployment
-     *        namespace, sanitized to [A-Za-z0-9_.-] before it is
-     *        embedded in the pin key. Matches every other bundle key.
+     * @param string                $namespace       the RAW configured
+     *        deployment namespace: this guard is the single derivation
+     *        boundary and derives the pin key through the one shared
+     *        versioned derivation (never pass an already-derived value).
      * @param int                   $reverifySecs    the verification cache
      *        window in seconds. 0 disables the cache, so every check
      *        re-verifies (the test-mode and doctor-mode behavior).
@@ -127,6 +140,10 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
      *        provisioned expected identity ("role|run_id", the same
      *        shape as the pin value). When set, the guard compares the
      *        serving identity against it instead of the pin key.
+     * @param int                   $namespaceKeyVersion the namespace key
+     *        version ({@see RedisNamespace::VERSION_LEGACY} or
+     *        {@see RedisNamespace::VERSION_DIGEST}); on the digest version
+     *        a legacy pin is migrated to the digest pin key explicitly.
      *
      * @throws PinnedAuthorityRefusalException when the client is an
      *         automatic-failover aggregate, a retry-enabled connection,
@@ -138,12 +155,27 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
         private readonly int $reverifySecs = 5,
         string $pinKeySuffix = '',
         private readonly ?string $expectedIdentity = null,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        /**
+         * Whether the digest rollout may adopt a legacy pin (the drained
+         * migration's explicit re-initialization path). A fresh install
+         * passes false: it has no pre-cutover pin, so an unrelated
+         * deployment's colliding legacy pin must never be adopted.
+         */
+        bool $readLegacyFallback = true,
     ) {
         if ($reverifySecs < 0) {
             throw new \InvalidArgumentException(sprintf('reverifySecs must be >= 0, got %d', $reverifySecs));
         }
-        $sanitized = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'kiwi';
-        $this->pinKey = sprintf('{kiwi:%s}:authority:pin%s', $sanitized, $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '');
+        $tag = RedisNamespace::deriveOr($namespace, 'kiwi', $namespaceKeyVersion);
+        $this->pinKey = sprintf('{kiwi:%s}:authority:pin%s', $tag, $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '');
+        $this->legacyPinKey = $readLegacyFallback && $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+            ? sprintf(
+                '{kiwi:%s}:authority:pin%s',
+                RedisNamespace::deriveOr($namespace, 'kiwi', RedisNamespace::VERSION_LEGACY),
+                $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '',
+            )
+            : null;
         if ($expectedIdentity !== null && preg_match('/^[^|]+\|[^|]+$/D', $expectedIdentity) !== 1) {
             throw new \InvalidArgumentException(sprintf('ha_authority_expected must be the identity shape "role|run_id" (got "%s")', $expectedIdentity));
         }
@@ -408,13 +440,46 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     /**
      * The pinned identity from the pin key, or null when absent or
      * unreadable (an unreadable store is a refusal, never a pass).
+     *
+     * On the digest key version a missing primary pin whose legacy pin
+     * exists is explicitly migrated to the primary key (SET NX) before
+     * it is returned. The namespace cutover can therefore never
+     * silently orphan a pin that was provisioned before it.
      */
     private function readPin(): ?string
     {
         try {
             $raw = $this->client->get($this->pinKey);
+            if (\is_string($raw) && $raw !== '') {
+                return $raw;
+            }
+            if ($this->legacyPinKey === null) {
+                return null;
+            }
+            $legacy = $this->client->get($this->legacyPinKey);
+            if (!\is_string($legacy) || $legacy === '') {
+                return null;
+            }
+            // Explicit migration: adopt the legacy pin under the
+            // configured key version. SET NX makes concurrent adopters
+            // converge on one value. The winner is authoritative: when
+            // the NX write loses, another actor installed a primary pin
+            // between the reads above, and that pin is returned — the
+            // method never reports a value it did not observe as the
+            // primary pin.
+            if ($this->setNx($this->pinKey, $legacy)) {
+                return $legacy;
+            }
+            $winner = $this->client->get($this->pinKey);
+            if (!\is_string($winner) || $winner === '') {
+                // The NX write lost but no primary pin is readable: the
+                // store is inconsistent, so the pin state is unreadable
+                // and the caller refuses (an unreadable store is a
+                // refusal, never a pass).
+                return null;
+            }
 
-            return \is_string($raw) && $raw !== '' ? $raw : null;
+            return $winner;
         } catch (\Throwable) {
             return null;
         }

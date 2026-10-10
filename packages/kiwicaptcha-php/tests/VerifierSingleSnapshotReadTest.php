@@ -118,7 +118,7 @@ final class VerifierSingleSnapshotReadTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolve($client, $prefix);
         $identity = 'op-'.hash('sha256', 'single-read-replay');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
         $client->gets = 0;
         $client->getKeys = [];
         $client->evals = [];

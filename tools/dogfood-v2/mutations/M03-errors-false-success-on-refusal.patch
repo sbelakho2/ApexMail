@@ -1,0 +1,13 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/campaigns.rs b/services/mail-server/crates/api-server/src/routes/campaigns.rs
+index 81603b31..af6d9433 100644
+--- a/services/mail-server/crates/api-server/src/routes/campaigns.rs
++++ b/services/mail-server/crates/api-server/src/routes/campaigns.rs
+@@ -1358,7 +1358,7 @@ async fn update_campaign(
+             scheduled_at = CASE WHEN $9 THEN $10 ELSE scheduled_at END, \
+             status = CASE WHEN $9 AND status = 'draft' THEN 'scheduled' ELSE status END, \
+             updated_at = NOW() \
+-         WHERE id = $1::uuid AND tenant_id = $2 AND status IN ('draft', 'scheduled', 'paused')",
++         WHERE id = $1::uuid AND tenant_id = $2",
+     )
+     .bind(parse_campaign_id(&id)?)
+     .bind(&auth.tenant_id)

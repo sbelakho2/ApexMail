@@ -18,34 +18,41 @@ namespace KiwiCaptcha;
  * Parameter sets outside the profile are rejected at construction;
  * issuing them would produce challenges that can never verify in PHP.
  */
-enum BindingMode: string
-{
-    /** Bind challenges to a nonce-bound HMAC tag of the client IP. */
-    case Bound = 'bound';
-
-    /** No client binding at all (maximum privacy; relay protection off). */
-    case None = 'none';
-}
-
 final class Config
 {
     /**
      * Hard ceiling for SHA-256 target bits. The browser/wasm solver caps
-     * at 20 bits (5,000,000 hashes), so higher difficulties would be
-     * unsolvable for legit clients and are rejected at construction.
+     * its search at 20,000,000 hashes (protocol/limits.json), so higher
+     * difficulties would be unsolvable for legit clients and are rejected
+     * at construction.
      *
      * The ceiling is not the baseline: 18 is the ordinary default,
      * converged across the core, the Symfony bundle and the documented
      * examples. The 16-vs-18 choice is benchmark-driven: the
      * client-performance lab measures the SHA 16/18/20 ladder, and 18
      * is the benchmark-selected ordinary baseline (mean ≈ 262k hashes,
-     * p99 ≈ 1.21M, exhaustion within the 5,000,000-hash cap
-     * ≈ 5.2×10⁻⁹). SHA20 stays the elevated rung, reached via adaptive
+     * p99 ≈ 1.21M, exhaustion within the 20,000,000-hash cap
+     * ≈ 7.3×10⁻³⁴). SHA20 stays the elevated rung, reached via adaptive
      * risk escalation: at 20 a legitimate solve still fails within the
-     * 5,000,000-hash cap with probability ≈ 0.8494% (about 1 in 118),
-     * so 20 is never the default.
+     * 20,000,000-hash cap with probability ≈ 5.2×10⁻⁹, so 20 is never
+     * the default.
      */
     public const MAX_SHA_TARGET_BITS = 20;
+
+    /**
+     * The minimum secret-key length in bytes: 32 text bytes, so even the
+     * worst-case 32-character hex spelling still carries 128 bits of
+     * entropy. Shared with the Rust core (`keys::MIN_MASTER_BYTES`) and
+     * asserted by `tools/ci/limits-parity-check.sh`.
+     */
+    public const MIN_SECRET_BYTES = 32;
+
+    /**
+     * The minimum execution-key length in bytes: the same 32-byte
+     * contract as the secret key, shared with the Rust core
+     * (`keys::MIN_EXECUTION_KEY_BYTES`).
+     */
+    public const MIN_EXECUTION_KEY_BYTES = 32;
 
     /** Ceiling for Argon2id target bits (browser-solvable range). */
     public const MAX_ARGON2_TARGET_BITS = 10;
@@ -114,9 +121,13 @@ final class Config
     public const MAX_ARGON_T = 6;
 
     /**
-     * @param string   $secretKey           HMAC secret key (min 16 bytes recommended).
+     * @param string   $secretKey           HMAC secret key (min 32 bytes).
      * @param PoWAlgorithm $algorithm       Proof-of-work algorithm to issue.
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
+     *                                      Protocol profile space: a power of two
+     *                                      within 8..=65536, so every verifier —
+     *                                      including log2-only bindings — can
+     *                                      rederive what a profile mints.
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
      * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..20).
@@ -152,7 +163,7 @@ final class Config
      *                                      (UnknownKid when the record's kid is unknown or
      *                                      ahead of the newest configured kid, the
      *                                      rollback/forward guard).
-     * @param string|null $executionKey     The ExecutionChallengeV1 keyed-PRF key (min 16
+     * @param string|null $executionKey     The ExecutionChallengeV1 keyed-PRF key (min 32
      *                                      bytes). Null (default) = execution challenges
      *                                      are never issued: issuance with the execution
      *                                      surface armed refuses (the issuer throws), so
@@ -165,11 +176,15 @@ final class Config
      *                                      standard base64 of exactly 256 bytes (top bit
      *                                      set, odd), the public half of the time-lock
      *                                      trapdoor. Generate the pair with the shipped
-     *                                      tools/rsw-keygen binary and record its
-     *                                      rsw_modulus_n_sha256 fingerprint; weak or
-     *                                      fabricated moduli are refused here. Required
-     *                                      when algorithm is rsw; ignored otherwise (null
-     *                                      default = the rsw algorithm is not configured).
+     *                                      tools/rsw-keygen binary. Record its
+     *                                      rsw_modulus_n_sha256 fingerprint, the sha256 of
+     *                                      the decoded 256-byte modulus. Identity-armed
+     *                                      protocol v5 issuance signs that value into
+     *                                      every record and the verifier resolves by it.
+     *                                      Weak or fabricated moduli are refused here.
+     *                                      Required when algorithm is rsw; ignored
+     *                                      otherwise (null default = the rsw algorithm is
+     *                                      not configured).
      * @param string|null $rswLambda        The rsw secret lambda = lcm(p-1, q-1) as
      *                                      canonical standard base64 of 1..256 even
      *                                      bytes, the trapdoor that lets the server
@@ -185,6 +200,24 @@ final class Config
      *                                      when algorithm is rsw). The client performs T
      *                                      sequential modular squarings; the server
      *                                      verifies instantly through lambda.
+     * @param string|null $tenantId         The tenant scope of the derived
+     *                                      purpose keys (mirrors the Rust
+     *                                      ChallengeConfig.tenant_id). When
+     *                                      non-null, the challenge-signing
+     *                                      and IP-binding keys of every
+     *                                      issued record are derived under
+     *                                      the per-tenant root
+     *                                      ("kiwi/v2/tenant/" + tenant id,
+     *                                      see {@see DerivedKeys::fromMaster()}),
+     *                                      so tenants of a shared master
+     *                                      secret cannot forge each other's
+     *                                      challenges or binding tags. Must
+     *                                      match the narrow identifier
+     *                                      alphabet, at most 64 bytes of
+     *                                      [A-Za-z0-9._:-]. Null (the
+     *                                      default) derives the global
+     *                                      purpose keys, byte-identical to
+     *                                      the tenantless issuance.
      */
     public function __construct(
         public readonly string $secretKey,
@@ -196,7 +229,7 @@ final class Config
         public readonly int $argon2TargetBits = 4,
         public readonly int $ttlSecs = 120,
         public readonly ?int $minDurationMs = null,
-        public readonly int $solverMaxHashes = 5_000_000,
+        public readonly int $solverMaxHashes = 20_000_000,
         public readonly BindingMode $bindingMode = BindingMode::Bound,
         public readonly int $policyVersion = 1,
         public readonly ?string $issuer = null,
@@ -205,12 +238,16 @@ final class Config
         public readonly ?string $rswModulusN = null,
         public readonly ?string $rswLambda = null,
         public readonly int $rswT = 75_000,
+        public readonly ?string $tenantId = null,
     ) {
-        if (\strlen($secretKey) < 16) {
-            throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
+        // 16 random bytes is only 128 bits of HMAC key, and 16 HEX
+        // characters ("0123456789abcdef") is just 64 bits while still
+        // passing a 16-byte floor. The floor is 32 text bytes.
+        if (\strlen($secretKey) < self::MIN_SECRET_BYTES) {
+            throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 32 bytes');
         }
-        if ($executionKey !== null && \strlen($executionKey) < 16) {
-            throw new \InvalidArgumentException('KiwiCaptcha execution key must be at least 16 bytes');
+        if ($executionKey !== null && \strlen($executionKey) < self::MIN_EXECUTION_KEY_BYTES) {
+            throw new \InvalidArgumentException('KiwiCaptcha execution key must be at least 32 bytes');
         }
         if ($kid < 1 || $kid > 4_294_967_295) {
             throw new \InvalidArgumentException(
@@ -220,6 +257,11 @@ final class Config
         if ($issuer !== null && !self::isValidIdentifier($issuer, 128)) {
             throw new \InvalidArgumentException(
                 'issuer must be 1-128 characters of [A-Za-z0-9._:-] when set'
+            );
+        }
+        if ($tenantId !== null && !self::isValidIdentifier($tenantId, 64)) {
+            throw new \InvalidArgumentException(
+                'tenantId must be 1-64 characters of [A-Za-z0-9._:-] when set'
             );
         }
         if ($t < 1) {
@@ -235,6 +277,21 @@ final class Config
         }
         if ($mKib > 65536) {
             throw new \InvalidArgumentException('Argon2id m_kib exceeds the browser-solvable ceiling (65536)');
+        }
+        // The protocol Argon2id memory profile space is powers of two
+        // within 8..=65536 KiB (16384/32768/65536 for the named rungs,
+        // 8192 for the low-memory profile): every verifier — including
+        // log2-only bindings — must be able to rederive what a profile
+        // mints. Rejected here at configuration time, never per
+        // request. Doctor note: an m_kib outside the space is a
+        // misconfiguration, never a tunable.
+        if ($algorithm === PoWAlgorithm::Argon2id && !self::isPowerOfTwo($mKib)) {
+            throw new \InvalidArgumentException(
+                sprintf(
+                    'Argon2id memory m_kib must be a power of two within 8..65536 (got %d) — the protocol profile space, so every verifier can rederive what a profile mints',
+                    $mKib
+                )
+            );
         }
         // 0 bits is rejected: it means "no work at all" and cannot be
         // distinguished from a misconfiguration (e.g. an uninitialized
@@ -317,6 +374,57 @@ final class Config
     }
 
     /**
+     * A copy of this Config with only the given fields replaced: every
+     * parameter left null keeps its current value, a non-null one
+     * replaces it. The merged field set is re-validated by constructing
+     * a new Config, so an override can never produce a configuration
+     * the constructor would refuse.
+     */
+    public function withOverrides(
+        ?string $secretKey = null,
+        ?PoWAlgorithm $algorithm = null,
+        ?int $mKib = null,
+        ?int $t = null,
+        ?int $p = null,
+        ?int $targetBits = null,
+        ?int $argon2TargetBits = null,
+        ?int $ttlSecs = null,
+        ?int $minDurationMs = null,
+        ?int $solverMaxHashes = null,
+        ?BindingMode $bindingMode = null,
+        ?int $policyVersion = null,
+        ?string $issuer = null,
+        ?int $kid = null,
+        ?string $executionKey = null,
+        ?string $rswModulusN = null,
+        ?string $rswLambda = null,
+        ?int $rswT = null,
+        ?string $tenantId = null,
+    ): self {
+        return new self(
+            secretKey: $secretKey ?? $this->secretKey,
+            algorithm: $algorithm ?? $this->algorithm,
+            mKib: $mKib ?? $this->mKib,
+            t: $t ?? $this->t,
+            p: $p ?? $this->p,
+            targetBits: $targetBits ?? $this->targetBits,
+            argon2TargetBits: $argon2TargetBits ?? $this->argon2TargetBits,
+            ttlSecs: $ttlSecs ?? $this->ttlSecs,
+            minDurationMs: $minDurationMs ?? $this->minDurationMs,
+            solverMaxHashes: $solverMaxHashes ?? $this->solverMaxHashes,
+            bindingMode: $bindingMode ?? $this->bindingMode,
+            policyVersion: $policyVersion ?? $this->policyVersion,
+            issuer: $issuer ?? $this->issuer,
+            kid: $kid ?? $this->kid,
+            executionKey: $executionKey ?? $this->executionKey,
+            rswModulusN: $rswModulusN ?? $this->rswModulusN,
+            rswLambda: $rswLambda ?? $this->rswLambda,
+            rswT: $rswT ?? $this->rswT,
+            tenantId: $tenantId ?? $this->tenantId,
+        );
+    }
+
+    /**
      * Redacted dump shape: every field prints under its public name with
      * its exact value. The secrets print '<redacted>' — `secretKey`
      * always, `executionKey` and `rswLambda` only when set. Their null
@@ -325,7 +433,7 @@ final class Config
      *
      * The shape is the full constructor field set in declaration order,
      * so var_dump/print_r shows the complete configuration with only the
-     * secret values replaced — the audit-mandated printability fix for
+     * secret values replaced — the printability rule for
      * the secret-bearing configuration object.
      *
      * @return array<string, mixed>
@@ -351,6 +459,7 @@ final class Config
             'rswModulusN' => $this->rswModulusN,
             'rswLambda' => $this->rswLambda !== null ? '<redacted>' : null,
             'rswT' => $this->rswT,
+            'tenantId' => $this->tenantId,
         ];
     }
 
@@ -389,5 +498,18 @@ final class Config
         return $len >= 1
             && $len <= 64
             && \preg_match('/^[A-Za-z0-9_-]+$/D', $value) === 1;
+    }
+
+    /**
+     * Whether $value is a power of two: the shape of the protocol
+     * Argon2id memory profile space (powers of two within 8..=65536
+     * KiB). Config-time only — the verifier's structural ceilings keep
+     * accepting any signed 8..=65536 record, but no profile is ever
+     * configured or issued outside the space every binding can
+     * rederive.
+     */
+    public static function isPowerOfTwo(int $value): bool
+    {
+        return $value > 0 && ($value & ($value - 1)) === 0;
     }
 }

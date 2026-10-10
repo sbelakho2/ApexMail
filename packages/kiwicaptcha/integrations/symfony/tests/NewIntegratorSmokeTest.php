@@ -167,7 +167,11 @@ final class NewIntegratorSmokeTest extends TestCase
             // "Protocol v4 execution rollout"). Complete step 2 of the
             // rollout (raise the central floor) before the doctor run: a
             // high_abuse deployment with a confirmed v4 floor must pass
-            // every check.
+            // every check. The abuse-first rsw gate (3.4.1) demands the
+            // time-lock trapdoor pair: the kernel fixture stages it
+            // (tools/rsw-keygen output, the shared test fixture pair),
+            // so the doctor reports the pre-armed inert posture instead
+            // of failing the run.
             $dsnClient = $container->get('kiwi_captcha.redis.dsn');
             $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
             $dsnClient->hset($monitor->policyKey(), 'min_protocol_version', 4);
@@ -180,6 +184,8 @@ final class NewIntegratorSmokeTest extends TestCase
             self::assertStringContainsString('[PASS] Risk Redis', $display, 'the risk Redis (the DSN client) answers PING');
             self::assertStringContainsString('[PASS] Storage atomicity', $display);
             self::assertStringContainsString('[PASS] Protocol-v3 writer', $display, 'the confirmed v4 floor satisfies the high_abuse decoy + execution contract');
+            self::assertStringContainsString('[WARN] RSW time-lock', $display, 'the staged pair clears the abuse-first rsw gate and reports the inert pre-armed posture');
+            self::assertStringContainsString('rsw_modulus_n/rsw_lambda are configured', $display, 'the staged trapdoor pair is what satisfies the gate');
             self::assertStringNotContainsString('[FAIL]', $display, 'the high_abuse config on the DSN must not FAIL any check');
 
             // The live risk engine must not break issuance: an ordinary

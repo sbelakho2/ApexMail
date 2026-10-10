@@ -347,6 +347,25 @@ mod nested_form_detector_tests {
         // A non-form tag sharing the prefix must not be mistaken for one.
         assert!(nested_form_violations("web", "/x", "<formatted><form></form>").is_empty());
     }
+
+    /// System contract: row-delete forms are siblings of the bulk form and
+    /// bind back via the `form` attribute. That shape must never be reported
+    /// as nesting (the whole point of the sibling layout).
+    #[test]
+    fn sibling_form_attribute_buttons_are_not_nested_forms() {
+        let html = concat!(
+            "<form method=\"get\" action=\"/confirm\" id=\"row-delete-c1\">",
+            "<input type=\"hidden\" name=\"id\" value=\"c1\"></form>",
+            "<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contact\">",
+            "<input type=\"checkbox\" name=\"ids\" value=\"c1\">",
+            "<button type=\"submit\" form=\"row-delete-c1\">Delete</button>",
+            "</form>",
+        );
+        assert!(
+            nested_form_violations("web", "/contacts", html).is_empty(),
+            "sibling forms + form= buttons must not flag as nested: {html}"
+        );
+    }
 }
 
 /// Does this POST form element carry a hidden `_csrf` field with a

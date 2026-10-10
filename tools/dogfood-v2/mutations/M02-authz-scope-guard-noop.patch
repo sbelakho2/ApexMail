@@ -1,0 +1,24 @@
+diff --git a/services/mail-server/crates/api-server/src/middleware/auth.rs b/services/mail-server/crates/api-server/src/middleware/auth.rs
+index fc9fae59..03e3b893 100644
+--- a/services/mail-server/crates/api-server/src/middleware/auth.rs
++++ b/services/mail-server/crates/api-server/src/middleware/auth.rs
+@@ -1557,17 +1557,8 @@ pub async fn require_auth(
+ 
+ /// Helper to check scopes after extracting AuthUser manually.
+ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError> {
+-    // Wildcard scope
+-    if user.scopes.iter().any(|s| s == "*") {
+-        return Ok(());
+-    }
+-    for scope in required {
+-        if !user.scopes.iter().any(|s| s == scope) {
+-            return Err(ApiError::Forbidden(format!(
+-                "missing required scope: {scope}"
+-            )));
+-        }
+-    }
++    // MUTANT M02: scope enforcement becomes a no-op
++    let _ = (user, required);
+     Ok(())
+ }
+ 

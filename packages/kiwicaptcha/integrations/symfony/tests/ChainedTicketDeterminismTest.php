@@ -157,4 +157,26 @@ final class ChainedTicketDeterminismTest extends TestCase
         self::assertSame($expiryX, $retained->expiresAt, 'the retained record keeps the ORIGINAL expiry');
         self::assertSame($ticket, $service->ticketFor($requirement->chainId, $retained->expiresAt), 'the completed chain re-signs the byte-identical ticket from its ORIGINAL expiry');
     }
+
+    /**
+     * The runtime half of the risk.chaining.hmac_secret floor: an
+     * env-resolved secret never passes through the compile-time config
+     * tree, so the service refuses a too-short resolved secret at
+     * construction. A dedicated secret under 32 bytes is refused; the
+     * literal-value refusal is pinned by ConfigurationTest.
+     */
+    public function testRuntimeSecretFloorRefusesAShortResolvedSecret(): void
+    {
+        $store = new ArrayChainedChallengeStateStore(static fn (): float => 1000.0);
+        try {
+            new ChainedChallengeTicketService($store, str_repeat('s', 31), 300, 15);
+            self::fail('a 31-byte resolved chain secret must be refused at construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+            self::assertStringContainsString('hmac_secret', $e->getMessage());
+        }
+
+        $accepted = new ChainedChallengeTicketService($store, str_repeat('s', 32), 300, 15);
+        self::assertInstanceOf(ChainedChallengeTicketService::class, $accepted);
+    }
 }

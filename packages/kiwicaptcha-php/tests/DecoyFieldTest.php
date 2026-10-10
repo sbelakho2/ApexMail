@@ -25,14 +25,14 @@ use PHPUnit\Framework\TestCase;
  *
  * The contract, pinned byte-for-byte against the Rust crate:
  *  - armed: protocol v3, the decoy-capable canonical. The signing input
- *    gains exactly one segment, `|<decoy_field>`, appended after the
- *    kid, 19 segments with the decoy last; the stored record's
+ *    gains exactly one segment, the tagged `|d={decoy_field}` appended
+ *    after the kid (the decoy last); the stored record's
  *    protocol_version is 3. The name comes from the shared
  *    combinatorial grammar, see {@see Issuer::composeDecoyName()}:
  *    a 27,840-prefix space with a per-issuance 16-hex `CSPRNG` suffix,
  *    an armed space of 27,840 * 2^64 names.
- *  - unarmed: protocol v2, byte-identical to the pre-extension 18-field
- *    format, and neither JSON surface, client-facing challenge nor
+ *  - unarmed: protocol v2, no extension segment, and neither JSON
+ *    surface, client-facing challenge nor
  *    stored record, carries the `decoy_field` key; it is absent, not
  *    null.
  *  - the decoy is authenticated: stripping, renaming or splicing it
@@ -52,8 +52,8 @@ final class DecoyFieldTest extends TestCase
 {
     use VerifyFixtureTrait;
 
-    /** The pre-extension canonical vector, pinned (ProtocolV2Test pins the same bytes). */
-    private const LEGACY_CANONICAL = 'v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1';
+    /** The revision-4 base canonical vector, pinned (ProtocolV2Test pins the same bytes). */
+    private const BASE_CANONICAL = 'v4|2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1';
 
     private function shaConfig(): Config
     {
@@ -98,7 +98,7 @@ final class DecoyFieldTest extends TestCase
         return $counter - 1;
     }
 
-    // ── (a) armed issuance: armed name, 19 segments, decoy last ─────
+    // ── (a) armed issuance: armed name, tagged d= segment last ─────
 
     public function testArmedIssuanceSignsAnArmedNameAsTheFinalCanonicalSegment(): void
     {
@@ -119,14 +119,16 @@ final class DecoyFieldTest extends TestCase
         self::assertSame($decoy, $record->decoyField);
         self::assertSame(3, $record->protocolVersion, 'an armed issuance writes protocol v3 (the decoy-capable canonical)');
 
-        // The canonical signing input: 18 base fields + the decoy segment,
-        // decoy last (after the kid), matching the Rust mirror.
+        // The canonical signing input: the 19-field revision-4 base +
+        // the tagged decoy segment + the m=1 MAC marker, matching
+        // the Rust mirror.
         $canonical = $this->decodedCanonical($challenge);
         $segments = explode('|', $canonical);
-        self::assertCount(19, $segments, 'the v3 canonical input: 18 base fields + the decoy segment');
-        self::assertSame($decoy, $segments[18], 'the decoy name must be the FINAL canonical segment');
-        self::assertSame((string) ($record->kid ?? 1), $segments[17], 'the kid stays immediately before the decoy');
-        self::assertStringEndsWith('|'.$decoy, $canonical);
+        self::assertCount(21, $segments, 'revision-4 v3 canonical: 19 base fields + the tagged decoy and m= segments');
+        self::assertSame('d='.$decoy, $segments[19], 'the decoy name is the tagged extension before the m= marker');
+        self::assertSame((string) ($record->kid ?? 1), $segments[18], 'the kid stays immediately before the decoy segment');
+        self::assertSame('m=1', $segments[20], 'the record-metadata MAC marker is the final segment');
+        self::assertStringEndsWith('|d='.$decoy.'|m=1', $canonical);
 
         // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
@@ -139,12 +141,15 @@ final class DecoyFieldTest extends TestCase
         self::assertGreaterThanOrEqual(2, \count($seen), 'per-issuance decoy picks must vary across challenges');
     }
 
-    // ── (b) unarmed: byte-identical to the pre-change canonical ─────
+    // ── (b) unarmed: the revision-4 base canonical ─────
 
-    public function testUnarmedCanonicalIsByteIdenticalToThePreExtensionVector(): void
+    public function testUnarmedCanonicalIsTheRevision3BaseVector(): void
     {
-        // The pinned pre-extension canonical (18 fields, kid last).
-        self::assertSame(self::LEGACY_CANONICAL, Issuer::canonicalPayload(
+        // The pinned revision-4 base canonical (19 fields, kid then the
+        // m= marker last for an issued record; this direct call leaves
+        // the marker off), protocol_version signed as the second segment).
+        self::assertSame(self::BASE_CANONICAL, Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -161,7 +166,8 @@ final class DecoyFieldTest extends TestCase
 
         // An explicit null decoy renders nothing extra — byte-identical
         // to the legacy call without the argument.
-        self::assertSame(self::LEGACY_CANONICAL, Issuer::canonicalPayload(
+        self::assertSame(self::BASE_CANONICAL, Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -184,8 +190,9 @@ final class DecoyFieldTest extends TestCase
 
         // An armed decoy appends exactly ONE segment after the kid.
         self::assertSame(
-            self::LEGACY_CANONICAL.'|company_website',
+            self::BASE_CANONICAL.'|d=company_website',
             Issuer::canonicalPayload(
+                2,
                 'nonce123',
                 'login',
                 'tag456',
@@ -210,10 +217,10 @@ final class DecoyFieldTest extends TestCase
 
     public function testUnarmedIssuanceKeepsTheLegacyCanonicalShape(): void
     {
-        // The plain path (and the explicit false arm) issues NO decoy: the
-        // canonical string keeps the exact pre-extension shape (18 fields,
-        // kid last), the record stays protocol v2, and neither JSON
-        // surface carries the key.
+        // The plain path (and the explicit false arm) issues NO decoy:
+        // the canonical keeps the revision-4 base shape (19 fields plus
+        // the m= marker, protocol_version signed), the record stays
+        // protocol v2, and neither JSON surface carries the key.
         $storage = new ArrayStorage();
         $issuer = $this->issuer($storage);
 
@@ -226,12 +233,15 @@ final class DecoyFieldTest extends TestCase
             $record = $storage->find($challenge->nonce);
             self::assertNotNull($record);
             self::assertNull($record->decoyField, "{$label}: no decoy on the stored record");
-            self::assertSame(2, $record->protocolVersion, "{$label}: unarmed issuance stays protocol v2, byte-identical to the pre-decoy format");
+            self::assertSame(2, $record->protocolVersion, "{$label}: unarmed issuance stays protocol v2");
 
             $canonical = $this->decodedCanonical($challenge);
             $segments = explode('|', $canonical);
-            self::assertCount(18, $segments, "{$label}: the base v2 canonical input stays 18 fields (no decoy segment)");
-            self::assertSame((string) ($record->kid ?? 1), $segments[17], "{$label}: kid stays the final field when no decoy is armed");
+            self::assertCount(20, $segments, "{$label}: the revision-4 base canonical input has 19 fields plus the m= marker");
+            self::assertSame('v4', $segments[0], "{$label}: the canonical revision tag leads the input");
+            self::assertSame('2', $segments[1], "{$label}: the signed protocol_version is the second field");
+            self::assertSame((string) ($record->kid ?? 1), $segments[18], "{$label}: kid stays the final base field when no decoy is armed");
+            self::assertSame('m=1', $segments[19], "{$label}: the record-metadata MAC marker is the final segment");
 
             self::assertArrayNotHasKey('decoy_field', $challenge->toArray(), "{$label}: the challenge key is absent when no decoy is armed");
             self::assertArrayNotHasKey('decoy_field', $record->toArray(), "{$label}: the record key is absent when no decoy is armed");
@@ -426,7 +436,7 @@ final class DecoyFieldTest extends TestCase
             self::fail('a protocol-v2 record carrying decoy_field must be rejected by fromArray');
         } catch (MalformedRecordException $e) {
             self::assertStringContainsString('protocol_version 2', $e->getMessage());
-            self::assertStringContainsString('decoy_field', $e->getMessage());
+            self::assertStringContainsString('field combination', $e->getMessage());
         }
 
         // The verifier's malformed-record path rejects the same
@@ -486,6 +496,8 @@ final class DecoyFieldTest extends TestCase
                 ChallengeRecord::fromArray($data);
                 self::fail("decoy name ".var_export($bad, true).' must be malformed');
             } catch (MalformedRecordException $e) {
+                // The name-shape gate fires before the grammar matrix
+                // when the name itself does not conform.
                 self::assertStringContainsString('decoy_field', $e->getMessage());
                 self::assertStringContainsString('[A-Za-z0-9_-]', $e->getMessage());
             }
@@ -655,7 +667,7 @@ final class DecoyFieldTest extends TestCase
     {
         // A v2 record whose JSON never carried the decoy key (the exact
         // pre-extension stored shape) decodes with a null decoy and
-        // verifies against its token with the legacy 18-field canonical
+        // verifies against its token with the 18-field base canonical
         // bytes.
         $storage = new ArrayStorage();
         $challenge = $this->issuer($storage)->issue('login', Vectors::CLIENT_IP);
@@ -699,7 +711,7 @@ final class DecoyFieldTest extends TestCase
             self::fail('a protocol-v3 record without a decoy must be rejected by fromArray');
         } catch (MalformedRecordException $e) {
             self::assertStringContainsString('protocol_version 3', $e->getMessage());
-            self::assertStringContainsString('decoy_field', $e->getMessage());
+            self::assertStringContainsString('field combination', $e->getMessage());
         }
 
         // The verifier's malformed-record path rejects the same
@@ -775,7 +787,7 @@ final class DecoyFieldTest extends TestCase
             ChallengeRecord::fromArray($flipped);
             self::fail('a decoyless v3 record must be refused by fromArray');
         } catch (MalformedRecordException $e) {
-            self::assertStringContainsString('decoy_field', $e->getMessage());
+            self::assertStringContainsString('field combination', $e->getMessage());
         }
         // The hand-rolled equivalent (bypassing the parser) fails the
         // verifier's malformed-record path.
@@ -810,22 +822,21 @@ final class DecoyFieldTest extends TestCase
         $outcome3 = $verifier3->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
         self::assertSame(VerifyError::MalformedRecord, $outcome3->error, 'a decoyless v3 record fails closed as MalformedRecord');
 
-        // The serde-mirror parser accepts any u8 for protocol_version
-        // except the grammar-locked shape: v4 requires the execution
-        // triplet, so a bare version flip to 4 is rejected at parse time
-        // (the same total grammar as the v2/v3 decoy split). Unknown
-        // versions (0, 5..255) still parse and fail closed at the
-        // verifier.
+        // The serde-mirror parser enforces the canonical protocol bounds
+        // at the parse boundary, mirroring the Rust serde boundary:
+        // versions 0 and 5..255 are corrupt or foreign values no
+        // conforming issuer writes, rejected before any storage or
+        // verification work (the verifier's stored-record path can never
+        // observe them).
         foreach ([0, 5, 255] as $version) {
             $data = $issued->toArray();
             $data['protocol_version'] = $version;
-            self::assertSame($version, ChallengeRecord::fromArray($data)->protocolVersion, 'the serde-mirror parser accepts any u8');
-
-            $fresh = new ArrayStorage();
-            $fresh->store(ChallengeRecord::fromArray($data));
-            $verifier = new Verifier($fresh, now: static fn (): int => Vectors::NOW);
-            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
-            self::assertSame(VerifyError::MalformedRecord, $outcome->error, "protocol version {$version} must fail closed as MalformedRecord");
+            try {
+                ChallengeRecord::fromArray($data);
+                self::fail("protocol version {$version} must be rejected at parse");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString('protocol_version', $e->getMessage());
+            }
         }
         // A bare flip to 4 (no execution triplet on a decoy-armed
         // record) is refused by the parser: the v4 canonical requires
@@ -1021,7 +1032,7 @@ final class DecoyFieldTest extends TestCase
         $record = $storage->find($challenge->nonce);
         self::assertNotNull($record);
         self::assertSame($pinned, $record->decoyField, 'the pinned name is signed into the record like any other armed name');
-        self::assertStringEndsWith('|'.$pinned, $this->decodedCanonical($challenge));
+        self::assertStringEndsWith('|d='.$pinned.'|m=1', $this->decodedCanonical($challenge));
 
         foreach (['', str_repeat('x', 65), 'company|website', 'company.website'] as $bad) {
             try {

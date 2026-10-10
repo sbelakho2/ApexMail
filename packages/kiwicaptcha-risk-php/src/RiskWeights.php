@@ -51,20 +51,39 @@ final class RiskWeights
 
     public static function fromArray(array $data): self
     {
+        // Integer-only, exactly like Rust's serde u16 decode: a float or
+        // numeric string would otherwise be silently cast here while the
+        // Rust parser rejects it, and the canonical policy hash (whose
+        // number formatting differs between the languages) would diverge.
+        $int = static function (array $row, string $key, int $default): int {
+            if (!\array_key_exists($key, $row)) {
+                return $default;
+            }
+            $value = $row[$key];
+            if (!\is_int($value) || $value < 0 || $value > 65535) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Risk weight %s must be an integer within 0..65535 (got %s); floats and numeric strings are not admissible because the canonical policy hash must be identical in PHP and Rust',
+                    $key,
+                    get_debug_type($value),
+                ));
+            }
+            return $value;
+        };
+
         return new self(
-            sourceFast: (int) ($data['source_fast'] ?? self::DEFAULT_SOURCE_FAST),
-            sourceSlow: (int) ($data['source_slow'] ?? self::DEFAULT_SOURCE_SLOW),
-            subnetFast: (int) ($data['subnet_fast'] ?? self::DEFAULT_SUBNET_FAST),
-            issueDebt: (int) ($data['issue_debt'] ?? self::DEFAULT_ISSUE_DEBT),
-            badProof: (int) ($data['bad_proof'] ?? self::DEFAULT_BAD_PROOF),
-            malformed: (int) ($data['malformed'] ?? self::DEFAULT_MALFORMED),
-            replay: (int) ($data['replay'] ?? self::DEFAULT_REPLAY),
-            actionFailure: (int) ($data['action_failure'] ?? self::DEFAULT_ACTION_FAILURE),
-            scopeSwitch: (int) ($data['scope_switch'] ?? self::DEFAULT_SCOPE_SWITCH),
-            globalPressure: (int) ($data['global_pressure'] ?? self::DEFAULT_GLOBAL_PRESSURE),
-            networkRisk: (int) ($data['network_risk'] ?? self::DEFAULT_NETWORK_RISK),
-            trustCredit: (int) ($data['trust_credit'] ?? self::DEFAULT_TRUST_CREDIT),
-            principalCredit: (int) ($data['principal_credit'] ?? self::DEFAULT_PRINCIPAL_CREDIT),
+            sourceFast: $int($data, 'source_fast', self::DEFAULT_SOURCE_FAST),
+            sourceSlow: $int($data, 'source_slow', self::DEFAULT_SOURCE_SLOW),
+            subnetFast: $int($data, 'subnet_fast', self::DEFAULT_SUBNET_FAST),
+            issueDebt: $int($data, 'issue_debt', self::DEFAULT_ISSUE_DEBT),
+            badProof: $int($data, 'bad_proof', self::DEFAULT_BAD_PROOF),
+            malformed: $int($data, 'malformed', self::DEFAULT_MALFORMED),
+            replay: $int($data, 'replay', self::DEFAULT_REPLAY),
+            actionFailure: $int($data, 'action_failure', self::DEFAULT_ACTION_FAILURE),
+            scopeSwitch: $int($data, 'scope_switch', self::DEFAULT_SCOPE_SWITCH),
+            globalPressure: $int($data, 'global_pressure', self::DEFAULT_GLOBAL_PRESSURE),
+            networkRisk: $int($data, 'network_risk', self::DEFAULT_NETWORK_RISK),
+            trustCredit: $int($data, 'trust_credit', self::DEFAULT_TRUST_CREDIT),
+            principalCredit: $int($data, 'principal_credit', self::DEFAULT_PRINCIPAL_CREDIT),
         );
     }
 

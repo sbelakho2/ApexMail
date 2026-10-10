@@ -4,15 +4,15 @@
 //! the main lib test binary runs issuance/verification tests in parallel
 //! threads that each derive `HKDF` keys, polluting any exact-count window.
 //! In this binary the counting test is the only test, so the counts are
-//! exact: from_master runs once per key id per verifier, and never again
-//! for the verifier's lifetime.
+//! exact: from_master runs once per (tenant, kid) pair per verifier, and
+//! never again for the verifier's lifetime.
 //!
 //! The store side runs against the hermetic fake endpoint from
 //! `tests/common` (no real Redis needed): a full `verify()` drives the
 //! cheap phase twice per verification (the peek plus the post-consume
 //! re-check), each hitting the v2 signature check AND the IP-binding
 //! re-derivation — four `HKDF` derivations per verification without the
-//! cache, zero with it (after the once-per-kid map build).
+//! cache, zero with it (after the once-per-pair lazy derivation).
 
 #![cfg(feature = "redis")]
 
@@ -68,6 +68,7 @@ fn sha_config(secret: &str, kid: u32) -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
     }
 }
 
@@ -121,8 +122,9 @@ fn from_master_runs_once_per_kid_per_verifier_process() {
     endpoint.seed(&prefix, &issued_1.record);
     endpoint.seed(&prefix, &issued_2.record);
 
-    // First verification under kid 1: the verifier builds its full
-    // per-kid derived-keys map (one derivation per configured kid — 2),
+    // First verification under kid 1: the lazy per-(tenant, kid) cache
+    // derives exactly the pair the record names (kid 1 only — the
+    // keyring's other kid stays underived until a record names it),
     // then the whole verification (cheap phase × 2: peek + post-consume
     // re-check; signature + IP binding each) runs on the cache.
     let before = keys::from_master_call_count();
@@ -139,14 +141,14 @@ fn from_master_runs_once_per_kid_per_verifier_process() {
     ));
     assert_eq!(
         keys::from_master_call_count() - before,
-        2,
-        "the first verification derives exactly once per configured kid (the full map), nothing more — without the cache this one verification alone would derive 4 times"
+        1,
+        "the first verification derives exactly its own kid's pair — the keyring's other kids stay underived"
     );
 
     // Every later verification — the second kid AND repeats of the first
-    // — derives nothing: the per-kid map is cached for the verifier's
-    // lifetime (each verification would derive 4 times without the
-    // cache).
+    // — derives nothing new for a cached kid: the per-kid map is cached
+    // for the verifier's lifetime (each verification would derive 4
+    // times without the cache).
     let before_more = keys::from_master_call_count();
     for (issued, counter) in [
         (&issued_2, counter_2),
@@ -170,7 +172,7 @@ fn from_master_runs_once_per_kid_per_verifier_process() {
     }
     assert_eq!(
         keys::from_master_call_count() - before_more,
-        0,
-        "three further full verifications (two kids, repeats included) must derive NOTHING — 12 derivations without the cache"
+        1,
+        "three further full verifications derive exactly once (kid 2's first use) — never for repeats"
     );
 }

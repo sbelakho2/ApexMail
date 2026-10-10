@@ -117,7 +117,7 @@ final class ExecutionChallengeTest extends TestCase
         // is refused before any program is minted (the strict parser
         // would reject the blob anyway, so issuance never produces an
         // unparseable program). No string-cast ever reaches the blob.
-        foreach ([0, 6, 255] as $bad) {
+        foreach ([0, 7, 255] as $bad) {
             try {
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $bad);
                 self::fail('a noncanonical version byte must be refused');
@@ -128,8 +128,8 @@ final class ExecutionChallengeTest extends TestCase
         // Every register version generates and stamps its own version
         // byte: 1 (the legacy construction-to-probe grammar), 2 (the
         // causal observe grammar), 3 (the sibling-index probe), 4
-        // (the nested-tree depth probe) and 5 (the causal
-        // object-graph grammar).
+        // (the nested-tree depth probe), 5 (the causal object-graph
+        // grammar) and 6 (the real-platform probes).
         foreach (range(1, ExecutionChallengeGenerator::MAX_EXECUTION_VERSION) as $version) {
             $decoded = ExecutionChallengeGenerator::decode(
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $version)
@@ -605,21 +605,21 @@ final class ExecutionChallengeTest extends TestCase
     public function testAllOpcodesExecuteDeterministically(): void
     {
         // Every opcode of the fixed set appears across a deterministic
-        // corpus of version-3, version-4 and version-5 programs (the
-        // causal grammars carry the observe opcode 33 plus the probe
-        // block; nonces derive from sha256 over a label, so the same
-        // programs run on every PHP version and every CI cell — the
-        // corpus is large enough that the rarest filler opcodes
-        // (uniform over 0..27 in the filler slots) are certainly
-        // drawn), and every trace entry is a valid value (decimal,
-        // "1"/"0", or base64 — never containing the ';' separator).
-        // The fragment-append opcode is terminal by design: it is
-        // never drawn into an issued program's extra slots or filler
-        // (see generate), so the reachable set is the full register
-        // minus OP_DOM_FRAGMENT_APPEND.
+        // corpus of version-3, version-4, version-5 and version-6
+        // programs (the causal grammars carry the observe opcode 33
+        // plus the probe block; nonces derive from sha256 over a
+        // label, so the same programs run on every PHP version and
+        // every CI cell — the corpus is large enough that the rarest
+        // filler opcodes (uniform over 0..27 in the filler slots) are
+        // certainly drawn), and every trace entry is a valid value
+        // (decimal, "1"/"0", or base64 — never containing the ';'
+        // separator). The fragment-append opcode is terminal by
+        // design: it is never drawn into an issued program's extra
+        // slots or filler (see generate), so the reachable set is the
+        // full register minus OP_DOM_FRAGMENT_APPEND.
         $seen = [];
         for ($i = 0; $i < 240; $i++) {
-            $version = 3 + ($i % 3);
+            $version = 3 + ($i % 4);
             $nonce = base64_encode(hash('sha256', 'opcode-coverage-'.$i, true));
             $program = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, $version);
             $decoded = ExecutionChallengeGenerator::decode($program);

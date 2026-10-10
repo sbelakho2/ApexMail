@@ -31,6 +31,10 @@ function driverSource() {
   return fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
 }
 
+function riskModuleSource() {
+  return fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
+}
+
 function workerSource() {
   return fs.readFileSync(assetPath('kiwi-worker.js'), 'utf8');
 }
@@ -42,6 +46,7 @@ function workerSource() {
 async function serveWidgetPage(page, attrs) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = driverSource();
+  const risk = riskModuleSource();
   const attrStr = Object.entries(attrs)
     .map(([k, v]) => ` ${k}="${v}"`)
     .join('');
@@ -57,7 +62,7 @@ async function serveWidgetPage(page, attrs) {
     </div>
   </div>
 </div>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
   await page.route('**/widget-test', (route) =>
     route.fulfill({ contentType: 'text/html', body: html })
   );
@@ -67,9 +72,13 @@ async function serveWidgetPage(page, attrs) {
 test.describe('KiwiCaptcha postMessage boundary', () => {
   test('driver has NO parent-page postMessage and NO unguarded message listeners (static source assertion)', () => {
     const src = driverSource();
+    const risk = riskModuleSource();
     const worker = workerSource();
 
-    for (const [name, source] of [['widget-driver.js', src], ['kiwi-worker.js', worker]]) {
+    // The driver surface is the eager core plus the lazy widget-risk.js
+    // module (the worker machinery and the execution runner live there
+    // since the driver was split into the eager core plus lazy modules), plus the worker asset itself.
+    for (const [name, source] of [['widget-driver.js', src], ['widget-risk.js', risk], ['kiwi-worker.js', worker]]) {
       // The driver must never post to the parent page at all — and never
       // with a wildcard target origin.
       expect(
@@ -95,22 +104,74 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
       }
     }
 
-    // The only postMessage traffic is worker-internal: the driver posts the
-    // solve request to its own worker, the worker posts ready/progress/
-    // done/failed back, and the MessageChannel yield is fully internal.
-    expect(src).toMatch(/worker\.postMessage\(/);
-    expect(src).toMatch(/worker\.onmessage\s*=/);
+    // The only postMessage traffic is worker-internal: the widget-risk.js
+    // module (the worker machinery) posts the solve request to its own
+    // worker, the worker posts ready/progress/done/failed back, and the
+    // MessageChannel yield is fully internal.
+    expect(risk).toMatch(/worker\.postMessage\(/);
+    expect(risk).toMatch(/worker\.onmessage\s*=/);
+  });
+
+  test('page-influenced dictionary maps are null-prototype (static source assertion)', () => {
+    // A plain {} map keyed by a page-supplied string (data-kiwi-instance,
+    // a widget render id, a scope-map key, an asset URL, a module kind)
+    // is a prototype-pollution sink: `map["__proto__"] = record` sets the
+    // map's [[Prototype]] to that record, so every other key inherits a
+    // forged entry. Every such store must be Object.create(null).
+    const sources = [
+      ['widget-driver.js', driverSource()],
+      ['widget-risk.js', riskModuleSource()],
+      ['widget-compat.js', fs.readFileSync(assetPath('widget-compat.js'), 'utf8')],
+      ['widget-shims.js', fs.readFileSync(assetPath('widget-shims.js'), 'utf8')],
+      ['execution-interpreter.js', fs.readFileSync(assetPath('execution-interpreter.js'), 'utf8')],
+    ];
+    const mapNames = [
+      'kiwiWidgets',
+      'compatControlById',
+      'shimsControlById',
+      'kiwiRuntimeGlueCache',
+      'kiwiWorkerAssetCache',
+      'kiwiModuleApis',
+      'kiwiModuleLoads',
+      'kiwiModuleFailedAt',
+      'shimsScopeMapCache',
+    ];
+    for (const [name, source] of sources) {
+      for (const mapName of mapNames) {
+        // Every live binding of a dictionary map must be Object.create(null).
+        // A lazy cache may assign Object.create(null) later. A plain `{}` reset
+        // is the pollution sink and is forbidden.
+        const plain = source.match(new RegExp(String.raw`\b${mapName}\s*=\s*\{\s*\}`, 'g')) ?? [];
+        expect(
+          plain,
+          `${name}: ${mapName} must never be assigned a plain {}; use Object.create(null)`
+        ).toEqual([]);
+      }
+      // docIds lives on the runner object literal.
+      const docIds = source.match(/docIds:\s*\{\s*\}/g) ?? [];
+      expect(docIds, `${name}: docIds must never be a plain {}`).toEqual([]);
+    }
+    // Positive: the driver's widget map and the shim/compat control maps
+    // must actually be constructed as null-prototype dictionaries.
+    expect(driverSource()).toMatch(/var\s+kiwiWidgets\s*=\s*Object\.create\(null\)/);
+    expect(fs.readFileSync(assetPath('widget-compat.js'), 'utf8'))
+      .toMatch(/var\s+compatControlById\s*=\s*Object\.create\(null\)/);
+    expect(fs.readFileSync(assetPath('widget-shims.js'), 'utf8'))
+      .toMatch(/var\s+shimsControlById\s*=\s*Object\.create\(null\)/);
   });
 
   test('worker message handlers are schema-guarded (versioned, unknown shapes ignored) (static source assertion)', () => {
     const src = driverSource();
+    const risk = riskModuleSource();
     const worker = workerSource();
 
-    // Driver side: the worker reply listener validates a version field and
-    // the payload schema before acting; anything else is ignored.
-    expect(src).toMatch(/msg\.v !== 1/);
-    expect(src).toMatch(/typeof msg\.counter !== "number"/);
-    expect(src).toMatch(/typeof msg\.reason !== "string"/);
+    // Driver side (the widget-risk.js module owns the worker machinery
+    // since the driver split): the worker reply listener validates a
+    // version field and the payload schema before acting; anything else
+    // is ignored.
+    expect(risk).toMatch(/msg\.v !== 1/);
+    expect(risk).toMatch(/typeof msg\.counter !== "number"/);
+    expect(risk).toMatch(/typeof msg\.reason !== "string"/);
     // Worker side (the standalone asset; the driver no longer embeds the
     // worker bytes — the glue carries them for inline mode): the solve
     // request must be a v1 object with the full numeric/string field set,
@@ -126,11 +187,11 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     // runtime can never race the verified one.
     expect(worker, 'the worker must never eagerly import the runtime').not.toMatch(/importScripts\(\s*["']kiwicaptcha-wasm\.js["']\s*\)/);
     // The solve request the driver sends carries the version field.
-    expect(src).toMatch(/v: 1,\n\s*type: "solve"/);
+    expect(risk).toMatch(/v: 1,\n\s*type: "solve"/);
     // The glue handshake the driver posts carries the version field and
     // the runtime asset URL (SRI-verified in files mode, derived from the
     // worker's own URL on the legacy static-worker path).
-    expect(src).toMatch(/v: 1, type: "glue", runtimeSrc: glueRuntimeSrc/);
+    expect(risk).toMatch(/v: 1, type: "glue", runtimeSrc: glueRuntimeSrc/);
   });
 
   test('the worker ignores versionless or unknown messages (runtime)', async ({ page }) => {
@@ -466,13 +527,16 @@ test.describe('KiwiCaptcha solver version coupling', () => {
     const src = driverSource();
     const worker = workerSource();
 
-    // The protocol id constant must exist in the driver and the worker,
-    // and both must agree (renamed from 'build id' — it
+    // The protocol id constant must exist in the driver (the eager core
+    // and the lazy widget-risk.js module both declare it) and the worker,
+    // and all must agree (renamed from 'build id' — it
     // proves protocol compatibility; exact identity is the release
     // SHA256SUMS/SRI/attestation chain).
     const driverProtocolId = src.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
+    const riskProtocolId = riskModuleSource().match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
     const workerProtocolId = worker.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
     expect(driverProtocolId).toBeTruthy();
+    expect(riskProtocolId).toBe(driverProtocolId);
     expect(workerProtocolId).toBe(driverProtocolId);
 
     // The worker verifies the wasm glue's exported solver_protocol_version()
@@ -487,11 +551,15 @@ test.describe('KiwiCaptcha solver version coupling', () => {
     expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
     expect(worker).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID/);
 
-    // The driver validates against its own constant and enters a controlled
-    // mismatch state — a mismatched worker must never yield a solution.
-    expect(src).toMatch(/msg\.type === "ready"/);
-    expect(src).toMatch(/msg\.buildId !== KIWI_SOLVER_PROTOCOL_ID/);
-    expect(src).toMatch(/mismatch: true/);
+    // The worker machinery validates against the constant and enters a
+    // controlled mismatch state — a mismatched worker must never yield a
+    // solution. The handshake code lives in the widget-risk.js module
+    // (the driver split); the controlled state machine stays in the
+    // eager core.
+    const risk = riskModuleSource();
+    expect(risk).toMatch(/msg\.type === "ready"/);
+    expect(risk).toMatch(/msg\.buildId !== KIWI_SOLVER_PROTOCOL_ID/);
+    expect(risk).toMatch(/mismatch: true/);
     expect(src).toMatch(/kiwi:solver-mismatch/);
   });
 
@@ -513,14 +581,17 @@ test.describe('KiwiCaptcha solver version coupling', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly five fetch calls exist in the whole driver: the
-    // loader-glue fetch (the external /api.js path fetches its own
-    // source to hand the wasm glue to the Blob worker), the challenge
-    // fetch, the bounded cancellation fetch ({endpoint}/cancel) and the
-    // two files-mode lazy fetches — the WASM runtime glue
-    // (kiwiFetchRuntimeGlue) and the Argon worker asset
-    // (kiwiFetchWorkerAsset, worker.<hash>.js) — downloaded only when a
-    // memory-hard challenge arrives; a SHA-256 solve pays no runtime or
+    const risk = riskModuleSource();
+    // The driver surface is the eager core plus the lazy widget modules.
+    // Fetch accounting across the surface: the eager core owns the
+    // challenge fetch and the bounded cancellation fetch ({endpoint}/
+    // cancel); the widget-risk.js module owns the two files-mode lazy
+    // fetches (the WASM runtime glue and the Argon worker asset,
+    // worker.<hash>.js), downloaded only when a memory-hard challenge
+    // arrives; the widget-compat.js module issues NO network request at
+    // all (the external /api.js path rebuilds its worker prelude from
+    // the glue constants embedded in the same loader response). A
+    // SHA-256 solve pays no runtime or
     // worker request at all. Both lazy fetches are SRI-verified (fail
     // closed when the digest cannot be computed), deduplicated per URL
     // across the page and bounded to two retries; their failure enters
@@ -528,34 +599,40 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // hash. There can be no "retry with a weaker challenge" code path to
     // fetch a second challenge: exactly ONE fetch targets the challenge
     // endpoint itself.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(5);
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(2);
+    expect(risk.match(/fetch\(/g) ?? []).toHaveLength(2);
     expect(src.match(/fetch\(endpoint,/g) ?? []).toHaveLength(1);
-    expect(src.match(/fetch\(url, \{ cache: "force-cache"/g) ?? []).toHaveLength(2);
-    expect(src.match(/fetch\(compatScriptUrl\.split\("\?"\)\[0\]/g) ?? []).toHaveLength(1);
+    expect(risk.match(/fetch\(url, \{ cache: "force-cache"/g) ?? []).toHaveLength(2);
     expect(src.match(/fetch\(cancelUrl,/g) ?? []).toHaveLength(1);
     // The algorithm variable is declared exactly once in the driver (from
     // the container/widget attributes only); the worker's own declaration
     // lives in the standalone asset, which the driver no longer embeds.
     expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(1);
     // The only hard-coded algorithm assignment in the entire file is the
-    // audit-#62 profile normalization itself (pinned by both assertions
+    // profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
-    expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id"\) algorithm = "sha256";/);
+    expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"\) algorithm = "sha256";/);
     // The request body algorithm is exactly the attribute-derived variable.
-    expect(src).toMatch(/var algorithm\s*=\s*W\.getAttribute\("data-kiwi-algorithm"\) \|\| container\.getAttribute\("data-kiwi-algorithm"\) \|\| "sha256"/);
+    // The one assignment goes through the shared supported-configuration
+    // reader (attribute-only, never client-synthesized).
+    expect(src).toMatch(/var algorithm\s*=\s*kiwiConfigValue\(W, container, "data-kiwi-algorithm"\) \|\| "sha256"/);
     expect(src).toMatch(/reqBody\.algorithm\s*=\s*algorithm/);
-    // Only the two server-offered profiles are selectable — anything else is
-    // normalized to the default; the client can never invent parameters.
-    expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id"/);
+    // Only the three server-offered profiles are selectable — anything
+    // else is normalized to the default; the client can never invent
+    // parameters (rsw is the optional time-lock rung, issued only when
+    // the server offers it).
+    expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"/);
     // Solver selection is driven only by the server's response algorithm —
     // never by a client capability probe (no navigator capability gating).
     expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "argon2id"/);
+    expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "rsw"/);
     expect(src, 'no capability probe may gate the algorithm choice').not.toMatch(/navigator\.[\w.]*[Cc]apab/);
-    // A server-side downgrade (argon2id requested, weaker returned) is a
-    // failed challenge, never accepted and never solved.
+    // A server-side downgrade (argon2id or rsw requested, weaker
+    // returned) is a failed challenge, never accepted and never solved.
     expect(src).toMatch(/Challenge downgraded/);
-    expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) !== "argon2id"/);
+    expect(src).toMatch(/returnedAlgorithm !== "argon2id"/);
+    expect(src).toMatch(/algorithm === "rsw" && returnedAlgorithm !== "rsw"/);
   });
 
   test('a stale worker leaves the widget in the mismatch state without ever re-requesting a weaker challenge (runtime)', async ({ page }) => {
@@ -596,7 +673,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', {
       timeout: 60_000,
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('Worker unavailable', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('could not start on this device', {
       timeout: 60_000,
     });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
@@ -616,11 +693,11 @@ test.describe('KiwiCaptcha challenge fetch timeout', () => {
     expect(src).toMatch(/KIWI_FETCH_TIMEOUT_MS\s*=\s*15000/);
     expect(src).toMatch(/data-kiwi-fetch-timeout-ms/);
     expect(src).toMatch(/clearTimeout\(abortTimer\)/);
-    // The worker solve path is bounded end to end: the driver caps the
-    // counter range it hands the worker (maxHashes), the worker caps its
-    // own search range (argMax), and every worker path terminates in a
-    // done/failed terminal message.
-    expect(src).toMatch(/maxHashes: MAX_SHA_HASHES/);
+    // The worker solve path is bounded end to end: the driver (the
+    // widget-risk.js module) caps the counter range it hands the worker
+    // (maxHashes), the worker caps its own search range (argMax), and
+    // every worker path terminates in a done/failed terminal message.
+    expect(riskModuleSource()).toMatch(/maxHashes: MAX_SHA_HASHES/);
     expect(worker).toMatch(/argMax = Math\.min\(maxHashes, Math\.max\(1024, expected \* 8\)\)/);
   });
 
@@ -691,6 +768,28 @@ test.describe('KiwiCaptcha narrow request shape', () => {
       'reqBody.cdata',
       'reqBody.sitekey',
     ]);
+  });
+
+  test('the execution capability advertisement rides the Kiwi-Execution-Max-Version request header, never a body field (static source assertion)', () => {
+    const src = driverSource();
+    // The execution tier is advertised out-of-band on purpose: the
+    // challenge body is validated against a closed field set, so an
+    // unknown body field is refused (422 `UNKNOWN_FIELDS`) before any
+    // version-2 emission is even enabled, while an ignorable request
+    // header keeps a server that never heard of it working unchanged.
+    // The header is attached only under the same condition that arms
+    // the execution surface (data-kiwi-execution-src + integrity) and
+    // with the exact integer-string value 6 (the newest execution
+    // grammar the widget can solve), and the fetch carries the header
+    // object built right next to the body.
+    expect(src.match(/Kiwi-Execution-Max-Version/g) ?? []).not.toEqual([]);
+    expect(src).toMatch(/var reqHeaders = \{ "Accept": "application\/json", "Content-Type": "application\/json" \};/);
+    expect(src).toMatch(/if \(execSrcAttr && execIntegrityAttr\) reqHeaders\["Kiwi-Execution-Max-Version"\] = "6";/);
+    expect(src.match(/reqHeaders\["Kiwi-Execution-Max-Version"\] = "6";/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/headers: reqHeaders,/);
+    // The narrow request shape holds: the capability must never exist
+    // as a body field anywhere in the driver.
+    expect(src.match(/reqBody\.execution_max_version/g) ?? []).toEqual([]);
   });
 
   test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} — no client_context without the opt-in (runtime)', async ({ page }) => {

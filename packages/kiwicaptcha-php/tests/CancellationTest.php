@@ -38,6 +38,17 @@ use PHPUnit\Framework\TestCase;
  */
 final class CancellationTest extends TestCase
 {
+
+    /**
+     * The wire nonce of a logical fixture label. The record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes.
+     * That is the strict serde twin. Logical labels map to it here and
+     * the storage keys stay readable at the call sites.
+     */
+    private static function wn(string $logical): string
+    {
+        return \KiwiCaptcha\Tests\Support\WireFixture::nonce($logical);
+    }
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
     // ── ArrayStorage ────────────────────────────────────────────────
@@ -197,7 +208,7 @@ final class CancellationTest extends TestCase
     {
         $storage = new RedisStorage($this->requirePredis());
 
-        self::assertNull($storage->cancel('never-stored'), 'a never-issued nonce is a null result, not a state');
+        self::assertNull($storage->cancel(self::wn('never-stored')), 'a never-issued nonce is a null result, not a state');
     }
 
     public function testRedisStorageCancelledRecordIsUnconsumableAndFailsVerificationClosed(): void
@@ -253,13 +264,13 @@ final class CancellationTest extends TestCase
         $record = $this->makeRecord('ttl-nonce');
         $storage->store($record);
 
-        $storage->cancel('ttl-nonce');
+        $storage->cancel(self::wn('ttl-nonce'));
 
         // The flip preserves the key expiration: the cancelled marker is
         // retained for the record's remaining lifetime (the SET EX splice
         // of the real Lua; the fake re-writes the value with the same
         // expiration map).
-        self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:ttl-nonce'], 'the cancelled record keeps its TTL');
+        self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:'.self::wn('ttl-nonce')], 'the cancelled record keeps its TTL');
     }
 
     public function testRedisStorageCancelIssuesWaitOnlyOnTheFreshTransition(): void
@@ -277,24 +288,24 @@ final class CancellationTest extends TestCase
         $storage->store($this->makeRecord('wait-fresh')); // +1 WAIT (issuance)
         self::assertSame(1, $waits());
 
-        $fresh = $storage->cancel('wait-fresh');
+        $fresh = $storage->cancel(self::wn('wait-fresh'));
         self::assertNotNull($fresh);
         self::assertTrue($fresh->wasCancelledNow(), 'the first cancel wins the fresh transition');
         self::assertSame(2, $waits(), 'a fresh pending→cancelled flip must issue exactly one WAIT');
 
-        $replay = $storage->cancel('wait-fresh');
+        $replay = $storage->cancel(self::wn('wait-fresh'));
         self::assertNotNull($replay);
         self::assertSame('cancelled', $replay->state);
         self::assertSame(2, $waits(), 'an already-cancelled replay performs no write and must issue NO WAIT');
 
         $storage->store($this->makeRecord('wait-consumed')); // +1 WAIT (issuance)
-        $storage->consume('wait-consumed'); // +1 WAIT (the pending→consumed transition)
-        $consumed = $storage->cancel('wait-consumed');
+        $storage->consume(self::wn('wait-consumed')); // +1 WAIT (the pending→consumed transition)
+        $consumed = $storage->cancel(self::wn('wait-consumed'));
         self::assertNotNull($consumed);
         self::assertSame('consumed', $consumed->state);
         self::assertSame(4, $waits(), 'a consumed record performs no write and must issue NO WAIT');
 
-        self::assertNull($storage->cancel('never-stored'));
+        self::assertNull($storage->cancel(self::wn('never-stored')));
         self::assertSame(4, $waits(), 'a missing record performs no write and must issue NO WAIT');
     }
 
@@ -326,7 +337,7 @@ final class CancellationTest extends TestCase
 
         $client->waitAck = 0;
         try {
-            $storage->cancel('barrier-nonce');
+            $storage->cancel(self::wn('barrier-nonce'));
             self::fail('cancel must fail closed when the flip is not durably replicated');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException $e) {
             self::assertStringContainsString('0 of 1', $e->getMessage());
@@ -338,7 +349,7 @@ final class CancellationTest extends TestCase
         // rollback): a retry observes the already-cancelled state and can
         // never re-flip — and, having performed no write, issues no WAIT.
         $client->waitAck = 1;
-        $retry = $storage->cancel('barrier-nonce');
+        $retry = $storage->cancel(self::wn('barrier-nonce'));
         self::assertNotNull($retry);
         self::assertSame('cancelled', $retry->state, 'the failed-barrier flip still cancelled the record on the primary');
     }
@@ -413,7 +424,7 @@ final class CancellationTest extends TestCase
     private function makeRecord(string $nonce = 'cancel-nonce-1'): ChallengeRecord
     {
         return new ChallengeRecord(
-            nonce: $nonce,
+            nonce: self::wn($nonce),
             scope: 'login',
             bindingTag: 'abc123',
             issuedAt: 1_800_000_000,
@@ -423,8 +434,8 @@ final class CancellationTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: 123_456_789,
@@ -435,7 +446,7 @@ final class CancellationTest extends TestCase
     {
         $storage->store($this->makeRecord());
 
-        return 'cancel-nonce-1';
+        return self::wn('cancel-nonce-1');
     }
 
     private function issue(\KiwiCaptcha\StorageInterface $storage): \KiwiCaptcha\Challenge

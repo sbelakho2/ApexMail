@@ -1,0 +1,4 @@
+{
+  "_doc": "Justified unprobed surfaces for the dogfood-v2 coverage ledger. Every entry requires a narrow surface id, an owner and a specific reason (>=12 chars); blanket or under-justified entries make the run exit non-zero. Prefer adding a probe over adding an entry.",
+  "entries": []
+}

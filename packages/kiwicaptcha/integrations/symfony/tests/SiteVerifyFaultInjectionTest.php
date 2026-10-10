@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
@@ -181,8 +182,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $scorer = new RiskScorer();
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -342,8 +343,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         usleep(($challenge->minDurationMs + 10) * 1000);
         $uuid = 'a1b2c3d4-1111-4a2b-8c3d-000000000001';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $probe->disconnect();
 
@@ -444,7 +445,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             self::assertNotNull($consumed->consumedResult, 'the winner must commit the deterministic result');
             self::assertSame(true, $consumed->consumedResult->valid);
             $store = new RedisSiteVerifyIdempotencyStore($check, 'kiwicaptcha');
-            $stored = $store->stored($backendId, $uuid);
+            $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($stored, 'the idempotency entry must be complete');
             // The store's Lua round-trip (cjson decode/encode) does not
             // preserve the canonical key ordering of the stored result;
@@ -623,10 +624,10 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $uuidK = 'b2c3d4e5-2222-4b3c-9d4e-111111111111';
         $uuidK2 = 'c3d4e5f6-3333-4c4d-ae5f-222222222222';
         $uuidK3 = 'd4e5f6a7-4444-4d5e-bf6a-333333333333';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemK = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
-        $idemK2 = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
-        $idemK3 = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK3;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemK = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
+        $idemK2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
+        $idemK3 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK3;
         $probe->del([$idemK, $idemK2, $idemK3]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 3);
 
@@ -639,7 +640,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             ]));
             self::assertSame(200, $first->getStatusCode());
             self::assertSame(true, json_decode((string) $first->getContent(), true)['success']);
-            $storedK = $store->stored($backendId, $uuidK);
+            $storedK = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidK, hash('sha256', $tokenA), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($storedK);
             self::assertSame(true, $storedK['success'] ?? false);
 
@@ -652,7 +653,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             self::assertSame(400, $second->getStatusCode(), 'key reuse across a different token must be refused');
             self::assertSame(['bad-request'], json_decode((string) $second->getContent(), true)['error-codes']);
             self::assertNull($storage->consumedState($nonceB), 'the refused claim must not touch token B');
-            self::assertSame(true, ($store->stored($backendId, $uuidK)['success'] ?? false) === true, "token A's stored success stays untouched");
+            self::assertSame(true, (SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidK, hash('sha256', $tokenA), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, "token A's stored success stays untouched");
 
             // 3. Token B redeemed under its own key K2: fresh success.
             $third = $controller->siteverify($this->siteverifyRequest([
@@ -682,7 +683,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             self::assertSame(200, $fifth->getStatusCode());
             self::assertFalse($fifthBody['success'] ?? null, 'a different logical operation presenting the consumed token must never succeed');
             self::assertSame(['timeout-or-duplicate'], $fifthBody['error-codes'] ?? null, 'the operation-identity mismatch answers the duplicate vocabulary');
-            $storedK3 = $store->stored($backendId, $uuidK3);
+            $storedK3 = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidK3, hash('sha256', $tokenB), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($storedK3, 'the mismatch verdict is finalized deterministically under K3');
             self::assertSame(['timeout-or-duplicate'], $storedK3['error-codes'] ?? null);
 
@@ -721,10 +722,10 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $secret1 = 'secret-one-'.str_repeat('a', 16);
         $secret2 = 'secret-two-'.str_repeat('b', 16);
         $uuid = 'e5f6a7b8-5555-4e6f-ca7b-444444444444';
-        $backendId1 = hash('sha256', $secret1.'|login|0|');
-        $backendId2 = hash('sha256', $secret2.'|login|0|');
-        $idemKey1 = '{kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
-        $idemKey2 = '{kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
+        $backendId1 = hash_hmac('sha256', 'login|0|', $secret1);
+        $backendId2 = hash_hmac('sha256', 'login|0|', $secret2);
+        $idemKey1 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
+        $idemKey2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
         $probe->del([$idemKey1, $idemKey2]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
@@ -747,7 +748,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
                 'the identity lands atomically with the state flip under secret-1',
             );
             self::assertNull($consumed->consumedResult);
-            self::assertNull($store->stored($backendId1, $uuid), 'the lost reply must NOT finalize the secret-1 claim');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId1, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the lost reply must NOT finalize the secret-1 claim');
 
             // The rotated retry (secret 2, same key): a fresh claim in the
             // secret-2 namespace. The resultless consumed record refuses
@@ -759,7 +760,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             ]));
             self::assertSame(503, $rotatedResponse->getStatusCode(), 'the rotated context must fail closed, never reconstruct');
             self::assertSame(['internal-error'], json_decode((string) $rotatedResponse->getContent(), true)['error-codes']);
-            self::assertNull($store->stored($backendId2, $uuid), 'the rotated retry finalizes nothing');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId2, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the rotated retry finalizes nothing');
             self::assertNull($storage->consumedState($nonce)?->consumedResult, 'the record stays resultless');
 
             // Wait out the 1s lease (Redis time is the lease clock).
@@ -776,7 +777,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             self::assertSame(true, $recoveryBody['success'] ?? null, 'the secret-1 context must still recover its original success: '.(string) $recoveryResponse->getContent());
             self::assertSame($this->expectedCanonicalSuccess($storage, $nonce), (string) $recoveryResponse->getContent());
             self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed derivation must be committed');
-            self::assertNull($store->stored($backendId2, $uuid), 'the secret-2 namespace stays untouched');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId2, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')), 'the secret-2 namespace stays untouched');
         } finally {
             $probe->del([$idemKey1, $idemKey2, 'kiwicaptcha:'.$nonce]);
         }
@@ -797,13 +798,13 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         }
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
-        $digestA = hash('sha256', 'issuer-a|region-a|[]|[]');
-        $digestB = hash('sha256', 'issuer-b|region-a|[]|[]');
+        $digestA = hash_hmac('sha256', 'region-a|[]|[]', 'issuer-a');
+        $digestB = hash_hmac('sha256', 'region-a|[]|[]', 'issuer-b');
         $uuid = 'f6a7b8c9-6666-4f7a-db8c-555555555555';
-        $backendIdA = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'.$digestA);
-        $backendIdB = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'.$digestB);
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendIdA.':'.$uuid;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendIdB.':'.$uuid;
+        $backendIdA = hash_hmac('sha256', 'login|0|'.$digestA, self::SITEVERIFY_SECRET);
+        $backendIdB = hash_hmac('sha256', 'login|0|'.$digestB, self::SITEVERIFY_SECRET);
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendIdA.':'.$uuid;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendIdB.':'.$uuid;
         $probe->del([$idemKeyA, $idemKeyB]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -830,7 +831,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
             ]));
             self::assertSame(503, $rotatedResponse->getStatusCode(), 'the digest-rotated retry must fail closed');
             self::assertSame(['internal-error'], json_decode((string) $rotatedResponse->getContent(), true)['error-codes']);
-            self::assertNull($store->stored($backendIdB, $uuid));
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendIdB, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')));
 
             usleep(2_500_000);
 
@@ -862,8 +863,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         [$token] = $this->issuedToken($storage, policyVersion: 0);
         $store = new ArraySiteVerifyIdempotencyStore();
         $uuid = 'a7b8c9d0-7777-4a8b-ec9d-666666666666';
-        $backendId0 = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $backendId1 = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
+        $backendId0 = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $backendId1 = hash_hmac('sha256', 'login|1|', self::SITEVERIFY_SECRET);
 
         $verifier0 = new Verifier($storage);
         $verifier0->setExpectedPolicyVersion(0);
@@ -873,7 +874,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         ]));
         self::assertSame(200, $first->getStatusCode());
         self::assertSame(true, json_decode((string) $first->getContent(), true)['success']);
-        self::assertSame(true, ($store->stored($backendId0, $uuid)['success'] ?? false) === true, 'the epoch-0 namespace caches the success');
+        self::assertSame(true, (SiteVerifyStoreAssert::completed($store->storedForOperation($backendId0, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, 'the epoch-0 namespace caches the success');
 
         // The policy epoch bumps to 1 (the verifier expectation rotates
         // with it): the identical retry claims the epoch-1 namespace and
@@ -888,10 +889,10 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         self::assertSame(200, $second->getStatusCode());
         self::assertFalse($secondBody['success'] ?? null, 'the epoch-bumped retry must NEVER return the cached success');
         self::assertSame(['invalid-input-response'], $secondBody['error-codes'] ?? null, 'the signed-epoch mismatch is a hard verdict: invalid-input-response');
-        $stored1 = $store->stored($backendId1, $uuid);
+        $stored1 = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId1, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
         self::assertIsArray($stored1, 'the bumped retry finalizes its own deterministic failure');
         self::assertFalse($stored1['success'] ?? true);
-        self::assertTrue(($store->stored($backendId0, $uuid)['success'] ?? false) === true, 'the epoch-0 cached success stays untouched');
+        self::assertTrue((SiteVerifyStoreAssert::completed($store->storedForOperation($backendId0, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, 'the epoch-0 cached success stays untouched');
     }
 
     /**
@@ -908,8 +909,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         [$token] = $this->issuedToken($storage, policyVersion: 0);
         $store = new ArraySiteVerifyIdempotencyStore();
         $uuid = 'b8c9d0e1-8888-4b9c-fd0e-777777777777';
-        $backendId0 = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $backendId1 = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
+        $backendId0 = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $backendId1 = hash_hmac('sha256', 'login|1|', self::SITEVERIFY_SECRET);
 
         $redisA = new FakePredisClient();
         $redisA->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '0');
@@ -924,7 +925,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         ]));
         self::assertSame(200, $first->getStatusCode());
         self::assertSame(true, json_decode((string) $first->getContent(), true)['success']);
-        self::assertSame(true, ($store->stored($backendId0, $uuid)['success'] ?? false) === true, 'the epoch-0 namespace caches the success');
+        self::assertSame(true, (SiteVerifyStoreAssert::completed($store->storedForOperation($backendId0, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, 'the epoch-0 namespace caches the success');
 
         // The central state bumps to 1; the retry's monitor observes it
         // and rotates the shared verifier's expectation.
@@ -937,9 +938,9 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         self::assertSame(200, $second->getStatusCode());
         self::assertFalse($secondBody['success'] ?? null, 'the centrally bumped retry must NEVER return the cached success');
         self::assertSame(['invalid-input-response'], $secondBody['error-codes'] ?? null, 'the rotated expectation fails the signed epoch-0 record closed');
-        $stored1 = $store->stored($backendId1, $uuid);
+        $stored1 = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId1, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
         self::assertIsArray($stored1, 'the bumped retry finalizes its own deterministic failure under the effective-epoch namespace');
-        self::assertTrue(($store->stored($backendId0, $uuid)['success'] ?? false) === true, 'the epoch-0 cached success stays untouched');
+        self::assertTrue((SiteVerifyStoreAssert::completed($store->storedForOperation($backendId0, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, 'the epoch-0 cached success stays untouched');
     }
 
     // ── 5. the no-IP identity ───────────────────────────────────────────────
@@ -962,7 +963,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $store = new ArraySiteVerifyIdempotencyStore();
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = 'c9d0e1f2-9999-4cad-ae1f-888888888888';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
 
         $first = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'idempotency_key' => $uuid,
@@ -993,7 +994,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         self::assertSame(400, $fourth->getStatusCode(), 'a different token under the same no-IP identity must conflict');
 
         // The stored success is intact under the no-IP identity.
-        $stored = $store->stored($backendId, $uuid);
+        $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), 'no-ip', ''));
         self::assertIsArray($stored);
         self::assertSame(true, $stored['success'] ?? null);
     }
@@ -1015,7 +1016,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $idemStore = new ArraySiteVerifyIdempotencyStore();
         $controller = $this->controller(idempotencyStore: $idemStore, riskGateway: $gateway);
         $uuid = 'd0e1f2a3-aaaa-4dbe-bf2a-999999999999';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $malformed = 'not-a-kiwi-solution-token';
 
         // No remoteip: the MalformedToken feedback has no source to
@@ -1038,7 +1039,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         ]))->getContent();
         self::assertSame($first, $second, 'a same-key malformed retry must return the identical canonical failure');
         self::assertSame([], $store->observations, 'the no-source retry keeps skipping the feedback');
-        $stored = $idemStore->stored($backendId, $uuid);
+        $stored = SiteVerifyStoreAssert::completed($idemStore->storedForOperation($backendId, $uuid, hash('sha256', $malformed), 'no-ip', ''));
         self::assertIsArray($stored);
         self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
 
@@ -1084,8 +1085,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage, 180);
         $uuid = 'f2a3b4c5-cccc-4fd0-db4c-bbbbbbbbcccc';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $probe->disconnect();
 

@@ -39,6 +39,8 @@ final class OutcomeRegistration
         public readonly bool $honeypotHit,
         public readonly RiskWeights $weights,
         public readonly RiskV2Weights $v2Weights,
+        /** Target pseudonym this assessment protects (null = no target). */
+        public readonly ?string $targetId = null,
     ) {
     }
 }

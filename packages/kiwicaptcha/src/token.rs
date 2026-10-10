@@ -98,18 +98,6 @@ pub struct IssuedChallenge {
 /// The telemetry segment may itself contain dots; the optional suffix
 /// segments (execution evidence, then the rsw final value) are peeled
 /// right-to-left, so an armed rsw challenge carries both independently.
-/// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
-pub const MAX_DURATION_MS: u64 = 3_600_000;
-
-/// Hard ceiling on the RAW token length (bytes) accepted by
-/// [`SolutionToken::decode`]. The canonical wire form of a
-/// legitimate token is a few hundred bytes (32-byte nonce + counter +
-/// duration + a small telemetry object); 32 KiB is far beyond any of them.
-/// The bound is enforced before the base64 decode, so an oversized token is
-/// rejected with [`DecodeError::TooLarge`] without spending any work on —
-/// or allocating for — a decode of attacker-supplied bytes.
-pub const MAX_TOKEN_RAW_BYTES: usize = 32_768;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionToken {
     /// The nonce from the original challenge (base64, 32 bytes).
@@ -142,6 +130,18 @@ pub struct SolutionToken {
     /// constant-time against the trapdoor expectation.
     pub rsw_proof: Option<String>,
 }
+
+/// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
+pub const MAX_DURATION_MS: u64 = 3_600_000;
+
+/// Hard ceiling on the RAW token length (bytes) accepted by
+/// [`SolutionToken::decode`]. The canonical wire form of a
+/// legitimate token is a few hundred bytes (32-byte nonce + counter +
+/// duration + a small telemetry object); 32 KiB is far beyond any of them.
+/// The bound is enforced before the base64 decode, so an oversized token is
+/// rejected with [`DecodeError::TooLarge`] without spending any work on —
+/// or allocating for — a decode of attacker-supplied bytes.
+pub const MAX_TOKEN_RAW_BYTES: usize = 32_768;
 
 impl SolutionToken {
     /// Encode the token into the compact wire format stored in `kiwi__token`.
@@ -297,15 +297,38 @@ impl SolutionToken {
             _ => return Err(DecodeError::Malformed),
         }
 
+        // Canonical numeric segments: only plain digits spell a numeric
+        // segment (the PHP ctype_digit gate), so a sign, space or other
+        // non-digit is refused before the parse. A leading zero is not
+        // part of the wire language ("0042" is a different, rejected
+        // spelling of 42) except the exact value "0" itself; both
+        // implementations accept exactly one spelling per value.
+        if counter_str.is_empty() || !counter_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(DecodeError::InvalidCounter);
+        }
+        if counter_str.len() > 1 && counter_str.starts_with('0') {
+            return Err(DecodeError::InvalidCounter);
+        }
         let counter: u64 = counter_str
             .parse()
             .map_err(|_| DecodeError::InvalidCounter)?;
         // The counter must be within what any solver can produce: the JS
-        // solver searches counters below the solver maximum (5,000,000
-        // attempts), so the largest legitimate counter is 4,999,999 — anything >= 5M
-        // was not minted by a real solve (matches PHP exactly).
+        // solver searches counters below the solver maximum (20,000,000
+        // attempts, the protocol/limits.json authority shared with PHP and
+        // the widget), so the largest legitimate counter is 19,999,999 —
+        // anything at or above 20M was not minted by a real solve (matches
+        // PHP exactly).
         if counter >= crate::challenge::SOLVER_MAX_HASHES {
             return Err(DecodeError::InvalidCounter);
+        }
+        // The same digit-only gate for the duration segment: a plus
+        // prefixed or otherwise signed spelling is a different wire
+        // token and is refused exactly like the counter.
+        if duration_str.is_empty() || !duration_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(DecodeError::InvalidDuration);
+        }
+        if duration_str.len() > 1 && duration_str.starts_with('0') {
+            return Err(DecodeError::InvalidDuration);
         }
         let duration_ms: u64 = duration_str
             .parse()
@@ -409,7 +432,7 @@ pub enum DecodeError {
     TooLarge,
     #[error("token is malformed (expected nonce.counter.duration.telemetry)")]
     Malformed,
-    #[error("counter is invalid or exceeds the solver maximum (5_000_000)")]
+    #[error("counter is invalid or exceeds the solver maximum (20_000_000)")]
     InvalidCounter,
     #[error("duration segment is not a valid integer")]
     InvalidDuration,
@@ -449,7 +472,8 @@ mod tests {
 
     #[test]
     fn telemetry_with_embedded_dots_is_preserved() {
-        // A JSON string value containing dots must not break the splitn(4).
+        // A JSON string value containing dots must not break decoding: the
+        // decoder splits on every dot and re-joins the telemetry tail.
         let token = SolutionToken {
             nonce: VALID_NONCE.to_string(),
             counter: 1,
@@ -524,8 +548,8 @@ mod tests {
     #[test]
     fn decode_rejects_counter_at_and_beyond_solver_max() {
         // The JS solver searches counters below the solver maximum
-        // (5,000,000 attempts), so the largest legitimate counter is
-        // 4,999,999 — the cap value itself is never minted by a real solve
+        // (20,000,000 attempts), so the largest legitimate counter is
+        // 19,999,999 — the cap value itself is never minted by a real solve
         // (off-by-one parity with PHP).
         for counter in [
             crate::challenge::SOLVER_MAX_HASHES,
@@ -552,16 +576,30 @@ mod tests {
 
     #[test]
     fn decode_accepts_counter_just_below_solver_max() {
-        let token = SolutionToken {
-            nonce: VALID_NONCE.to_string(),
-            counter: crate::challenge::SOLVER_MAX_HASHES - 1,
-            duration_ms: 2,
-            telemetry: serde_json::json!({}),
-            execution_digest: None,
-            execution_trace: None,
-            rsw_proof: None,
-        };
-        assert!(SolutionToken::decode(&token.encode()).is_ok());
+        // The four-way boundary: 4,999,999 (the 5M ceiling's last valid
+        // counter), 5,000,000 (the first counter the 5M contract refused
+        // but the 20M solver can mint) and 19,999,999 (the 20M last valid
+        // counter) all decode; the cap itself is covered by the sibling
+        // rejection test. The shared protocol/solution-token-v1 fixture
+        // pins the same vectors against the PHP decoder.
+        for counter in [
+            4_999_999u64,
+            5_000_000,
+            crate::challenge::SOLVER_MAX_HASHES - 1,
+        ] {
+            let token = SolutionToken {
+                nonce: VALID_NONCE.to_string(),
+                counter,
+                duration_ms: 2,
+                telemetry: serde_json::json!({}),
+                execution_digest: None,
+                execution_trace: None,
+                rsw_proof: None,
+            };
+            let decoded = SolutionToken::decode(&token.encode())
+                .unwrap_or_else(|e| panic!("counter {counter}: {e:?}"));
+            assert_eq!(decoded.counter, counter);
+        }
     }
 
     #[test]
@@ -622,6 +660,44 @@ mod tests {
             rsw_proof: None,
         };
         assert!(SolutionToken::decode(&ok.encode()).is_ok());
+    }
+
+    #[test]
+    fn decode_rejects_numeric_segments_with_leading_zeros() {
+        // Canonical numeric wire segments: "0042" is a different,
+        // rejected spelling of 42; the exact "0" and a plain "10" are
+        // the accepted spellings (both implementations agree).
+        for (counter, duration, counter_bad) in [("0042", "10", true), ("42", "0070", false)] {
+            let plain = format!("{VALID_NONCE}.{counter}.{duration}.{{}}");
+            let wrapped = B64.encode(plain.into_bytes());
+            let expected = if counter_bad {
+                DecodeError::InvalidCounter
+            } else {
+                DecodeError::InvalidDuration
+            };
+            assert!(
+                matches!(SolutionToken::decode(&wrapped), Err(e) if e == expected),
+                "counter {counter:?} / duration {duration:?} must be rejected with {expected:?}"
+            );
+        }
+        let ok_counter = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 0,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: None,
+        };
+        assert!(SolutionToken::decode(&ok_counter.encode()).is_ok());
+        let ok_ten = SolutionToken {
+            counter: 10,
+            duration_ms: 10,
+            ..ok_counter
+        };
+        let decoded = SolutionToken::decode(&ok_ten.encode()).unwrap();
+        assert_eq!(decoded.counter, 10);
+        assert_eq!(decoded.duration_ms, 10);
     }
 
     #[test]

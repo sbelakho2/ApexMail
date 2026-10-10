@@ -228,4 +228,40 @@ final class RiskV2EngineTest extends TestCase
         $receipt2 = $engine->record_feedback(RiskEventKind::DecoyFieldSubmitted, $this->context(RiskEventKind::DecoyFieldSubmitted));
         self::assertFalse($receipt2->isDuplicate);
     }
+
+    public function testClientContextTagBoundIs64BytesFailClosed(): void
+    {
+        $engine = $this->engine($this->zeroStore());
+        $session = str_repeat('ab', 16);
+
+        // 64 bytes: accepted, neutral (the tag matches its own record).
+        $decision = $engine->assessPreIssueV2(
+            $this->context(sessionId: $session),
+            $this->v2(tag: str_repeat('x', RiskV2Context::MAX_TAG_BYTES)),
+        );
+        self::assertSame(100, $decision->score);
+
+        // 65 bytes: the assessment input is rejected — never a silent
+        // truncation (which would split one session's identity across tag
+        // records).
+        try {
+            $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tag: str_repeat('x', RiskV2Context::MAX_TAG_BYTES + 1)));
+            self::fail('a 65-byte client context tag must be rejected');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('64', $e->getMessage());
+        }
+        try {
+            $engine->reassessV2($this->context(sessionId: $session), $this->v2(tag: str_repeat('x', RiskV2Context::MAX_TAG_BYTES + 1)));
+            self::fail('a 65-byte client context tag must be rejected on reassess too');
+        } catch (\InvalidArgumentException) {
+        }
+
+        // The TLS tag keeps its documented over-bound handling: treated as
+        // absent (no record written), never a rejection.
+        $decision = $engine->assessPreIssueV2(
+            $this->context(sessionId: $session),
+            $this->v2(tlsTag: str_repeat('t', RiskV2Context::MAX_TAG_BYTES + 1)),
+        );
+        self::assertSame(100, $decision->score, 'an over-bound TLS tag is absent-neutral');
+    }
 }

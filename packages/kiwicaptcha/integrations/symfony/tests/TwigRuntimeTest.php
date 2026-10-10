@@ -53,8 +53,9 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('.kiwi-container', $html);
         // WASM solver embed inlined
         self::assertStringContainsString('KIWI_WASM_B64', $html);
-        // Driver inlined
-        self::assertStringContainsString('window.KiwiCaptcha = {', $html);
+        // Driver inlined, installed as an own property so a DOM-clobbered
+        // named element can never impersonate the public API.
+        self::assertStringContainsString('Object.defineProperty(window, "KiwiCaptcha"', $html);
         self::assertStringContainsString('render: kiwiRender', $html);
         // The driver sends the container's request binding with
         // the challenge POST and writes the hidden kiwi_request_binding form
@@ -125,8 +126,11 @@ final class TwigRuntimeTest extends TestCase
         self::assertSame('/kiwi-captcha/assets/widget.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css')).'.css', $cssMatches[1][0]);
         self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css'), true)), $cssMatches[2][0]);
 
-        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{64}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)"></script>~', $html, $driverMatches);
-        self::assertCount(1, $driverMatches[0], 'the driver script must be emitted exactly once');
+        // The files-mode driver is deferred: ~100 KB must never block
+        // parsing mid-form, and the driver's readyState handling covers
+        // the deferred timing.
+        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{64}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)" defer></script>~', $html, $driverMatches);
+        self::assertCount(1, $driverMatches[0], 'the driver script must be emitted exactly once, deferred');
         self::assertSame('/kiwi-captcha/assets/driver.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js')).'.js', $driverMatches[1][0]);
         self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js'), true)), $driverMatches[2][0]);
 
@@ -234,6 +238,21 @@ final class TwigRuntimeTest extends TestCase
         [$env, $runtime] = $this->runtimeWithTelemetry('minimal');
         $html = $runtime->renderWidget($env, []);
         self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html, 'the configured telemetry mode must be the render default');
+
+        // Inline telemetry is embedded even when this (first) widget has
+        // telemetry off: a later widget on the page may enable it, and
+        // the first widget's emit_assets block is the only place the
+        // shared inline module can land.
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringContainsString('kiwiBridge.register("telemetry"', $html, 'the inline telemetry module must be embedded for later widgets');
+    }
+
+    public function testLangRendersDataKiwiLangLikeTheRustRenderer(): void
+    {
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, ['lang' => 'pt-BR']);
+        self::assertStringContainsString('data-kiwi-lang="pt-BR"', $html);
     }
 
     private function runtimeWithTelemetry(string $telemetry): array
@@ -323,7 +342,7 @@ final class TwigRuntimeTest extends TestCase
         $risk = (string) file_get_contents(__DIR__.'/../Resources/public/widget-risk.js');
 
         self::assertStringContainsString('data-kiwi-request-binding', $driver, 'the driver reads the server-rendered binding attribute');
-        self::assertStringContainsString('var requestBinding = W.getAttribute("data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute');
+        self::assertStringContainsString('var requestBinding = kiwiConfigValue(W, container, "data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute (through the shared supported-configuration reader)');
         self::assertStringNotContainsString('randomUUID', $driver, 'the driver must never generate bindings with crypto.randomUUID');
         // The client-side `CSPRNG` draw of the decoy (honeypot) rendering
         // strategy lives in the lazy widget-risk.js module (a
@@ -331,16 +350,46 @@ final class TwigRuntimeTest extends TestCase
         // binding). The binding path stays attribute-only (asserted
         // above).
         self::assertSame(0, substr_count($driver, 'getRandomValues'), 'the eager core must not draw decoy strategies — the decoy machinery is the lazy widget-risk.js module');
-        self::assertSame(1, substr_count($risk, 'crypto.getRandomValues(buf)'), 'crypto.getRandomValues must be limited to the decoy-strategy draw — bindings are never synthesized client-side');
+        // widget-risk.js has exactly two crypto.getRandomValues draws:
+        // the presentation-only decoy-strategy draw and the solve
+        // correlation request id (128 random bits; the worker echoes the
+        // id and uncorrelated replies are ignored). Neither is a
+        // binding: bindings are never synthesized client-side.
+        self::assertSame(2, substr_count($risk, 'crypto.getRandomValues(buf)'), 'crypto.getRandomValues must be limited to the decoy-strategy draw and the solve-correlation request id — bindings are never synthesized client-side');
+        self::assertStringContainsString('function kiwiCorrelationWords()', $risk, 'the correlation request id comes from its own strict CSPRNG helper');
+        self::assertStringContainsString('if (!window.crypto || typeof window.crypto.getRandomValues !== "function") return null;', $risk, 'the correlation helper must fail closed (null) instead of degrading to Math.random');
         // Math.random exists exactly twice in the eager core — the
         // per-widget data-kiwi-instance debugging marker and the
         // per-widget hCaptcha response-key marker — plus once in the
         // lazy widget-risk.js module (the presentation-only fallback of
         // the decoy-strategy draw on engines without
-        // crypto.getRandomValues). It must never appear in the binding
-        // path: the binding is assigned from the container attribute
-        // only (asserted above).
+        // crypto.getRandomValues; the correlation draw has NO fallback).
+        // It must never appear in the binding path: the binding is
+        // assigned from the container attribute only (asserted above).
         self::assertSame(2, substr_count($driver, 'Math.random'), 'Math.random in the eager core must be limited to the instance-id and response-key markers — bindings are never synthesized client-side');
         self::assertSame(1, substr_count($risk, 'Math.random'), 'Math.random in widget-risk.js must be limited to the decoy-strategy fallback — bindings are never synthesized client-side');
+    }
+
+    public function testAQuoteBearingCspNonceIsEscapedInTheRawAssetTags(): void
+    {
+        // files mode emits the nonce inside a raw HTML attribute string
+        // (asset_tags|raw), so the nonce itself must be HTML-escaped
+        // before interpolation: a quote-bearing value can never break
+        // out of the attribute and inject markup into the script tag.
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+        $env = new Environment($loader);
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig');
+
+        $html = $runtime->renderWidget($env, ['nonce' => 'abc"def\'onload=alert(1)>&lt;']);
+
+        // The emitted driver tag carries the escaped nonce (quotes and
+        // angle brackets encoded), never the raw value.
+        self::assertStringContainsString('nonce="abc&quot;def&#039;onload=alert(1)&gt;&amp;lt;"', $html, 'the CSP nonce is HTML-escaped inside the raw attribute');
+        self::assertStringNotContainsString('nonce="abc"def', $html, 'a raw double quote must never break out of the nonce attribute');
+        // The asset tags are emitted exactly once (the request-scoped
+        // dedup registry), and the stylesheet link stays nonce-free.
+        self::assertSame(1, substr_count($html, '<script src="/kiwi-captcha/assets/driver.'), 'the driver asset tag is emitted exactly once');
     }
 }

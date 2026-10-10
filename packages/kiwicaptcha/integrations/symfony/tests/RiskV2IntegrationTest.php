@@ -48,8 +48,8 @@ final class RiskV2IntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -129,7 +129,7 @@ final class RiskV2IntegrationTest extends TestCase
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
         $controller = new ChallengeController($issuer);
         $response = $controller->challenge($this->challengeRequest(
-            '{"scope":"login","decoy_field":"decoy_12345678","honeypot":"x","client_context":"vp=1,t=0,l=en,z=1"}'
+            '{"scope":"login","decoy_field":"decoy_12345678","honeypot":"x","client_context":"t=0,l=en,z=1"}'
         ));
         self::assertSame(200, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
@@ -152,14 +152,14 @@ final class RiskV2IntegrationTest extends TestCase
 
         // First tag-bearing request: the tag is recorded; the consistency
         // signal is neutral (score 100, Allow).
-        $first = $stack['gateway']->clientContextV2(false, $session, 'vp=1,t=0,l=en,z=1');
+        $first = $stack['gateway']->clientContextV2(false, $session, 't=0,l=en,z=1');
         self::assertNotNull($first);
         $decision1 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $first);
         self::assertSame(100, $decision1->score);
 
         // Same session, changed coarse capabilities: a different tag -> the
         // session-consistency signal raises the aggregate (100 + 120 = 220).
-        $second = $stack['gateway']->clientContextV2(false, $session, 'vp=3,t=1,l=zh,z=2');
+        $second = $stack['gateway']->clientContextV2(false, $session, 't=1,l=zh,z=2');
         self::assertNotNull($second);
         self::assertNotSame($first->clientContextTag, $second->clientContextTag, 'changed capabilities must change the tag');
         $decision2 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $second);
@@ -171,7 +171,7 @@ final class RiskV2IntegrationTest extends TestCase
         $stack = $this->stack();
         $session = str_repeat('cd', 16);
 
-        $v2 = $stack['gateway']->clientContextV2(false, $session, 'vp=1,t=0,l=en,z=1');
+        $v2 = $stack['gateway']->clientContextV2(false, $session, 't=0,l=en,z=1');
         $decision1 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $v2);
         $decision2 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $v2);
         self::assertSame(100, $decision1->score);
@@ -181,7 +181,7 @@ final class RiskV2IntegrationTest extends TestCase
     public function testNoSessionOrNoDescriptorCarriesNoV2Context(): void
     {
         $stack = $this->stack();
-        self::assertNull($stack['gateway']->clientContextV2(false, null, 'vp=1,t=0,l=en,z=1'), 'no session -> no v2 context');
+        self::assertNull($stack['gateway']->clientContextV2(false, null, 't=0,l=en,z=1'), 'no session -> no v2 context');
         self::assertNull($stack['gateway']->clientContextV2(false, 'session', null), 'no descriptor -> no v2 context');
         self::assertNull($stack['gateway']->clientContextV2(false, null, null), 'no evidence at all -> no v2 context');
 
@@ -196,7 +196,7 @@ final class RiskV2IntegrationTest extends TestCase
     {
         $stack = $this->stack();
         $session = str_repeat('3a', 16);
-        $descriptor = 'vp=1,t=0,l=en,z=1';
+        $descriptor = 't=0,l=en,z=1';
 
         // The gateway accepts the coarse, server-attested TLS classification
         // tag from trusted proxy infrastructure as the 4th argument.
@@ -240,7 +240,7 @@ final class RiskV2IntegrationTest extends TestCase
     {
         $stack = $this->stack();
         $session = str_repeat('3b', 16);
-        $descriptor = 'vp=1,t=0,l=en,z=1';
+        $descriptor = 't=0,l=en,z=1';
 
         // Null override: the default weights apply (100 + 1000*200/1000 = 300).
         $default = $stack['gateway']->clientContextV2(true, $session, $descriptor);
@@ -263,8 +263,8 @@ final class RiskV2IntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],

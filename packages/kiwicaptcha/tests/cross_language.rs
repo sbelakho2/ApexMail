@@ -53,6 +53,7 @@ fn rust_verifies_php_issued_record() {
     let mut ctx = VerifyContext {
         record: &mut rec,
         secret_key: "0123456789abcdef0123456789abcdef",
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,
@@ -70,6 +71,7 @@ fn rust_verifies_php_issued_record() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: None,
         execution_trace: None,
@@ -80,6 +82,7 @@ fn rust_verifies_php_issued_record() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     };
     assert!(
         matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -91,6 +94,7 @@ fn rust_verifies_php_issued_record() {
     let mut ctx2 = VerifyContext {
         record: &mut rec2,
         secret_key: "0123456789abcdef0123456789abcdef",
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,
@@ -108,6 +112,7 @@ fn rust_verifies_php_issued_record() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("9.9.9.9"),
         execution_digest: None,
         execution_trace: None,
@@ -118,6 +123,7 @@ fn rust_verifies_php_issued_record() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     };
     assert_eq!(
         verify_solution(&mut ctx2),
@@ -163,6 +169,7 @@ fn rust_issues_record_for_php() {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm,
         m_kib,
         t,
@@ -637,7 +644,7 @@ fn decoy_grammar_vocabularies_match_php() {
 }
 
 /// Real-Redis protocol-v3 decoy interop: the decoy-armed issuance
-/// canonical (protocol v3, the `|decoy_field` segment appended after the
+/// canonical (protocol v3, the tagged `d=` segment appended after the
 /// kid) must verify across languages, and the v2-plus-decoy combination
 /// must be rejected on both sides. Runs only when a Redis URL is
 /// provided and the PHP core's autoloader is reachable from this crate.
@@ -842,34 +849,37 @@ echo $ch->nonce;
 "#;
     let v2_decoy_nonce =
         php_script(php_write_v2_decoy).expect("PHP must write the v2-plus-decoy record");
-    let v2_decoy_state = into_pending(
-        store
-            .runtime_state(&v2_decoy_nonce)
-            .expect("Rust must read the v2-plus-decoy record"),
-    )
-    .expect("the v2-plus-decoy record is pending");
-    assert_eq!(
-        v2_decoy_state.protocol_version, 2,
-        "the patched record is protocol v2"
-    );
+    // The shared grammar matrix runs at the stored-record decode
+    // boundary, so the patched v2-plus-decoy envelope never decodes:
+    // the runtime-state read resolves it as missing (the structural
+    // rejection happened one layer earlier than the verifier's own
+    // malformed verdict), and a verification against it answers
+    // RecordNotFound through the same cheap-phase path. The timing
+    // record for the receipt instant is the untouched armed v3 record.
     assert!(
-        v2_decoy_state.decoy_field.is_some(),
-        "the patched record still carries the decoy"
+        matches!(
+            store
+                .runtime_state(&v2_decoy_nonce)
+                .expect("Rust must read the v2-plus-decoy record"),
+            kiwicaptcha::redis_verify::RuntimeState::Missing
+        ),
+        "the v2-plus-decoy envelope is refused at the decode boundary"
     );
-    let v2_counter =
-        solve_for_test(&v2_decoy_state).expect("Rust solver for the v2-plus-decoy record");
+    // The armed record was consumed by the verification above, so the
+    // timing basis is its already-held pending snapshot.
+    let v2_counter = solve_for_test(&state).expect("Rust solver for the timing record");
     let v2_token = encode_token(&v2_decoy_nonce, v2_counter);
     assert_eq!(
         verifier.verify(
             &v2_token,
             "login",
             "127.0.0.1",
-            v2_decoy_state.issued_at_ns + 1_000_000,
+            state.issued_at_ns + 1_000_000,
             None,
             RequestBindingExpectation::Unenforced,
         ),
-        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-        "Rust must reject a PHP-written v2 record carrying decoy_field"
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "Rust must refuse a PHP-written v2 record carrying decoy_field at the decode boundary"
     );
     println!("RUST_REJECTS_PHP_V2_PLUS_DECOY: OK");
 
@@ -1361,6 +1371,7 @@ fn issue_armed_for_interop() -> kiwicaptcha::challenge::Issued {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -1421,6 +1432,7 @@ fn issue_execution_for_interop_at(
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -1567,16 +1579,25 @@ fn rust_verifies_php_issued_v4_record() {
         canonical_from_challenge,
         "the Rust canonical reconstruction must be byte-exact against the PHP-signed canonical"
     );
-    assert!(canonical_reconstructed.ends_with(&format!("|1|{commitment}")));
+    assert!(canonical_reconstructed.ends_with(&format!(
+        "|e={},{}|m=1",
+        record.execution_version.expect("armed"),
+        commitment
+    )));
 
-    let digest = kiwicaptcha::execution::expected_digest(program, &record.nonce)
-        .expect("the PHP-issued program must parse in Rust");
+    let decoded = kiwicaptcha::execution::decode(program)
+        .expect("the PHP-issued program must decode in Rust");
+    let trace = kiwicaptcha::execution::fixtures::executed_trace_for(&decoded);
+    let digest = kiwicaptcha::execution::expected_digest_over_trace(program, &record.nonce, &trace)
+        .expect("the digest over the executed trace must compute in Rust");
+    let trace_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(trace.as_bytes());
     let counter = solve_for_test(&record).expect("Rust solver finds a counter");
     let mut rec = record;
     let now_ns = rec.issued_at_ns + 1_000_000;
     let mut ctx = VerifyContext {
         record: &mut rec,
         secret_key: SECRET,
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,
@@ -1594,9 +1615,10 @@ fn rust_verifies_php_issued_v4_record() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: Some(&digest),
-        execution_trace: None,
+        execution_trace: Some(&trace_b64),
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
@@ -1604,6 +1626,7 @@ fn rust_verifies_php_issued_v4_record() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     };
     assert!(
         matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -1740,6 +1763,7 @@ fn issue_record_for_interop() -> kiwicaptcha::challenge::ChallengeRecord {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -1801,10 +1825,24 @@ fn rust_verifies_php_issued_rsw_record() {
     let mut record: kiwicaptcha::ChallengeRecord =
         serde_json::from_value(data).expect("PHP JSON must deserialize into the Rust record");
     assert_eq!(record.algorithm, kiwicaptcha::challenge::PoWAlgorithm::Rsw);
-    assert_eq!(
-        record.protocol_version, 2,
-        "PHP rsw issuance stays protocol v2"
+    // The identity-armed issuance (protocol v5) is the current PHP shape:
+    // the record authenticates its modulus. The identityless v2 shape
+    // stays accepted while a deployment has not enabled the writer.
+    assert!(
+        record.protocol_version == 5 || record.protocol_version == 2,
+        "PHP rsw issuance is v5 (identity-armed) or the legacy v2"
     );
+    if record.protocol_version >= 5 {
+        assert_eq!(
+            record.rsw_modulus_sha256.as_deref(),
+            Some(
+                kiwicaptcha::rsw::modulus_fingerprint_hex(&modulus)
+                    .expect("the fixture modulus is canonical")
+                    .as_str()
+            ),
+            "the v5 record carries the canonical-byte modulus identity"
+        );
+    }
 
     let proof = kiwicaptcha::rsw::fixtures::sequential_proof(
         &record.prefix,
@@ -1815,6 +1853,7 @@ fn rust_verifies_php_issued_rsw_record() {
     let outcome = verify_solution(&mut kiwicaptcha::verify::VerifyContext {
         record: &mut record,
         secret_key: "0123456789abcdef0123456789abcdef",
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter: 0,
@@ -1827,6 +1866,7 @@ fn rust_verifies_php_issued_rsw_record() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: None,
         execution_trace: None,
@@ -1837,6 +1877,7 @@ fn rust_verifies_php_issued_rsw_record() {
         rsw_proof: Some(&proof),
         rsw_modulus_n: Some(&modulus),
         rsw_lambda: Some(&lambda),
+        rsw_keyring: None,
     });
     assert!(
         matches!(outcome, VerifyOutcome::Valid { .. }),
@@ -1855,7 +1896,9 @@ fn rust_issues_rsw_record_for_php() {
         eprintln!("KC_RUST_RSW_RECORD unset — reverse rsw cross-language test skipped");
         return;
     };
-    use kiwicaptcha::challenge::{issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm};
+    use kiwicaptcha::challenge::{
+        issue_challenge_with_capabilities, BindingMode, ChallengeConfig, PoWAlgorithm,
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1871,6 +1914,7 @@ fn rust_issues_rsw_record_for_php() {
         rsw_modulus_n: Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into()),
         rsw_lambda: Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into()),
         rsw_t: kiwicaptcha::challenge::MIN_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Rsw,
         m_kib: 0,
         t: 1,
@@ -1887,8 +1931,23 @@ fn rust_issues_rsw_record_for_php() {
         issuer: None,
         policy_version: 1,
     };
-    let issued =
-        issue_challenge(&config, "login", "198.51.100.7", now, now_ns, 0, None).expect("issue");
+    // The shared-Redis interop exercises the identity-bearing
+    // generation: the ceiling is confirmed explicitly (the plain
+    // issue_challenge default is the capability-free legacy shape).
+    let issued = issue_challenge_with_capabilities(
+        kiwicaptcha::challenge::EmissionCapabilities::confirmed(
+            kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+        )
+        .expect("the confirmed ceiling is at least the base protocol"),
+        &config,
+        "login",
+        "198.51.100.7",
+        now,
+        now_ns,
+        0,
+        None,
+    )
+    .expect("issue");
     let mut top = serde_json::to_value(&issued.record).expect("serialize");
     if let Some(obj) = top.as_object_mut() {
         obj.insert(
@@ -2027,7 +2086,9 @@ echo $token;
 
     // 2. Rust issue + sequential solve -> PHP verifier.
     let rust_issued = {
-        use kiwicaptcha::challenge::{issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm};
+        use kiwicaptcha::challenge::{
+            issue_challenge_with_capabilities, BindingMode, ChallengeConfig, PoWAlgorithm,
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2043,6 +2104,7 @@ echo $token;
             rsw_modulus_n: Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into()),
             rsw_lambda: Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into()),
             rsw_t: kiwicaptcha::challenge::MIN_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Rsw,
             m_kib: 0,
             t: 1,
@@ -2059,7 +2121,20 @@ echo $token;
             issuer: None,
             policy_version: 1,
         };
-        issue_challenge(&config, "login", "127.0.0.1", now, now_ns, 0, None).expect("issue")
+        issue_challenge_with_capabilities(
+            kiwicaptcha::challenge::EmissionCapabilities::confirmed(
+                kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
+            &config,
+            "login",
+            "127.0.0.1",
+            now,
+            now_ns,
+            0,
+            None,
+        )
+        .expect("issue")
     };
     store
         .store(&rust_issued.record)
@@ -2193,7 +2268,7 @@ echo $token;
     //    real verifier.
     let composed_issued = {
         use kiwicaptcha::challenge::{
-            issue_challenge_with_execution, BindingMode, ChallengeConfig, PoWAlgorithm,
+            issue_challenge_with_execution_capabilities, BindingMode, ChallengeConfig, PoWAlgorithm,
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2210,6 +2285,7 @@ echo $token;
             rsw_modulus_n: Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into()),
             rsw_lambda: Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into()),
             rsw_t: kiwicaptcha::challenge::MIN_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Rsw,
             m_kib: 0,
             t: 1,
@@ -2226,7 +2302,11 @@ echo $token;
             issuer: None,
             policy_version: 1,
         };
-        issue_challenge_with_execution(
+        issue_challenge_with_execution_capabilities(
+            kiwicaptcha::challenge::EmissionCapabilities::confirmed(
+                kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &config,
             "login",
             "127.0.0.1",
@@ -2305,4 +2385,167 @@ echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
         "PHP must verify a Rust-issued rsw + execution composition through real Redis: {php_composed_result}"
     );
     println!("PHP_VERIFIES_RUST_RSW_EXECUTION_COMPOSITION_REDIS: OK");
+
+    // 5. Shared-storage rollout safety, PHP side: with NO confirmed
+    //    emission ceiling the PHP writer must emit the legacy
+    //    identityless v2 shape — not a single v5 record may appear on
+    //    the shared store before the floor is confirmed — and the Rust
+    //    production verifier accepts that pre-v5 record end to end.
+    let php_capped = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$issuer = new KiwiCaptcha\Issuer(new KiwiCaptcha\Config(
+    secretKey: '0123456789abcdef0123456789abcdef',
+    algorithm: KiwiCaptcha\PoWAlgorithm::Rsw,
+    ttlSecs: 120,
+    minDurationMs: 0,
+    rswModulusN: getenv('KC_INTEROP_RSW_N'),
+    rswLambda: getenv('KC_INTEROP_RSW_LAMBDA'),
+    rswT: KiwiCaptcha\Config::MIN_RSW_T,
+), $storage);
+$ch = $issuer->issue('login', '127.0.0.1');
+$rec = $storage->find($ch->nonce);
+$proof = KiwiCaptcha\Tests\Support\RswFixture::sequentialProof($ch->prefix, $ch->nonce, $ch->t);
+$token = KiwiCaptcha\SolutionToken::create($ch->nonce, 0, 5000, [], null, null, $proof)->encode();
+echo json_encode([
+    'token' => $token,
+    'protocol_version' => $rec->protocolVersion,
+    'rsw_modulus_sha256' => $rec->rswModulusSha256,
+]);
+"#;
+    let capped_json = php_script(php_capped).expect("PHP must issue the capped rsw challenge");
+    let capped: serde_json::Value =
+        serde_json::from_str(&capped_json).expect("the PHP capped issuance result is JSON");
+    assert_eq!(
+        capped["protocol_version"], 2,
+        "the unconfirmed PHP writer must emit the legacy identityless shape: {capped_json}"
+    );
+    assert_eq!(
+        capped["rsw_modulus_sha256"],
+        serde_json::Value::Null,
+        "the unconfirmed PHP writer must not sign a modulus identity: {capped_json}"
+    );
+    let capped_token = capped["token"].as_str().expect("token string");
+    let outcome = verifier.verify(
+        capped_token,
+        "login",
+        "127.0.0.1",
+        kiwicaptcha::challenge::now_epoch_micros(),
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    match outcome {
+        VerifyOutcome::Valid { .. } => {}
+        other => panic!("Rust must verify the PHP-issued pre-v5 rsw challenge, got {other:?}"),
+    }
+    println!("RUST_VERIFIES_PHP_CAPPED_RSW_REDIS: OK");
+
+    // 6. Shared-storage rollout safety, Rust side: the capability-free
+    //    Rust writer stores the same legacy shape, and PHP reads the
+    //    stored record back and verifies it unchanged.
+    let capped_issued = {
+        use kiwicaptcha::challenge::{issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        let mut config = ChallengeConfig {
+            secret_key: "0123456789abcdef0123456789abcdef".into(),
+            kid: 1,
+            execution_key: None,
+            rsw_modulus_n: Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into()),
+            rsw_lambda: Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into()),
+            rsw_t: kiwicaptcha::challenge::MIN_RSW_T,
+            tenant: None,
+            algorithm: PoWAlgorithm::Rsw,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: Some(0),
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        };
+        config.secret_key = "0123456789abcdef0123456789abcdef".into();
+        issue_challenge(&config, "login", "127.0.0.1", now, now_ns, 0, None).expect("issue")
+    };
+    assert_eq!(capped_issued.record.protocol_version, 2);
+    assert_eq!(capped_issued.record.rsw_modulus_sha256, None);
+    store
+        .store(&capped_issued.record)
+        .expect("Rust must store the capped rsw record");
+    let capped_proof = kiwicaptcha::rsw::fixtures::sequential_proof(
+        &capped_issued.record.prefix,
+        &capped_issued.record.nonce,
+        capped_issued.record.t as u64,
+    );
+    let capped_rust_token = kiwicaptcha::token::SolutionToken {
+        nonce: capped_issued.record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+        rsw_proof: Some(capped_proof),
+    }
+    .encode();
+    let php_verify_capped = format!(
+        r#"
+$input = json_decode(stream_get_contents(STDIN), true);
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$rec = $storage->find($input['nonce']);
+$outcome = (new KiwiCaptcha\Verifier($storage, rswModulusN: '{N}', rswLambda: '{L}'))
+    ->verify($input['token'], '0123456789abcdef0123456789abcdef', 'login', '127.0.0.1');
+echo json_encode([
+    'ok' => $outcome->isOk(),
+    'code' => $outcome->code(),
+    'protocol_version' => $rec->protocolVersion,
+    'rsw_modulus_sha256' => $rec->rswModulusSha256,
+]);
+"#,
+        N = kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        L = kiwicaptcha::rsw::fixtures::LAMBDA_B64
+    );
+    let capped_input = serde_json::json!({
+        "nonce": capped_issued.record.nonce,
+        "token": capped_rust_token,
+    })
+    .to_string();
+    let php_capped_result = php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        &php_verify_capped,
+        capped_input.as_bytes(),
+    )
+    .expect("PHP must verify the Rust-issued capped rsw record");
+    let php_capped_json: serde_json::Value =
+        serde_json::from_str(&php_capped_result).expect("the PHP capped verifier result is JSON");
+    assert_eq!(
+        php_capped_json["ok"], true,
+        "PHP must verify a Rust-issued pre-v5 rsw record through real Redis: {php_capped_result}"
+    );
+    assert_eq!(
+        php_capped_json["protocol_version"], 2,
+        "the stored Rust record stayed on the legacy shape: {php_capped_result}"
+    );
+    assert_eq!(
+        php_capped_json["rsw_modulus_sha256"],
+        serde_json::Value::Null,
+        "the stored Rust record carries no identity: {php_capped_result}"
+    );
+    println!("PHP_VERIFIES_RUST_CAPPED_RSW_REDIS: OK");
 }

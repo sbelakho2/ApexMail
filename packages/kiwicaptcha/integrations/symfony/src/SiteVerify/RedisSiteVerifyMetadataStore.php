@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 use KiwiCaptcha\Storage\StorageInterface;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 
 /**
  * Redis-backed metadata sidecar. Namespace:
@@ -16,12 +17,23 @@ final class RedisSiteVerifyMetadataStore implements SiteVerifyMetadataStore
 {
     private const PREFIX = 'siteverify-meta:';
 
+    /**
+     * The encoded deployment namespace inside the `{kiwi:<ns>}` hash
+     * tag, derived from the raw configured discriminator.
+     */
+    private readonly string $namespace;
+
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
-        private readonly string $namespace = 'kiwicaptcha',
+        string $namespace = 'kiwicaptcha',
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
+        // The RAW discriminator is derived here, so the metadata lives
+        // under the deployment namespace exactly like the idempotency
+        // entries.
+        $this->namespace = RedisNamespace::deriveOr($namespace, 'kiwicaptcha', $namespaceKeyVersion);
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
@@ -46,12 +58,13 @@ final class RedisSiteVerifyMetadataStore implements SiteVerifyMetadataStore
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
-        try {
-            $data = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            // Corrupt security metadata is never "missing": the typed
-            // fail-closed exception (the controller answers the 503).
-            throw new SiteVerifyMetadataCorruptException('the siteverify metadata record is malformed', 0, $e);
+        // The strict persisted-JSON authority: a malformed, oversized or
+        // semantically duplicated document is corrupt security metadata,
+        // never "missing" — the typed fail-closed exception (the
+        // controller answers the 503).
+        $data = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw, 8192);
+        if ($data === null) {
+            throw new SiteVerifyMetadataCorruptException('the siteverify metadata record is not a clean JSON object (malformed, oversized or carrying a semantic duplicate key)');
         }
         if (!\is_array($data)) {
             throw new SiteVerifyMetadataCorruptException('the siteverify metadata record is not an object');
@@ -62,7 +75,7 @@ final class RedisSiteVerifyMetadataStore implements SiteVerifyMetadataStore
 
     private function key(string $nonce): string
     {
-        return sprintf('{%s}:%s%s', $this->namespace, self::PREFIX, $nonce);
+        return sprintf('{kiwi:%s}:%s%s', $this->namespace, self::PREFIX, $nonce);
     }
 
     private function waitAndVerify(string $what): void

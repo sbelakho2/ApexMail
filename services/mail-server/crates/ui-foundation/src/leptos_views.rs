@@ -9264,8 +9264,13 @@ mod tests {
         let html = web_settings_api_keys_page();
         assert!(html.contains("API Keys"));
         assert!(html.contains("Create API Key"));
+        assert!(html.contains("Create an API key"));
         assert!(html.contains("<table"));
         assert!(!html.contains("data-view-state=\"loading\""));
+        // Scopes are grouped by task (fieldset legends), not a flat wall.
+        assert!(html.contains("<legend"), "{html}");
+        assert!(html.contains("Sending"), "{html}");
+        assert!(html.contains("name=\"scopes\""), "{html}");
     }
 
     #[test]
@@ -10452,5 +10457,362 @@ mod deferred_feature_view_tests {
         assert!(control_plane_root_layout_with_title("<p>x</p>", "T").contains(&expected));
         // Percent-encoding is stable (deterministic goldens).
         assert_eq!(favicon_data_url(), data_url);
+    }
+
+    // ── System contract (dogfood alignment) ─────────────────────────
+    //
+    // Pins the behaviors the live system implements NOW: identity-preserving
+    // campaign saves, automatic scheduled sends, sibling (never nested) row
+    // forms, the committed domain-verify handler, template round-trip
+    // semantics, the two-tone wordmark, and grouped API-key scopes. Each
+    // expectation is checked against the renderer source, not a remembered
+    // older design.
+
+    /// Edit mode must POST to `/web/campaigns/update` with the row id —
+    /// never the create path (which would silently duplicate).
+    #[test]
+    fn campaign_edit_for_id_posts_to_update_with_hidden_id() {
+        let html = web_campaign_edit_page_for_id("c_abc");
+        assert!(
+            html.contains("action=\"/web/campaigns/update\""),
+            "edit-with-id must target the update handler: {html}"
+        );
+        assert!(
+            html.contains("name=\"id\" value=\"c_abc\""),
+            "edit-with-id must carry the row id: {html}"
+        );
+        assert!(
+            !html.contains("action=\"/web/campaigns\""),
+            "edit-with-id must not fall back to the create action: {html}"
+        );
+    }
+
+    /// Create mode (no campaign id) keeps the create action.
+    #[test]
+    fn campaign_edit_without_id_posts_to_create() {
+        let html = web_campaign_edit_page();
+        assert!(
+            html.contains("action=\"/web/campaigns\""),
+            "create-shaped fallback posts to create: {html}"
+        );
+        assert!(
+            !html.contains("action=\"/web/campaigns/update\""),
+            "create-shaped fallback must not claim an update: {html}"
+        );
+        assert!(
+            !html.contains("name=\"id\""),
+            "create-shaped fallback carries no row id: {html}"
+        );
+    }
+
+    /// Every scheduling surface must state that a stored time starts the
+    /// send automatically (the worker claims `status='scheduled'` rows).
+    /// Re-checked against `worker-processors::campaigns::start_due_scheduled_campaigns`.
+    /// The detail-page KPI/monitor copy is pinned in api-server
+    /// (`scheduled_campaigns_say_they_start_automatically`).
+    #[test]
+    fn every_scheduling_surface_names_the_automatic_send() {
+        let full = web_campaigns_new_page();
+        assert!(
+            full.contains("Scheduled campaigns start automatically"),
+            "full editor must name the automatic send: {full}"
+        );
+        assert!(
+            full.contains("saving a schedule authorizes that automatic send"),
+            "full editor must state that saving authorizes the send: {full}"
+        );
+        let values = web_campaign_edit_page_with_values(&crate::view_data::CampaignEditData {
+            scheduled_at: "2026-12-01T10:00".into(),
+            ..Default::default()
+        });
+        assert!(
+            values.contains("starts the send automatically"),
+            "values editor must name the automatic send: {values}"
+        );
+        // No surface may still claim the old manual-start contract.
+        for html in [full.as_str(), values.as_str()] {
+            assert!(
+                !html.contains("nothing sends automatically"),
+                "stale manual-start copy: {html}"
+            );
+            assert!(
+                !html.contains("waits for you to press Start"),
+                "stale manual-start copy: {html}"
+            );
+        }
+    }
+
+    /// Template edit with loaded values prefills name/subject/body and
+    /// promises blank-body keep (the update handler implements that promise).
+    #[test]
+    fn template_edit_with_values_round_trips_content() {
+        let html = web_template_edit_page_with_values(&crate::view_data::TemplateEditData {
+            id: "t_9".into(),
+            name: "Welcome".into(),
+            subject: "Hi there".into(),
+            html_body: "<p>Hello</p>".into(),
+        });
+        assert!(html.contains("name=\"id\" value=\"t_9\""));
+        assert!(html.contains("value=\"Welcome\""));
+        assert!(html.contains("value=\"Hi there\""));
+        assert!(html.contains("&lt;p&gt;Hello&lt;/p&gt;"));
+        assert!(
+            html.contains("Leave the content empty to keep the stored body"),
+            "editor must state the keep-on-blank rule: {html}"
+        );
+        assert!(html.contains("action=\"/web/templates/update\""));
+        assert!(html.contains("formaction=\"/web/templates/preview\""));
+    }
+
+    /// The auth wordmark is the marketing two-tone lockup: brand red "Apex"
+    /// + near-black "Mail" (`text-brand-600` / `text-surface-950`).
+    #[test]
+    fn auth_logo_is_two_tone_brand_red_and_ink() {
+        let logo = web_auth_logo();
+        assert!(logo.contains("text-brand-600\">Apex"), "{logo}");
+        assert!(logo.contains("text-surface-950\">Mail"), "{logo}");
+        assert!(
+            !logo.contains("text-primary\">Apex"),
+            "the wordmark must not rely on .text-primary (undefined --accent-text collapsed it): {logo}"
+        );
+    }
+
+    /// API-key scopes are grouped by task (fieldsets + legends), not a flat
+    /// checkbox wall. The same form is composed beside live tables.
+    #[test]
+    fn api_key_create_form_groups_scopes_by_task() {
+        let form = api_key_create_form_html();
+        for legend in [
+            "Sending",
+            "Reading",
+            "Contacts &amp; lists",
+            "Templates &amp; campaigns",
+            "Domains &amp; webhooks",
+            "Analytics &amp; suppressions",
+        ] {
+            assert!(
+                form.contains(&format!(
+                    "<legend class=\"text-sm font-semibold text-surface-950\">{legend}</legend>"
+                )),
+                "missing scope group {legend}: {form}"
+            );
+        }
+        // Least-privilege copy and the committed create action.
+        assert!(form.contains("action=\"/web/api-keys\""));
+        assert!(form.contains("Create an API key"));
+        assert!(form.contains("Prefer read-only keys"));
+        assert!(form.contains("name=\"scopes\""));
+        // Every issueable scope from the registry is present exactly once as
+        // a checkbox value.
+        for scope in [
+            "messages:send",
+            "messages:read",
+            "events:read",
+            "logs:read",
+            "contacts:read",
+            "contacts:write",
+            "templates:read",
+            "templates:write",
+            "campaigns:read",
+            "campaigns:write",
+            "domains:read",
+            "webhooks:read",
+            "webhooks:write",
+            "analytics:read",
+            "suppressions:read",
+            "suppressions:write",
+        ] {
+            let hits = form.matches(&format!("value=\"{scope}\"")).count();
+            assert_eq!(hits, 1, "scope {scope} must appear exactly once: {form}");
+        }
+    }
+
+    /// The handwritten API-keys page and the live-table create form share
+    /// one contract (same helper) — they cannot drift into two products.
+    #[test]
+    fn api_keys_page_composes_the_shared_create_form() {
+        let page = web_settings_api_keys_page();
+        assert!(page.contains("Create an API key"));
+        assert!(page.contains("Create API Key"));
+        assert!(page.contains("<table"));
+        // The shared helper is what live loaders attach via action_form_html.
+        assert_eq!(
+            api_key_create_form_html()
+                .matches("Create an API key")
+                .count(),
+            1
+        );
+    }
+
+    /// Live settings loaders attach the create/invite form via
+    /// `action_form_html`; `data_list_page` must render it beside the table.
+    #[test]
+    fn data_list_page_composes_action_form_html() {
+        let mut data = crate::view_data::ListPageData {
+            title: "API Keys".into(),
+            description: "Machine credentials.".into(),
+            base_path: "/settings/api-keys".into(),
+            action_form_html: api_key_create_form_html(),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Name".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "k1".into(),
+                cells: vec![crate::view_data::DataCell::text("prod")],
+            }],
+        });
+        let html = data_list_page(&data, "key");
+        assert!(
+            html.contains("Create an API key"),
+            "action form must compose with the live table: {html}"
+        );
+        assert!(html.contains("<table"), "live table still renders: {html}");
+        // Form appears before the table section (create-then-list).
+        let form_at = html.find("Create an API key").expect("form");
+        let table_at = html.find("<table").expect("table");
+        assert!(
+            form_at < table_at,
+            "create form must precede the table: {html}"
+        );
+    }
+
+    /// Every live settings surface has a real create/invite/request affordance
+    /// composed beside its table (the handwritten counterparts cannot be the
+    /// only place those actions exist).
+    #[test]
+    fn settings_action_forms_cover_every_live_surface() {
+        let api = api_key_create_form_html();
+        assert!(api.contains("action=\"/web/api-keys\""));
+        assert!(api.contains("Create API Key"));
+
+        let team = team_invite_form_html();
+        assert!(team.contains("action=\"/web/team/invite\""));
+        assert!(team.contains("Send invitation"));
+        assert!(team.contains("name=\"email\""));
+
+        let hooks = webhook_register_form_html();
+        assert!(hooks.contains("action=\"/web/webhooks\""));
+        assert!(hooks.contains("Register endpoint"));
+        assert!(hooks.contains("name=\"url\""));
+
+        let ips = dedicated_ip_request_form_html();
+        assert!(ips.contains("action=\"/web/dedicated-ips/request\""));
+        assert!(ips.contains("Request dedicated IP"));
+
+        let billing = billing_action_form_html();
+        assert!(billing.contains("href=\"/settings/billing/portal\""));
+        assert!(billing.contains("Open billing portal"));
+    }
+
+    /// Row-delete confirmation forms are SIBLINGS of the bulk form and bind
+    /// via the `form` attribute — never nested (HTML drops nested forms).
+    #[test]
+    fn bulk_row_delete_uses_sibling_forms_not_nested_forms() {
+        let mut data = crate::view_data::ListPageData {
+            title: "Contacts".into(),
+            description: "d".into(),
+            base_path: "/contacts".into(),
+            delete_intent: Some("delete-contact".into()),
+            bulk_action: Some(crate::view_data::BulkActionData {
+                action: "/web/contacts/delete-bulk".into(),
+                button_label: "Delete selected".into(),
+            }),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Email".into()],
+            rows: vec![
+                crate::view_data::DataRowData {
+                    id: "c1".into(),
+                    cells: vec![crate::view_data::DataCell::text("a@example.com")],
+                },
+                crate::view_data::DataRowData {
+                    id: "c2".into(),
+                    cells: vec![crate::view_data::DataCell::text("b@example.com")],
+                },
+            ],
+        });
+        let html = data_list_page(&data, "contact");
+
+        // Max form nesting depth is 1 (sibling forms only).
+        let mut depth = 0usize;
+        let mut max_depth = 0usize;
+        for (idx, _) in html.match_indices('<') {
+            let Some(end) = html[idx..].find('>').map(|e| idx + e) else {
+                break;
+            };
+            let tag = &html[idx + 1..end];
+            if tag == "form" || tag.starts_with("form ") || tag.starts_with("form\t") {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            } else if tag.starts_with("/form") && depth > 0 {
+                depth -= 1;
+            }
+        }
+        assert_eq!(max_depth, 1, "no nested forms: {html}");
+
+        // Row-delete buttons bind to sibling forms via form=.
+        assert!(
+            html.contains("form=\"row-delete-c1\""),
+            "row delete binds to its sibling form: {html}"
+        );
+        assert!(
+            html.contains("id=\"row-delete-c1\""),
+            "sibling delete form is emitted: {html}"
+        );
+        assert!(
+            html.contains("data-bulk-form=\"contact\""),
+            "bulk form still present: {html}"
+        );
+    }
+
+    /// Domain Verify must POST to the mounted browser handler
+    /// (`/web/domains/:id/verify`), not a bare `/domains/:id/verify`.
+    #[test]
+    fn domain_verify_posts_to_the_mounted_web_handler() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        let mut data = crate::view_data::ListPageData {
+            title: "Domain".into(),
+            description: "DNS".into(),
+            base_path: format!("/domains/{id}"),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Type".into(), "Host".into(), "Value".into(), "State".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "TXT".into(),
+                cells: vec![
+                    crate::view_data::DataCell::mono("TXT"),
+                    crate::view_data::DataCell::mono("_dmarc.example.com"),
+                    crate::view_data::DataCell::mono("v=DMARC1; p=none"),
+                    crate::view_data::DataCell::status("verified"),
+                ],
+            }],
+        });
+        let html = data_list_page(&data, "domain");
+        assert!(
+            html.contains(&format!("action=\"/web/domains/{id}/verify\"")),
+            "verify must target /web/domains/{{id}}/verify: {html}"
+        );
+        assert!(
+            !html.contains(&format!("action=\"/domains/{id}/verify\"")),
+            "verify must not target the unmounted bare path: {html}"
+        );
+    }
+
+    /// Preview is a sanitized structural view — never claimed as
+    /// recipient-client fidelity (the sanitizer strips inline styles).
+    #[test]
+    fn campaign_editor_preview_copy_is_structural_not_client_fidelity() {
+        let html = web_campaigns_new_page();
+        assert!(
+            html.contains("sanitized structural view"),
+            "preview must be labeled structural: {html}"
+        );
+        assert!(
+            !html.contains("exactly as recipients will see"),
+            "preview must not claim recipient-client fidelity: {html}"
+        );
     }
 }

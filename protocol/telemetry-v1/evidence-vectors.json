@@ -1,0 +1,599 @@
+{
+  "schema": "kiwicaptcha.evidence-vectors/1",
+  "title": "Shared cross-language evidence vectors: telemetry-v1 scoring, solve anomaly, stage composition and decoy escalation",
+  "note": "Both risk cores must resolve every vector identically. The scorer constants below are the single authority mirrored by EvidenceModel.php and evidence.rs; a constant revision is one edit here plus a schema_version bump.",
+  "consts": {
+    "version": 1,
+    "score_saturation": 1000,
+    "sample_cap": 32,
+    "entropy_max": 15,
+    "entropy_min_samples": 32,
+    "entropy_weight": 400,
+    "focus_weight": 200,
+    "paste_weight": 400,
+    "paste_volume_floor": 8,
+    "paste_ratio_edge": 900,
+    "paste_anomaly_value": 800,
+    "human_band_edge": 150,
+    "agent_evidence_edge": 400,
+    "interaction_weight": 500,
+    "solve_weight": 500,
+    "solve_ratio_saturation_mille": 1000,
+    "band_edges": [
+      150,
+      300,
+      500,
+      700
+    ],
+    "band_rungs": [
+      "sha16",
+      "sha18",
+      "sha20",
+      "argon16"
+    ],
+    "max_solve_ms": 3600000
+  },
+  "interaction_formula": "scale = min(n, 32) * 1000 / 32; entropy_term = (n >= 32) ? (15 - qe) * 1000 / 15 : 0; focus_term = (ec.fm > 0 and ft == 0) ? 1000 : 0; paste_term = (ec.ke + ec.pa >= 8 and ec.pa > 0 and pt >= 900) ? 800 : 0; weighted = entropy_term * 400 + focus_term * 200 + paste_term * 400; interaction_anomaly = min(1000, weighted * scale / 1000000). All divisions are integer divisions.",
+  "solve_formula": "ratio_mille = min(solve_ms, 3600000) * 1000 / p1_ms(rung); solve_anomaly = ratio_mille >= 1000 ? 0 : 1000 - ratio_mille; an unknown rung scores 0. All divisions are integer divisions.",
+  "p1_ms": {
+    "sha16": 23,
+    "sha18": 27,
+    "sha20": 27,
+    "argon16": 86,
+    "argon32": 86,
+    "argon64": 86,
+    "rsw75k": 244,
+    "rsw150k": 432,
+    "rsw300k": 810
+  },
+  "interaction_vectors": [
+    {
+      "name": "human-mixed-cadence",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 4,
+          "ke": 14,
+          "pa": 0,
+          "po": 2,
+          "fm": 12
+        },
+        "qe": 12,
+        "ft": 3,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 80,
+      "band": "human"
+    },
+    {
+      "name": "human-regular-but-plausible",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 3,
+          "ke": 17,
+          "pa": 0,
+          "po": 1,
+          "fm": 11
+        },
+        "qe": 13,
+        "ft": 2,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 53,
+      "band": "human"
+    },
+    {
+      "name": "human-hesitant",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 5,
+          "ke": 9,
+          "pa": 0,
+          "po": 3,
+          "fm": 15
+        },
+        "qe": 14,
+        "ft": 4,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 26,
+      "band": "human"
+    },
+    {
+      "name": "human-busy-form",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 6,
+          "ke": 12,
+          "pa": 0,
+          "po": 2,
+          "fm": 12
+        },
+        "qe": 10,
+        "ft": 5,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 133,
+      "band": "human"
+    },
+    {
+      "name": "human-thin-below-entropy-floor",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 2,
+          "ke": 8,
+          "pa": 0,
+          "po": 1,
+          "fm": 17
+        },
+        "qe": 0,
+        "ft": 2,
+        "pt": 0,
+        "n": 28
+      },
+      "expected": 0,
+      "band": "human"
+    },
+    {
+      "name": "human-max-entropy",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 4,
+          "ke": 10,
+          "pa": 0,
+          "po": 2,
+          "fm": 16
+        },
+        "qe": 15,
+        "ft": 3,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 0,
+      "band": "human"
+    },
+    {
+      "name": "human-one-paste",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 4,
+          "ke": 10,
+          "pa": 1,
+          "po": 2,
+          "fm": 15
+        },
+        "qe": 11,
+        "ft": 3,
+        "pt": 90,
+        "n": 32
+      },
+      "expected": 106,
+      "band": "human"
+    },
+    {
+      "name": "human-autofill-assisted",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 3,
+          "ke": 6,
+          "pa": 0,
+          "po": 2,
+          "fm": 19
+        },
+        "qe": 12,
+        "ft": 2,
+        "pt": 0,
+        "n": 30
+      },
+      "expected": 0,
+      "band": "human"
+    },
+    {
+      "name": "agent-metronomic-typing",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 1,
+          "ke": 16,
+          "pa": 0,
+          "po": 1,
+          "fm": 14
+        },
+        "qe": 0,
+        "ft": 1,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 400,
+      "band": "agent"
+    },
+    {
+      "name": "agent-metronomic-no-focus",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 0,
+          "ke": 15,
+          "pa": 0,
+          "po": 2,
+          "fm": 15
+        },
+        "qe": 0,
+        "ft": 0,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 600,
+      "band": "agent"
+    },
+    {
+      "name": "agent-all-paste",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 1,
+          "ke": 0,
+          "pa": 16,
+          "po": 1,
+          "fm": 14
+        },
+        "qe": 3,
+        "ft": 1,
+        "pt": 1000,
+        "n": 32
+      },
+      "expected": 640,
+      "band": "agent"
+    },
+    {
+      "name": "agent-scripted-fill",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 0,
+          "ke": 0,
+          "pa": 0,
+          "po": 0,
+          "fm": 32
+        },
+        "qe": 2,
+        "ft": 0,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 546,
+      "band": "agent"
+    },
+    {
+      "name": "agent-metronomic-thin",
+      "payload": {
+        "v": 1,
+        "ec": {
+          "fo": 0,
+          "ke": 20,
+          "pa": 0,
+          "po": 0,
+          "fm": 12
+        },
+        "qe": 1,
+        "ft": 0,
+        "pt": 0,
+        "n": 32
+      },
+      "expected": 573,
+      "band": "agent"
+    }
+  ],
+  "band_assertion": "Every vector with band human scores at or below consts.human_band_edge; every vector with band agent scores at or above consts.agent_evidence_edge. Both assertions are fixture-tested in both cores, so an AI agent driving genuine input is positive evidence and a human-band payload never escalates.",
+  "invalid_payloads": [
+    {
+      "name": "wrong-version",
+      "raw": "{\"v\":2,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "missing-version",
+      "raw": "{\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "missing-entropy",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "missing-sample-count",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0}"
+    },
+    {
+      "name": "missing-event-class",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "unknown-field",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3,\"x\":1}"
+    },
+    {
+      "name": "unknown-event-class",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1,\"zz\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "entropy-out-of-range",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":16,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "ratio-out-of-range",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":1001,\"n\":3}"
+    },
+    {
+      "name": "counts-do-not-sum-to-samples",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":5}"
+    },
+    {
+      "name": "samples-over-cap",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":33}"
+    },
+    {
+      "name": "count-over-cap",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":40,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":42}"
+    },
+    {
+      "name": "negative-count",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":-1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "non-integer-entropy",
+      "raw": "{\"v\":1,\"ec\":{\"fo\":1,\"ke\":1,\"pa\":0,\"po\":0,\"fm\":1},\"qe\":5.5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "ec-not-an-object",
+      "raw": "{\"v\":1,\"ec\":3,\"qe\":5,\"ft\":1,\"pt\":0,\"n\":3}"
+    },
+    {
+      "name": "array-not-object",
+      "raw": "[1,2,3]"
+    },
+    {
+      "name": "string-not-object",
+      "raw": "telemetry"
+    },
+    {
+      "name": "empty-text",
+      "raw": ""
+    }
+  ],
+  "invalid_payload_rule": "Every rejected payload scores exactly like an absent payload: interaction anomaly 0, neutral-unknown, never negative, no stage raise, no reason.",
+  "solve_vectors": [
+    {
+      "name": "instant-sha18",
+      "solve_ms": 0,
+      "rung": "sha18",
+      "expected": 1000
+    },
+    {
+      "name": "implausibly-fast-sha18",
+      "solve_ms": 13,
+      "rung": "sha18",
+      "expected": 519
+    },
+    {
+      "name": "exactly-the-reference-sha18",
+      "solve_ms": 27,
+      "rung": "sha18",
+      "expected": 0
+    },
+    {
+      "name": "human-plausible-sha18",
+      "solve_ms": 100,
+      "rung": "sha18",
+      "expected": 0
+    },
+    {
+      "name": "instant-sha20",
+      "solve_ms": 0,
+      "rung": "sha20",
+      "expected": 1000
+    },
+    {
+      "name": "fast-argon",
+      "solve_ms": 40,
+      "rung": "argon16",
+      "expected": 535
+    },
+    {
+      "name": "reference-argon",
+      "solve_ms": 86,
+      "rung": "argon16",
+      "expected": 0
+    },
+    {
+      "name": "slightly-fast-rsw",
+      "solve_ms": 400,
+      "rung": "rsw150k",
+      "expected": 75
+    },
+    {
+      "name": "reference-rsw",
+      "solve_ms": 432,
+      "rung": "rsw150k",
+      "expected": 0
+    },
+    {
+      "name": "unknown-rung-is-neutral",
+      "solve_ms": 0,
+      "rung": "sha17",
+      "expected": 0
+    },
+    {
+      "name": "absent-facts-are-neutral",
+      "solve_ms": null,
+      "rung": null,
+      "expected": 0
+    },
+    {
+      "name": "over-domain-solve-clamps",
+      "solve_ms": 7200000,
+      "rung": "sha16",
+      "expected": 0
+    },
+    {
+      "name": "sha16-half-reference",
+      "solve_ms": 11,
+      "rung": "sha16",
+      "expected": 522
+    }
+  ],
+  "stage": {
+    "composition": "The evidence stage runs after the marks stage and before the pricing stage. combined = weighted(interaction, 500) + weighted(solve, 500); a combined score below the first band edge passes the decision through untouched; otherwise the action rises to the band rung (sha16, sha18, sha20, argon16), never beyond the first argon rung, and an argon rung on a saturated backend re-escalates to the interactive step-up.",
+    "policy": {
+      "version": 3,
+      "weights": {
+        "source_fast": 190,
+        "source_slow": 110,
+        "subnet_fast": 80,
+        "issue_debt": 150,
+        "bad_proof": 220,
+        "malformed": 260,
+        "replay": 320,
+        "action_failure": 120,
+        "scope_switch": 60,
+        "global_pressure": 170,
+        "network_risk": 100,
+        "trust_credit": 130,
+        "principal_credit": 100
+      },
+      "scopes": {
+        "1": {
+          "base_risk": 100,
+          "minimum": "allow",
+          "post_solve_check": true,
+          "degraded": "sha20"
+        }
+      },
+      "global_floors": {
+        "0": "allow",
+        "1": "sha16",
+        "2": "sha18",
+        "3": "sha20",
+        "4": "sha20"
+      }
+    },
+    "pass_through_rule": "Below the first band edge nothing fired and the decision passes through byte-identically with no reasons. At or above the edge the evidence has fired: the stage reasons prepend, and the action rises to the band rung only when that exceeds the composed action, so a deny is never softened and a stronger rung never lowered.",
+    "vectors": [
+      {
+        "name": "absent-evidence-passes-through",
+        "interaction": null,
+        "solve_ms": null,
+        "rung": null,
+        "score": 100,
+        "expected_action": "allow",
+        "expected_stage_reasons": []
+      },
+      {
+        "name": "human-band-passes-through",
+        "interaction": 80,
+        "solve_ms": null,
+        "rung": null,
+        "score": 100,
+        "expected_action": "allow",
+        "expected_stage_reasons": []
+      },
+      {
+        "name": "agent-evidence-alone-raises",
+        "interaction": 400,
+        "solve_ms": 100,
+        "rung": "sha18",
+        "score": 100,
+        "expected_action": "sha16",
+        "expected_stage_reasons": [
+          "interaction_anomaly"
+        ]
+      },
+      {
+        "name": "instant-solve-raises",
+        "interaction": null,
+        "solve_ms": 0,
+        "rung": "sha20",
+        "score": 100,
+        "expected_action": "sha20",
+        "expected_stage_reasons": [
+          "solve_anomaly"
+        ]
+      },
+      {
+        "name": "strong-evidence-caps-at-first-argon",
+        "interaction": 640,
+        "solve_ms": 0,
+        "rung": "sha18",
+        "score": 100,
+        "expected_action": "argon16",
+        "expected_stage_reasons": [
+          "interaction_anomaly",
+          "solve_anomaly"
+        ]
+      },
+      {
+        "name": "evidence-never-lowers-a-deny",
+        "interaction": 640,
+        "solve_ms": 0,
+        "rung": "sha18",
+        "score": 980,
+        "expected_action": "deny",
+        "expected_stage_reasons": [
+          "interaction_anomaly",
+          "solve_anomaly"
+        ]
+      }
+    ]
+  },
+  "decoy_escalation": {
+    "ttl_ms": 600000,
+    "composition": "A live escalation record raises the composed action by exactly one ladder rung, capped at the interactive step-up (an escalation, never a block). The record is written only when the autofill-qualification gate is open.",
+    "vectors": [
+      {
+        "name": "allow-raises-to-sha16",
+        "score": 100,
+        "plain_action": "allow",
+        "expected_action": "sha16"
+      },
+      {
+        "name": "sha16-raises-to-sha18",
+        "score": 200,
+        "plain_action": "sha16",
+        "expected_action": "sha18"
+      },
+      {
+        "name": "sha20-raises-to-argon16",
+        "score": 500,
+        "plain_action": "sha20",
+        "expected_action": "argon16"
+      },
+      {
+        "name": "argon64-raises-to-step-up",
+        "score": 900,
+        "plain_action": "argon64",
+        "expected_action": "step_up"
+      },
+      {
+        "name": "step-up-stays-step-up",
+        "score": 950,
+        "plain_action": "step_up",
+        "expected_action": "step_up"
+      },
+      {
+        "name": "deny-never-deepens",
+        "score": 990,
+        "plain_action": "deny",
+        "expected_action": "deny"
+      }
+    ]
+  }
+}

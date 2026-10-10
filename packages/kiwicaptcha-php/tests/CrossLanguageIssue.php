@@ -96,7 +96,13 @@ $challenge = $execution
         executionAction: $action !== false && $action !== '' ? $action : 'login-action',
         armDecoyField: getenv('KC_PHP_EXECUTION_DECOY') === '1',
     )
-    : $issuer->issue('login', '198.51.100.7');
+    : $issuer->issue(
+        'login',
+        '198.51.100.7',
+        maxProtocolVersionToEmit: $config->algorithm === \KiwiCaptcha\PoWAlgorithm::Rsw
+            ? \KiwiCaptcha\ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION
+            : \KiwiCaptcha\ChallengeRecord::BASE_PROTOCOL_VERSION,
+    );
 $record = $storage->find($challenge->nonce);
 if ($execution) {
     // The v4 equivalence is enforced on the writing side too: the

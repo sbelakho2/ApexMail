@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Storage\ReplicaWaitException;
@@ -425,7 +426,11 @@ LUA;
     public function sourceKey(string $clientIp): string
     {
         try {
-            $identity = Issuer::canonicalIpFamily($clientIp);
+            // The shared source identity: full IPv4, /64 IPv6, matching
+            // the issuance/cancellation limiter and the risk source
+            // pseudonym. A /128 key would let an IPv6 host rotate
+            // addresses around the anti-stockpiling window.
+            $identity = Issuer::canonicalSourceFamily($clientIp);
         } catch (\InvalidArgumentException) {
             $identity = 'unknown';
         }
@@ -696,18 +701,26 @@ LUA;
 
     /**
      * Run a Lua script against whichever client implementation is in use.
+     * The script rides the typed seam's ordinary mutation lane,
+     * {@see RedisSecurityCommandExecutor::executeMutation()}: the
+     * outstanding-membership accounting (issuance admission, release,
+     * cancellation admission) is non-final mutation bookkeeping. The
+     * terminal security transitions live in the storage and chain
+     * stores. Under ha_authority pinned_primary these therefore serve
+     * within the guard's verification window instead of being
+     * classified by the plain-EVAL shape as security-final (which
+     * would force an INFO + pin revalidation round trip per
+     * challenge). Without the wrapper the lane declaration is inert
+     * and the packing is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args
      */
     private function eval(string $script, array $keys, array $args): mixed
     {
-        if ($this->redis instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->redis->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
+        return ($this->luaSeam ??= new RedisSecurityCommandExecutor($this->redis))
+            ->executeMutation($script, $keys, $args);
     }
+
+    private ?RedisSecurityCommandExecutor $luaSeam = null;
 }

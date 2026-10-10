@@ -10,8 +10,31 @@ use PHPUnit\Framework\TestCase;
 
 final class ProcessEmergencyCapTest extends TestCase
 {
+    public static function nonFiniteWarmupRamps(): array
+    {
+        return [
+            'not a number' => [\NAN],
+            'positive infinity' => [\INF],
+            'negative infinity' => [-\INF],
+            'negative ramp' => [-1.0],
+        ];
+    }
+
     /**
-     * The pre-audit burst tests construct with warmupRampSecs: 0 (ramp
+     * @dataProvider nonFiniteWarmupRamps
+     */
+    public function testNonFiniteWarmupRampsAreRefused(float $ramp): void
+    {
+        // A non-finite ramp would never finish: elapsed >= INF is
+        // permanently false and the cap would stay at its warm-up floor
+        // forever. The constructor refuses it instead.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('finite');
+        new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: $ramp);
+    }
+
+    /**
+     * The burst tests construct with warmupRampSecs: 0 (ramp
      * disabled) so they pin the FULL-cap window semantics; the ramp's own
      * behavior is covered by the testWarmup* cases below.
      */

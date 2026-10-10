@@ -1,0 +1,58 @@
+{
+  "comment": "Cross-language scope-action hysteresis edge-fallback vectors (risk-v1). Each step is independent: seed the client's last action in the scope with `previous`, then select(`score`) with the plain mapping action_for_score(`score`) and assert `expected`. The edge fallback targets action_for_score(score - 10) when escalating past enter[i] = upper[i] + 10 and action_for_score(score + 10) when dropping below exit[i] = lower[i] - 10; hover scores within the margins keep the previous action. Both the Rust and PHP suites iterate this one file and must agree on every step.",
+  "vectors": [
+    {
+      "client": "edge-pin",
+      "steps": [
+        { "scope": 1, "score": 605, "previous": "Allow", "expected": "Sha20" },
+        { "scope": 1, "score": 141, "previous": "Argon64", "expected": "Sha16" }
+      ]
+    },
+    {
+      "client": "hover",
+      "steps": [
+        { "scope": 1, "score": 150, "previous": "Allow", "expected": "Allow" },
+        { "scope": 1, "score": 451, "previous": "Sha18", "expected": "Sha18" },
+        { "scope": 1, "score": 459, "previous": "Sha18", "expected": "Sha18" },
+        { "scope": 1, "score": 441, "previous": "Sha20", "expected": "Sha20" },
+        { "scope": 1, "score": 590, "previous": "Sha20", "expected": "Sha20" }
+      ]
+    },
+    {
+      "client": "escalation",
+      "steps": [
+        { "scope": 1, "score": 605, "previous": "Sha16", "expected": "Sha20" },
+        { "scope": 1, "score": 455, "previous": "Sha16", "expected": "Sha18" },
+        { "scope": 1, "score": 800, "previous": "Allow", "expected": "Argon32" }
+      ]
+    },
+    {
+      "client": "drop",
+      "steps": [
+        { "scope": 1, "score": 141, "previous": "Argon32", "expected": "Sha16" },
+        { "scope": 1, "score": 100, "previous": "Argon64", "expected": "Allow" }
+      ]
+    },
+    {
+      "client": "boundary",
+      "steps": [
+        { "scope": 1, "score": 160, "previous": "Allow", "expected": "Sha16" },
+        { "scope": 1, "score": 159, "previous": "Allow", "expected": "Allow" },
+        { "scope": 1, "score": 140, "previous": "Sha16", "expected": "Allow" },
+        { "scope": 1, "score": 141, "previous": "Sha16", "expected": "Sha16" }
+      ]
+    },
+    {
+      "client": "hard",
+      "steps": [
+        { "scope": 1, "score": 500, "previous": "Deny", "expected": "Sha20" }
+      ]
+    },
+    {
+      "client": "scope-2",
+      "steps": [
+        { "scope": 2, "score": 605, "previous": "Allow", "expected": "Sha20" }
+      ]
+    }
+  ]
+}

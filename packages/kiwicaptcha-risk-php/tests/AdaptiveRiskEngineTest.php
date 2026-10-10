@@ -62,6 +62,39 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
     }
 
+    public function testZeroEpochOrTtlIsRefusedAtConstruction(): void
+    {
+        $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        foreach ([
+            ['sourceEpochSecs', 0],
+            ['subnetEpochSecs', -1],
+            ['stateTtlSecs', 0],
+            ['principalTtlSecs', 0],
+            ['dedupeTtlSecs', -5],
+        ] as [$knob, $value]) {
+            try {
+                $arguments = [
+                    'store' => new class extends RiskStateStoreStub {
+                        public function observe(RiskObservation $observation): SignalVector
+                        {
+                            return SignalVector::fromArray([]);
+                        }
+                    },
+                    'classifier' => new CidrNetworkClassifier([]),
+                    'identityFactory' => new RiskIdentityFactory($keys),
+                    'scorer' => new RiskScorer(),
+                    'policy' => $this->policy(),
+                    'keys' => $keys,
+                    $knob => $value,
+                ];
+                new AdaptiveRiskEngine(...$arguments);
+                self::fail(sprintf('the invalid timing %s=%d must be refused at construction', $knob, $value));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString($knob, $e->getMessage());
+            }
+        }
+    }
+
     private function context(int $scope = 1, RiskEventKind $event = RiskEventKind::PreIssue, ?string $principalId = null): RiskContext
     {
         return new RiskContext(
@@ -331,7 +364,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         $engine->record_feedback(RiskEventKind::RateLimitHit, $this->context(event: RiskEventKind::RateLimitHit), $key);
         $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), str_repeat('a', 32), $key);
         $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), str_repeat('b', 32), $key);
-        $engine->record(RiskEventKind::ExpiredChallenge, 1, '203.0.113.27', 'sess', null);
+        $engine->record(RiskEventKind::ExpiredChallenge, 1, '203.0.113.27', '5ae1a4b8c0d1e2f30011223344556677', null);
 
         self::assertSame([
             $preIssue,
@@ -451,6 +484,157 @@ final class AdaptiveRiskEngineTest extends TestCase
         }
     }
 
+    /**
+     * Engine-level keying: the hysteresis memory follows the session
+     * pseudonym, so the bot's Argon64 history never steers another
+     * client's action in the same scope.
+     */
+    public function testScopeActionHysteresisIsKeyedPerClient(): void
+    {
+        $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        $botPseudonym = (new RiskIdentityFactory($keys))->sessionId(str_repeat('b0', 16));
+        $store = new class($botPseudonym) extends RiskStateStoreStub {
+            public function __construct(private readonly string $botPseudonym)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                if ($observation->sessionId === $this->botPseudonym) {
+                    return SignalVector::fromArray([
+                        'source_fast' => 900,
+                        'bad_proof' => 1000,
+                        'issue_debt' => 1000,
+                        'malformed' => 700,
+                        'subnet_fast' => 700,
+                        'scope_switch' => 700,
+                    ]);
+                }
+
+                return SignalVector::zero();
+            }
+        };
+        $engine = $this->engine($store);
+        $context = function (string $session): RiskContext {
+            return new RiskContext(
+                scope: 1,
+                sourceIp: '203.0.113.27',
+                sessionId: $session,
+                principalId: null,
+                event: RiskEventKind::PreIssue,
+                networkFlags: (new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify('203.0.113.27'),
+                resources: new ResourcePressure(1000, 1000),
+            );
+        };
+
+        // The legitimate client establishes an Allow history.
+        self::assertSame(
+            RiskAction::Allow,
+            $engine->assessPreIssue($context(str_repeat('41', 16)))->action
+        );
+        // The bot's own key jumps straight to Argon64.
+        $bot = $engine->assessPreIssue($context(str_repeat('b0', 16)));
+        self::assertSame(921, $bot->score);
+        self::assertSame(RiskAction::Argon64, $bot->action);
+        // The legitimate client still reads its own Allow entry.
+        self::assertSame(
+            RiskAction::Allow,
+            $engine->assessPreIssue($context(str_repeat('41', 16)))->action
+        );
+        // A second fresh client after the bot keeps the plain mapping.
+        self::assertSame(
+            RiskAction::Allow,
+            $engine->assessPreIssue($context(str_repeat('42', 16)))->action
+        );
+    }
+
+    /**
+     * Engine-level keying without a session: the hysteresis client key
+     * falls back to the source pseudonym, never to the subnet or a
+     * shared constant. Two sources in the same scope, even in the same
+     * /24, keep independent entries. The bot source's fresh key selects
+     * Argon64; an ordinary source's request must read its own fresh
+     * entry (the plain band for 845). The bot source's next, lower score
+     * stays held at Argon64 by its own entry.
+     */
+    public function testScopeActionHysteresisIsKeyedPerSourceWhenSessionIsAbsent(): void
+    {
+        // 921 = 100 base + the saturated bot vector (the same vector as
+        // the per-client test above); 845 maps plain to Argon32 (band
+        // [750, 850)) and sits inside Argon64's hold window (>= 850 − 10).
+        $vectors = [
+            [
+                'source_fast' => 900,
+                'bad_proof' => 1000,
+                'issue_debt' => 1000,
+                'malformed' => 700,
+                'subnet_fast' => 700,
+                'scope_switch' => 700,
+            ],
+            [
+                'source_fast' => 900,
+                'bad_proof' => 1000,
+                'issue_debt' => 1000,
+                'malformed' => 700,
+                'subnet_fast' => 275,
+            ],
+            [
+                'source_fast' => 900,
+                'bad_proof' => 1000,
+                'issue_debt' => 1000,
+                'malformed' => 700,
+                'subnet_fast' => 275,
+            ],
+        ];
+        $store = new class($vectors) extends RiskStateStoreStub {
+            private int $call = 0;
+
+            /** @param list<array<string, int>> $vectors */
+            public function __construct(private readonly array $vectors)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::fromArray($this->vectors[$this->call++]);
+            }
+        };
+        $engine = $this->engine($store);
+        $context = function (string $ip): RiskContext {
+            return new RiskContext(
+                scope: 1,
+                sourceIp: $ip,
+                sessionId: null,
+                principalId: null,
+                event: RiskEventKind::PreIssue,
+                networkFlags: (new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify($ip),
+                resources: new ResourcePressure(1000, 1000),
+            );
+        };
+
+        // Both sources share the 203.0.113.0/24 subnet pseudonym, so only
+        // the source pseudonym can keep the two entries apart.
+        $bot = $engine->assessPreIssue($context('203.0.113.27'));
+        self::assertSame(921, $bot->score);
+        self::assertSame(RiskAction::Argon64, $bot->action, 'the fresh bot source key uses the plain mapping');
+
+        $ordinary = $engine->assessPreIssue($context('203.0.113.28'));
+        self::assertSame(845, $ordinary->score);
+        self::assertSame(
+            RiskAction::Argon32,
+            $ordinary->action,
+            "the other source's own fresh entry must apply — the bot's Argon64 hold must not leak"
+        );
+
+        $held = $engine->assessPreIssue($context('203.0.113.27'));
+        self::assertSame(845, $held->score);
+        self::assertSame(
+            RiskAction::Argon64,
+            $held->action,
+            "the bot source's own entry holds Argon64 inside its exit window (845 >= 850 − 10)"
+        );
+    }
+
     public function testAssessIsAliasOfAssessPreIssue(): void
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 1);
@@ -503,7 +687,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame(RiskEventKind::ProtectedActionFailure, $captured[0]->event, 'feedback must not be rewritten to PreIssue');
 
         // The deprecated alias routes to the same path.
-        $receipt = $engine->record(RiskEventKind::ChallengeIssued, 1, '203.0.113.27', 'sess', null);
+        $receipt = $engine->record(RiskEventKind::ChallengeIssued, 1, '203.0.113.27', '5ae1a4b8c0d1e2f30011223344556677', null);
         self::assertInstanceOf(EventReceipt::class, $receipt);
         self::assertSame(RiskEventKind::ChallengeIssued, $captured[1]->event);
     }
@@ -603,7 +787,10 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame([[$decision->decisionId, false, null]], $confirmed, 'the atomic confirm must run first (legitimate=false)');
         self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ConfirmedAbuse], $observedEvents, 'the reputation event must still be recorded');
 
-        // A limiter-hit decision also registers a receipt (silently).
+        // A limiter-hit decision never reaches the state backend, so it
+        // registers NO receipt (the backend is skipped entirely on the
+        // hard-deny path).
+        $capturedReceiptsBefore = count($capturedReceipts);
         $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
@@ -620,7 +807,11 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
         $denied = $engine->assess($this->context());
         self::assertTrue($denied->hasReason(RiskReason::HardRateLimit));
-        self::assertSame([[$denied->decisionId, 1, 10, RiskAction::Deny, 1000, 1, $hour]], array_slice($capturedReceipts, 1));
+        self::assertSame(
+            $capturedReceiptsBefore,
+            count($capturedReceipts),
+            'a limiter hard-deny must not touch the state backend (no receipt, no ledger)'
+        );
     }
 
     public function testConfirmedFeedbackGatesReputationOnStatus(): void
@@ -1059,7 +1250,7 @@ final class AdaptiveRiskEngineTest extends TestCase
             keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
             calibration: $this->staticCalibration(1),
         );
-        $engine->record(RiskEventKind::ProtectedActionFailure, 1, '203.0.113.27', 'sess', null);
+        $engine->record(RiskEventKind::ProtectedActionFailure, 1, '203.0.113.27', '5ae1a4b8c0d1e2f30011223344556677', null);
         $engine->confirmedLegitimate(
             $this->context(event: RiskEventKind::ConfirmedLegitimate),
             str_repeat('a', 32),
@@ -1231,5 +1422,159 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame($badAfter2, (int) ($client->hget($sourceKey2, 'bad') ?? 0), 'no second reputation mutation');
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         self::assertSame([], $client->hgetall("{kiwi:{$ns2}}:cal:1:{$hour}"), 'a status-2 outcome never reaches the calibration buckets');
+    }
+
+    // ── Degraded paths never touch the state backend (degraded-path seam) ──
+
+    private function exhaustedLimiter(): ProcessEmergencyCap
+    {
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
+        for ($i = 0; $i < 100; $i++) {
+            $limiter->allow();
+        }
+        return $limiter;
+    }
+
+    public function testLimiterHardDenyMakesZeroStoreCalls(): void
+    {
+        $store = new class() extends RiskStateStoreStub {
+            public int $observeCalls = 0;
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observeCalls++;
+                return SignalVector::zero();
+            }
+        };
+        $engine = $this->engine($store, limiter: $this->exhaustedLimiter());
+
+        $decision = $engine->assess($this->context());
+        self::assertTrue($decision->hasReason(RiskReason::HardRateLimit));
+        self::assertSame(0, $store->observeCalls, 'a limiter hard-deny must never reach the store');
+        self::assertSame([], $store->ledgerCalls, 'a limiter hard-deny must book no ledger entry');
+    }
+
+    public function testOpenBreakerMakesZeroStoreCalls(): void
+    {
+        $store = new class() extends RiskStateStoreStub {
+            public int $observeCalls = 0;
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observeCalls++;
+                return SignalVector::zero();
+            }
+        };
+        $breaker = new CircuitBreaker(failureThreshold: 1, openMs: 60_000);
+        $breaker->recordFailure();
+        $engine = $this->engine($store, breaker: $breaker);
+
+        $decision = $engine->assess($this->context());
+        self::assertSame(0, $store->observeCalls, 'an open breaker must skip the store entirely');
+        self::assertSame([], $store->ledgerCalls, 'an open breaker must book no ledger entry');
+    }
+
+    public function testStoreFailureBooksNoLedgerEntry(): void
+    {
+        $store = new class() extends RiskStateStoreStub {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                throw new RiskStoreException('backend down');
+            }
+        };
+        $engine = $this->engine($store);
+
+        $decision = $engine->assess($this->context());
+        self::assertSame([], $store->ledgerCalls, 'a failed assessment must book no ledger entry against the failing backend');
+        self::assertNotSame(RiskAction::Allow, $decision->action, 'the decision is degraded');
+    }
+
+    public function testFeedbackStoreFailureFeedsTheBreaker(): void
+    {
+        $store = new class() extends RiskStateStoreStub {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                throw new RiskStoreException('backend down');
+            }
+        };
+        $breaker = new CircuitBreaker(failureThreshold: 2, openMs: 60_000);
+        $engine = $this->engine($store, breaker: $breaker);
+
+        $engine->record_feedback(RiskEventKind::SolveSuccess, $this->context());
+        self::assertFalse($breaker->isOpen(), 'one feedback failure must not open the breaker');
+        $engine->record_feedback(RiskEventKind::SolveSuccess, $this->context());
+        self::assertTrue($breaker->isOpen(), 'two feedback-path store failures must open the breaker');
+
+        // With the breaker open the assessment degrades without touching
+        // the store (no ledger entry either).
+        $decision = $engine->assess($this->context());
+        self::assertSame([], $store->ledgerCalls, 'the degraded decision must book no ledger entry');
+    }
+
+    /**
+     * The engine reads the reply-object surfaces (observeWithReply /
+     * assessV2WithReply), never the racy last* side channels: this stub
+     * throws when a side channel is read.
+     */
+    public function testEngineNeverReadsTheSideChannels(): void
+    {
+        $store = new class() extends RiskStateStoreStub implements \KiwiCaptcha\Risk\Storage\ConsolidatedAssessmentStoreInterface {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                throw new \LogicException('observe() must not be used when observeWithReply() exists');
+            }
+
+            public function observeWithReply(RiskObservation $observation): \KiwiCaptcha\Risk\Storage\ObservationReply
+            {
+                return new \KiwiCaptcha\Risk\Storage\ObservationReply(
+                    vector: SignalVector::zero(),
+                    globalLevel: 0,
+                    cooldownUntilMs: 0,
+                    isDuplicate: false,
+                );
+            }
+
+            public function assessV2(RiskObservation $observation, ?string $contextTag, ?string $tlsTag, ?\KiwiCaptcha\Risk\Storage\OutcomeRegistration $registration = null): array
+            {
+                throw new \LogicException('assessV2() must not be used when assessV2WithReply() exists');
+            }
+
+            public function assessV2WithReply(
+                RiskObservation $observation,
+                ?string $contextTag,
+                ?string $tlsTag,
+                ?\KiwiCaptcha\Risk\Storage\OutcomeRegistration $registration = null,
+            ): \KiwiCaptcha\Risk\Storage\AssessV2Reply {
+                return new \KiwiCaptcha\Risk\Storage\AssessV2Reply(
+                    vector: SignalVector::zero(),
+                    globalLevel: 2,
+                    cooldownUntilMs: 0,
+                    isDuplicate: false,
+                    existingContextTag: null,
+                    existingTlsTag: null,
+                    registrationStatus: true,
+                );
+            }
+
+            public function lastGlobalLevel(): int
+            {
+                throw new \LogicException('the engine must not read the lastGlobalLevel side channel');
+            }
+
+            public function lastCooldownUntilMs(): int
+            {
+                throw new \LogicException('the engine must not read the lastCooldownUntilMs side channel');
+            }
+
+            public function lastIsDuplicate(): bool
+            {
+                throw new \LogicException('the engine must not read the lastIsDuplicate side channel');
+            }
+        };
+        $engine = $this->engine($store);
+
+        $decision = $engine->assess($this->context());
+        self::assertSame(2, $decision->globalLevel, 'the level comes from the reply object');
+
+        $receipt = $engine->record_feedback(RiskEventKind::SolveSuccess, $this->context());
+        self::assertFalse($receipt->isDuplicate, 'the dedupe verdict comes from the reply object');
     }
 }

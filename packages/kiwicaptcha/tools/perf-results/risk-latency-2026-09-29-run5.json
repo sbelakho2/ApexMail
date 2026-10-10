@@ -1,0 +1,43 @@
+{
+    "schema": "kiwicaptcha.perf-risk-latency/1",
+    "generated_at": "2026-09-29T21:15:15Z",
+    "mode": "redis_concurrent",
+    "command": [
+        "packages/kiwicaptcha/tools/perf-bench-risk.php",
+        "--redis",
+        "--json-out",
+        "packages/kiwicaptcha/tools/perf-results/risk-latency-2026-09-29-run5.json"
+    ],
+    "environment": {
+        "php_version": "8.5.10",
+        "php_sapi": "cli",
+        "os": "Darwin 25.5.0 arm64",
+        "cpu": "Apple M5 Pro",
+        "cpu_count": 18
+    },
+    "source": {
+        "commit": "467e15c1b9b28bd5763a6ce91bde0260811cf741",
+        "dirty": false
+    },
+    "configuration": {
+        "workers": 8,
+        "per_worker": 100,
+        "warmup": 10
+    },
+    "redis": {
+        "url": "redis://127.0.0.1:6399",
+        "version": "8.10.1"
+    },
+    "measurement": {
+        "n": 800,
+        "p50_ms": 1.8844,
+        "p95_ms": 2.5164,
+        "throughput_requests_per_second": 2600
+    },
+    "ratchet": {
+        "baseline_p95_ms": 1.364,
+        "multiplier": 3,
+        "limit_p95_ms": 4.0920000000000005,
+        "verdict": "ok"
+    }
+}

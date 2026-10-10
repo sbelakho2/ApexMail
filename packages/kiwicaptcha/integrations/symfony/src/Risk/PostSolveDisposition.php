@@ -24,9 +24,18 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * The expiry is bound to the disposition's exact chain at finalize
  * time, so the ticket signing never consults the current obligation
  * again. A concurrently opened chain of the same transaction can never
- * leak its expiry into this disposition's ticket, and a completed
- * chain (record retained) keeps re-signing its deterministic ticket. Raw
+ * leak its expiry into this disposition's ticket, and a completed chain
+ * (record retained) keeps re-signing its deterministic ticket. Raw
  * risk vectors, fingerprints and descriptors are never persisted.
+ *
+ * quarantined is the quarantine disposition of the Pass kind (change.md
+ * 1.3 and 3.3.4). The decision plane assessed a server-confirmed spam
+ * identity with a clean request, so the solve passes (the submission is
+ * accepted, the wire stays indistinguishable from allow) while the
+ * application withholds the submission from publication. The flag is
+ * persisted with the disposition, so a replay reproduces the hold
+ * instead of publishing on the retry. Every other kind refuses the
+ * flag: quarantine never overrides deny, step-up or a chain demand.
  */
 final readonly class PostSolveDisposition
 {
@@ -35,6 +44,7 @@ final readonly class PostSolveDisposition
         public ?string $decisionId = null,
         public ?string $chainId = null,
         public ?int $chainExpiresAt = null,
+        public bool $quarantined = false,
     ) {
         if ($kind === PostSolveDispositionKind::ChainRequired && ($chainId === null || $chainId === '')) {
             throw new \InvalidArgumentException('a ChainRequired disposition must carry a chain id');
@@ -45,24 +55,8 @@ final readonly class PostSolveDisposition
         if ($kind !== PostSolveDispositionKind::ChainRequired && $chainExpiresAt !== null) {
             throw new \InvalidArgumentException('a chain expiry is only meaningful on the ChainRequired kind');
         }
+        if ($quarantined && $kind !== PostSolveDispositionKind::Pass) {
+            throw new \InvalidArgumentException('quarantine rides the Pass kind only: it never overrides deny, step-up or a chain demand');
+        }
     }
-}
-
-/**
- * The final disposition kinds. String-backed so the persisted wire format
- * is stable and machine-readable.
- */
-enum PostSolveDispositionKind: string
-{
-    /** The protected action is accepted (the solve passes). */
-    case Pass = 'pass';
-
-    /** The post-solve assessment rejects the submission. */
-    case Deny = 'deny';
-
-    /** Application-level step-up is required. */
-    case StepUp = 'step_up';
-
-    /** A stronger PoW stage is required via a one-shot chain ticket. */
-    case ChainRequired = 'chain_required';
 }

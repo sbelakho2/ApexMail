@@ -24,7 +24,7 @@ use kiwicaptcha::challenge::{
 use kiwicaptcha::execution;
 use kiwicaptcha::redis_verify::{
     AdmissionError, ArgonAdmissionGate, ArgonLease, CancelResult, DeleteIfPending,
-    ProductionVerifier, RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
+    ProductionVerifier, RedisChallengeStore, RuntimeState, StoredConsumedResult, DEFAULT_POOL_SIZE,
 };
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, RequestBindingExpectation, VerifyError, VerifyOutcome};
@@ -230,6 +230,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -256,6 +257,7 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Argon2id,
         m_kib: 128,
         t: 3,
@@ -348,6 +350,62 @@ fn store_for(url: &str, prefix: &str) -> RedisChallengeStore {
 
 fn verifier_for(url: &str, prefix: &str) -> ProductionVerifier {
     ProductionVerifier::new(store_for(url, prefix), SECRET)
+}
+
+/// Commits a consumed result together with its server-state MAC, exactly
+/// as the production verify path commits it: the hardened retained-valid
+/// acceptance only replays a MACed success, so a hand-seeded stored
+/// result must be authenticated the same way (the unauthenticated
+/// `commit_result` is the legacy shape and replaying it is the
+/// deterministic MalformedRecord).
+fn commit_authenticated_result(
+    store: &RedisChallengeStore,
+    record: &ChallengeRecord,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+) -> bool {
+    let keys = kiwicaptcha::DerivedKeys::from_master(SECRET, None);
+    let mac = kiwicaptcha::challenge::consumed_result_mac(
+        &keys,
+        &record.challenge,
+        valid,
+        binding,
+        operation_identity,
+    );
+    store
+        .commit_result_with_mac(&record.nonce, valid, binding, Some(&mac))
+        .expect("the authenticated commit lands")
+}
+
+/// A counter that provably does NOT meet the record's target: the
+/// deterministic replacement for the small-counter guess
+/// (`if valid == 0 { 1 } else { 0 }`) that was flaky whenever the
+/// alternate counter also solved the target.
+fn insufficient_counter(record: &ChallengeRecord) -> u64 {
+    use sha2::{Digest, Sha256};
+    let salt = B64.decode(&record.salt).expect("the salt decodes");
+    let mut counter = 0u64;
+    loop {
+        let input = format!("{}{}", record.prefix, counter);
+        let mut hasher = Sha256::new();
+        hasher.update(input.as_bytes());
+        hasher.update(&salt);
+        let digest = hasher.finalize();
+        let mut bits = 0u32;
+        for byte in digest.iter() {
+            if *byte == 0 {
+                bits += 8;
+            } else {
+                bits += byte.leading_zeros();
+                break;
+            }
+        }
+        if bits < record.target_bits {
+            return counter;
+        }
+        counter += 1;
+    }
 }
 
 fn encode_token(nonce: &str, counter: u64) -> String {
@@ -758,6 +816,69 @@ fn cancelled_argon_record_never_acquires_an_admission_slot() {
 }
 
 #[test]
+fn consume_identity_without_a_marker_fails_closed_after_the_durable_flip() {
+    // A pending envelope hand-written without the operation_identity
+    // marker that only store writes: the splice cannot
+    // land, the durable flip still happens, and the caller MUST learn
+    // the identity was not recorded instead of proceeding on a silently
+    // identity-less consumed record (the PHP doConsume contract; the
+    // revision-2 Rust Lua skipped the splice and reported success).
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("identity-splice");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let mut envelope = serde_json::to_value(&issued.record).unwrap();
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .insert("state".to_string(), serde_json::json!("pending"));
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .insert("consumed_result".to_string(), serde_json::Value::Null);
+    let raw = serde_json::to_string(&envelope).unwrap();
+    assert!(
+        !raw.contains("operation_identity"),
+        "precondition: no marker"
+    );
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&raw)
+        .arg("EX")
+        .arg(300)
+        .query(&mut conn)
+        .unwrap();
+
+    let store = store_for(&url, &prefix);
+    let failure = store.consume_with_operation_identity(&issued.record.nonce, Some("op-uncorded"));
+    assert!(
+        failure.is_err(),
+        "a requested identity that cannot be spliced must fail closed"
+    );
+
+    // The flip itself is durable: the record is consumed without the
+    // identity, so a same-identity retry recovers instead of redeeming
+    // twice.
+    let after: Option<String> = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let after = after.expect("the consumed record survives");
+    assert!(after.contains("\"state\":\"consumed\""));
+    assert!(!after.contains("op-uncorded"));
+}
+
+#[test]
 fn consumed_argon_record_with_matching_identity_replays_without_admission() {
     // An already-consumed Argon record resolves through
     // the identity gate from the runtime-state read, before the
@@ -789,13 +910,13 @@ fn consumed_argon_record_with_matching_identity_replays_without_admission() {
             .expect("the pending record consumes")
             .first
     );
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let gate = CountingGate {
         active: Arc::new(AtomicUsize::new(0)),
@@ -862,13 +983,13 @@ fn consumed_argon_record_with_wrong_or_null_identity_is_already_consumed_without
             .expect("the pending record consumes")
             .first
     );
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let gate = CountingGate {
         active: Arc::new(AtomicUsize::new(0)),
@@ -1092,7 +1213,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
     )
     .unwrap();
     let valid_counter = solve_for_test(&issued_wrong.record).expect("4-bit sha solves");
-    let wrong_counter = if valid_counter == 0 { 1 } else { 0 };
+    let wrong_counter = insufficient_counter(&issued_wrong.record);
     verifier.store().store(&issued_wrong.record).unwrap();
     assert_eq!(
         verify_with(
@@ -1294,9 +1415,7 @@ fn consumed_evidence_survives_a_cheap_failure_past_expiry() {
         Some("op-evidence"),
         "the winner's own identity rides back on the transition result"
     );
-    store
-        .commit_result(&issued.record.nonce, true, None)
-        .unwrap();
+    commit_authenticated_result(&store, &issued.record, true, None, Some("op-evidence"));
 
     // Advance the verifier clock past the signed expiry: the cheap TTL
     // check fails, but the record is consumed — the failure routes to the
@@ -1358,7 +1477,7 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
     )
     .unwrap();
     let valid = solve_for_test(&issued.record).expect("4-bit sha solves");
-    let wrong = if valid == 0 { 1 } else { 0 };
+    let wrong = insufficient_counter(&issued.record);
     let issued_at_ns = issued.record.issued_at_ns;
 
     let verifier = verifier_for(&url, &prefix);
@@ -1386,6 +1505,194 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork),
         "a wrong counter commits valid=false; the replay returns the stored outcome"
     );
+}
+
+#[test]
+fn semantic_duplicate_runtime_fields_are_unusable_never_consumed() {
+    // The strict decoder refuses any stored document with two members
+    // decoding to the same semantic name (escaped aliases included)
+    // before serde_json's collapsed object is trusted: the runtime state
+    // is unusable/missing, never Consumed. The PHP StrictJson decoder
+    // applies the identical rule.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:dup-state:{}:", std::process::id());
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    let mut conn = redis::Client::open(url.clone()).unwrap();
+
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let consumed = raw
+        .replace("\"state\":\"pending\"", "\"state\":\"consumed\"")
+        .replace(
+            "\"consumed_result\":null",
+            "\"consumed_result\":{\"valid\":true,\"binding\":null}",
+        )
+        .replace(
+            "\"operation_identity\":null",
+            "\"operation_identity\":\"op-1\"",
+        );
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&consumed)
+        .arg("EX")
+        .arg(300)
+        .query(&mut conn)
+        .unwrap();
+    assert!(
+        matches!(
+            store.runtime_state(&issued.record.nonce).unwrap(),
+            RuntimeState::Consumed(_)
+        ),
+        "the clean control classifies as consumed",
+    );
+
+    let rows = [
+        (
+            "duplicate state",
+            consumed.replace(
+                "\"state\":\"consumed\"",
+                "\"state\":\"consumed\",\"st\\u0061te\":\"pending\"",
+            ),
+        ),
+        (
+            "duplicate consumed_result",
+            consumed.replace(
+                "\"consumed_result\":{",
+                "\"consumed\\u005fresult\":null,\"consumed_result\":{",
+            ),
+        ),
+        (
+            "duplicate operation_identity",
+            consumed.replace(
+                "\"operation_identity\":\"op-1\"",
+                "\"operation_identity\":\"op-1\",\"op\\u0065ration_identity\":\"op-2\"",
+            ),
+        ),
+        (
+            "duplicate resume_owner",
+            consumed.replace(
+                "\"state\":\"consumed\"",
+                "\"state\":\"consumed\",\"resume\\u005fowner\":\"a\",\"resume_owner\":\"b\"",
+            ),
+        ),
+        (
+            "duplicate resume_until",
+            consumed.replace(
+                "\"state\":\"consumed\"",
+                "\"state\":\"consumed\",\"resume\\u005funtil\":1,\"resume_until\":2",
+            ),
+        ),
+    ];
+    for (label, tampered) in rows {
+        assert_ne!(consumed, tampered, "{label}: the tamper applies");
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            matches!(
+                store.runtime_state(&issued.record.nonce).unwrap(),
+                RuntimeState::Missing
+            ),
+            "{label}: an ambiguous envelope is unusable, never consumed"
+        );
+        assert!(
+            store
+                .consumed_state(&issued.record.nonce)
+                .unwrap()
+                .is_none(),
+            "{label}: the strict consumed read refuses it too"
+        );
+    }
+}
+
+#[test]
+fn absent_or_non_string_runtime_state_fails_closed_as_missing() {
+    // Under the current envelope contract every stored record carries a
+    // string runtime state. An absent marker or a wrong-typed one is
+    // corrupt state: it fails closed as Missing in both languages, never
+    // as Pending.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:state-shape:{}:", std::process::id());
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    let mut conn = redis::Client::open(url.clone()).unwrap();
+
+    let rows = [
+        serde_json::json!({}),
+        serde_json::json!({"state": 1}),
+        serde_json::json!({"state": true}),
+        serde_json::json!({"state": ["pending"]}),
+        serde_json::json!({"state": {"value": "pending"}}),
+        serde_json::json!({"state": null}),
+    ];
+    for row in rows {
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("state");
+        }
+        for (name, entry) in row.as_object().expect("object row") {
+            value[name] = entry.clone();
+        }
+        let tampered = serde_json::to_string(&value).unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            matches!(
+                store.runtime_state(&issued.record.nonce).unwrap(),
+                RuntimeState::Missing
+            ),
+            "a corrupt state shape must fail closed as Missing: {tampered}"
+        );
+    }
+
+    // The canonical pending shape still classifies as Pending.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    assert!(matches!(
+        store.runtime_state(&issued.record.nonce).unwrap(),
+        RuntimeState::Pending(_)
+    ));
 }
 
 #[test]
@@ -1814,7 +2121,7 @@ fn sha256_records_are_never_gated() {
 #[test]
 fn decoy_armed_v3_record_verifies_through_the_production_verifier() {
     // The protocol-v3 contract end to end: an armed issuance
-    // writes protocol v3 with the `|decoy_field` canonical segment, the
+    // writes protocol v3 with the tagged `d=` canonical segment, the
     // record stores and verifies like any other, and the armed
     // challenge string carries the decoy name in its base64 payload.
     let Some(url) = redis_url() else { return };
@@ -1930,40 +2237,21 @@ fn execution_armed_record_at_the_register_maximum_verifies_through_the_productio
         decoded.op_version,
         kiwicaptcha::execution::MAX_EXECUTION_VERSION
     );
-    let spine_codes: Vec<u8> = decoded
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(
-                op.opcode,
-                execution::OP_DOM_CLONE
-                    | execution::OP_DOM_REPARENT
-                    | execution::OP_DOM_URL_CANON
-                    | execution::OP_DOM_TEXT_MUTATE
-            )
-        })
-        .map(|op| op.opcode)
-        .collect();
-    // The four spine opcodes must EACH be carried by the max-register
-    // program. The count is not pinned to exactly 4: the version-5
-    // extra-probe pool legitimately contains OP_DOM_URL_CANON, so a
-    // drawn extra probe may add a second URL-canon entry (the fixed
-    // spine always contributes exactly one of each). Asserting an exact
-    // total made the test a coin flip on the PRF-drawn nonce.
-    for spine in [
-        execution::OP_DOM_CLONE,
-        execution::OP_DOM_REPARENT,
-        execution::OP_DOM_URL_CANON,
-        execution::OP_DOM_TEXT_MUTATE,
-    ] {
-        assert!(
-            spine_codes.contains(&spine),
-            "the max-register program must carry spine op {spine}"
-        );
-    }
+    // The version-5 spine ops must all be present. The read-only extra
+    // probe pool may repeat URL_CANON, so membership is asserted per op
+    // instead of an exact occurrence count.
+    let spine_position = |opcode: u8| decoded.ops.iter().position(|op| op.opcode == opcode);
+    let clone_at = spine_position(execution::OP_DOM_CLONE);
+    let reparent_at = spine_position(execution::OP_DOM_REPARENT);
+    let text_at = spine_position(execution::OP_DOM_TEXT_MUTATE);
+    let canon_at = spine_position(execution::OP_DOM_URL_CANON);
     assert!(
-        spine_codes.len() >= 4,
-        "the version-5 spine contributes at least one of each op"
+        clone_at.is_some() && reparent_at.is_some() && text_at.is_some() && canon_at.is_some(),
+        "the max-register program carries every version-5 spine op"
+    );
+    assert!(
+        clone_at < reparent_at && reparent_at < text_at,
+        "the version-5 mutation spine keeps its fixed order"
     );
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let (digest, trace_b64) = execution_evidence(&issued.record);
@@ -2191,19 +2479,11 @@ fn unarmed_v2_record_verifies_unchanged() {
 
 #[test]
 fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
-    // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
+    // The protocol-vs-decoy grammar: the tagged `d=` segment is a
     // protocol v3 canonical extension, so a v2 record carrying one is
     // malformed — such a record cannot have been signed by a conforming
-    // issuer. The rejection is enforced at the record's deserialization
-    // boundary: `ChallengeRecord`'s validating Deserialize runs the
-    // shared structural authority (`record_is_structurally_valid`), so
-    // the hand-rolled v2-plus-decoy envelope is undecodable. The Redis
-    // storage decoder maps an undecodable value to Missing — the lenient
-    // corrupt-key rule documented on `decode_stored`, mirroring PHP's
-    // `RedisStorage::decodeEnvelope` — so the verifier answers
-    // RecordNotFound: the token is rejected closed and no proof is ever
-    // derived (it can never reach the cheap phase's MalformedRecord
-    // verdict, because there is no decodable record to validate).
+    // issuer. The explicit rejection fires before any signature work and
+    // burns the record like every terminal cheap failure.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("v2-decoy");
     let issued = issue_challenge(
@@ -2225,10 +2505,15 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
     );
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&tampered).unwrap();
+    // The shared grammar matrix runs at the stored-record decode
+    // boundary too, so the corrupt v2+decoy envelope never decodes:
+    // the production path resolves it as a missing record before any
+    // cheap-phase work (the structural rejection happened one layer
+    // earlier than the verifier's own malformed verdict).
     assert_eq!(
         verify_at(&verifier, &token, tampered.issued_at_ns),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-        "the undecodable v2-plus-decoy envelope reads as Missing and the token is rejected closed"
+        "a v2 record with a decoy_field is refused at the decode boundary"
     );
     assert_eq!(
         verify_at(
@@ -2240,7 +2525,7 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
             issued.record.issued_at_ns
         ),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-        "the unreadable envelope stays Missing: nothing rewrites or resurrects it"
+        "the malformed v2-plus-decoy record is consumed by the cheap failure"
     );
 }
 
@@ -2635,7 +2920,14 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
     )
     .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
-    let record_json = serde_json::to_string(&issued.record).unwrap();
+    // The stored value always carries the runtime envelope the store
+    // writes; a bare record with no state marker is corrupt state and
+    // fails closed before the consume.
+    let mut stored = serde_json::to_value(&issued.record).unwrap();
+    stored["state"] = serde_json::json!("pending");
+    stored["consumed_result"] = serde_json::Value::Null;
+    stored["operation_identity"] = serde_json::Value::Null;
+    let record_json = serde_json::to_string(&stored).unwrap();
     let nonce = issued.record.nonce.clone();
     let issued_at_ns = issued.record.issued_at_ns;
 
@@ -2695,8 +2987,10 @@ fn record_json_keys_match_php_cross_language_format() {
     // exact key set a PHP RedisStorage writes and fromArray() reads. The
     // `region` and `issuer` keys are always present: null
     // when unbound, exactly like PHP; `kid` is always present
-    // (default 1). No Redis needed: pure language-neutral schema parity.
-    const PHP_KEYS: [&str; 23] = [
+    // (default 1); `server_mac` is present because every issuance seals
+    // the record-metadata MAC (both writers emit the key iff non-null).
+    // No Redis needed: pure language-neutral schema parity.
+    const PHP_KEYS: [&str; 24] = [
         "nonce",
         "scope",
         "binding_tag",
@@ -2720,6 +3014,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "issuer",
         "kid",
         "hostname",
+        "server_mac",
     ];
 
     let issued = issue_challenge(
@@ -3295,13 +3590,13 @@ fn consume_issues_the_verified_wait_only_on_the_fresh_transition() {
                                         let key = args.get(3).map(String::as_str).unwrap_or("");
                                         if key.ends_with("-pending") {
                                             format!(
-                                                "*2\r\n${}\r\n{}\r\n:1\r\n",
+                                                "*3\r\n${}\r\n{}\r\n:1\r\n:1\r\n",
                                                 consumed_json.len(),
                                                 consumed_json
                                             )
                                         } else if key.ends_with("-consumed") {
                                             format!(
-                                                "*2\r\n${}\r\n{}\r\n:0\r\n",
+                                                "*3\r\n${}\r\n{}\r\n:0\r\n:1\r\n",
                                                 consumed_json.len(),
                                                 consumed_json
                                             )
@@ -3881,8 +4176,8 @@ fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
     );
 
     // The wrong secret for the same kid → BadSignature.
-    let wrong =
-        verifier_for(&url, &prefix).with_secrets_by_kid([(2, "WRONG-KEY-16-bytes!".into())]);
+    let wrong = verifier_for(&url, &prefix)
+        .with_secrets_by_kid([(2, "WRONG-KEY-32-bytes-0123456789abc".into())]);
     wrong.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(&wrong, &token, issued_at_ns),
@@ -4075,7 +4370,8 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
         third.stored_result,
         Some(StoredConsumedResult {
             valid: true,
-            binding: None
+            binding: None,
+            mac: None,
         })
     );
 
@@ -4118,7 +4414,8 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
         replay2.stored_result,
         Some(StoredConsumedResult {
             valid: true,
-            binding: Some("txn-1".into())
+            binding: Some("txn-1".into()),
+            mac: None,
         })
     );
 
@@ -4796,7 +5093,7 @@ fn delete_if_pending_is_the_atomic_tri_state() {
 #[test]
 fn delete_if_pending_race_never_erases_committed_evidence() {
     // The check-then-delete window the fused transition closes, run as a real barrier
-    // race in the audit's shape: thread A (the cheap-failing verifier)
+    // race: thread A (the cheap-failing verifier)
     // pauses right before its cleanup while thread B consumes + commits
     // Valid; A then resumes. The barrier enforces B's ordering, and the
     // stagger after B's completion varies the gap (0..400 µs) so the
@@ -4941,9 +5238,7 @@ fn consumed_committed_record(
         .unwrap()
         .expect("pending record consumes");
     assert!(consumed.first);
-    store
-        .commit_result(&issued.record.nonce, true, None)
-        .unwrap();
+    commit_authenticated_result(&store, &issued.record, true, None, Some("op-replay"));
 
     (issued.record.nonce.clone(), token, issued_at_ns)
 }
@@ -5403,13 +5698,13 @@ fn resume_resolves_an_already_completed_record_without_redriving() {
         .consume_with_operation_identity(&issued.record.nonce, Some(identity))
         .unwrap()
         .is_some());
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let gate = CountingGate {
         active: Arc::new(AtomicUsize::new(0)),
@@ -5745,7 +6040,7 @@ fn resume_releases_the_claim_on_an_early_return() {
 }
 #[test]
 fn resume_commit_wait_shortfall_never_returns_valid() {
-    // The audit's failover sequence: the recovery's commit lands but
+    // The failover sequence: the recovery's commit lands but
     // its verified WAIT shortfalls (standalone Redis acks nothing).
     // The recovered success was NOT proven durable, so the resume
     // must fail closed (the fence on the reread shortfalls too ->
@@ -5836,13 +6131,13 @@ fn resume_committed_result_fast_path_rejects_a_changed_context() {
         .consume_with_operation_identity(&issued.record.nonce, Some(identity))
         .unwrap()
         .is_some());
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let verifier = ProductionVerifier::new(
         RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
@@ -5905,7 +6200,7 @@ fn resume_commit_requires_current_claim_ownership() {
     // The claim is a fencing precondition: a commit whose caller no
     // longer holds the claim is refused before any write, so a stale
     // owner whose claim expired mid-derive can never mutate the
-    // record (the audit's stale-vs-new-owner scenario).
+    // record (the stale-vs-new-owner scenario).
     let Some(url) = redis_url() else { return };
     let prefix = format!("kiwitest:resume-owner:{}:", std::process::id());
     let issued = issue_challenge(
@@ -6062,9 +6357,14 @@ fn verify_costs_three_checkouts_and_three_store_commands_on_the_happy_path() {
     };
     assert_eq!(evalsha(5), 1, "one consume transition");
     assert_eq!(
-        evalsha(6),
+        evalsha(7),
         1,
-        "one outcome commit (6-arg EVALSHA: key + valid flag + binding)"
+        "one outcome commit (7-arg EVALSHA: key + valid flag + binding + consumed-result MAC)"
+    );
+    assert_eq!(
+        evalsha(6),
+        0,
+        "no 6-arg commit remains: the consumed-result MAC is part of the commit wire shape"
     );
     assert_eq!(
         evalsha(4),
@@ -6889,7 +7189,7 @@ fn commit_write_failure_keeps_the_valid_outcome_and_the_retry_is_indeterminate()
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     endpoint.seed(&prefix, &issued.record);
 
-    endpoint.arm_fault(evalsha_with_argc(6), FaultReply::Error);
+    endpoint.arm_fault(evalsha_with_argc(7), FaultReply::Error);
     let outcome = verifier.verify(
         &encode_token(&issued.record.nonce, counter),
         "login",
@@ -7211,4 +7511,282 @@ fn v4_execution_armed_record_verifies_at_the_production_boundary() {
         Ok(()),
         "the v4 shape itself is structurally valid"
     );
+}
+
+// ── the pending-envelope integrity guard (hermetic) ─────────────────
+
+/// The raw stored JSON of an issued record: the canonical record bytes
+/// plus the pending runtime envelope, exactly what the real store
+/// writes — the corrupt-envelope suites splice their forged fields into
+/// this base.
+fn pending_envelope_json(record: &ChallengeRecord) -> String {
+    let mut json = serde_json::to_string(record).unwrap();
+    json.truncate(json.len() - 1);
+    json.push_str(",\"state\":\"pending\",\"consumed_result\":null,\"operation_identity\":null}");
+    json
+}
+
+#[test]
+fn consume_refuses_a_pending_envelope_carrying_a_terminal_result() {
+    // A genuinely issued pending record carries only the null markers;
+    // a pending envelope that also carries a committed result is a
+    // corrupt or forged rewrite, and the transition refuses it with the
+    // missing shape, leaving the stored bytes untouched.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("pending-guard-result");
+    let store = store_for(&url, &prefix);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut forged = pending_envelope_json(&issued.record);
+    forged = forged.replace(
+        "\"consumed_result\":null",
+        "\"consumed_result\":{\"valid\":true,\"binding\":null}",
+    );
+    assert!(forged.contains("\"state\":\"pending\""));
+    endpoint.seed_raw(&key, &forged);
+
+    assert!(
+        store.consume(&issued.record.nonce).unwrap().is_none(),
+        "the corrupt pending envelope reads as missing"
+    );
+    assert_eq!(
+        endpoint.raw_record(&key).as_deref(),
+        Some(forged.as_str()),
+        "the refused transition leaves the stored bytes byte-intact"
+    );
+}
+
+#[test]
+fn consume_refuses_a_pending_envelope_carrying_a_claim_marker() {
+    // A resume marker on a pending envelope is the same forged shape:
+    // only the claim scripts write those fields, and only into an
+    // already-consumed envelope.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("pending-guard-claim");
+    let store = store_for(&url, &prefix);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let base = pending_envelope_json(&issued.record);
+    let forged = format!("{},\"resume_owner\":\"x\"}}", &base[..base.len() - 1]);
+    endpoint.seed_raw(&key, &forged);
+
+    assert!(
+        store.consume(&issued.record.nonce).unwrap().is_none(),
+        "the claimed pending envelope reads as missing"
+    );
+    assert_eq!(
+        endpoint.raw_record(&key).as_deref(),
+        Some(forged.as_str()),
+        "the refused transition leaves the stored bytes byte-intact"
+    );
+}
+
+// ── the lazy rsw builder (hermetic) ──────────────────────────────────
+
+#[test]
+fn with_rsw_trapdoor_with_a_malformed_pair_never_panics() {
+    // The builder stores the raw pair and never validates eagerly: a
+    // malformed pair builds cleanly, and the verification of an rsw
+    // record surfaces the typed UnsupportedRswParams at the proof site
+    // (the record is authentic; this verifier cannot represent the
+    // trapdoor computation).
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("rsw-malformed");
+    let mut config = sha_config(4);
+    config.algorithm = PoWAlgorithm::Rsw;
+    config.rsw_modulus_n = Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into());
+    config.rsw_lambda = Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into());
+    config.rsw_t = kiwicaptcha::challenge::MIN_RSW_T;
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+        rsw_proof: Some("0".repeat(512)),
+    }
+    .encode();
+    endpoint.seed(&prefix, &issued.record);
+
+    // The malformed pair (not base64 at all) builds without panicking.
+    let verifier = verifier_for(&url, &prefix).with_rsw_trapdoor("!!!not-base64!!!", "also-bad");
+    assert_eq!(
+        verify_at(&verifier, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+        "a malformed trapdoor pair surfaces the typed unsupported verdict"
+    );
+
+    // A well-formed but invalid pair (a weak modulus) behaves the same;
+    // re-seed first — the malformed-pair verification above consumed
+    // the record without committing a result.
+    endpoint.seed(&prefix, &issued.record);
+    let verifier_weak = verifier_for(&url, &prefix).with_rsw_trapdoor(
+        "AQID", // 3 bytes — refused by the shape gate
+        "AgQ",
+    );
+    assert_eq!(
+        verify_at(&verifier_weak, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+        "an invalid trapdoor pair surfaces the same typed verdict"
+    );
+}
+
+#[test]
+fn with_rsw_trapdoor_verifies_rsw_records_through_the_trapdoor() {
+    // The positive control of the lazy pair: the fixture trapdoor
+    // resolves through the validated-pair memo and the sequential
+    // final value verifies end to end.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("rsw-valid");
+    let mut config = sha_config(4);
+    config.algorithm = PoWAlgorithm::Rsw;
+    config.rsw_modulus_n = Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into());
+    config.rsw_lambda = Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into());
+    config.rsw_t = kiwicaptcha::challenge::MIN_RSW_T;
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let proof = kiwicaptcha::rsw::fixtures::sequential_proof(
+        &issued.record.prefix,
+        &issued.record.nonce,
+        issued.record.t as u64,
+    );
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+        rsw_proof: Some(proof),
+    }
+    .encode();
+    endpoint.seed(&prefix, &issued.record);
+    let verifier = verifier_for(&url, &prefix).with_rsw_trapdoor(
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        kiwicaptcha::rsw::fixtures::LAMBDA_B64,
+    );
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued.record.issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the fixture trapdoor verifies the sequential proof end to end"
+    );
+}
+
+// ── tenant-scoped production verification (hermetic) ────────────────
+
+#[test]
+fn tenant_scoped_records_verify_only_under_the_same_tenant() {
+    // The t1-issued record verifies under a t1 verifier and fails
+    // under t2 and under the global keys (BadSignature, before any
+    // consume of the pending record).
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("tenant-prod");
+    let mut config = sha_config(4);
+    config.secret_key = SECRET.into();
+    config.tenant = Some("t1".into());
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    endpoint.seed(&prefix, &issued.record);
+
+    let same = verifier_for(&url, &prefix).with_tenant("t1");
+    assert!(
+        matches!(
+            verify_at(&same, &token, issued.record.issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the t1 record verifies under the t1 verifier"
+    );
+
+    // Cross-tenant negatives: re-seed a fresh pending record per verdict
+    // (the first failure burned the pending original through the
+    // cheap-failure cleanup).
+    endpoint.seed(&prefix, &issued.record);
+    let cross = verifier_for(&url, &prefix).with_tenant("t2");
+    assert_eq!(
+        verify_at(&cross, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "a t2 verifier rejects the t1 record"
+    );
+    endpoint.seed(&prefix, &issued.record);
+    let global = verifier_for(&url, &prefix);
+    assert_eq!(
+        verify_at(&global, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "the global (tenant-free) verifier rejects the t1 record"
+    );
+}
+
+#[test]
+fn the_rsw_keyring_builder_refuses_an_invalid_pair() {
+    // The shadowing hazard: active A is valid, but the
+    // historical keyring carries A with a bad lambda. The builder must
+    // refuse that configuration instead of silently storing an entry
+    // that resolution would consult before the valid active pair.
+    let client = redis::Client::open("redis://127.0.0.1:1/").expect("client");
+    let make = || {
+        ProductionVerifier::new(
+            kiwicaptcha::redis_verify::RedisChallengeStore::new(
+                client.clone(),
+                "rsw-keyring-test:",
+            ),
+            "0123456789abcdef0123456789abcdef",
+        )
+    };
+    let identity =
+        kiwicaptcha::rsw::modulus_fingerprint_hex(kiwicaptcha::rsw::fixtures::MODULUS_N_B64)
+            .expect("the fixture modulus is canonical");
+
+    let refused = make().with_rsw_verification_key(
+        identity.clone(),
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        "not-a-lambda!",
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(kiwicaptcha::rsw::RswKeyringError::InvalidTrapdoor)
+        ),
+        "an invalid historical pair must refuse configuration, never shadow the active pair"
+    );
+
+    let mismatched = make().with_rsw_verification_key(
+        "f".repeat(64),
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        kiwicaptcha::rsw::fixtures::LAMBDA_B64,
+    );
+    assert!(matches!(
+        mismatched,
+        Err(kiwicaptcha::rsw::RswKeyringError::MismatchedIdentity)
+    ));
+
+    let valid = make().with_rsw_verification_key(
+        identity,
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        kiwicaptcha::rsw::fixtures::LAMBDA_B64,
+    );
+    assert!(valid.is_ok(), "the valid rotated pair configures");
 }

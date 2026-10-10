@@ -176,6 +176,46 @@ final class RedisDsnWiringTest extends TestCase
         }
     }
 
+    public function testAMalformedCredentialBearingDsnIsRedactedInTheBuildTimeRefusal(): void
+    {
+        // A DSN carrying userinfo (a password) is quoted in the
+        // violation message redacted: the exception crosses into build
+        // output, exception pages and logs, so the credential must
+        // never travel with it. The scheme and the shape hint survive
+        // (they are the actionable part).
+        try {
+            $this->load([['secret_key' => self::SECRET, 'redis_dsn' => 'redis://:secretpw@']]);
+            self::fail('a hostless credential-bearing redis_dsn must fail closed at container build');
+        } catch (\LogicException $e) {
+            self::assertStringNotContainsString('secretpw', $e->getMessage(), 'the DSN password must never appear in the violation message');
+            self::assertStringContainsString('redis://***@', $e->getMessage(), 'the userinfo component is replaced with the redaction marker');
+        }
+
+        // The username:password form is redacted the same way.
+        try {
+            $this->load([['secret_key' => self::SECRET, 'redis_dsn' => 'rediss://user:hunter2@']]);
+            self::fail('a hostless user:password redis_dsn must fail closed at container build');
+        } catch (\LogicException $e) {
+            self::assertStringNotContainsString('hunter2', $e->getMessage());
+            self::assertStringNotContainsString('user:', $e->getMessage());
+            self::assertStringContainsString('rediss://***@', $e->getMessage());
+        }
+    }
+
+    public function testAMalformedCredentialBearingDsnIsRedactedInTheRuntimeRefusal(): void
+    {
+        // The runtime lane (createDsnClient, the env-resolved value) is
+        // redacted identically: the factory's LogicException is what a
+        // request-time failure surfaces.
+        try {
+            KiwiCaptchaExtension::createDsnClient('redis://:secretpw@');
+            self::fail('a hostless credential-bearing resolved redis_dsn must fail closed at client construction');
+        } catch (\LogicException $e) {
+            self::assertStringNotContainsString('secretpw', $e->getMessage(), 'the resolved DSN password must never appear in the runtime refusal');
+            self::assertStringContainsString('redis://***@', $e->getMessage());
+        }
+    }
+
     public function testDsnSatisfiesTheProductionRedisGuards(): void
     {
         // Without a redis_dsn (and without redis_service), production

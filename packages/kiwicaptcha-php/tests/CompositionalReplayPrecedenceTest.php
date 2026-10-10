@@ -388,4 +388,50 @@ final class CompositionalReplayPrecedenceTest extends TestCase
         self::assertSame($expected, $outcome->error, sprintf('the fresh path keeps the first-error precedence, got %s', $outcome->code()));
         self::assertNull($storage->find($record->nonce), 'the pending record keeps the one-shot cheap-failure delete');
     }
+
+    public function testTheReplayGateEvaluatesTheFloorOnTheSameReceiptInstant(): void
+    {
+        // The replay gate's receipt-timing floor runs on the same receipt
+        // instant the caller's original check used, never a separately
+        // timed fresh clock read: a replay verdict adjacent to the
+        // minimum-duration boundary must be deterministic on the receipt
+        // the verification holds. The scenario: the record is expired
+        // (the exempt circumstance that routes into the replay gate) and
+        // carries a 5000 ms floor; a receipt one microsecond below the
+        // floor makes the hard TooFast win, a receipt exactly at the
+        // floor lets the exempt-alone retry replay the stored success.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 5000),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issue('login', self::IP, 'txn-123');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        $token = self::solveToken($challenge->prefix, $challenge->salt, $challenge->nonce, $challenge->targetBits);
+
+        // The original redemption at a receipt past the floor: fresh
+        // valid derivation, consumed with the identity, committed.
+        $valid = new Verifier($storage, now: self::clock());
+        $first = $valid->verify($token, Vectors::SECRET, 'login', self::IP, nowNs: $record->issuedAtNs + 6_000_000, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123'));
+        self::assertTrue($first->isOk(), sprintf('the setup redemption must verify fresh, got %s', $first->code()));
+
+        // The expired replay: the TTL group answers Expired first on the
+        // wall clock, so the replay gate decides the floor on the receipt
+        // instant alone. Deterministic on both sides of the boundary.
+        $expired = new Verifier($storage, now: self::expiredClock());
+        $below = $expired->verify($token, Vectors::SECRET, 'login', self::IP, nowNs: $record->issuedAtNs + 4_999_999, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123'));
+        self::assertSame(VerifyError::TooFast, $below->error, 'a receipt one microsecond below the floor makes the hard timing verdict win');
+        $atFloor = $expired->verify($token, Vectors::SECRET, 'login', self::IP, nowNs: $record->issuedAtNs + 5_000_000, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123'));
+        self::assertTrue($atFloor->isOk(), sprintf('a receipt exactly at the floor is an exempt-alone replay and resolves the stored success, got %s', $atFloor->code()));
+        self::assertTrue($atFloor->fromStoredResult, 'the at-floor replay is the stored result, never a fresh derivation');
+
+        // Boundary-adjacent verdicts are stable: the same receipt
+        // answers identically on every retry of the same verification.
+        $below2 = $expired->verify($token, Vectors::SECRET, 'login', self::IP, nowNs: $record->issuedAtNs + 4_999_999, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123'));
+        self::assertSame($below->error, $below2->error, 'the below-floor verdict is stable on the same receipt instant');
+        $atFloor2 = $expired->verify($token, Vectors::SECRET, 'login', self::IP, nowNs: $record->issuedAtNs + 5_000_000, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123'));
+        self::assertSame($atFloor->isOk(), $atFloor2->isOk(), 'the at-floor verdict is stable on the same receipt instant');
+    }
 }

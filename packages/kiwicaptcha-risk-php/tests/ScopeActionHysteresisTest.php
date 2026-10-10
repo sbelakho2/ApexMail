@@ -19,13 +19,14 @@ use PHPUnit\Framework\TestCase;
  * The policy's fixed score bands must not oscillate at their boundaries:
  * a score hovering at a threshold (449/451/449…) would flip the challenge
  * profile on every request. The engine keeps a per-process, bounded,
- * TTL'd map of the last action per scope. The band selection escalates
- * to the next band only at enter = upper + 10 and de-escalates only
- * below exit = lower − 10, staying in the current band in between.
- * Fresh scopes and the hard actions (StepUp/Deny) use the plain
- * mapping. (The audit's 49/51 example falls entirely inside the Allow
- * band [0,150), so the equivalent boundary-oscillation test uses
- * 449/451 at the 450 edge.)
+ * TTL'd map of the last action per scope and client pseudonym. The band
+ * selection escalates to the next band only at enter = upper + 10,
+ * de-escalates only below exit = lower − 10, and jumps straight to the
+ * plain band when the request's own score clears the target margin.
+ * Fresh keys and the hard actions (StepUp/Deny) use the plain mapping.
+ * The canonical 49/51 example falls entirely inside the Allow band
+ * [0,150), so the equivalent boundary-oscillation test uses 449/451 at
+ * the 450 edge.
  */
 final class ScopeActionHysteresisTest extends TestCase
 {
@@ -45,7 +46,7 @@ final class ScopeActionHysteresisTest extends TestCase
         ]);
     }
 
-    private function decide(RiskPolicy $policy, ScopeActionHysteresis $h, int $scope, int $score, int $nowMs, int $globalLevel = 0): \KiwiCaptcha\Risk\RiskDecision
+    private function decide(RiskPolicy $policy, ScopeActionHysteresis $h, int $scope, int $score, int $nowMs, int $globalLevel = 0, string $clientKey = 'client'): \KiwiCaptcha\Risk\RiskDecision
     {
         return $policy->decide(
             $scope,
@@ -56,6 +57,8 @@ final class ScopeActionHysteresisTest extends TestCase
             $nowMs,
             0,
             $h,
+            null,
+            $clientKey,
         );
     }
 
@@ -63,7 +66,7 @@ final class ScopeActionHysteresisTest extends TestCase
     {
         $policy = $this->policy();
         $h = new ScopeActionHysteresis();
-        // The audit's exact example: 49/51/49/51 — entirely inside the
+        // The canonical example: 49/51/49/51 — entirely inside the
         // Allow band [0,150): no flip-flop possible, always Allow.
         $actions = [];
         foreach ([49, 51, 49, 51] as $i => $score) {
@@ -138,7 +141,7 @@ final class ScopeActionHysteresisTest extends TestCase
             $fresh = new ScopeActionHysteresis();
             self::assertSame(
                 RiskAction::actionForScore($score),
-                $fresh->select(1, $score, RiskAction::actionForScore($score), self::T0),
+                $fresh->select(1, 'client', $score, RiskAction::actionForScore($score), self::T0),
                 "fresh scope must use the plain mapping at score $score"
             );
         }
@@ -193,17 +196,17 @@ final class ScopeActionHysteresisTest extends TestCase
     public function testTtlExpiryForgetsTheScope(): void
     {
         $h = new ScopeActionHysteresis();
-        $h->remember(1, RiskAction::Sha20, self::T0);
-        self::assertSame(RiskAction::Sha20, $h->lastAction(1, self::T0 + ScopeActionHysteresis::TTL_MS));
-        self::assertNull($h->lastAction(1, self::T0 + ScopeActionHysteresis::TTL_MS + 1), 'an entry past TTL must expire');
+        $h->remember(1, 'client', RiskAction::Sha20, self::T0);
+        self::assertSame(RiskAction::Sha20, $h->lastAction(1, 'client', self::T0 + ScopeActionHysteresis::TTL_MS));
+        self::assertNull($h->lastAction(1, 'client', self::T0 + ScopeActionHysteresis::TTL_MS + 1), 'an entry past TTL must expire');
         self::assertSame(0, $h->count(), 'expired entries are evicted on access');
 
         // An expired entry also resets the selection: the scope is fresh
         // again and uses the plain mapping.
-        $h->select(1, 449, RiskAction::actionForScore(449), self::T0);
+        $h->select(1, 'client', 449, RiskAction::actionForScore(449), self::T0);
         self::assertSame(
             RiskAction::Sha20,
-            $h->select(1, 451, RiskAction::actionForScore(451), self::T0 + ScopeActionHysteresis::TTL_MS + 1),
+            $h->select(1, 'client', 451, RiskAction::actionForScore(451), self::T0 + ScopeActionHysteresis::TTL_MS + 1),
             'after TTL the boundary score must fall back to the plain mapping'
         );
     }
@@ -212,37 +215,137 @@ final class ScopeActionHysteresisTest extends TestCase
     {
         $h = new ScopeActionHysteresis();
         $now = self::T0;
-        for ($scope = 1; $scope <= ScopeActionHysteresis::MAX_SCOPES; $scope++) {
-            $h->remember($scope, RiskAction::Sha16, $now + $scope);
+        for ($scope = 1; $scope <= ScopeActionHysteresis::MAX_ENTRIES; $scope++) {
+            $h->remember($scope, 'client', RiskAction::Sha16, $now + $scope);
         }
-        self::assertSame(ScopeActionHysteresis::MAX_SCOPES, $h->count());
+        self::assertSame(ScopeActionHysteresis::MAX_ENTRIES, $h->count());
 
-        // A NEW scope at capacity evicts the least-recently-used entry (scope 1).
-        $h->remember(ScopeActionHysteresis::MAX_SCOPES + 1, RiskAction::Sha16, $now + 100_000);
-        self::assertSame(ScopeActionHysteresis::MAX_SCOPES, $h->count(), 'the map must stay bounded');
-        self::assertNull($h->lastAction(1, $now + 100_000), 'the least-recently-used entry must be evicted');
-        self::assertNotNull($h->lastAction(ScopeActionHysteresis::MAX_SCOPES + 1, $now + 100_000));
+        // A NEW key at capacity evicts the least-recently-used entry (scope 1).
+        $h->remember(ScopeActionHysteresis::MAX_ENTRIES + 1, 'client', RiskAction::Sha16, $now + 100_000);
+        self::assertSame(ScopeActionHysteresis::MAX_ENTRIES, $h->count(), 'the map must stay bounded');
+        self::assertNull($h->lastAction(1, 'client', $now + 100_000), 'the least-recently-used entry must be evicted');
+        self::assertNotNull($h->lastAction(ScopeActionHysteresis::MAX_ENTRIES + 1, 'client', $now + 100_000));
 
-        // Updates to existing scopes never evict.
-        $h->remember(2, RiskAction::Sha20, $now + 100_001);
-        self::assertSame(ScopeActionHysteresis::MAX_SCOPES, $h->count());
-        self::assertSame(RiskAction::Sha20, $h->lastAction(2, $now + 100_001));
+        // Updates to existing keys never evict.
+        $h->remember(2, 'client', RiskAction::Sha20, $now + 100_001);
+        self::assertSame(ScopeActionHysteresis::MAX_ENTRIES, $h->count());
+        self::assertSame(RiskAction::Sha20, $h->lastAction(2, 'client', $now + 100_001));
     }
 
     public function testExpiredEntriesArePurgedBeforeEviction(): void
     {
         $h = new ScopeActionHysteresis();
         $now = self::T0;
-        for ($scope = 1; $scope <= ScopeActionHysteresis::MAX_SCOPES; $scope++) {
-            $h->remember($scope, RiskAction::Sha16, $now + $scope);
+        for ($scope = 1; $scope <= ScopeActionHysteresis::MAX_ENTRIES; $scope++) {
+            $h->remember($scope, 'client', RiskAction::Sha16, $now + $scope);
         }
         // All entries expired long ago: the purge alone makes room.
-        $h->remember(ScopeActionHysteresis::MAX_SCOPES + 1, RiskAction::Sha16, $now + 10_000_000);
+        $h->remember(ScopeActionHysteresis::MAX_ENTRIES + 1, 'client', RiskAction::Sha16, $now + 10_000_000);
         self::assertSame(1, $h->count());
         self::assertSame(
             RiskAction::Sha16,
-            $h->lastAction(ScopeActionHysteresis::MAX_SCOPES + 1, $now + 10_000_000)
+            $h->lastAction(ScopeActionHysteresis::MAX_ENTRIES + 1, 'client', $now + 10_000_000)
         );
+    }
+
+    public function testMultiBandEscalationJumpsImmediately(): void
+    {
+        // Regression: a bot on a fresh key after another client held
+        // Allow in the same scope gets Argon64 at once.
+        $h = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Allow, $h->select(1, 'legit', 100, RiskAction::Allow, self::T0));
+        self::assertSame(
+            RiskAction::Argon64,
+            $h->select(1, 'bot', 900, RiskAction::Argon64, self::T0 + 1),
+            "a fresh client's own score clears every band margin"
+        );
+        // The same key jumps from Allow to Argon64 in one request too.
+        self::assertSame(
+            RiskAction::Argon64,
+            $h->select(1, 'legit', 900, RiskAction::Argon64, self::T0 + 2)
+        );
+        // The escalation edge fallback (previous Allow, score 605): the
+        // plain band of 605 - 10 = 595 is Sha20 — three ladder bands up in
+        // one request, not the adjacent Sha16.
+        $h2 = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Allow, $h2->select(1, 'client', 100, RiskAction::Allow, self::T0));
+        self::assertSame(RiskAction::Sha20, $h2->select(1, 'client', 605, RiskAction::Argon16, self::T0 + 1));
+    }
+
+    public function testLegitimateClientScoreAfterBotStaysAllow(): void
+    {
+        // Regression: the bot's Argon64 memory must not leak into a
+        // different client's key in the same scope.
+        $h = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Argon64, $h->select(1, 'bot', 900, RiskAction::Argon64, self::T0));
+        self::assertSame(
+            RiskAction::Allow,
+            $h->select(1, 'legit', 100, RiskAction::Allow, self::T0 + 1),
+            'a client with no history maps 100 to Allow'
+        );
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'other', 449, RiskAction::Sha18, self::T0 + 2));
+    }
+
+    public function testMultiBandDropJumpsImmediately(): void
+    {
+        $h = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Argon64, $h->select(1, 'client', 900, RiskAction::Argon64, self::T0));
+        self::assertSame(
+            RiskAction::Allow,
+            $h->select(1, 'client', 100, RiskAction::Allow, self::T0 + 1),
+            'the score clears the target band exit margin'
+        );
+        // Just above the drop margin the edge fallback lands on the plain
+        // band of score + 10 (151 -> Sha16), several ladder bands below the
+        // previous Argon64, not the adjacent Argon32.
+        $h2 = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Argon64, $h2->select(1, 'client', 900, RiskAction::Argon64, self::T0));
+        self::assertSame(RiskAction::Sha16, $h2->select(1, 'client', 141, RiskAction::Allow, self::T0 + 1));
+    }
+
+    public function testBoundaryHoverWithinTenHoldsOneBand(): void
+    {
+        // Enter edge of the Sha18 band: 459 holds, 460 escalates.
+        $h = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'client', 449, RiskAction::Sha18, self::T0));
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'client', 451, RiskAction::Sha20, self::T0 + 1));
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'client', 455, RiskAction::Sha20, self::T0 + 2));
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'client', 459, RiskAction::Sha20, self::T0 + 3));
+        self::assertSame(RiskAction::Sha20, $h->select(1, 'client', 460, RiskAction::Sha20, self::T0 + 4));
+        // Exit edge of the Sha20 band: 441 holds, 440 drops.
+        $h2 = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Sha20, $h2->select(1, 'client', 480, RiskAction::Sha20, self::T0));
+        self::assertSame(RiskAction::Sha20, $h2->select(1, 'client', 441, RiskAction::Sha18, self::T0 + 1));
+        self::assertSame(RiskAction::Sha18, $h2->select(1, 'client', 440, RiskAction::Sha18, self::T0 + 2));
+    }
+
+    public function testDifferentClientsKeepIndependentHistories(): void
+    {
+        $h = new ScopeActionHysteresis();
+        // Client a climbs to Sha20 under the 450 edge.
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'a', 449, RiskAction::Sha18, self::T0));
+        self::assertSame(RiskAction::Sha20, $h->select(1, 'a', 480, RiskAction::Sha20, self::T0 + 1));
+        // Client b on the same scope starts fresh: 100 -> Allow, then the
+        // 449 edge uses the plain mapping.
+        self::assertSame(RiskAction::Allow, $h->select(1, 'b', 100, RiskAction::Allow, self::T0 + 2));
+        self::assertSame(RiskAction::Sha18, $h->select(1, 'b', 449, RiskAction::Sha18, self::T0 + 3));
+        // Client a still holds its own Sha20 memory.
+        self::assertSame(RiskAction::Sha20, $h->select(1, 'a', 449, RiskAction::Sha18, self::T0 + 4));
+        self::assertSame(2, $h->count(), 'one entry per scope and client key');
+    }
+
+    public function testPolicyDecideHysteresisIsKeyedPerClient(): void
+    {
+        $policy = $this->policy();
+        $h = new ScopeActionHysteresis();
+        $legit = $this->decide($policy, $h, 1, 100, self::T0, 0, 'legit');
+        self::assertSame(RiskAction::Allow, $legit->action);
+        // The bot's own key jumps straight to Argon64.
+        $bot = $this->decide($policy, $h, 1, 900, self::T0 + 1, 0, 'bot');
+        self::assertSame(RiskAction::Argon64, $bot->action);
+        // A client with no history keeps the plain mapping.
+        $fresh = $this->decide($policy, $h, 1, 100, self::T0 + 2, 0, 'fresh');
+        self::assertSame(RiskAction::Allow, $fresh->action);
     }
 
 
@@ -260,14 +363,14 @@ final class ScopeActionHysteresisTest extends TestCase
         $h = new ScopeActionHysteresis();
         $cooldown = self::T0 + 10_000;
 
-        $inside = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown - 1, $cooldown, $h);
+        $inside = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown - 1, $cooldown, $h, clientKey: 'cooldown-client');
         self::assertSame(RiskAction::Deny, $inside->action, 'cooldown - 1 ms: still inside the hold window -> Deny');
         self::assertContains(RiskReason::Cooldown, $inside->reasons);
 
-        $exact = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown, $cooldown, $h);
+        $exact = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown, $cooldown, $h, clientKey: 'cooldown-client');
         self::assertNotSame(RiskAction::Deny, $exact->action, 'cooldown + 0 ms: the hold expires AT the deadline');
 
-        $after = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown + 1, $cooldown, $h);
+        $after = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown + 1, $cooldown, $h, clientKey: 'cooldown-client');
         self::assertNotSame(RiskAction::Deny, $after->action, 'cooldown + 1 ms: fully outside the hold window');
     }
 
@@ -280,7 +383,7 @@ final class ScopeActionHysteresisTest extends TestCase
         // Level 3 (below the emergency threshold) ignores the hold marker:
         // an elevated-but-not-emergency global level must not become a
         // blanket admission stop.
-        $level3 = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 3, $cooldown - 1, $cooldown, $h);
+        $level3 = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 3, $cooldown - 1, $cooldown, $h, clientKey: 'cooldown-client');
         self::assertNotSame(RiskAction::Deny, $level3->action);
         self::assertNotContains(RiskReason::Cooldown, $level3->reasons);
     }

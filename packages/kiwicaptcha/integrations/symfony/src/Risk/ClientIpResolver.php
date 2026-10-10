@@ -48,13 +48,13 @@ use Symfony\Component\HttpFoundation\Request;
  * logged and the request proceeds with the socket peer, never a
  * header-derived guess.
  *
- * Duplicate security-singular headers: a request carrying Origin, Forwarded,
- * X-Forwarded-For or X-Real-IP more than once is parser ambiguity: different
- * intermediaries will pick different values, so the header-derived identity
- * is untrustworthy. The challenge controller rejects such a request with 400
- * `DUPLICATE_HEADER` before this resolver is ever consulted; the resolver
- * therefore treats a duplicate as ambiguous, since it is rejected earlier,
- * never silently resolved.
+ * Duplicate forwarding headers: a request carrying Forwarded or
+ * X-Forwarded-For more than once is parser ambiguity: different
+ * intermediaries will pick different values, so the header-derived
+ * identity is untrustworthy. The resolver enforces this boundary itself,
+ * so every caller (including the solve/validation path that reaches the
+ * resolver directly) throws {@see AmbiguousForwardingException} before
+ * parsing anything, unless ambiguity is explicitly allowed.
  *
  * An unparseable/missing socket peer yields the empty string (the callers'
  * existing "no usable risk signal" handling applies).
@@ -110,6 +110,26 @@ final class ClientIpResolver
      */
     public function resolve(Request $request): string
     {
+        // Duplicate forwarding headers are parser ambiguity: one
+        // intermediary trusts the first occurrence, another the last, so
+        // no header-derived identity is trustworthy. The resolver owns
+        // this boundary because the solve/validation path reaches it
+        // without passing the challenge controller's duplicate scan.
+        foreach (['Forwarded', 'X-Forwarded-For'] as $headerName) {
+            if (\count($request->headers->all($headerName)) > 1) {
+                $message = sprintf(
+                    'kiwicaptcha.risk: the %s header appears more than once — the canonical client IP is ambiguous',
+                    $headerName,
+                );
+                if ($this->rejectAmbiguousForwarding) {
+                    throw new AmbiguousForwardingException($message);
+                }
+                $this->logger?->warning($message);
+
+                return (string) $request->server->get('REMOTE_ADDR', '');
+            }
+        }
+
         if ($this->mode === self::MODE_DIRECT) {
             // Socket peer only: forwarding headers are always ignored.
             return (string) $request->server->get('REMOTE_ADDR', '');
@@ -196,37 +216,211 @@ final class ClientIpResolver
      */
     private static function clientFromXForwardedFor(Request $request, array $effectiveTrust): ?string
     {
-        $ips = array_reverse(array_map('trim', explode(',', (string) $request->headers->get('X-Forwarded-For'))));
+        $header = (string) $request->headers->get('X-Forwarded-For');
+        // A raw control byte is never optional whitespace: refuse the
+        // whole header before the split and trim below can launder a
+        // padded value into a valid address.
+        if (preg_match('/[\x00-\x1F\x7F]/', $header) === 1) {
+            return null;
+        }
+        $ips = array_reverse(array_map('trim', explode(',', $header)));
 
         return self::trustedChainClient($ips, $effectiveTrust);
     }
 
     /**
      * The locally derived client from a single Forwarded header. The
-     * `for=` node identifiers of every element are collected, then the
-     * same right-to-left trusted-chain walk as the XFF parser is
-     * applied. An appending (rather than sanitizing) trusted proxy that
-     * passes a client-supplied left-side `for=` cannot spoof the
-     * canonical client: the walk starts at the direct-peer side and the
-     * first untrusted validated address wins.
+     * `for=` node identifiers of every element are collected in header
+     * order, then the same right-to-left trusted-chain walk as the XFF
+     * parser is applied. An appending (rather than sanitizing) trusted
+     * proxy that passes a client-supplied left-side `for=` cannot spoof
+     * the canonical client: the walk starts at the direct-peer side and
+     * the first untrusted validated address wins.
+     *
+     * The parse is strict about element identity: every element must
+     * carry exactly one syntactically valid `for=` parameter before the
+     * walk is allowed to move past it. An element without `for=` (e.g.
+     * the nearest `proto=https`), a duplicate `for=`, an unterminated or
+     * escaped quote, an empty value, or any malformed parameter refuses
+     * the whole header and the canonical IP falls back to the socket
+     * peer. Collecting only the successful `for=` extracts would let a
+     * for-less nearest element disappear, promoting an older
+     * attacker-controlled `for=` to the nearest hop.
      */
     private static function clientFromForwarded(Request $request, array $effectiveTrust): ?string
     {
         $header = (string) $request->headers->get('Forwarded');
-        $identifiers = [];
-        // Every element (comma-separated) may carry for= plus other
-        // parameters (by=, proto=, host=); the for= may be quoted and may
-        // carry an optional port (IPv4 form, or a bracketed IPv6 form).
-        foreach (explode(',', $header) as $element) {
-            if (preg_match('/(?:^|;)\s*for\s*=\s*("[^"]*"|[^;\s]+)/i', $element, $m) === 1) {
-                $identifiers[] = trim($m[1], '"');
-            }
+        // The same raw-control refusal as the X-Forwarded-For parser: a
+        // padded node value must fail closed, never trim into an address.
+        if (preg_match('/[\x00-\x1F\x7F]/', $header) === 1) {
+            return null;
         }
-        if ($identifiers === []) {
+        if (trim($header) === '') {
+            return null;
+        }
+        $identifiers = self::forwardedNodeIdentifiers($header);
+        if ($identifiers === null || $identifiers === []) {
             return null;
         }
 
         return self::trustedChainClient(array_reverse($identifiers), $effectiveTrust);
+    }
+
+    /**
+     * The `for=` node identifiers of every Forwarded element, in header
+     * order, or null when ANY element fails the strict grammar. The
+     * splitter respects quoted strings, so a comma or semicolon inside a
+     * quoted value never fabricates an element or parameter.
+     *
+     * @return list<string>|null
+     */
+    private static function forwardedNodeIdentifiers(string $header): ?array
+    {
+        $identifiers = [];
+        $elements = self::forwardedElements($header);
+        if ($elements === null) {
+            return null;
+        }
+        foreach ($elements as $element) {
+            $forCount = 0;
+            $forValue = null;
+            $parameters = self::forwardedParameters($element);
+            if ($parameters === null) {
+                return null;
+            }
+            foreach ($parameters as [$name, $value]) {
+                if (strcasecmp($name, 'for') !== 0) {
+                    continue;
+                }
+                ++$forCount;
+                $forValue = $value;
+            }
+            if ($forCount !== 1 || $forValue === null) {
+                return null;
+            }
+            $identifiers[] = $forValue;
+        }
+
+        return $identifiers;
+    }
+
+    /**
+     * Split a Forwarded header into elements on commas outside quoted
+     * strings. A backslash escape inside a quoted string is refused: the
+     * grammar is ambiguous for the downstream node parser, and an
+     * ambiguous nearest hop must fail closed. An unterminated quote
+     * refuses the whole header.
+     *
+     * @return list<string>|null
+     */
+    private static function forwardedElements(string $header): ?array
+    {
+        $elements = [];
+        $current = '';
+        $inQuote = false;
+        $length = \strlen($header);
+        for ($i = 0; $i < $length; ++$i) {
+            $char = $header[$i];
+            if ($char === '\\') {
+                return null;
+            }
+            if ($char === '"') {
+                $inQuote = !$inQuote;
+                $current .= $char;
+                continue;
+            }
+            if ($char === ',' && !$inQuote) {
+                $elements[] = $current;
+                $current = '';
+                continue;
+            }
+            $current .= $char;
+        }
+        if ($inQuote) {
+            return null;
+        }
+        $elements[] = $current;
+
+        return $elements;
+    }
+
+    /**
+     * The parameters of one element: split on semicolons outside quoted
+     * strings, each `name=value` (a token or a simple quoted string; no
+     * brace) with a non-empty name. A part without `=` or with an empty
+     * or malformed value refuses the whole header.
+     *
+     * @return list<array{0: string, 1: string}>|null
+     */
+    private static function forwardedParameters(string $element): ?array
+    {
+        $parameters = [];
+        foreach (self::splitOutsideQuotes($element, ';') as $part) {
+            $part = trim($part);
+            if ($part === '') {
+                return null;
+            }
+            $eq = strpos($part, '=');
+            if ($eq === false) {
+                return null;
+            }
+            $name = trim(substr($part, 0, $eq));
+            $raw = trim(substr($part, $eq + 1));
+            if (preg_match('/^[A-Za-z][A-Za-z0-9!#$%&\'*+.^_`|~-]*$/D', $name) !== 1) {
+                return null;
+            }
+            if ($raw === '') {
+                return null;
+            }
+            if ($raw[0] === '"') {
+                if (\strlen($raw) < 2 || substr($raw, -1) !== '"') {
+                    return null;
+                }
+                $value = substr($raw, 1, -1);
+                if (str_contains($value, '"')) {
+                    return null;
+                }
+            } else {
+                // A token value: no whitespace, quote, comma, semicolon or
+                // separator noise (RFC 7239 token grammar, tightened).
+                if (preg_match('/^[^\s"(),;=]+$/D', $raw) !== 1) {
+                    return null;
+                }
+                $value = $raw;
+            }
+            $parameters[] = [$name, $value];
+        }
+
+        return $parameters;
+    }
+
+    /**
+     * Split a string on a separator that appears outside double-quoted
+     * runs (used for the element/parameter grammar above).
+     *
+     * @return list<string>
+     */
+    private static function splitOutsideQuotes(string $value, string $separator): array
+    {
+        $parts = [];
+        $current = '';
+        $inQuote = false;
+        $length = \strlen($value);
+        for ($i = 0; $i < $length; ++$i) {
+            $char = $value[$i];
+            if ($char === '"') {
+                $inQuote = !$inQuote;
+            }
+            if ($char === $separator && !$inQuote) {
+                $parts[] = $current;
+                $current = '';
+                continue;
+            }
+            $current .= $char;
+        }
+        $parts[] = $current;
+
+        return $parts;
     }
 
     /**
@@ -323,6 +517,12 @@ final class ClientIpResolver
                     $candidate = implode(':', $parts);
                 }
             }
+        }
+        // The platform's inet_pton accepts some non-canonical IPv4
+        // spellings (leading-zero forms among them) and normalizes them
+        // inconsistently; the strict validator is the grammar gate.
+        if (filter_var($candidate, FILTER_VALIDATE_IP) === false) {
+            return null;
         }
         $packed = @inet_pton($candidate);
         if ($packed === false) {

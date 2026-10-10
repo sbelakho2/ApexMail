@@ -64,14 +64,10 @@ final class KiwiCaptchaRuntime
         'locales' => ['locales', 'js'],
     ];
 
-    private readonly string $css;
-    private readonly string $wasm;
-    private readonly string $driver;
-    private readonly string $worker;
-    private readonly string $execution;
-    private readonly string $risk;
-    private readonly string $telemetryAsset;
-    private readonly string $localesAsset;
+    private readonly string $assetsDir;
+
+    /** @var array<string, string> lazily read asset contents (inline mode) */
+    private array $contentCache = [];
 
     /** @var array<string, array{url: string, sri: string}>|null */
     private ?array $assetInfo = null;
@@ -79,9 +75,21 @@ final class KiwiCaptchaRuntime
     /** @var array<string, true> the assets already emitted this request */
     private array $emittedAssetKeys = [];
 
+    /** The asset file of each descriptor key. */
+    private const ASSET_FILES = [
+        'widget' => 'widget.css',
+        'runtime' => 'kiwicaptcha-wasm.js',
+        'driver' => 'widget-driver.js',
+        'worker' => 'kiwi-worker.js',
+        'execution' => 'execution-interpreter.js',
+        'risk' => 'widget-risk.js',
+        'telemetry' => 'widget-telemetry.js',
+        'locales' => 'widget-locales.js',
+    ];
+
     public function __construct(
         private readonly string $routePrefix,
-        private readonly ?string $assetDir = null,
+        ?string $assetDir = null,
         private readonly string $template = self::DEFAULT_TEMPLATE,
         private readonly string $telemetry = 'off',
         private readonly ?string $requestBinding = null,
@@ -89,67 +97,80 @@ final class KiwiCaptchaRuntime
         private readonly bool $riskClientContext = false,
         private readonly bool $privacyStrict = false,
         private readonly string $assetMode = 'files',
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Asset\AssetDigestIndex $digestIndex = null,
     ) {
-        $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
-        $this->css = $this->readAsset($assetDir, 'widget.css');
-        $this->wasm = $this->readAsset($assetDir, 'kiwicaptcha-wasm.js');
-        $this->driver = $this->readAsset($assetDir, 'widget-driver.js');
-        $this->worker = $this->readAsset($assetDir, 'kiwi-worker.js');
-        $this->execution = $this->readAsset($assetDir, 'execution-interpreter.js');
-        $this->risk = $this->readAsset($assetDir, 'widget-risk.js');
-        $this->telemetryAsset = $this->readAsset($assetDir, 'widget-telemetry.js');
-        $this->localesAsset = $this->readAsset($assetDir, 'widget-locales.js');
+        // Files mode only needs the digests; the contents are read
+        // lazily and memoized per instance, so a PHP-FPM request pays
+        // for the inline tier only when that tier is actually rendered.
+        $this->assetsDir = rtrim($assetDir ?? \dirname(__DIR__, 2).'/Resources/public', '/');
+        // The asset set is validated eagerly (stat only, never read):
+        // a deployment with a missing or misspelled asset fails at
+        // render with the same clear error whether the render path
+        // needs the bytes (inline) or only their digest (files).
+        foreach (self::ASSET_FILES as $name) {
+            if (!is_file($this->assetsDir.'/'.$name)) {
+                throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $this->assetsDir.'/'.$name));
+            }
+        }
     }
 
-    private function readAsset(string $dir, string $name): string
+    /**
+     * The exact bytes of one asset, read on first use and memoized for
+     * the instance. Only the inline tier (and the digest fallback when no
+     * index is wired) ever reads a file.
+     */
+    private function content(string $name): string
     {
-        $path = rtrim($dir, '/').'/'.$name;
+        if (isset($this->contentCache[$name])) {
+            return $this->contentCache[$name];
+        }
+        $path = $this->assetsDir.'/'.$name;
         $contents = @file_get_contents($path);
         if ($contents === false) {
             throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $path));
         }
 
-        return $contents;
+        return $this->contentCache[$name] = $contents;
     }
 
     public function css(): string
     {
-        return $this->css;
+        return $this->content(self::ASSET_FILES['widget']);
     }
 
     public function wasm(): string
     {
-        return $this->wasm;
+        return $this->content(self::ASSET_FILES['runtime']);
     }
 
     public function driver(): string
     {
-        return $this->driver;
+        return $this->content(self::ASSET_FILES['driver']);
     }
 
     public function worker(): string
     {
-        return $this->worker;
+        return $this->content(self::ASSET_FILES['worker']);
     }
 
     public function execution(): string
     {
-        return $this->execution;
+        return $this->content(self::ASSET_FILES['execution']);
     }
 
     public function risk(): string
     {
-        return $this->risk;
+        return $this->content(self::ASSET_FILES['risk']);
     }
 
     public function telemetry(): string
     {
-        return $this->telemetryAsset;
+        return $this->content(self::ASSET_FILES['telemetry']);
     }
 
     public function locales(): string
     {
-        return $this->localesAsset;
+        return $this->content(self::ASSET_FILES['locales']);
     }
 
     public function assetMode(): string
@@ -185,13 +206,23 @@ final class KiwiCaptchaRuntime
             return $this->assetInfo;
         }
         $prefix = rtrim($this->routePrefix, '/');
-        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution, 'risk' => $this->risk, 'telemetry' => $this->telemetryAsset, 'locales' => $this->localesAsset];
         $info = [];
         foreach (self::ASSET_KEYS as $key => [$var, $ext]) {
-            $content = $contents[$key];
+            $sha = $this->digestIndex?->digest(self::ASSET_FILES[$key]);
+            if ($sha === null) {
+                // No index wired (or the file vanished): fall back to
+                // hashing the lazy content once.
+                $content = $this->content(self::ASSET_FILES[$key]);
+                $sha = hash('sha256', $content);
+                $info[$key] = [
+                    'url' => $prefix.'/assets/'.$key.'.'.$sha.'.'.$ext,
+                    'sri' => 'sha256-'.base64_encode(hash('sha256', $content, true)),
+                ];
+                continue;
+            }
             $info[$key] = [
-                'url' => $prefix.'/assets/'.$key.'.'.hash('sha256', $content).'.'.$ext,
-                'sri' => 'sha256-'.base64_encode(hash('sha256', $content, true)),
+                'url' => $prefix.'/assets/'.$key.'.'.$sha.'.'.$ext,
+                'sri' => 'sha256-'.base64_encode((string) hex2bin($sha)),
             ];
         }
         $this->assetInfo = $info;
@@ -215,7 +246,14 @@ final class KiwiCaptchaRuntime
             return '';
         }
         $assets = $this->assets();
-        $nonceAttr = $nonce !== null && $nonce !== '' ? ' nonce="'.$nonce.'"' : '';
+        // The nonce is interpolated into a raw HTML attribute string that
+        // the template emits unescaped (|raw), so it is HTML-escaped
+        // here: a quote-bearing nonce value must never break out of the
+        // attribute and inject markup into the script tag. A real CSP
+        // nonce is base64 and passes through unchanged.
+        $nonceAttr = $nonce !== null && $nonce !== ''
+            ? ' nonce="'.htmlspecialchars($nonce, ENT_QUOTES).'"'
+            : '';
         $out = '';
         foreach (['widget', 'driver'] as $key) {
             if (isset($this->emittedAssetKeys[$key])) {
@@ -226,10 +264,35 @@ final class KiwiCaptchaRuntime
             $sri = $assets[$key]['sri'];
             $out .= $key === 'widget'
                 ? '<link rel="stylesheet" href="'.$url.'" integrity="'.$sri.'">'."\n"
-                : '<script src="'.$url.'" integrity="'.$sri.'"'.$nonceAttr.'></script>'."\n";
+                // defer: the ~100 KB files-mode driver must never block
+                // HTML parsing mid-form; it scans the parsed DOM on
+                // execution (readyState handling already exists) and
+                // Turbo/htmx re-execution keeps working.
+                : '<script src="'.$url.'" integrity="'.$sri.'" defer'.$nonceAttr.'></script>'."\n";
         }
 
         return $out;
+    }
+
+    /**
+     * The inline tier's once-per-page switch: true for the first widget
+     * of a request, false for every later one. The driver is idempotent
+     * and its DOM scan/observer initialize later widgets and share one
+     * module registry, so the shared inline assets need to be emitted
+     * exactly once. Files mode deduplicates through assetTags()
+     * instead, so the claim always succeeds there.
+     */
+    public function claimInlineAssets(): bool
+    {
+        if ($this->assetMode !== 'inline') {
+            return true;
+        }
+        if (isset($this->emittedAssetKeys['inline:shared'])) {
+            return false;
+        }
+        $this->emittedAssetKeys['inline:shared'] = true;
+
+        return true;
     }
 
     /**
@@ -458,12 +521,19 @@ final class KiwiCaptchaRuntime
             // when explicitly provided (the driver reads it; the server
             // response stays authoritative).
             'algorithm' => $algorithm,
+            // The widget language rendered into data-kiwi-lang (the
+            // Rust renderer has always carried it; Twig did not). An
+            // empty value emits no attribute.
+            'lang' => isset($context['lang']) ? (string) $context['lang'] : '',
             // Standalone renders have no form view vars; provide working defaults.
+            // Once per page: the shared inline assets are emitted by the
+            // first widget only (claimed per request).
+            'emit_assets' => $this->claimInlineAssets(),
             'id' => $context['id'] ?? '',
             'full_name' => $context['full_name'] ?? 'kiwi__token',
-            'kiwi_css' => $this->css,
-            'kiwi_wasm' => $this->wasm,
-            'kiwi_driver' => $this->driver,
+            'kiwi_css' => $this->css(),
+            'kiwi_wasm' => $this->wasm(),
+            'kiwi_driver' => $this->driver(),
             // The lazy widget modules (see the driver split docs): the
             // inline tier embeds widget-risk.js (the adaptive-risk solve
             // tier + armed-evidence machinery, always: a decoy or
@@ -471,8 +541,8 @@ final class KiwiCaptchaRuntime
             // widget-telemetry.js (only when a session is enabled); the
             // files tier renders their versioned URLs + SRI digests as
             // container attributes for the driver's lazy fetch.
-            'kiwi_risk' => $this->risk,
-            'kiwi_telemetry' => $this->telemetryAsset,
+            'kiwi_risk' => $this->risk(),
+            'kiwi_telemetry' => $this->telemetry(),
             'risk_src' => $this->riskSrc(),
             'risk_integrity' => $this->riskIntegrity(),
             'telemetry_src' => $this->telemetrySrc(),

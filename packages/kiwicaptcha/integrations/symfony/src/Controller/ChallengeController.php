@@ -16,10 +16,11 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
-use KiwiCaptcha\Config;
+use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\Issuer;
+use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\StorageInterface;
@@ -149,16 +150,19 @@ final class ChallengeController
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
     /**
-     * The once-per-process gate warning guard: when risk.decoy_v3_enabled
-     * is true but the confirmed central min_protocol_version floor is
-     * below 3 (or unconfirmed), or when risk.execution_challenge is on
-     * but the floor is below 4 (or unconfirmed).
-     * Issuance then falls back to the safe unarmed emission.
-     * This flag makes the actionable warning fire exactly once per
-     * process instead of once per issuance, so an issuance-rate log
-     * flood never drowns the signal.
+     * The once-per-process gate warning guard. A warning condition
+     * exists when a writer switch is on but the confirmed central
+     * `min_protocol_version` floor is too low, or unconfirmed:
+     * risk.decoy_v3_enabled below 3, risk.execution_challenge on below
+     * 4, or kiwi_captcha.rsw_identity on below 5. Issuance then falls
+     * back to the safe unarmed emission. This flag makes the actionable
+     * warning fire exactly once per process instead of once per
+     * issuance, so an issuance-rate log flood never drowns the signal.
      */
     private bool $decoyV3WarningLogged = false;
+
+    /** The once-per-process warning guard of the protocol-v5 writer gate. */
+    private bool $rswIdentityWarningLogged = false;
 
     public function __construct(
         private readonly Issuer $issuer,
@@ -193,8 +197,15 @@ final class ChallengeController
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
         /** Server-owned sitekey policy map. */
         private readonly array $sitekeyPolicy = [],
-        /** Lazily-built TTL-variant issuers (per-sitekey override), keyed by TTL. */
-        private array $ttlOverrideIssuers = [],
+        /**
+         * Lazily-built issuance-variant issuers, keyed by "ttl:epoch":
+         * an issuance mints through an issuer whose Config carries the
+         * effective security-policy epoch and any per-sitekey TTL
+         * override. A central min_policy_epoch bump then revokes only
+         * older challenges, and a new challenge verifies immediately
+         * without a redeploy.
+         */
+        private array $issuanceVariants = [],
         /**
          * One-shot chain-ticket service for stage-2 issuance; null =
          * chaining disabled (a ticket-bearing request is then refused).
@@ -222,8 +233,11 @@ final class ChallengeController
          */
         private readonly array $trustedTlsProxies = [],
         /**
-         * The security-policy epoch a presented chain ticket must match
-         * (risk.policy_version).
+         * The configured floor of the security-policy epoch
+         * (risk.policy_version), also the epoch a presented chain ticket
+         * must match when no epoch monitor is wired. With the monitor
+         * wired, the chain ticket and every new record carry the
+         * effective epoch max(configured, central) instead.
          */
         private readonly int $policyVersion = 1,
         /**
@@ -271,6 +285,19 @@ final class ChallengeController
          */
         private readonly bool $executionGate = false,
         /**
+         * The rsw identity writer switch (kiwi_captcha.rsw_identity,
+         * default false). When true and the algorithm is rsw, issuance
+         * may arm the authenticated modulus identity (protocol v5),
+         * subject to {@see self::rswIdentityEmissionCap()}: the
+         * central security-policy floor must confirm >= 5 first, and any
+         * uncertainty keeps issuance on the legacy identityless v2
+         * shape. The identity is the security property (the accepted
+         * proof is bound to the exact authenticated modulus), but a
+         * pre-v5 verifier rejects the unknown protocol version — the
+         * two-phase rollout gate is why the default is false.
+         */
+        private readonly bool $rswIdentityEnabled = false,
+        /**
          * The issuance-side logger (when the app has one): receives the
          * once-per-process warning when decoy_v3_enabled cannot take
          * effect because the central protocol floor is below 3 or
@@ -294,6 +321,30 @@ final class ChallengeController
          */
         private readonly int $executionVersionCap = 1,
         private readonly int $executionRequiredVersion = 1,
+        /**
+         * The cancellation endpoint's per-source admission window when the
+         * anti-stockpiling layer is not wired (risk disabled: no
+         * OutstandingChallenges, so its cancellationAdmission window is
+         * unavailable). A dedicated IssuanceRateLimiter instance with its
+         * own key namespace mirroring that window's shape (per-source cap
+         * + deployment-global cap over one sliding window). Null leaves
+         * the endpoint bounded by the body ceiling, the nonce shape and
+         * the origin checks only (direct construction / legacy wiring).
+         */
+        private readonly ?IssuanceRateLimiter $cancellationLimiter = null,
+        /**
+         * The verified-agents gate (risk.agents, RFC 9421 HTTP
+         * Message Signatures). Null = no agent is configured, so no
+         * request can take the machine-client path: a Signature-Input
+         * header is then an ignorable stranger header on the ordinary
+         * widget flow. When wired, a request carrying Signature-Input
+         * must verify as a configured agent, with typed 401 refusals,
+         * fail closed. A verified request then skips the
+         * widget-facing gates (origin, fetch-metadata, the adaptive
+         * assessment) for its allowed scopes, priced at its tier,
+         * attributed to its agent id.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentsVerifier $agentsVerifier = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
     }
@@ -393,6 +444,79 @@ final class ChallengeController
     }
 
     /**
+     * The protocol-v5 emission gate implements the two-phase rollout
+     * invariant for the rsw modulus identity. Identity-armed rsw
+     * issuance requires the configured switch (kiwi_captcha.rsw_identity)
+     * and the algorithm rsw. It also requires the confirmed central
+     * min_protocol_version floor ({kiwi:<ns>}:security-policy) to reach
+     * at least the feature version
+     * {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION} (5), not the
+     * binary's global maximum. The floor establishes that every serving
+     * binary accepts the v5 identity-bearing canonical before any node
+     * emits it: a pre-v5 verifier rejects the unknown protocol version,
+     * so the identity can never be silently ignored by an old reader. A
+     * floor below 5, an absent or corrupt floor, an unreadable central
+     * policy or no central policy at all all fail safe to the legacy
+     * identityless v2 emission while still leaving the other confirmed
+     * dimensions to their own gates. The actionable warning fires once
+     * per process.
+     *
+     * @return int the confirmed emission ceiling the core Issuer receives:
+     *             the confirmed central floor (at least
+     *             {@see ChallengeRecord::BASE_PROTOCOL_VERSION}), lowered
+     *             below {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}
+     *             while the writer switch is off. The core then arms the
+     *             identity only at the feature version while still
+     *             admitting the decoy/execution dimensions their own
+     *             confirmed floors allow.
+     */
+    private function rswIdentityEmissionCap(): int
+    {
+        $featureVersion = ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION;
+        $reportedFloor = $this->epochMonitor?->minProtocolVersion();
+        $floor = $reportedFloor ?? ChallengeRecord::BASE_PROTOCOL_VERSION;
+        if ($floor < ChallengeRecord::BASE_PROTOCOL_VERSION) {
+            $floor = ChallengeRecord::BASE_PROTOCOL_VERSION;
+        }
+        if (!$this->rswIdentityEnabled) {
+            // The writer switch off: the confirmed ceiling still admits
+            // the other confirmed dimensions (the decoy and execution
+            // arms are gated by their own floors), but the identity
+            // feature stays off by lowering the ceiling below it.
+            return min($floor, $featureVersion - 1);
+        }
+        if ($floor >= $featureVersion) {
+            return $floor;
+        }
+        if (!$this->rswIdentityWarningLogged) {
+            $this->rswIdentityWarningLogged = true;
+            $detail = $reportedFloor === null
+                ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
+                : sprintf('the central min_protocol_version is %d', $reportedFloor);
+            $message = sprintf(
+                'kiwicaptcha: kiwi_captcha.rsw_identity is on but protocol-v5 emission stays DISABLED — %s (below %d). '.
+                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to %d only after every serving binary accepts protocol v5 '.
+                '(deploy the new binaries fleet-wide and confirm no old binary remains); until then rsw issuance stays on the legacy identityless '.
+                'protocol v2 shape.',
+                $detail,
+                $featureVersion,
+                $featureVersion,
+            );
+            try {
+                $this->logger?->warning($message);
+            } catch (\Throwable) {
+                // A raising logger must never break issuance.
+            }
+        }
+
+        // The switch is on but the feature floor is unconfirmed: keep the
+        // confirmed floor (the decoy/execution arms stay governed by
+        // their own gates) — the core sees a ceiling below the feature
+        // version and emits the identityless shape.
+        return $floor;
+    }
+
+    /**
      * The effective execution-program grammar version of this issuance,
      * the real execution-versioning gate of the dimension.
      *
@@ -425,7 +549,7 @@ final class ChallengeController
     }
 
     /**
-     * The protocol-v3 emission gate implements the audit's two-phase
+     * The protocol-v3 emission gate implements the two-phase
      * rollout invariant: the decoy (protocol v3) is armed only when the
      * operator's writer switch (risk.decoy_v3_enabled) is true. The
      * confirmed central security-policy floor
@@ -565,7 +689,21 @@ final class ChallengeController
         // tolerated); an absent header is accepted, since the body still
         // has to parse as a strict JSON object with only the documented
         // fields. The widget sends exactly application/json.
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $rawContentType = (string) $request->headers->get('Content-Type', '');
+        // A raw control byte is not optional whitespace: reject it before
+        // the split and trim below can launder a padded value into a
+        // valid media type. A comma is the collapsed-duplicate marker
+        // (two occurrences folded into one field value): the split on
+        // ';' below would otherwise accept "application/json; c=1,
+        // text/plain" as application/json while another layer reads a
+        // two-type list. No accepted media type uses a comma parameter.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1 || str_contains($rawContentType, ',')) {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
+                Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+        $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
         if ($contentType !== '' && $contentType !== 'application/json') {
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
@@ -611,7 +749,36 @@ final class ChallengeController
             }
         }
 
-        if ($this->sameOriginOnly && !$this->isSameOrigin($request)) {
+        // Verified-agent identification (risk.agents, RFC 9421): a
+        // request carrying a Signature-Input header on a deployment
+        // with configured agents must verify as one of them — typed
+        // 401 refusals, fail closed, never a silent fallthrough into
+        // the widget flow. The gate runs after the framing and body
+        // read (the signature covers the exact body bytes) and before
+        // every browser-facing check, since a machine client sends no
+        // Origin header by design. A verified request is a direct
+        // issue: no widget eligibility, no origin gate, no adaptive
+        // assessment, the agent's own quota and its tier price.
+        $verifiedAgent = null;
+        if ($this->agentsVerifier !== null && $request->headers->has('Signature-Input')) {
+            $agentSignature = $this->agentsVerifier->verifySignature($request, $requestBody);
+            if (!$agentSignature->isVerified()) {
+                $this->logGate('kiwicaptcha: verified-agent signature refused: {code}', ['code' => $agentSignature->errorCode()]);
+
+                return $this->privateJson(
+                    ['error' => ['code' => $agentSignature->errorCode(), 'message' => $agentSignature->errorMessage()]],
+                    $agentSignature->statusCode(),
+                );
+            }
+            $verifiedAgent = $agentSignature->agent();
+            // The attribution identity rides the request attributes so
+            // every downstream observer (the application's own
+            // listeners, the outcome bridge) can attribute what this
+            // request does to the verified agent id.
+            $request->attributes->set('kiwi_agent', $verifiedAgent->name());
+        }
+
+        if ($this->sameOriginOnly && $verifiedAgent === null && !$this->isSameOrigin($request)) {
             return $this->privateJson(
                 ['error' => ['code' => 'CROSS_ORIGIN_DENIED', 'message' => 'Cross-origin challenge requests are not allowed.']],
                 Response::HTTP_FORBIDDEN,
@@ -625,15 +792,17 @@ final class ChallengeController
         // scheme, host and effective port. With enforce_origin, a request
         // without a usable Origin header, or carrying the literal "null"
         // origin, is rejected before the allowlist is consulted. Refused
-        // before any state is written.
+        // before any state is written. A verified agent skips all three
+        // browser-facing gates: the machine client authenticated
+        // cryptographically and sends no Origin header by design.
         $origin = $request->headers->get('Origin');
-        if ($this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
+        if ($verifiedAgent === null && $this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
             return $this->privateJson(
                 ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request carries no usable Origin header.']],
                 Response::HTTP_FORBIDDEN,
             );
         }
-        if ($this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
+        if ($verifiedAgent === null && $this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
             return $this->privateJson(
                 ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request origin is not allowlisted.']],
                 Response::HTTP_FORBIDDEN,
@@ -852,7 +1021,9 @@ final class ChallengeController
         // binding_mode only.
         $sitekey = isset($payload['sitekey']) && $payload['sitekey'] !== '' ? (string) $payload['sitekey'] : null;
         $sitekeyTtlSecs = null;
+        $scopeResolvedByPolicy = false;
         if ($sitekey !== null && isset($this->sitekeyPolicy[$sitekey])) {
+            $scopeResolvedByPolicy = true;
             $policy = $this->sitekeyPolicy[$sitekey];
             // Per-sitekey challenge lifetime: the provider-migration TTL
             // override (risk.sitekeys.<sitekey>.ttl_secs, bounded 1..300 by
@@ -877,8 +1048,13 @@ final class ChallengeController
         // metadata, never a secret. When the client sends a configured
         // sitekey, the scope is resolved from the server-owned mapping; an
         // unknown sitekey simply stays a scope name subject to the
-        // allowed_scopes gate and the risk assessment below.
-        if (isset($this->sitekeyAllowlist[$scope])) {
+        // allowed_scopes gate and the risk assessment below. The alias is
+        // applied only to a client-presented scope: a scope already
+        // resolved by the (sitekey, action) policy is authoritative and
+        // must never be reinterpreted as a legacy sitekey name, otherwise
+        // a policy whose resolved scope happens to equal an alias key
+        // would be silently re-mapped to a different scope.
+        if (!$scopeResolvedByPolicy && isset($this->sitekeyAllowlist[$scope])) {
             $scope = $this->sitekeyAllowlist[$scope];
         }
 
@@ -922,7 +1098,7 @@ final class ChallengeController
                 // client-changed binding is a transaction mismatch.
                 // Refused before any state is touched; the detail goes to
                 // the server log only.
-                error_log(sprintf('kiwicaptcha: request binding authority refused the presented binding: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: request binding authority refused the presented binding: {message}', ['message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'INVALID_REQUEST_BINDING', 'message' => 'The request binding does not match this transaction.']],
@@ -932,7 +1108,7 @@ final class ChallengeController
                 // An infrastructure failure of the authority is never a
                 // client 422: nothing has been touched, so the private
                 // structured 503 is the retryable answer.
-                error_log(sprintf('kiwicaptcha: request binding authority unavailable: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: request binding authority unavailable: {message}', ['message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -973,14 +1149,22 @@ final class ChallengeController
         // obligation id of the policy-epoch/scope/binding triple) were
         // created atomically at the `CHAIN_REQUIRED` stage, so a client cannot
         // restart the transaction at stage 1 by discarding the ticket. The
-        // gate runs before any admission control touches a counter, so an
-        // invalid, forged, foreign or expired ticket never consumes
-        // rate-limit budget, risk state, scope-cap quota or an outstanding
-        // slot:
+        // signed-ticket validation runs before any admission control touches
+        // a counter, so an invalid, forged, foreign or expired ticket never
+        // consumes rate-limit budget, risk state, scope-cap quota or an
+        // outstanding slot — and its only pre-limiter state read (the direct
+        // chain-record read of the obligation match) is gated by possession
+        // of a server-signed one-shot ticket, so an unauthenticated flood
+        // can never drive it. The ticketless obligation lookup (the
+        // auto-resume read, one Redis read per ordinary challenge request
+        // when chaining is on) deliberately runs after the per-IP rate
+        // limiter, so an unthrottled flood performs no obligation reads:
         //   - a presented ticket is validated (signature, expiry, structure)
-        //     and must match the current transaction's open obligation;
+        //     and matched against its own chain record (scope, policy epoch,
+        //     authoritative binding);
         //   - a request without a ticket but with an open obligation
-        //     auto-resumes the chain (never issue stage 1);
+        //     auto-resumes the chain (never issue stage 1) — resolved after
+        //     the limiter;
         //   - no obligation means the ordinary stage-1 flow.
         // The stage-2 state is then validated, the issued stage-2 challenge
         // inspected (recover, rearm or verify as the consumed state demands)
@@ -1001,6 +1185,20 @@ final class ChallengeController
         $chainId = null;
         $chainOwner = null;
         $chainRequirement = null;
+        if ($verifiedAgent !== null && $chainTicket !== null) {
+            // The chain is a browser-flow concept (a stage-2 stronger
+            // challenge resuming an obligation): a verified agent is a
+            // direct-issue machine client and never joins one, so a
+            // ticket-bearing agent request is refused, never silently
+            // downgraded to an unchained issuance either.
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'Chain tickets are not accepted for verified-agent requests.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
         if ($this->chainTickets === null) {
             if ($chainTicket !== null) {
                 return $this->privateJson(
@@ -1025,44 +1223,13 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            // Open-chain read: the obligation of this transaction (policy
-            // epoch + scope + authoritative binding; the unbound
-            // transaction is the '' binding). A plain read, no transition.
-            try {
-                $chainRequirement = $this->chainTickets->findOpenRequirement($scope, $requestBinding ?? '', $this->policyVersion);
-            } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
-                // The chain record is corrupt server state: a stage-2
-                // issuance cannot be authorized. Fail closed with the
-                // retryable 503; the detail goes to the server log only.
-                error_log(sprintf('kiwicaptcha: malformed chain state: %s', $e->getMessage()));
-
-                return $this->privateJson(
-                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
-                    Response::HTTP_SERVICE_UNAVAILABLE,
-                    $request,
-                    $riskSession,
-                    $mintedCookie,
-                );
-            } catch (\Throwable $e) {
-                // The chain state backend is unavailable: fail closed. The
-                // detail goes to the server log only.
-                error_log(sprintf('kiwicaptcha: chain obligation read failed: %s', $e->getMessage()));
-
-                return $this->privateJson(
-                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
-                    Response::HTTP_SERVICE_UNAVAILABLE,
-                    $request,
-                    $riskSession,
-                    $mintedCookie,
-                );
-            }
             if ($chainTicket !== null) {
                 try {
                     $chainTicketPayload = $this->chainTickets->verify($chainTicket);
                 } catch (\Throwable $e) {
                     // The ticket cannot be verified: fail closed. The
                     // detail goes to the server log only.
-                    error_log(sprintf('kiwicaptcha: chain ticket verification failed: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: chain ticket verification failed: {message}', ['message' => $e->getMessage()]);
 
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1081,63 +1248,55 @@ final class ChallengeController
                         $mintedCookie,
                     );
                 }
-                // Obligation match: the ticket's chain must be the open
-                // chain of the current transaction; a signed ticket for a
-                // different transaction (a different authoritative binding
-                // or scope computes a different obligation id) is a foreign
-                // ticket and gets 422. The exception is a terminal chain
-                // (verified / legacy completed): its obligation was cleared
-                // at verification, so the chain is read directly and the
-                // identity fields (scope, policy epoch, authoritative
-                // binding) are re-checked against the record.
-                if ($chainRequirement === null || $chainRequirement->chainId !== (string) $chainTicketPayload['chainId']) {
-                    try {
-                        $direct = $this->chainTickets->requirementFor((string) $chainTicketPayload['chainId']);
-                    } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
-                        error_log(sprintf('kiwicaptcha: malformed chain state: %s', $e->getMessage()));
+                // Obligation match: the ticket's signed chain is read
+                // directly (the chain record's own identity fields — scope,
+                // policy epoch, authoritative binding — are re-checked
+                // against the record). A signed ticket for a different
+                // transaction (a different authoritative binding or scope
+                // computes a different obligation id) is a foreign ticket
+                // and gets 422; a terminal chain (verified / legacy
+                // completed) whose obligation was cleared at verification
+                // reads the same way. This one pre-limiter state read is
+                // reachable only with a valid server-signed ticket in
+                // hand, never by an unauthenticated flood.
+                try {
+                    $direct = $this->chainTickets->requirementFor((string) $chainTicketPayload['chainId']);
+                } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
+                    $this->logGate('kiwicaptcha: malformed chain state: {message}', ['message' => $e->getMessage()]);
 
-                        return $this->privateJson(
-                            ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
-                            Response::HTTP_SERVICE_UNAVAILABLE,
-                            $request,
-                            $riskSession,
-                            $mintedCookie,
-                        );
-                    } catch (\Throwable $e) {
-                        error_log(sprintf('kiwicaptcha: chain state read failed: %s', $e->getMessage()));
+                    return $this->privateJson(
+                        ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                        Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                } catch (\Throwable $e) {
+                    $this->logGate('kiwicaptcha: chain state read failed: {message}', ['message' => $e->getMessage()]);
 
-                        return $this->privateJson(
-                            ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
-                            Response::HTTP_SERVICE_UNAVAILABLE,
-                            $request,
-                            $riskSession,
-                            $mintedCookie,
-                        );
-                    }
-                    if ($direct === null
-                        || $direct->scope !== $scope
-                        || $direct->policyVersion !== $this->policyVersion
-                        || $direct->requestBinding !== ($requestBinding ?? '')
-                    ) {
-                        return $this->privateJson(
-                            ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket does not match this transaction.']],
-                            Response::HTTP_UNPROCESSABLE_ENTITY,
-                            $request,
-                            $riskSession,
-                            $mintedCookie,
-                        );
-                    }
-                    $chainRequirement = $direct;
+                    return $this->privateJson(
+                        ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                        Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
                 }
+                if ($direct === null
+                    || $direct->scope !== $scope
+                    || $direct->policyVersion !== $this->effectivePolicyEpoch()
+                    || $direct->requestBinding !== ($requestBinding ?? '')
+                ) {
+                    return $this->privateJson(
+                        ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket does not match this transaction.']],
+                        Response::HTTP_UNPROCESSABLE_ENTITY,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                }
+                $chainRequirement = $direct;
                 $chainId = (string) $chainTicketPayload['chainId'];
-            } elseif ($chainRequirement !== null) {
-                // Auto-resume: no ticket presented but an open obligation
-                // exists for this transaction, so the chain resumes at
-                // stage 2. A lost or cleared ticket never downgrades the
-                // flow to an unchained stage-1 issuance.
-                $chainId = $chainRequirement->chainId;
-            }
-            if ($chainId !== null) {
                 // The owner token: a random per-request handle that scopes
                 // the reservation. Only this request may release or issue
                 // its own reservation.
@@ -1175,15 +1334,18 @@ final class ChallengeController
             );
         }
 
-        if ($this->rateLimiter !== null) {
+        if ($this->rateLimiter !== null && $verifiedAgent === null) {
             // The rate limiter is inside the structured failure boundary:
             // a Redis outage (or a malformed Redis TIME — the limiter never
             // falls back to the host clock for its epochs) answers the
             // private 503 with the reservation released, never a raw 500.
+            // A verified agent never consults it: the agent's own
+            // per-minute and per-day quota windows replace the per-IP
+            // browser limiter for the machine-client path.
             try {
                 $rate = $this->rateLimiter->check($clientIp);
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: issuance rate limiter unavailable: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: issuance rate limiter unavailable: {message}', ['message' => $e->getMessage()]);
                 $this->releaseChain($chainId, $chainOwner);
 
                 return $this->privateJson(
@@ -1223,10 +1385,72 @@ final class ChallengeController
 
                 $this->releaseChain($chainId, $chainOwner);
 
+                // The just-minted risk session must ride the 429 too:
+                // the sourceRateLimitHit evidence above was recorded
+                // against it, and a client that never receives the
+                // cookie mints a fresh session on every retry, losing
+                // the session reputation that partly drives the limit.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
+            }
+        }
+
+        // Ticketless auto-resume (risk.chaining): the open-obligation read
+        // of this transaction (policy epoch + scope + authoritative
+        // binding; the unbound transaction is the '' binding) runs only
+        // NOW, after the per-IP rate limiter has admitted the request —
+        // an unthrottled flood performs no chain-obligation reads before
+        // the limiter denies it, and a signed-ticket request (already
+        // resolved above) never repeats the read. No ticket presented but
+        // an open obligation exists, so the chain resumes at stage 2: a
+        // lost or cleared ticket never downgrades the flow to an
+        // unchained stage-1 issuance. A plain read, no transition. A
+        // verified agent never joins the read: the direct-issue path
+        // holds no chain obligation.
+        if ($this->chainTickets !== null && $this->risk !== null && $verifiedAgent === null && $chainTicket === null && $chainId === null) {
+            try {
+                $chainRequirement = $this->chainTickets->findOpenRequirement($scope, $requestBinding ?? '', $this->effectivePolicyEpoch());
+            } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
+                // The chain record is corrupt server state: a stage-2
+                // issuance cannot be authorized. Fail closed with the
+                // retryable 503; the detail goes to the server log only.
+                $this->logGate('kiwicaptcha: malformed chain state: {message}', ['message' => $e->getMessage()]);
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            } catch (\Throwable $e) {
+                // The chain state backend is unavailable: fail closed. The
+                // detail goes to the server log only.
+                $this->logGate('kiwicaptcha: chain obligation read failed: {message}', ['message' => $e->getMessage()]);
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            if ($chainRequirement !== null) {
+                $chainId = $chainRequirement->chainId;
+                // The owner token: a random per-request handle that scopes
+                // the reservation. Only this request may release or issue
+                // its own reservation.
+                $chainOwner = bin2hex(random_bytes(16));
+                $stageTwo = $this->prepareStageTwo($chainId, $chainOwner, $chainRequirement, $request, $riskSession, $mintedCookie);
+                if ($stageTwo !== null) {
+                    return $stageTwo;
+                }
             }
         }
 
@@ -1238,7 +1462,10 @@ final class ChallengeController
         // decision. An unknown scope depends on unknown_scope.mode:
         // 'minimum' (default) assesses it under the synthetic sha20 policy,
         // 'baseline' issues the default profile, 'reject' returns the
-        // risk-denied 429 without issuing.
+        // risk-denied 429 without issuing. A verified agent skips the
+        // assessment entirely (a cryptographically identified machine
+        // client has no browser risk surface) and is priced at its tier
+        // instead, see {@see self::agentIssuanceProfile()}.
         $profile = null;
         $riskAssessed = false;
         // The ExecutionChallengeV1 risk trigger: the resolved pre-issue
@@ -1247,7 +1474,30 @@ final class ChallengeController
         // on AND the trigger passes (a non-Allow decision; without the
         // risk engine, the gate alone).
         $executionRiskDecision = null;
-        if ($this->risk !== null) {
+        if ($verifiedAgent !== null) {
+            // The scope authorization and the quota of the verified
+            // agent: the allowed-scopes check (403 typed code) and the
+            // per-minute/per-day windows (429 with Retry-After and the
+            // escalation mark) run exactly here, after the scope is
+            // resolved and validated, before any challenge is minted.
+            $agentAuthorization = $this->agentsVerifier?->authorize($verifiedAgent, $scope);
+            if ($agentAuthorization !== null && !$agentAuthorization->isVerified()) {
+                $this->logGate('kiwicaptcha: verified agent {agent} refused: {code}', ['agent' => $verifiedAgent->name(), 'code' => $agentAuthorization->errorCode()]);
+                $response = $this->privateJson(
+                    ['error' => ['code' => $agentAuthorization->errorCode(), 'message' => $agentAuthorization->errorMessage()]],
+                    $agentAuthorization->statusCode(),
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+                if ($agentAuthorization->retryAfterSecs() !== null) {
+                    $response->headers->set('Retry-After', (string) max(1, $agentAuthorization->retryAfterSecs()));
+                }
+
+                return $response;
+            }
+            $profile = $this->agentIssuanceProfile($verifiedAgent);
+        } elseif ($this->risk !== null) {
             if ($riskSession === null) {
                 $riskSession = $this->continuityCookie?->mint();
                 $mintedCookie = $riskSession !== null;
@@ -1389,9 +1639,10 @@ final class ChallengeController
 
         // Per-scope issuance cap: when
         // risk.max_challenges_per_scope_per_minute is configured, the
-        // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
-        // counter (INCR + EXPIRE 60 in one Lua script) refuses 429
-        // `SCOPE_LIMITED` beyond the cap. The check consumes the slot it
+        // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:sw sliding-window
+        // log (a sorted set pruned to the last 60 s in one Lua script)
+        // refuses 429 `SCOPE_LIMITED` beyond the cap. The check consumes
+        // the slot it
         // admits, so a denial below is not double-counted. The quota keys
         // on the server-owned scope identity (the risk policy's canonical
         // scope id), never on the raw scope string; when allowed_scopes is
@@ -1415,7 +1666,7 @@ final class ChallengeController
                 // (503, private envelope; the detail goes to the server log
                 // only). Never silently fall back to per-host wall clocks
                 // around window boundaries.
-                error_log(sprintf('kiwicaptcha: scope issuance cap clock unavailable: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: scope issuance cap clock unavailable: {message}', ['message' => $e->getMessage()]);
                 $this->releaseChain($chainId, $chainOwner);
 
                 return $this->privateJson(
@@ -1504,9 +1755,11 @@ final class ChallengeController
             // the hostname stays null.
             $hostname = $this->expectedOrigin?->host();
             // Issuance always uses the canonical client IP. A per-sitekey
-            // ttl_secs override mints through a TTL-variant issuer,
-            // {@see self::issuerForTtl()}, so the signed lifetime carries
-            // the override. The adaptive-risk surface (risk wired) arms
+            // ttl_secs override mints through a TTL-variant issuer, and a
+            // central policy bump mints through an epoch-variant issuer,
+            // {@see self::issuerForIssuance()}: the signed lifetime
+            // carries the override and the record carries the effective
+            // epoch, so new challenges verify immediately. The adaptive-risk surface (risk wired) arms
             // the authenticated decoy: the issuer picks a random
             // pool name per issuance, {@see Issuer::issueWithDecoyField()},
             // signs it into the canonical payload (protocol v3 record) and
@@ -1516,11 +1769,16 @@ final class ChallengeController
             // invariant, {@see self::protocolV3EmissionEnabled()}: the
             // operator's writer switch (risk.decoy_v3_enabled) must be
             // true AND the confirmed central min_protocol_version floor
-            // must be >= 3; otherwise issuance emits protocol v2,
-            // byte-identical to the pre-decoy format, so a new node can
+            // must be >= 3; otherwise issuance emits protocol v2 with no
+            // decoy extension segment, so a new node can
             // never emit a challenge a parent-revision verifier rejects.
-            $issuer = $this->issuerForTtl($ttlSecs);
-            $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
+            $issuer = $this->issuerForIssuance($ttlSecs);
+            // A verified agent is never armed with the browser-facing
+            // dimensions: the decoy and the execution program are
+            // widget-driver surfaces a machine client does not run, so
+            // the direct issue stays on the plain protocol shape at the
+            // agent's tier.
+            $armDecoy = $verifiedAgent === null && $this->risk !== null && $this->protocolV3EmissionEnabled();
             // The ExecutionChallengeV1 seam: the dimension is armed when
             // the risk.execution_challenge gate is on AND a risk trigger
             // passes AND the confirmed central floor is >= 4, see
@@ -1537,7 +1795,7 @@ final class ChallengeController
             // confirmed central min_execution_version floor and the
             // generator maximum). An older client never advertises and
             // receives version 1.
-            $armExecution = $this->executionArmingEnabled($executionRiskDecision);
+            $armExecution = $verifiedAgent === null && $this->executionArmingEnabled($executionRiskDecision);
             $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
             // The server-owned required execution tier: the client
             // capability declaration is never an authority over the
@@ -1548,8 +1806,14 @@ final class ChallengeController
             // outcome (code below) — never downgraded to the weaker
             // version-1 grammar, never issued an unarmed challenge.
             // The refusal happens before any admission slot or record
-            // commit, so nothing is minted or held.
+            // commit, but a chain stage-2 request may already hold the
+            // chain reservation taken by prepareStageTwo(); release it
+            // exactly like every other post-reservation refusal so the
+            // ticket stays reusable and the chain is not stuck busy for
+            // the reservation lease.
             if ($armExecution && $executionVersion < $this->executionRequiredVersion) {
+                $this->releaseChain($chainId, $chainOwner);
+
                 return $this->privateJson(
                     ['error' => ['code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED', 'message' => sprintf('This deployment requires the execution version %d client; reload the page or upgrade the widget.', $this->executionRequiredVersion)]],
                     Response::HTTP_UNPROCESSABLE_ENTITY,
@@ -1558,9 +1822,20 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
+            // The rsw identity emission capability: the writer switch
+            // (kiwi_captcha.rsw_identity) AND the confirmed central
+            // feature floor min_protocol_version >=
+            // {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}, see
+            // {@see self::rswIdentityEmissionCap()}. The core Issuer
+            // arms the identity only when this ceiling reaches the
+            // feature version; when the gate is unmet the ceiling stays
+            // at the capability-free base, so issuance keeps the legacy
+            // identityless v2 shape and no pre-v5 verifier ever sees the
+            // identity-bearing canonical. Inert for a non-rsw algorithm.
+            $maxProtocolVersionToEmit = $this->rswIdentityEmissionCap();
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion)
-                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion, maxProtocolVersionToEmit: $maxProtocolVersionToEmit)
+                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy, maxProtocolVersionToEmit: $maxProtocolVersionToEmit);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random
@@ -1587,10 +1862,14 @@ final class ChallengeController
             // admitted outstanding slot is returned and the reservation
             // released. The mint may have failed before the $challenge
             // variable was assigned; the nullable parameter handles both.
+            // The exception text is internal detail (a backend may name a
+            // filesystem path, a class or a configuration value): it
+            // reaches the server log only, never the response body.
+            $this->logGate('kiwicaptcha: challenge issuance refused with an invalid-argument fault: {message}', ['message' => $e->getMessage()]);
             $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
-                ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
+                ['error' => ['code' => 'INVALID_SCOPE', 'message' => 'The challenge request carries an invalid scope, binding or metadata value.']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
                 $request,
                 $riskSession,
@@ -1604,7 +1883,7 @@ final class ChallengeController
             // envelope and an opaque message. The admitted outstanding
             // slot is returned and the reserved chain is released, so the
             // ticket is reusable.
-            error_log(sprintf('kiwicaptcha: challenge issuance failed the replica-wait barrier: %s', $e->getMessage()));
+            $this->logGate('kiwicaptcha: challenge issuance failed the replica-wait barrier: {message}', ['message' => $e->getMessage()]);
             // The mint's WAIT can fail before the $challenge variable is
             // ever assigned; the nullable parameter handles both phases.
             $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
@@ -1628,7 +1907,7 @@ final class ChallengeController
             // variable is ever assigned — the nullable parameter tolerates
             // the unassigned state, so the error-handling path itself can
             // never fault.
-            error_log(sprintf('kiwicaptcha: challenge issuance backend failure: %s', $e->getMessage()));
+            $this->logGate('kiwicaptcha: challenge issuance backend failure: {message}', ['message' => $e->getMessage()]);
             $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
@@ -1674,7 +1953,7 @@ final class ChallengeController
                 // released, and the request answers the private
                 // structured 503 — never an uncaught exception and never
                 // a minted-but-never-handed-out record.
-                error_log(sprintf('kiwicaptcha: outstanding admission failed for nonce_id=%s: %s', $this->nonceId($challenge->nonce), $e->getMessage()));
+                $this->logGate('kiwicaptcha: outstanding admission failed for nonce_id={nonce_id}: {message}', ['nonce_id' => $this->nonceId($challenge->nonce), 'message' => $e->getMessage()]);
                 $this->discardChallenge($challenge);
                 $this->outstanding?->abortedBeforeHandoff($challenge->nonce);
                 $this->releaseChain($chainId, $chainOwner);
@@ -1736,7 +2015,7 @@ final class ChallengeController
                     max(60, $challenge->ttlSecs) + $this->metadataRetentionMarginSecs,
                 );
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: siteverify metadata store failed for nonce_id=%s: %s', $this->nonceId($challenge->nonce), $e->getMessage()));
+                $this->logGate('kiwicaptcha: siteverify metadata store failed for nonce_id={nonce_id}: {message}', ['nonce_id' => $this->nonceId($challenge->nonce), 'message' => $e->getMessage()]);
                 $this->discardChallenge($challenge);
                 $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
@@ -1777,7 +2056,7 @@ final class ChallengeController
         $stage2IssuedCommitted = false;
         try {
             if ($chainId !== null) {
-                $chainResponse = $this->markStage2Issued($challenge, $chainId, $chainOwner, $clientIp, $outstandingAdmissionHeld);
+                $chainResponse = $this->markStage2Issued($challenge, $chainId, $chainOwner, $clientIp, $outstandingAdmissionHeld, $request, $riskSession, $mintedCookie);
                 if ($chainResponse !== null) {
                     return $chainResponse;
                 }
@@ -1792,8 +2071,25 @@ final class ChallengeController
             // risk.nonce_to_decision_ttl_secs).
             $this->issuanceCounter?->record();
             if ($this->risk !== null && $riskAssessed && $decision !== null) {
-                $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
-                $this->risk->attachDecisionForNonce($challenge->nonce, $decision->decisionId);
+                // Issue-debt feedback and the nonce->decision pairing are
+                // evidence on top of an already-minted, already-admitted
+                // challenge: a risk-Redis blip must never discard the
+                // challenge (rollback) or escape as a raw 500. The
+                // pairing is best-effort too; losing it degrades only
+                // later confirmation attribution.
+                try {
+                    $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
+                } catch (\Throwable $riskFailure) {
+                    $this->logGate('kiwicaptcha: challengeIssued feedback failed for nonce_id={nonce_id}: {message}', [
+                        'nonce_id' => substr(hash('sha256', $challenge->nonce), 0, 16),
+                        'message' => $riskFailure->getMessage(),
+                    ]);
+                }
+                try {
+                    $this->risk->attachDecisionForNonce($challenge->nonce, $decision->decisionId);
+                } catch (\Throwable) {
+                    // Evidence only.
+                }
             }
         } catch (\Throwable $e) {
             if ($stage2IssuedCommitted) {
@@ -1804,7 +2100,7 @@ final class ChallengeController
                 // 503 tells the client to retry (the retry recovers the
                 // same issued challenge, byte-identical, with no re-mint
                 // and no re-admission).
-                error_log(sprintf('kiwicaptcha: post-commit issuance feedback failed for nonce_id=%s: %s', substr(hash('sha256', $challenge->nonce), 0, 16), $e->getMessage()));
+                $this->logGate('kiwicaptcha: post-commit issuance feedback failed for nonce_id={nonce_id}: {message}', ['nonce_id' => substr(hash('sha256', $challenge->nonce), 0, 16), 'message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1818,15 +2114,28 @@ final class ChallengeController
             // not handed out, so the whole uncommitted issuance attempt is
             // rolled back (the minted record discarded, the admitted
             // outstanding slot returned, the chain reservation released);
-            // then the failure propagates (the caller maps it to the
-            // closed response).
+            // then the private structured 503 answers — never a raw 500.
+            // The bundle has no kernel.exception listener, so a propagated
+            // exception would reach the client as an unhandled error
+            // instead of the documented retryable envelope.
             $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
-            throw $e;
+            $this->logGate('kiwicaptcha: pre-commit issuance failed for nonce_id={nonce_id}: {message}', [
+                'nonce_id' => substr(hash('sha256', $challenge->nonce), 0, 16),
+                'message' => $e->getMessage(),
+            ]);
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
         }
 
         // The handoff body is serialized from the stored record through
         // the single canonical issuance-response serializer,
-        // {@see self::issuanceResponseFromRecord()}: the record was
+        // issuanceResponseFromRecord(): the record was
         // durably stored by the issuer (the mint's storage write ran
         // before the commit point above), and the recovery paths
         // rebuild the response from that same stored record, so the
@@ -1853,7 +2162,7 @@ final class ChallengeController
             try {
                 $storedRecord = $this->storage->find($challenge->nonce);
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: stored-record read failed before handoff for nonce_id=%s: %s', $this->nonceId($challenge->nonce), $e->getMessage()));
+                $this->logGate('kiwicaptcha: stored-record read failed before handoff for nonce_id={nonce_id}: {message}', ['nonce_id' => $this->nonceId($challenge->nonce), 'message' => $e->getMessage()]);
             }
             if ($storedRecord === null) {
                 if (!$stage2IssuedCommitted) {
@@ -1872,16 +2181,42 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            $challengeData = self::issuanceResponseFromRecord($storedRecord);
+            $challengeData = $this->issuanceResponseOrUnavailable($storedRecord, $request, $riskSession, $mintedCookie);
+            if ($challengeData instanceof JsonResponse) {
+                return $challengeData;
+            }
         }
 
         // Handoff: the challenge is durably issued and stored, the metadata
         // identity persisted, and (stage 2) the chain durably transitioned
         // to issued(stage2Nonce). The outstanding slot is now the client's
-        // responsibility and is not rolled back.
+        // responsibility and is not rolled back. A verified agent's
+        // response additionally carries the machine-client markers: the
+        // agent identity, its price tier and the explicit
+        // widget-eligibility flag off (the direct issue — the challenge
+        // is meant for the agent's own solver, never for a widget), so
+        // the client can never mistake its path for the browser flow.
         $outstandingAdmissionHeld = false;
+        if ($verifiedAgent !== null) {
+            $challengeData['agent'] = $verifiedAgent->name();
+            $challengeData['price_tier'] = $verifiedAgent->priceTier()->value;
+            $challengeData['widget_eligible'] = false;
+        }
 
         return $this->privateJson($challengeData, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+    }
+
+    /**
+     * The issuance profile of a verified agent: the interim tier
+     * pricing of the bundle (the tier's documented rung, issued
+     * exactly as the tier names it and never clamped to the widget
+     * baseline). The core pricing stage of the risk packages will
+     * supersede this mapping when it lands; until then this is the
+     * price a verified agent is issued and billed at.
+     */
+    private function agentIssuanceProfile(\BelConsulting\KiwiCaptchaBundle\Security\Agents\VerifiedAgentRequest $agent): \KiwiCaptcha\ChallengeProfile
+    {
+        return $agent->priceProfile();
     }
 
     /**
@@ -1919,7 +2254,10 @@ final class ChallengeController
      * anti-stockpiling bypass. The per-source limiter is the
      * anti-stockpiling layer's own cancellation window; see
      * {@see OutstandingChallenges::cancellationAdmission()}. When that
-     * layer is not wired, the endpoint stays bounded by the body ceiling,
+     * layer is not wired (risk disabled), the endpoint's own dedicated
+     * cancellation limiter ({@see $cancellationLimiter}) applies the same
+     * bounded per-source + deployment-global sliding-window shape. The
+     * endpoint is therefore never left bounded only by the body ceiling,
      * the nonce shape and the origin checks.
      */
     public function cancel(Request $request): JsonResponse
@@ -1991,7 +2329,21 @@ final class ChallengeController
         }
 
         // Narrow HTTP: the cancellation POST is a JSON document.
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $rawContentType = (string) $request->headers->get('Content-Type', '');
+        // A raw control byte is not optional whitespace: reject it before
+        // the split and trim below can launder a padded value into a
+        // valid media type. A comma is the collapsed-duplicate marker
+        // (two occurrences folded into one field value): the split on
+        // ';' below would otherwise accept "application/json; c=1,
+        // text/plain" as application/json while another layer reads a
+        // two-type list. No accepted media type uses a comma parameter.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1 || str_contains($rawContentType, ',')) {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
+                Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+        $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
         if ($contentType !== '' && $contentType !== 'application/json') {
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
@@ -2125,7 +2477,7 @@ final class ChallengeController
             try {
                 $admission = $this->outstanding->cancellationAdmission($clientIp);
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: cancellation admission failed: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: cancellation admission failed: {message}', ['message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Cancellation is temporarily unavailable. Try again later.']],
@@ -2141,6 +2493,40 @@ final class ChallengeController
                     ? 'Cancellation is temporarily unavailable for this deployment. Try again later.'
                     : 'Too many cancellation requests from this address. Try again later.';
 
+                // The cancellation endpoint never mints or re-sets the
+                // continuity cookie: the 429 carries no session.
+                return $this->privateJson(
+                    ['error' => ['code' => $code, 'message' => $message]],
+                    Response::HTTP_TOO_MANY_REQUESTS,
+                );
+            }
+        } elseif ($this->cancellationLimiter !== null) {
+            // No anti-stockpiling layer (risk disabled), so its
+            // cancellationAdmission window does not exist: the same
+            // bounded per-source + deployment-global sliding-window shape
+            // runs through the dedicated cancellation limiter instead
+            // (its own key namespace, so it never consumes issuance
+            // budget). The same fail-closed boundary applies: a limiter
+            // outage refuses with the retryable 503 rather than letting
+            // an unbounded cancellation stream through.
+            try {
+                $admission = $this->cancellationLimiter->check($clientIp);
+            } catch (\Throwable $e) {
+                $this->logGate('kiwicaptcha: cancellation admission failed: {message}', ['message' => $e->getMessage()]);
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Cancellation is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                );
+            }
+            if ($admission !== 1) {
+                $code = $admission === -1 ? 'GLOBAL_CANCELLATION_RATE_LIMITED' : 'CANCELLATION_RATE_LIMITED';
+                $message = $admission === -1
+                    ? 'Cancellation is temporarily unavailable for this deployment. Try again later.'
+                    : 'Too many cancellation requests from this address. Try again later.';
+
+                // The cancellation endpoint never mints or re-sets the
+                // continuity cookie: the 429 carries no session.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
@@ -2183,7 +2569,7 @@ final class ChallengeController
             try {
                 $result = $this->storage->cancel($nonce);
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: challenge cancellation failed for nonce_id=%s: %s', $this->nonceId($nonce), $e->getMessage()));
+                $this->logGate('kiwicaptcha: challenge cancellation failed for nonce_id={nonce_id}: {message}', ['nonce_id' => $this->nonceId($nonce), 'message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge cancellation is temporarily unavailable. Try again later.']],
@@ -2207,7 +2593,7 @@ final class ChallengeController
                 try {
                     $this->risk->challengeCancelled($cancelledScope, $clientIp, $riskSession, $nonce);
                 } catch (\Throwable $e) {
-                    error_log(sprintf('kiwicaptcha: ChallengeCancelled feedback failed for nonce_id=%s: %s', $this->nonceId($nonce), $e->getMessage()));
+                    $this->logGate('kiwicaptcha: ChallengeCancelled feedback failed for nonce_id={nonce_id}: {message}', ['nonce_id' => $this->nonceId($nonce), 'message' => $e->getMessage()]);
                 }
             }
 
@@ -2284,20 +2670,56 @@ final class ChallengeController
     }
 
     /**
-     * The issuer to mint with for a given challenge lifetime: the wired
-     * issuer when $ttlSecs is null or equals its Config's TTL, otherwise a
-     * TTL-variant issuer built once per TTL,
-     * {@see self::buildTtlVariantIssuer()}. The core signs the lifetime
-     * from the issuer Config, so the per-sitekey override
-     * (risk.sitekeys.<sitekey>.ttl_secs) requires a variant issuer.
+     * The effective security-policy epoch of this request:
+     * max(configured, central), refreshed through the monitor within its
+     * short cache window. Without a monitor the configured
+     * risk.policy_version is authoritative.
      */
-    private function issuerForTtl(?int $ttlSecs): Issuer
+    private function effectivePolicyEpoch(): int
     {
-        if ($ttlSecs === null || $ttlSecs === $this->issuer->config()->ttlSecs) {
+        return $this->epochMonitor?->currentEpoch() ?? $this->policyVersion;
+    }
+
+    /**
+     * The issuer to mint with, carrying the effective policy epoch and
+     * the requested challenge lifetime: the base issuer when its Config
+     * already stamps that epoch and TTL, otherwise a variant built once
+     * per (TTL, epoch) pair. A central min_policy_epoch bump then
+     * revokes only older challenges: the record minted here carries the
+     * effective epoch and verifies immediately, instead of being stamped
+     * with the stale configured value and failing equality on the next
+     * verification.
+     */
+    private function issuerForIssuance(?int $ttlSecs): Issuer
+    {
+        $base = $this->issuer->config();
+        $epoch = $this->effectivePolicyEpoch();
+        if (($ttlSecs === null || $ttlSecs === $base->ttlSecs) && $epoch === $base->policyVersion) {
             return $this->issuer;
         }
+        $ttl = $ttlSecs ?? $base->ttlSecs;
 
-        return $this->ttlOverrideIssuers[$ttlSecs] ??= $this->buildTtlVariantIssuer($ttlSecs);
+        return $this->issuanceVariants[$ttl.':'.$epoch] ??= $this->buildIssuanceVariantIssuer($ttl, $epoch);
+    }
+
+    /**
+     * An issuance-variant Issuer: the wired issuer's Config rebuilt with
+     * only ttlSecs and policyVersion replaced, issued against the same
+     * storage and carrying the same deployment state (clock, region, rsw
+     * trapdoor keyring, legacy-identity migration mode).
+     *
+     * The core Issuer stamps both values from its Config, which is
+     * readonly, so this seam rebuilds the Config through
+     * Config::withOverrides() and hands it to Issuer::withConfig(). The
+     * core constructor is the one authoritative copy of the issuer's
+     * own storage, clock, region, keyring and legacy mode, so the
+     * variant can never drift from the wired issuer's deployment state.
+     */
+    private function buildIssuanceVariantIssuer(int $ttlSecs, int $policyVersion): Issuer
+    {
+        $config = $this->issuer->config()->withOverrides(ttlSecs: $ttlSecs, policyVersion: $policyVersion);
+
+        return $this->issuer->withConfig($config);
     }
 
     /**
@@ -2440,7 +2862,7 @@ final class ChallengeController
                 );
             }
             if ($state === 'issued') {
-                $inspection = $this->inspectIssuedStage2($chainId, (string) $requirement?->stage2Nonce, $request, $riskSession, $mintedCookie);
+                $inspection = $this->inspectIssuedStage2($chainId, (string) $requirement?->stage2Nonce, $requirement?->requiredAction, $request, $riskSession, $mintedCookie);
                 if ($inspection !== null) {
                     return $inspection;
                 }
@@ -2508,7 +2930,7 @@ final class ChallengeController
                     try {
                         $requirement = $this->chainTickets->requirementFor($chainId);
                     } catch (\Throwable $e) {
-                        error_log(sprintf('kiwicaptcha: chain state read failed: %s', $e->getMessage()));
+                        $this->logGate('kiwicaptcha: chain state read failed: {message}', ['message' => $e->getMessage()]);
 
                         return $this->privateJson(
                             ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2578,7 +3000,7 @@ final class ChallengeController
      * Returns null when the chain was rearmed and the pipeline proceeds to
      * the reservation and mint.
      */
-    private function inspectIssuedStage2(string $chainId, string $stage2Nonce, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
+    private function inspectIssuedStage2(string $chainId, string $stage2Nonce, ?\KiwiCaptcha\Risk\RiskAction $requiredAction, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
         if ($this->storage === null) {
             // No challenge storage to inspect: the issued challenge's state
@@ -2602,7 +3024,7 @@ final class ChallengeController
             try {
                 $runtime = $this->storage->runtimeState($stage2Nonce);
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: stage-2 challenge inspection failed: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: stage-2 challenge inspection failed: {message}', ['message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2626,12 +3048,59 @@ final class ChallengeController
             if ($runtime->kind === \KiwiCaptcha\ChallengeRuntimeStateKind::Pending) {
                 $record = $runtime->record;
                 if ($record !== null && $this->now() < $record->expiresAt) {
+                    // Defense in depth: a requirement raise transitions an
+                    // issued chain to the terminal step-up state, but a
+                    // legacy or raced record must still never be recovered
+                    // when its actual strength cannot satisfy the chain's
+                    // current requirement. The stale nonce is retired
+                    // (pending -> cancelled) and the chain rearmed so the
+                    // pipeline mints at the current floor — never handed
+                    // out at the weaker strength.
+                    if ($requiredAction !== null
+                        && $this->risk !== null
+                        && !$this->risk->recordSatisfies($record, $requiredAction)
+                    ) {
+                        $this->logGate('kiwicaptcha: issued stage-2 record does not satisfy the chain requirement; retiring and rearming');
+                        $cancelled = $this->storage instanceof \KiwiCaptcha\CancellableStorageInterface ? $this->storage->cancel($stage2Nonce) : null;
+                        if ($cancelled !== null && ($cancelled->state === 'cancelled-now' || $cancelled->state === 'cancelled')) {
+                            $this->outstanding?->abortedBeforeHandoff($stage2Nonce);
+
+                            return $this->rearmIssuedStage2($chainId, $stage2Nonce, $request, $riskSession, $mintedCookie);
+                        }
+                        // The retirement lost the race (the record was
+                        // consumed or is no longer cancellable): fail
+                        // closed rather than recover a weak record.
+                        return $this->privateJson(
+                            ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                            Response::HTTP_SERVICE_UNAVAILABLE,
+                            $request,
+                            $riskSession,
+                            $mintedCookie,
+                        );
+                    }
                     // Pending and still valid: recover the exact issuance
                     // response (no re-mint, no re-admission). Exactly one
                     // fence per store before the hand-out.
-                    $this->confirmRecoveryBarriers();
+                    try {
+                        $this->confirmRecoveryBarriers();
+                    } catch (\Throwable $fenceFailure) {
+                        $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-                    return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                        return $this->privateJson(
+                            ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                            Response::HTTP_SERVICE_UNAVAILABLE,
+                            $request,
+                            $riskSession,
+                            $mintedCookie,
+                        );
+                    }
+
+                    $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+                    if ($builtResponse instanceof JsonResponse) {
+                        return $builtResponse;
+                    }
+
+                    return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
                 // margin): the prior nonce must become provably
@@ -2644,7 +3113,7 @@ final class ChallengeController
                 try {
                     $cancelled = $this->storage instanceof \KiwiCaptcha\CancellableStorageInterface ? $this->storage->cancel($stage2Nonce) : null;
                 } catch (\Throwable $e) {
-                    error_log(sprintf('kiwicaptcha: stage-2 retirement failed: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: stage-2 retirement failed: {message}', ['message' => $e->getMessage()]);
 
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2713,7 +3182,7 @@ final class ChallengeController
         try {
             $record = $this->storage->find($stage2Nonce);
         } catch (\Throwable $e) {
-            error_log(sprintf('kiwicaptcha: stage-2 challenge inspection failed: %s', $e->getMessage()));
+            $this->logGate('kiwicaptcha: stage-2 challenge inspection failed: {message}', ['message' => $e->getMessage()]);
 
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2735,9 +3204,26 @@ final class ChallengeController
             // Pending: the issued challenge is still live, so recover the
             // exact issuance response (no re-mint, no re-admission). One
             // fence before the hand-out.
-            $this->confirmRecoveryBarriers();
+            try {
+                $this->confirmRecoveryBarriers();
+            } catch (\Throwable $fenceFailure) {
+                $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-            return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+
+            $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+            if ($builtResponse instanceof JsonResponse) {
+                return $builtResponse;
+            }
+
+            return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
         }
         $result = $consumed->consumedResult;
         if ($result === null) {
@@ -2764,7 +3250,7 @@ final class ChallengeController
         try {
             $rearmed = $this->chainTickets->rearmIssued($chainId, $stage2Nonce);
         } catch (\Throwable $e) {
-            error_log(sprintf('kiwicaptcha: chain rearm failed: %s', $e->getMessage()));
+            $this->logGate('kiwicaptcha: chain rearm failed: {message}', ['message' => $e->getMessage()]);
 
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2793,7 +3279,7 @@ final class ChallengeController
      * metadata identity). The retry reads the issued challenge record
      * through the storage find by the state's stage2Nonce, then
      * serializes it through the single canonical issuance-response
-     * serializer, {@see self::issuanceResponseFromRecord()}, the same
+     * serializer, issuanceResponseFromRecord(), the same
      * function the fresh handoff uses. The recovered response is
      * byte-identical with the original request's, with no re-mint, no
      * re-admission and no re-consume. An issued or verified state never
@@ -2816,9 +3302,26 @@ final class ChallengeController
             return null;
         }
 
-        $this->confirmRecoveryBarriers();
+        try {
+            $this->confirmRecoveryBarriers();
+        } catch (\Throwable $fenceFailure) {
+            $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-        return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
+
+        $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+        if ($builtResponse instanceof JsonResponse) {
+            return $builtResponse;
+        }
+
+        return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**
@@ -2841,14 +3344,45 @@ final class ChallengeController
      *    this nonce: the minted record is discarded, the slot returned,
      *    the reservation released (503).
      */
-    private function markStage2Issued(\KiwiCaptcha\Challenge $challenge, string $chainId, string $chainOwner, string $clientIp, bool $outstandingAdmissionHeld): ?JsonResponse
+    private function markStage2Issued(\KiwiCaptcha\Challenge $challenge, string $chainId, string $chainOwner, string $clientIp, bool $outstandingAdmissionHeld, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
+        // The issuance-time requirement check: a concurrent stage-1 solve
+        // for the same transaction may have raised the chain's requirement
+        // while this challenge was minting from an older snapshot. The
+        // minted challenge must satisfy the chain's current requirement
+        // before it is installed; a weaker one is discarded and the
+        // client retries, which mints at the current floor. The store's
+        // reservation-generation CAS still guards the write itself, and a
+        // raise after the write transitions the chain to the terminal
+        // step-up state, so no window leaves a weak challenge redeemable.
+        try {
+            $current = $this->chainTickets->requirementFor($chainId);
+        } catch (\Throwable) {
+            $current = null;
+        }
+        if ($current !== null
+            && \in_array($current->state, ['available', 'reserved'], true)
+            && $this->risk !== null
+            && !$this->risk->challengeSatisfies(\BelConsulting\KiwiCaptchaBundle\Risk\ChallengeStrength::fromChallenge($challenge), $current->requiredAction)
+        ) {
+            $this->logGate('kiwicaptcha: the chain requirement rose while the stage-2 challenge was minting; discarding the weaker challenge');
+            $this->discardChallenge($challenge);
+            $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
         try {
             $result = $this->chainTickets->markIssued($chainId, $chainOwner, $challenge->nonce);
         } catch (\Throwable $e) {
             // Lost reply: the transition may have happened, so read the
             // chain state before touching anything.
-            error_log(sprintf('kiwicaptcha: chain issuance transition failed: %s', $e->getMessage()));
+            $this->logGate('kiwicaptcha: chain issuance transition failed: {message}', ['message' => $e->getMessage()]);
             try {
                 $current = $this->chainTickets->requirementFor($chainId);
             } catch (\Throwable) {
@@ -2862,6 +3396,9 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
             if (($current->state === 'issued' || $current->state === 'verified') && $current->stage2Nonce === $challenge->nonce) {
@@ -2878,11 +3415,14 @@ final class ChallengeController
                 try {
                     $this->confirmRecoveryBarriers();
                 } catch (\Throwable $fenceFailure) {
-                    error_log(sprintf('kiwicaptcha: stage-2 recovery fence failed after the issuance transition: %s', $fenceFailure->getMessage()));
+                    $this->logGate('kiwicaptcha: stage-2 recovery fence failed after the issuance transition: {message}', ['message' => $fenceFailure->getMessage()]);
 
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
                     );
                 }
 
@@ -2899,6 +3439,9 @@ final class ChallengeController
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
                     );
                 }
             } else {
@@ -2910,6 +3453,9 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
         }
@@ -2930,16 +3476,20 @@ final class ChallengeController
                 try {
                     $this->confirmRecoveryBarriers();
                 } catch (\Throwable $fenceFailure) {
-                    error_log(sprintf('kiwicaptcha: stage-2 recovery fence failed on the same-state replay: %s', $fenceFailure->getMessage()));
+                    $this->logGate('kiwicaptcha: stage-2 recovery fence failed on the same-state replay: {message}', ['message' => $fenceFailure->getMessage()]);
 
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
                     );
                 }
 
                 return null;
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Conflict:
+            case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::StaleRequirement:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::NotOwner:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Missing:
                 // Positively not issued with this nonce (the chain holds a
@@ -2954,6 +3504,9 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
         }
     }
@@ -2965,7 +3518,7 @@ final class ChallengeController
      * fresh stage-2 challenge. Recovery of a recoverable issued chain
      * instead serializes the stored record through the single canonical
      * issuance-response serializer,
-     * {@see self::issuanceResponseFromRecord()}, the same function the
+     * issuanceResponseFromRecord(), the same function the
      * fresh handoff uses — the recovery body is byte-identical with the
      * original response by construction.
      *
@@ -2978,7 +3531,7 @@ final class ChallengeController
         try {
             $rearmed = $this->chainTickets->rearmIssued($chainId, $stage2Nonce);
         } catch (\Throwable $e) {
-            error_log(sprintf('kiwicaptcha: chain rearm failed: %s', $e->getMessage()));
+            $this->logGate('kiwicaptcha: chain rearm failed: {message}', ['message' => $e->getMessage()]);
 
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -3030,7 +3583,7 @@ final class ChallengeController
             try {
                 $dispositionRecord = $this->postSolveDispositionStore->read($stage2Nonce);
             } catch (\Throwable $e) {
-                error_log(sprintf('kiwicaptcha: stage-2 disposition read failed: %s', $e->getMessage()));
+                $this->logGate('kiwicaptcha: stage-2 disposition read failed: {message}', ['message' => $e->getMessage()]);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -3066,7 +3619,7 @@ final class ChallengeController
                     // Lost reply: read the state and confirm the exact
                     // nonce; do not return a final pass while the
                     // obligation may be uncleared.
-                    error_log(sprintf('kiwicaptcha: chain verification transition failed: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: chain verification transition failed: {message}', ['message' => $e->getMessage()]);
                     try {
                         $current = $this->chainTickets->requirementFor($chainId);
                     } catch (\Throwable) {
@@ -3097,9 +3650,26 @@ final class ChallengeController
                     );
                 }
 
-                $this->confirmRecoveryBarriers();
+                try {
+                    $this->confirmRecoveryBarriers();
+                } catch (\Throwable $fenceFailure) {
+                    $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-                return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                    return $this->privateJson(
+                        ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                        Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                }
+
+                $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+                if ($builtResponse instanceof JsonResponse) {
+                    return $builtResponse;
+                }
+
+                return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
             case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp:
                 // The final disposition is StepUp: transition to the
                 // terminal step_up_required (the obligation mapping is
@@ -3108,7 +3678,7 @@ final class ChallengeController
                 try {
                     $terminal = $this->chainTickets->markStepUpRequired($chainId, $stage2Nonce);
                 } catch (\Throwable $e) {
-                    error_log(sprintf('kiwicaptcha: chain step-up transition failed: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: chain step-up transition failed: {message}', ['message' => $e->getMessage()]);
                     try {
                         $current = $this->chainTickets->requirementFor($chainId);
                     } catch (\Throwable) {
@@ -3152,7 +3722,7 @@ final class ChallengeController
                 try {
                     $terminal = $this->chainTickets->markDenied($chainId, $stage2Nonce);
                 } catch (\Throwable $e) {
-                    error_log(sprintf('kiwicaptcha: chain denial transition failed: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: chain denial transition failed: {message}', ['message' => $e->getMessage()]);
                     try {
                         $current = $this->chainTickets->requirementFor($chainId);
                     } catch (\Throwable) {
@@ -3219,59 +3789,52 @@ final class ChallengeController
     }
 
     /**
-     * The ONE canonical issuance-response serializer of the controller.
-     * It emits the client-facing challenge response key set in the
-     * exact order Challenge::toArray() uses: nonce, challenge, salt,
-     * algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
-     * prefix. The authenticated decoy_field follows when the record
-     * carries one, then the execution_program when the record carries
-     * one. execution_version and execution_commitment are stored-record
-     * canonical fields and never appear on the client-facing surface.
-     *
-     * Both handoff paths serialize through this function. The fresh
-     * handoff of {@see self::challenge()} serializes the stored record
-     * after the issuance commit. Every stage-2 recovery path does too:
-     * {@see self::inspectIssuedStage2()},
-     * {@see self::recoverIssuedResponse()} and
-     * {@see self::resolveConsumedStage2Disposition()}. The handoff
-     * body and every later recovery body of the same challenge are
-     * therefore byte-identical by construction. The response can never
-     * carry an execution_program or decoy_field the stored record does
-     * not carry, and a recovery can never drop one the record carries.
-     * Each value comes from the record, never a nonce-derived
-     * reconstruction.
+     * The ONE canonical issuance-response serializer of the controller:
+     * the issuer reconstructs the client-facing Challenge from the stored
+     * record (including the algorithm-specific public material — the rsw
+     * modulus on an rsw deployment) and Challenge::toArray() owns the key
+     * set and order. The controller no longer duplicates that key set,
+     * so a future response field can never silently go missing on the
+     * stored-record handoff, the issued-stage-2 recovery or the
+     * lost-response reconstruction.
      */
-    private static function issuanceResponseFromRecord(\KiwiCaptcha\ChallengeRecord $record): array
+    /**
+     * Serialize a stored record or answer the private structured 503.
+     * issuanceResponseFromRecord() throws when the record cannot be
+     * rebuilt from storage. This bundle has no kernel.exception
+     * listener, so an uncaught throw would reach the client as a raw 500
+     * on a recovery path instead of the retryable envelope.
+     *
+     * @return array<string,mixed>|JsonResponse
+     */
+    private function issuanceResponseOrUnavailable(\KiwiCaptcha\ChallengeRecord $record, Request $request, ?string $riskSession, bool $mintedCookie): array|JsonResponse
     {
-        $data = $record->toArray();
-        $response = [
-            'nonce' => $data['nonce'],
-            'challenge' => $data['challenge'],
-            'salt' => $data['salt'],
-            'algorithm' => $data['algorithm'],
-            'mKib' => $data['m_kib'],
-            't' => $data['t'],
-            'p' => $data['p'],
-            'targetBits' => $data['target_bits'],
-            'ttlSecs' => $data['expires_at'] - $data['issued_at'],
-            'minDurationMs' => $data['min_duration_ms'],
-            'prefix' => $data['prefix'],
-        ];
-        // The authenticated decoy name of the record: the original
-        // response carried exactly this value (the issuer's per-issuance
-        // pool pick, signed into the canonical payload).
-        if ($record->decoyField !== null) {
-            $response['decoy_field'] = $record->decoyField;
+        try {
+            return $this->issuanceResponseFromRecord($record);
+        } catch (\RuntimeException $e) {
+            $this->logGate('kiwicaptcha: stored challenge record could not be serialized: {message}', ['message' => $e->getMessage()]);
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
         }
-        // The armed execution program of the record: the original
-        // response carried exactly these bytes, so a stage-2 recovery of
-        // an execution-armed challenge stays solvable (the stored record
-        // and the response can never diverge).
-        if ($record->executionProgram !== null) {
-            $response['execution_program'] = $record->executionProgram;
+    }
+
+    private function issuanceResponseFromRecord(\KiwiCaptcha\ChallengeRecord $record): array
+    {
+        $challenge = $this->issuer?->responseFromRecord($record);
+        if ($challenge === null) {
+            // The configured algorithm cannot serve this record (a
+            // foreign family, an rsw record without the configured
+            // modulus): never hand out an unsolvable challenge.
+            throw new \RuntimeException('the stored challenge record cannot be reconstructed by the configured issuer');
         }
 
-        return $response;
+        return $challenge->toArray();
     }
 
     /**
@@ -3309,21 +3872,6 @@ final class ChallengeController
         $required = RiskAction::from($requiredAction);
 
         return $decisionAction->rank() > $required->rank() ? $decisionAction : $required;
-    }
-
-    /**
-     * A TTL-variant Issuer: a clone of the wired issuer's Config with only
-     * ttlSecs replaced, issued against the same storage as the wired
-     * issuer and replicating its clock and region. A region-bound
-     * deployment (risk.region) keeps its signed region on overridden-TTL
-     * challenges, so the verifier's expected-region check still passes.
-     *
-     * @throws \LogicException when the controller has no storage wired
-     *                         (the extension always wires one)
-     */
-    private function buildTtlVariantIssuer(int $ttlSecs): Issuer
-    {
-        return $this->issuer->withTtl($ttlSecs);
     }
 
     /**
@@ -3479,47 +4027,17 @@ final class ChallengeController
     }
 
     /**
-     * Path canonicality: whether the raw request target is the canonical
-     * path, checked over the raw request URI, never a normalized route.
-     * Rejects any empty segment (`//` and a trailing slash), any dot
-     * segment (`/.`, `/./`, `/..`, `/../`), any percent-encoded byte
-     * (the canonical target is a fixed ASCII path, so `/%76hallenge`,
-     * `%2F`, `%5C` and `%2e%2e` are encoding probes), and any backslash.
-     * Only the path component is inspected; the query string is rejected
-     * separately with a 422.
-     */
-    private function isCanonicalRequestTarget(string $rawRequestUri): bool
-    {
-        $path = $rawRequestUri;
-        $queryPos = strpos($rawRequestUri, '?');
-        if ($queryPos !== false) {
-            $path = substr($rawRequestUri, 0, $queryPos);
-        }
-        if (str_contains($path, '%') || str_contains($path, '\\')) {
-            return false;
-        }
-        // The empty element before a leading slash is the absolute-path
-        // marker, not a segment; every other empty segment (a `//` in the
-        // middle, or the trailing `/` of "/challenge/") is noncanonical.
-        $segments = explode('/', $path);
-        $start = $path !== '' && $path[0] === '/' ? 1 : 0;
-        for ($i = $start, $count = \count($segments); $i < $count; $i++) {
-            if ($segments[$i] === '' || $segments[$i] === '.' || $segments[$i] === '..') {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
      * Read the request body with a hard byte cap: the input stream is
      * consumed for at most $maxBytes + 1 bytes, so an oversized chunked
      * body is refused by the caller's length check without ever being
      * materialized in full. A declared Content-Length was already checked
      * before the stream was touched, but chunked uploads can skip a
      * truthful one. When Symfony hands back a buffered stream (tests,
-     * already-consumed input), the read is still bounded.
+     * already-consumed input), the read is still bounded. When no stream
+     * resource is available at all, the fallback is the empty string —
+     * never the unbounded buffered content — so the caller's strict
+     * decoder refuses the request instead of materializing a body the
+     * byte cap never measured.
      */
     private function readBoundedBody(Request $request, int $maxBytes = self::MAX_CHALLENGE_BODY_BYTES): string
     {
@@ -3528,7 +4046,7 @@ final class ChallengeController
             return (string) stream_get_contents($stream, $maxBytes + 1);
         }
 
-        return (string) $request->getContent();
+        return '';
     }
 
     /**
@@ -3546,30 +4064,20 @@ final class ChallengeController
     }
 
     /**
-     * Strict form-urlencoded decoder: rejects duplicate parameter names
-     * and PHP bracket syntax, so the form transport has the same
-     * parser-ambiguity rigor as the JSON transport. Returns the decoded
-     * name=>value map, or null when the body is not strictly decodable.
+     * The gate-path diagnostic channel: the backend exception detail
+     * reaches the injected logger (structured, PSR-3 context), never the
+     * response and never the raw SAPI log stream. A raising or absent
+     * logger must never turn a guarded failure path into a 500.
+     *
+     * @param array<string, string> $context
      */
-    private function decodeStrictFormBody(string $body): ?array
+    private function logGate(string $message, array $context = []): void
     {
-        $decoded = [];
-        foreach (explode('&', $body) as $pair) {
-            if ($pair === '') {
-                continue;
-            }
-            $parts = explode('=', $pair, 2);
-            $name = rawurldecode($parts[0]);
-            if ($name === '' || str_contains($name, '[') || str_contains($name, ']')) {
-                return null;
-            }
-            if (\array_key_exists($name, $decoded)) {
-                return null;
-            }
-            $decoded[$name] = rawurldecode($parts[1] ?? '');
+        try {
+            $this->logger?->warning($message, $context);
+        } catch (\Throwable) {
+            // A raising logger must never break the guarded path.
         }
-
-        return $decoded;
     }
 
     /**
@@ -3583,14 +4091,17 @@ final class ChallengeController
      * so the allowlist is exactly the framing contract of the challenge
      * endpoint (an empty allowlist emits no CSP header). The bundle emits
      * no CORS headers: CORS is not authorization; the origin checks are,
-     * and they run on every response regardless. When a new risk
-     * continuity session was minted for this request, the cookie is
-     * attached here, on every response path, so the session the
-     * assessment keyed on is what the client carries.
+     * and they run on every response regardless. When the request
+     * carries or mints a risk continuity session, the cookie is attached
+     * here on every response path, so the session the assessment keyed
+     * on is what the client carries. A successful response with a
+     * carried session does not re-set it; a newly minted session and
+     * every error path do, so a 429/503 can never drop a session the
+     * assessment already recorded evidence against.
      *
      * @param array<string, mixed> $data
      */
-    private function privateJson(array $data, int $status = Response::HTTP_OK, ?Request $request = null, ?string $riskSession = null, bool $mintedCookie = false): JsonResponse
+    private function privateJson(array $data, int $status = Response::HTTP_OK, ?Request $request = null, ?string $riskSession = null, ?bool $mintedCookie = null): JsonResponse
     {
         $response = new JsonResponse($data, $status);
         $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
@@ -3602,18 +4113,20 @@ final class ChallengeController
             $response->headers->set('Content-Security-Policy', 'frame-ancestors '.implode(' ', $this->challengeOriginAllowlist));
         }
 
-        if ($mintedCookie && $request !== null && $riskSession !== null && $this->continuityCookie !== null) {
+        // The continuity session rides every response path that has a
+        // session, not only the minting one. A carried session belongs to
+        // the client (idempotent re-set, same value), and a rate-limited
+        // or failed response that records evidence against the session
+        // must not drop it, or every retry looks like a fresh client and
+        // the session reputation dimension never engages. The
+        // $mintedCookie argument stays for existing call sites; the
+        // emission condition is the session's presence.
+        $carriesSession = $request !== null && $riskSession !== null && $this->continuityCookie !== null;
+        if ($carriesSession && ($mintedCookie === true || $status >= 400)) {
             $response->headers->setCookie($this->continuityCookie->cookie($request, $riskSession));
         }
 
         return $response;
     }
 }
-
-/**
- * @internal control-flow sentinel of the duplicate-JSON-key scan: thrown
- *           when the walker finds an object key it already saw at the same
- *           level. Carries the raw key for the error message. Never
- *           escapes the controller.
- */
 

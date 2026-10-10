@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
+
 use KiwiCaptcha\Verifier;
 
 /**
@@ -13,8 +15,12 @@ use KiwiCaptcha\Verifier;
  * hash's `min_policy_epoch` field, the same key the readiness probe
  * consults, with a short cache (risk.security_epoch_cache_secs, default
  * 1 s). It feeds the {@see Verifier}'s expected policy epoch per
- * verification, so a central policy bump revokes outstanding challenges
- * within one cache window instead of waiting for a redeploy.
+ * verification. The bundle's issuance path stamps every new record with
+ * the same effective epoch, read through {@see self::currentEpoch()}.
+ * A central bump revokes only older challenges: the outstanding ones
+ * fall outside the expected epoch within one cache window, while new
+ * challenges verify immediately on every node that follows the central
+ * state. The revocation path stays independent of deploys.
  *
  * The same cached central read also exposes the `min_protocol_version`
  * field, the fleet-wide writer floor the challenge controller consults
@@ -64,18 +70,23 @@ use KiwiCaptcha\Verifier;
  *     challenge controller refuses issuance with 503
  *     `SERVICE_UNAVAILABLE`. Within the
  *     window the cached max keeps serving, so availability is preserved
- *     for a bounded outage. A monitor without a Redis client is never
- *     stale: "no central state by design" is a configured posture, not a
- *     failure.
+ *     for a bounded outage. A monitor without a Redis client stays
+ *     permanently fresh: "no central state by design" is a configured
+ *     posture rather than a failure.
  *
  * The effective epoch is `max(configuredEpoch, observedMax)`: the local
- * risk.policy_version is the floor, a node never expects less than its own
- * issuance epoch since its own challenges must verify, and the central
- * value only ever raises it. The readiness gate
+ * risk.policy_version is a floor, a node always expects and issues at
+ * least its own configured epoch, and the central value only ever raises
+ * it. The same effective epoch stamps new records through
+ * {@see self::currentEpoch()}. A node whose configured value trails a
+ * central bump still issues challenges that its own verifier accepts
+ * immediately, as does every other node following the central state.
+ * The readiness gate
  * ({@see \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController})
- * keeps a binary whose configured epoch is behind the central epoch out of
- * the pool, so a serving node's configured epoch is always >= the central
- * value.
+ * keeps a binary whose max protocol or execution grammar is behind the
+ * central floors out of the pool. A node whose configured policy epoch
+ * trails the central epoch remains in the pool, because the effective
+ * epoch covers the gap.
  *
  * The epoch is applied to the shared {@see Verifier} via its public
  * {@see Verifier::setExpectedPolicyVersion()} seam: this monitor owns
@@ -153,12 +164,23 @@ final class SecurityEpochMonitor
      *                                                   authoritative and the
      *                                                   monitor is never
      *                                                   stale).
-     * @param string                     $namespace     the sanitized risk
-     *                                                   namespace ({kiwi:<ns>}).
+     * @param string                     $namespace     the raw configured
+     *                                                   risk namespace; the
+     *                                                   monitor derives the
+     *                                                   {kiwi:<ns>} key
+     *                                                   segment through the
+     *                                                   one shared
+     *                                                   derivation, and on
+     *                                                   the digest key
+     *                                                   version also reads
+     *                                                   the legacy segment
+     *                                                   (the migration
+     *                                                   safety net).
      * @param int                        $configuredEpoch the local
      *                                                   risk.policy_version
-     *                                                   (the floor and the
-     *                                                   issuance-side stamp).
+     *                                                   (the configured
+     *                                                   floor of the
+     *                                                   effective epoch).
      * @param int                        $cacheSecs     short cache window
      *                                                   (risk.security_epoch_cache_secs).
      * @param callable(): float|null     $nowMs         clock override (tests).
@@ -185,6 +207,15 @@ final class SecurityEpochMonitor
         private readonly int $cacheSecs = 1,
         private $nowMs = null,
         private readonly int $maxStaleSecs = 60,
+        private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        /**
+         * Whether the digest rollout also consults the legacy segment.
+         * A drained migration does (the safety net); a fresh install
+         * does NOT: it has no pre-cutover state, so an unrelated
+         * deployment's colliding legacy keys must never be read as its
+         * own policy.
+         */
+        private readonly bool $readLegacyFallback = true,
     ) {
         if ($cacheSecs < 1) {
             throw new \InvalidArgumentException('security-epoch cache window must be >= 1 s');
@@ -199,6 +230,11 @@ final class SecurityEpochMonitor
      * Re-read the central policy when the cache window elapsed, apply the
      * monotonic max of the epoch to the verifier, refresh the protocol
      * floor, and return the current effective epoch.
+     *
+     * The returned value is the epoch the bundle stamps into new records
+     * (the effective epoch) and the epoch the verifier enforces: a node
+     * whose configured value trails the central state follows the central
+     * value on both sides of the transaction.
      *
      * Never throws: a central-read failure serves the last-observed max
      * (fail-safe) and the last-confirmed protocol floor (null when none
@@ -283,10 +319,29 @@ final class SecurityEpochMonitor
         return $this->observedMax;
     }
 
+    /**
+     * The central policy hash keys this monitor consults, primary first:
+     * the configured namespace derivation, plus the legacy derivation
+     * when the deployment is on the digest key version. The extra read is
+     * the migration safety net — a digest key that is absent while
+     * legacy policy state exists is never read as "no policy
+     * configured", so a live emergency revocation can never be
+     * abandoned by the cutover.
+     *
+     * @return list<string>
+     */
+    public function policyKeys(): array
+    {
+        return array_map(
+            static fn (string $namespace): string => sprintf(self::POLICY_KEY, $namespace),
+            RedisNamespace::readNamespaces($this->namespace, 'kiwi', $this->namespaceKeyVersion, $this->readLegacyFallback),
+        );
+    }
+
     /** The central policy hash key (shared with the readiness probe). */
     public function policyKey(): string
     {
-        return sprintf(self::POLICY_KEY, $this->namespace);
+        return $this->policyKeys()[0];
     }
 
     /**
@@ -339,87 +394,152 @@ final class SecurityEpochMonitor
         if ($this->redis === null) {
             return [null, null, null];
         }
-        try {
-            $policy = $this->redis->hgetall($this->policyKey());
-        } catch (\Throwable) {
-            // Fail-safe: serve the last-observed max and the last
-            // confirmed floors, never a weaker epoch or an armed
-            // v3/v4/execution-v2.
-            return [null, null, null];
+        $epoch = null;
+        $protocolFloor = null;
+        $executionFloor = null;
+        $policyConfirmed = false;
+        $protocolCorrupt = false;
+        $executionCorrupt = false;
+        foreach ($this->policyKeys() as $policyKey) {
+            try {
+                $policy = $this->redis->hgetall($policyKey);
+            } catch (\Throwable) {
+                // Fail-safe: serve the last-observed max and the last
+                // confirmed floors, never a weaker epoch or an armed
+                // v3/v4/execution-v2. A read failure on ANY consulted
+                // namespace leaves the combined read unconfirmed, since
+                // the unread namespace could carry a stronger floor.
+                return [null, null, null];
+            }
+            if (!\is_array($policy) || $policy === []) {
+                continue;
+            }
+            $parsed = $this->parsePolicyFields($policy);
+            if ($parsed === null) {
+                // Corrupt present epoch state must never be
+                // indistinguishable from absent state: a malformed value
+                // (abc, -1, 1.5, 1e3, integer overflow) is NOT a
+                // successful read — the stale window is NOT refreshed
+                // (the verification fails closed once the max-stale bound
+                // passes) and the last-observed max keeps serving. The
+                // protocol/execution floors below are unaffected: a
+                // corrupt floor only stays unconfirmed (older-rung
+                // emission).
+                return [null, null, null];
+            }
+            $policyConfirmed = true;
+            if ($parsed['epoch'] !== null) {
+                $epoch = max($epoch ?? 0, $parsed['epoch']);
+            }
+            if ($parsed['protocolCorrupt']) {
+                // A corrupt present floor stays unconfirmed for the whole
+                // combined read: the issuance gate emits the earlier
+                // protocol rungs, the fail-safe direction, instead of
+                // arming v3/v4 off a possibly-weaker floor.
+                $protocolCorrupt = true;
+            } elseif ($parsed['protocol'] !== null) {
+                // Conservative merge across the consulted namespaces:
+                // the strongest declared fleet floor wins.
+                $protocolFloor = max($protocolFloor ?? 0, $parsed['protocol']);
+            }
+            if ($parsed['executionCorrupt']) {
+                // A corrupt present execution floor is never collapsed to
+                // the permissive 0: the combined floor stays unconfirmed
+                // and every rung above execution version 1 stays
+                // unemitted.
+                $executionCorrupt = true;
+            } elseif ($parsed['execution'] !== null) {
+                $executionFloor = max($executionFloor ?? 0, $parsed['execution']);
+            } elseif ($executionFloor === null) {
+                // A confirmed policy without the key declares no
+                // execution floor (0), never "unconfirmed".
+                $executionFloor = 0;
+            }
         }
-        if (!\is_array($policy) || $policy === []) {
-            // A successful read with no central policy configured (a fresh
-            // deployment): the monitor is healthy and the success mark is
-            // refreshed — only the last-observed max keeps serving, and
-            // the floors stay unconfirmed (older-rung emission).
+        if (!$policyConfirmed) {
+            // A successful read with no central policy configured in any
+            // consulted namespace (a fresh deployment): the monitor is
+            // healthy and the success mark is refreshed — only the
+            // last-observed max keeps serving, and the floors stay
+            // unconfirmed (older-rung emission).
             $this->lastSuccessAtMs = $now;
 
             return [null, null, null];
         }
-        $epoch = null;
-        $floor = null;
-        $executionFloor = null;
-        if (\array_key_exists(self::MIN_POLICY_EPOCH_FIELD, $policy)) {
-            $value = $policy[self::MIN_POLICY_EPOCH_FIELD];
-            if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
-                $parsed = (int) $value;
-                if ((string) $parsed === $value) {
-                    $epoch = $parsed;
-                }
-            }
-            // Corrupt present epoch state must never be indistinguishable
-            // from absent state: a malformed value (abc, -1, 1.5, 1e3,
-            // integer overflow) is NOT a successful read — the stale
-            // window is NOT refreshed (the verification fails closed once
-            // the max-stale bound passes) and the last-observed max keeps
-            // serving. The protocol/execution floors below are unaffected:
-            // a corrupt floor only stays null (older-rung emission).
-            if ($epoch === null) {
-                return [null, null, null];
-            }
-        }
-        if (\array_key_exists(self::MIN_PROTOCOL_VERSION_FIELD, $policy)) {
-            $value = $policy[self::MIN_PROTOCOL_VERSION_FIELD];
-            if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
-                $parsed = (int) $value;
-                if ((string) $parsed === $value) {
-                    $floor = $parsed;
-                }
-            }
-            // A corrupt protocol floor (abc, -1, 1.5, 1e3, overflow) is
-            // an unconfirmed floor: null, so the issuance gate emits the
-            // older protocol rungs. The stale window is deliberately NOT
-            // refreshed by the floor field: the epoch field above owns
-            // the freshness deadline.
-        }
-        if (\array_key_exists(self::MIN_EXECUTION_VERSION_FIELD, $policy)) {
-            $value = $policy[self::MIN_EXECUTION_VERSION_FIELD];
-            if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
-                $parsed = (int) $value;
-                if ((string) $parsed === $value) {
-                    $executionFloor = $parsed;
-                }
-            }
-            // A corrupt execution floor (abc, -1, 1.5, 1e3, overflow)
-            // stays null — an unconfirmed floor that only keeps every
-            // rung above execution version 1 unemitted (the fail-safe
-            // direction for the writer gate), never silently collapsed
-            // to the permissive 0. The stale window is deliberately NOT
-            // refreshed by this field either.
-        }
-        // A confirmed policy without the min_execution_version key has no
-        // declared execution floor and reads 0 — permissive at the read
-        // level (it imposes nothing on the readiness gate), but a missing
-        // floor keeps every rung above execution version 1 unemitted
-        // until the operator explicitly declares one.
-        if ($executionFloor === null && !\array_key_exists(self::MIN_EXECUTION_VERSION_FIELD, $policy)) {
-            $executionFloor = 0;
-        }
         // The epoch field was confirmed (present and canonical) or
-        // legitimately absent; either way the central read succeeded.
+        // legitimately absent in every consulted namespace; either way the
+        // central read succeeded.
         $this->lastSuccessAtMs = $now;
 
-        return [$epoch, $floor, $executionFloor];
+        return [
+            $epoch,
+            $protocolCorrupt ? null : $protocolFloor,
+            $executionCorrupt ? null : $executionFloor,
+        ];
+    }
+
+    /**
+     * The parsed floors of one confirmed policy hash, or null when the
+     * present epoch field is corrupt (the read is unconfirmed). Per-field
+     * semantics mirror the single-namespace contract exactly: an absent
+     * protocol floor is null (older-rung emission), an absent execution
+     * floor is 0 (confirmed policy, no declared floor), and a present but
+     * non-canonical floor is marked corrupt rather than collapsed.
+     *
+     * @param array<string, mixed> $policy
+     *
+     * @return array{epoch: ?int, protocol: ?int, protocolCorrupt: bool, execution: ?int, executionCorrupt: bool}|null
+     */
+    private function parsePolicyFields(array $policy): ?array
+    {
+        $epoch = null;
+        if (\array_key_exists(self::MIN_POLICY_EPOCH_FIELD, $policy)) {
+            $epoch = self::canonicalDecimal($policy[self::MIN_POLICY_EPOCH_FIELD]);
+            if ($epoch === null) {
+                return null;
+            }
+        }
+        $protocol = null;
+        $protocolCorrupt = false;
+        if (\array_key_exists(self::MIN_PROTOCOL_VERSION_FIELD, $policy)) {
+            $protocol = self::canonicalDecimal($policy[self::MIN_PROTOCOL_VERSION_FIELD]);
+            $protocolCorrupt = $protocol === null;
+        }
+        $execution = null;
+        $executionCorrupt = false;
+        if (\array_key_exists(self::MIN_EXECUTION_VERSION_FIELD, $policy)) {
+            $execution = self::canonicalDecimal($policy[self::MIN_EXECUTION_VERSION_FIELD]);
+            $executionCorrupt = $execution === null;
+        } else {
+            // A confirmed policy without the min_execution_version key has
+            // no declared execution floor and reads 0 — permissive at the
+            // read level (it imposes nothing on the readiness gate), but a
+            // missing floor keeps every rung above execution version 1
+            // unemitted until the operator explicitly declares one.
+            $execution = 0;
+        }
+
+        return [
+            'epoch' => $epoch,
+            'protocol' => $protocol,
+            'protocolCorrupt' => $protocolCorrupt,
+            'execution' => $execution,
+            'executionCorrupt' => $executionCorrupt,
+        ];
+    }
+
+    /**
+     * The canonical non-negative decimal value of a central policy field,
+     * or null when absent or non-canonical (abc, -1, 1.5, 1e3, overflow).
+     */
+    private static function canonicalDecimal(mixed $value): ?int
+    {
+        if (!\is_string($value) || preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) !== 1) {
+            return null;
+        }
+        $parsed = (int) $value;
+
+        return (string) $parsed === $value ? $parsed : null;
     }
 
     private function apply(int $epoch): void
@@ -432,7 +552,11 @@ final class SecurityEpochMonitor
         // this monitor owns). Region and issuer are static deployment
         // expectations established at verifier construction; rewriting
         // them here — in particular with a null issuer — would silently
-        // disable the issuer security boundary after an epoch bump.
+        // disable the issuer security boundary after an epoch bump. The
+        // rollout-window floor (risk.policy_rollout_min_epoch) is
+        // likewise untouched: it is an explicit config declaration, never
+        // derived from the central min this monitor reads, and a bump of
+        // the expected epoch must not narrow it.
         $this->verifier->setExpectedPolicyVersion($epoch);
     }
 

@@ -1,0 +1,13 @@
+diff --git a/services/mail-server/crates/api-server/src/middleware/rate_limiter.rs b/services/mail-server/crates/api-server/src/middleware/rate_limiter.rs
+index 4fc499ec..c95b0141 100644
+--- a/services/mail-server/crates/api-server/src/middleware/rate_limiter.rs
++++ b/services/mail-server/crates/api-server/src/middleware/rate_limiter.rs
+@@ -432,7 +432,7 @@ pub async fn public_rate_limit_middleware(
+     };
+ 
+     let window_ms: u64 = 60_000; // 1 minute
+-    let max_requests: u64 = 20;
++    let max_requests: u64 = u64::MAX; // MUTANT M07: limiter bound dropped
+     let redis_key = format!(
+         "apexmail:ratelimit:public:{}:{}",
+         bucket,

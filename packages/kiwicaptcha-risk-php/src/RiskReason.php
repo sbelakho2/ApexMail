@@ -26,4 +26,14 @@ enum RiskReason: string
     case CapacityPressure = 'capacity_pressure';
     case HardRateLimit = 'hard_rate_limit';
     case Cooldown = 'cooldown';
+    case MarkedIdentity = 'marked_identity';
+    case CorroboratedAbuse = 'corroborated_abuse';
+    case TargetUnderAttack = 'target_under_attack';
+    case PricedEscalation = 'priced_escalation';
+    case InteractionAnomaly = 'interaction_anomaly';
+    case SolveAnomaly = 'solve_anomaly';
+    case DecoyEscalation = 'decoy_escalation';
+    case SpamMarkQuarantine = 'spam_mark_quarantine';
+    case NovelNetwork = 'novel_network';
+    case BreachedCredential = 'breached_credential';
 }

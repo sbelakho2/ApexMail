@@ -21,7 +21,7 @@ use Symfony\Component\Validator\Validation;
  * Asymmetric result receipts: the result verification is central-only
  * (the HMAC secret never leaves the server — no third party can re-derive
  * a result). The optional Ed25519 receipt signer exports valid
- * verification results as {jti, tenant, action, request_binding,
+ * verification results as {v, jti, tenant, request_binding,
  * issued_at, expires_at, issuer} receipts, signed from the consumed
  * record and verified with the public key (never the private seed).
  * Signature verification alone is not sufficient for single-use actions:
@@ -73,7 +73,7 @@ final class ResultReceiptTest extends TestCase
         $meta = $engineValidator->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
 
-        return [$validator, $engineValidator->validate($dto), $challenge->nonce];
+        return [$validator, $engineValidator->validate($dto), $challenge->nonce, $engineValidator];
     }
 
     public function testValidVerificationProducesAReceiptVerifiableWithThePublicKey(): void
@@ -88,7 +88,7 @@ final class ResultReceiptTest extends TestCase
         self::assertNotNull($signature);
 
         // The payload carries the full replay-critical set from the consumed
-        // record: jti, tenant (scope), action (PoW algorithm),
+        // record: v, jti, tenant (scope), algorithm (PoW family),
         // request_binding, issued_at / expires_at (epoch ms), issuer.
         $receipt = json_decode($payload, true);
         self::assertSame($nonce, $receipt['jti'], 'the receipt jti is the verified challenge nonce');
@@ -161,6 +161,39 @@ final class ResultReceiptTest extends TestCase
         self::assertFalse(
             sodium_crypto_sign_verify_detached(base64_decode($badSignature, true), $payload, $publicKey)
         );
+    }
+
+    public function testAReusedValidatorClearsEveryAccessorOnALaterFailedCall(): void
+    {
+        // Worker-mode reuse (FrankenPHP/RoadRunner): the same validator
+        // instance serves many requests. A successful verification must
+        // not leak its jti, binding or receipt through the public
+        // accessors after a later failed call; validate() resets the
+        // per-verification state first, and ResetInterface does the same
+        // between requests.
+        $signer = new ResultReceiptSigner($this->seed());
+        [$validator, $violations, , $engineValidator] = $this->verifyThroughValidator($signer);
+        self::assertCount(0, $violations);
+        self::assertNotNull($validator->verifiedJti());
+        self::assertNotNull($validator->verifiedReceiptPayload());
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = 'garbage-not-a-token';
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertNull($validator->verifiedJti(), 'a later failed call must clear the earlier jti');
+        self::assertNull($validator->verifiedRequestBinding(), 'a later failed call must clear the earlier binding');
+        self::assertNull($validator->verifiedReceiptPayload(), 'a later failed call must clear the earlier receipt');
+        self::assertNull($validator->verifiedReceiptSignature());
+
+        // The ResetInterface hook is equivalent and idempotent.
+        $validator->reset();
+        self::assertNull($validator->verifiedJti());
+        self::assertNull($validator->verifiedReceiptPayload());
     }
 
     public function testNoSigningKeyMeansNoReceipt(): void

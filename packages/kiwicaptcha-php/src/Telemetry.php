@@ -13,14 +13,17 @@ namespace KiwiCaptcha;
  *
  * Hard rejection signals:
  *  1. webdriver flag set ("wd" == true).
- *  2. Solve completes in > 30s with zero mouse/key events (headless solver).
- *  3. Solve takes > 300s total (well beyond expected).
- *  4. >= 24 discrete event timings ("et") whose mean interval is >= 8ms
+ *  2. Solve takes > 300s total: beyond any expected solve while still
+ *     allowing very slow hardware. There is deliberately NO "long solve
+ *     with zero interaction" rule — the widget auto-solves with
+ *     widget-local listeners, so a slow device or an Argon2id profile
+ *     legitimately produces no events.
+ *  3. >= 24 discrete event timings ("et") whose mean interval is >= 8ms
  *     with a coefficient of variation < 0.02. Bots simulate events with
  *     perfectly uniform intervals, which a person cannot produce.
  *
  * The check is deliberately conservative: it only considers *discrete*
- * events (pointerdown, non-repeat keydown, wheel, click; never coalesced
+ * events (pointerdown, non-repeat keydown, click; never coalesced
  * mousemove or OS key auto-repeat). A burst of sub-frame events that
  * rounds to identical millisecond timestamps is therefore never
  * misclassified; a mean below 8ms fails the gate.
@@ -38,23 +41,23 @@ final class Telemetry
             return true;
         }
 
-        $me = self::intField($telemetry, 'me');
-        $ke = self::intField($telemetry, 'ke');
-        $hc = self::intField($telemetry, 'hc');
-        $dm = self::intField($telemetry, 'dm');
-        $pl = self::intField($telemetry, 'pl');
-
-        // 1. Solve completes in >30s with zero mouse/key events (headless solver).
-        if ($durationMs > 30_000 && $me === 0 && $ke === 0) {
-            return true;
+        // 1. Solve takes >300s total (well beyond expected). There is
+        //    deliberately NO "long solve with zero interaction" rule: the
+        //    widget auto-solves and its listeners sit only on the widget,
+        //    so a real user on a slow device (or an Argon2id profile)
+        //    has no reason to interact and would be misclassified.
+        // A negative duration cannot arrive over the wire (the token
+        // decoder only accepts canonical digit strings), but a direct
+        // caller could pass one; Rust's u64 cannot be negative, so clamp
+        // to 0 for exact parity.
+        if ($durationMs < 0) {
+            $durationMs = 0;
         }
-
-        // 2. Solve takes >300s total (well beyond expected).
         if ($durationMs > 300_000) {
             return true;
         }
 
-        // 3. Entropy check: uniform-interval discrete events reveal simulated
+        // 2. Entropy check: uniform-interval discrete events reveal simulated
         //    interaction. Rust mirrors this arithmetic (mean, variance,
         //    coefficient of variation) bit-for-bit.
         if (isset($telemetry['et']) && \is_array($telemetry['et'])) {
@@ -64,9 +67,12 @@ final class Telemetry
             for ($i = 1; $i < $count; $i++) {
                 $t1 = $events[$i];
                 $t0 = $events[$i - 1];
-                // Rust's as_u64(): only integers count; floats/strings are
-                // skipped exactly as serde_json's u64 coercion would fail.
-                if (\is_int($t1) && \is_int($t0) && $t1 >= $t0) {
+                // Rust's as_u64(): only non-negative integers count;
+                // floats, strings and negatives are skipped exactly as
+                // serde_json's u64 coercion would fail (a negative
+                // timestamp breaks the pair chain instead of forming a
+                // diff, which the earlier permissive check allowed).
+                if (\is_int($t1) && \is_int($t0) && $t1 >= 0 && $t0 >= 0 && $t1 >= $t0) {
                     $diffs[] = $t1 - $t0;
                 }
             }
@@ -92,22 +98,11 @@ final class Telemetry
             }
         }
 
-        // Soft signals (hc=0, dm=0 / hc=0, pl=0) are logged by the Rust
-        // verifier but never rejected; the PHP port has no logger
-        // dependency, so they are intentionally ignored here.
-
         return false;
     }
 
     private static function boolField(array $telemetry, string $key): bool
     {
         return \is_bool($telemetry[$key] ?? null) && $telemetry[$key];
-    }
-
-    private static function intField(array $telemetry, string $key): int
-    {
-        $v = $telemetry[$key] ?? null;
-
-        return \is_int($v) ? $v : 0;
     }
 }

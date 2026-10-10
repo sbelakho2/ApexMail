@@ -88,7 +88,7 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * first, so a long-lived CLI process sharing one storage instance can
  * never accumulate unbounded state.
  */
-final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface
+final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface, \KiwiCaptcha\AuthenticatedResultCommitInterface
 {
     /**
      * The default hard cap on retained entries. `store()` prunes
@@ -149,6 +149,14 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function store(ChallengeRecord $record): void
     {
+        // A store must never rewind live state. Re-placing an older
+        // genuine pending envelope over a consumed or cancelled entry
+        // would re-open a one-shot token. The consumed flag is the
+        // monotonic witness: it only ever moves forward.
+        $existing = $this->records[$record->nonce] ?? null;
+        if ($existing !== null && ($existing['consumed'] || ($existing['cancelled'] ?? false))) {
+            throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+        }
         // Bounded retention: expired entries never accumulate (they are
         // absent to every read anyway, see {@see self::entry()}), and a
         // long-lived process never exceeds the hard cap — the evictions
@@ -250,11 +258,16 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
+        return $this->commitAuthenticatedResult($nonce, new ConsumedResult($valid, $binding));
+    }
+
+    public function commitAuthenticatedResult(string $nonce, ConsumedResult $result): bool
+    {
         $entry = $this->entry($nonce);
         if ($entry === null || !$entry['consumed'] || $entry['result'] !== null) {
             return false;
         }
-        $this->records[$nonce]['result'] = new ConsumedResult($valid, $binding);
+        $this->records[$nonce]['result'] = $result;
 
         return true;
     }
@@ -344,6 +357,11 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      */
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
+        return $this->commitAuthenticatedResultResume($nonce, new ConsumedResult($valid, $binding), $owner);
+    }
+
+    public function commitAuthenticatedResultResume(string $nonce, ConsumedResult $result, string $owner): bool
+    {
         $this->assertValidResumeOwner($owner);
         $entry = $this->entry($nonce);
         if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null) {
@@ -353,7 +371,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         if (($entry['claim'] ?? null) !== $owner || ($entry['claimUntil'] ?? null) === null || ($entry['claimUntil'] ?? 0) <= $now) {
             return false;
         }
-        $this->records[$nonce]['result'] = new ConsumedResult($valid, $binding);
+        $this->records[$nonce]['result'] = $result;
         $this->records[$nonce]['claim'] = null;
         $this->records[$nonce]['claimUntil'] = null;
 

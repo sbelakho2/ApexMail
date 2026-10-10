@@ -10,6 +10,7 @@ use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Rsw;
+use KiwiCaptcha\RswModulusIdentity;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
@@ -50,11 +51,16 @@ final class RswTest extends TestCase
         );
     }
 
-    private function issue(Config $config, string $scope = 'login', string $ip = '198.51.100.7', ?int $now = null): array
-    {
+    private function issue(
+        Config $config,
+        string $scope = 'login',
+        string $ip = '198.51.100.7',
+        ?int $now = null,
+        int $maxProtocolVersionToEmit = ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION,
+    ): array {
         $storage = new ArrayStorage();
         $issuer = new Issuer($config, $storage, now: $now !== null ? static fn (): int => $now : null);
-        $challenge = $issuer->issue($scope, $ip);
+        $challenge = $issuer->issue($scope, $ip, maxProtocolVersionToEmit: $maxProtocolVersionToEmit);
         $record = $storage->find($challenge->nonce);
 
         return [$challenge, $record, $storage];
@@ -65,6 +71,67 @@ final class RswTest extends TestCase
         $proof ??= RswFixture::sequentialProof($prefix, $nonce, $t);
 
         return SolutionToken::create($nonce, $counter, 5000, [], null, null, $proof)->encode();
+    }
+
+    public function testResponseFromRecordRoundTripsEveryAlgorithm(): void
+    {
+        // The canonical reconstruction: the stored-record handoff used by
+        // the Symfony controller re-emits exactly Challenge::toArray()
+        // for every algorithm, including the rsw modulus on an rsw
+        // deployment (dropped on that path before the reconstruction existed).
+        $storage = new ArrayStorage();
+        $rsw = new Issuer(new Config(
+            secretKey: Vectors::SECRET,
+            algorithm: PoWAlgorithm::Rsw,
+            targetBits: 8,
+            ttlSecs: 300,
+            rswModulusN: RswFixture::MODULUS_N_B64,
+            rswLambda: RswFixture::LAMBDA_B64,
+            rswT: 10_000,
+        ), $storage);
+        $issued = $rsw->issue('login', '198.51.100.7');
+        $record = $storage->find($issued->nonce);
+        self::assertNotNull($record);
+        $reconstructed = $rsw->responseFromRecord($record);
+        self::assertNotNull($reconstructed, 'the rsw deployment reconstructs its own record');
+        self::assertSame(RswFixture::MODULUS_N_B64, $reconstructed->rswModulus, 'the exact configured modulus rides the reconstruction');
+        self::assertSame($issued->toArray(), $reconstructed->toArray(), 'the reconstruction is byte-identical to the issuance response');
+        self::assertArrayHasKey('rsw_modulus', $issued->toArray());
+
+        // SHA and Argon records reconstruct without the rsw field, from
+        // any deployment (an Argon record issued by a SHA-configured
+        // risk escalation included).
+        $sha = new Issuer(new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 300), $storage);
+        $shaIssued = $sha->issue('login', '198.51.100.7');
+        $shaRecord = $storage->find($shaIssued->nonce);
+        self::assertNotNull($shaRecord);
+        self::assertArrayNotHasKey('rsw_modulus', $sha->responseFromRecord($shaRecord)->toArray());
+        self::assertSame($shaIssued->toArray(), $sha->responseFromRecord($shaRecord)->toArray());
+
+        $argon = new Issuer(new Config(
+            secretKey: Vectors::SECRET,
+            algorithm: PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 3,
+            p: 1,
+            argon2TargetBits: 2,
+            ttlSecs: 300,
+        ), $storage);
+        $argonIssued = $argon->issue('login', '198.51.100.7');
+        $argonRecord = $storage->find($argonIssued->nonce);
+        self::assertNotNull($argonRecord);
+        self::assertArrayNotHasKey('rsw_modulus', $argon->responseFromRecord($argonRecord)->toArray());
+        self::assertSame($argonIssued->toArray(), $argon->responseFromRecord($argonRecord)->toArray());
+        // A SHA deployment reconstructs the risk-escalated Argon record
+        // it stored (the record carries the full parameter set).
+        self::assertSame($argonIssued->toArray(), $sha->responseFromRecord($argonRecord)->toArray());
+
+        // A non-rsw deployment must never serve an rsw record: it has no
+        // modulus, and a challenge the client cannot solve must not be
+        // handed out.
+        $rswRecord = $storage->find($issued->nonce);
+        self::assertNotNull($rswRecord);
+        self::assertNull($sha->responseFromRecord($rswRecord), 'a deployment without the rsw trapdoor never reconstructs an rsw record');
     }
 
     public function testDefaultConfigStaysRswFree(): void
@@ -434,7 +501,7 @@ final class RswTest extends TestCase
         self::assertSame(Config::RSW_TARGET_BITS_PIN, $challenge->targetBits);
         self::assertSame(RswFixture::MODULUS_N_B64, $challenge->rswModulus);
         self::assertArrayHasKey('rsw_modulus', $challenge->toArray());
-        self::assertSame(2, $record->protocolVersion, 'rsw issuance stays protocol v2');
+        self::assertSame(5, $record->protocolVersion, 'identity-armed rsw issuance is protocol v5');
         self::assertNull($record->decoyField);
         self::assertNull($record->executionProgram);
         self::assertSame($challenge->prefix, $record->prefix);
@@ -442,9 +509,18 @@ final class RswTest extends TestCase
         // The canonical payload really says rsw: the signed string is
         // the v2 grammar with the algorithm segment.
         $payload = base64_decode(explode('.', $challenge->challenge)[0], true);
-        self::assertStringStartsWith('v2|', $payload);
+        self::assertStringStartsWith('v4|5|', $payload);
         self::assertStringContainsString('|rsw|0|30000|1|1|', $payload);
-        self::assertStringEndsWith('|1', $payload, 'the pin renders as the final canonical field only after kid');
+        self::assertStringEndsWith(
+            '|r='.RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64).'|m=1',
+            $payload,
+            'the authenticated rsw trapdoor identity is followed by the m= marker as the final canonical segment',
+        );
+        self::assertSame(
+            RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
+            $record->rswModulusSha256,
+            'the record carries the authenticated modulus identity',
+        );
 
         // The stored record JSON carries no rsw-specific key: every
         // authenticated parameter rides the existing v2 slots, and the
@@ -491,6 +567,122 @@ final class RswTest extends TestCase
 
         self::assertTrue($outcome->isOk(), 'the client-style sequential solve must verify: '.$outcome->code());
         self::assertSame($record->nonce, $outcome->nonce());
+    }
+
+    public function testTheEmissionCeilingGatesTheRswIdentity(): void
+    {
+        $this->requireGmp();
+        $config = $this->rswConfig(10_000);
+        $identity = RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64);
+
+        // The capability-free public default: a direct core caller in a
+        // rolling-upgrade-capable deployment must NOT see v5 records
+        // appear implicitly.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($config, $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(ChallengeRecord::BASE_PROTOCOL_VERSION, $record->protocolVersion);
+        self::assertNull($record->rswModulusSha256);
+
+        // Any confirmed ceiling below the feature version stays on the
+        // legacy identityless shape, and an old in-range reader accepts
+        // and verifies it exactly like before the identity feature.
+        foreach ([ChallengeRecord::BASE_PROTOCOL_VERSION, 4] as $ceiling) {
+            [$capped, $record, $cappedStorage] = $this->issue($config, now: self::ISSUED_AT, maxProtocolVersionToEmit: $ceiling);
+            self::assertSame(ChallengeRecord::BASE_PROTOCOL_VERSION, $record->protocolVersion, "ceiling {$ceiling} stays legacy");
+            self::assertNull($record->rswModulusSha256);
+            $reader = new Verifier(
+                $cappedStorage,
+                now: static fn (): int => self::ISSUED_AT,
+                rswModulusN: RswFixture::MODULUS_N_B64,
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            $outcome = $reader->verify(
+                $this->solveToken($capped->nonce, $capped->prefix, $capped->t),
+                Vectors::SECRET,
+                'login',
+                '198.51.100.7',
+            );
+            self::assertTrue($outcome->isOk(), 'an old reader accepts the capped identityless record: '.$outcome->code());
+        }
+
+        // The feature version arms the identity; a later protocol maximum
+        // must not shut it off.
+        foreach ([ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION, 6] as $ceiling) {
+            [, $record] = $this->issue($config, now: self::ISSUED_AT, maxProtocolVersionToEmit: $ceiling);
+            self::assertSame(ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION, $record->protocolVersion, "ceiling {$ceiling} arms v5");
+            self::assertSame($identity, $record->rswModulusSha256);
+        }
+    }
+
+    public function testTheTrapdoorIdentityDrivesRotationSelection(): void
+    {
+        $this->requireGmp();
+        $config = $this->rswConfig(Config::MIN_RSW_T);
+        [$challenge, $record, $storage] = $this->issue($config);
+        $identity = RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64);
+        self::assertSame($identity, $record->rswModulusSha256, 'the issued record carries the authenticated identity');
+        $token = $this->solveToken($challenge->nonce, $challenge->prefix, $challenge->t);
+        $keyring = [$identity => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]];
+        $freshChallenge = function () use ($config): array {
+            [$challenge, $record, $storage] = $this->issue($config);
+
+            return [$challenge, $record, $storage];
+        };
+
+        // A rotated deployment (the active pair is no longer the one the
+        // record was issued under) resolves the trapdoor through the
+        // keyring by the record's authenticated identity: reconstruction
+        // still emits the original modulus and verification still passes.
+        $rotatedIssuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8),
+            $storage,
+            rswVerificationKeys: $keyring,
+        );
+        $reconstructed = $rotatedIssuer->responseFromRecord($record);
+        self::assertNotNull($reconstructed, 'the keyring resolves a rotated record');
+        self::assertSame(RswFixture::MODULUS_N_B64, $reconstructed->rswModulus, 'the ORIGINAL modulus, never the newly active one');
+        self::assertSame($challenge->toArray(), $reconstructed->toArray(), 'the rotated reconstruction is byte-identical');
+
+        [$rotatedChallenge, , $rotatedStorage] = $freshChallenge();
+        $rotatedToken = $this->solveToken($rotatedChallenge->nonce, $rotatedChallenge->prefix, $rotatedChallenge->t);
+        $rotatedVerifier = new Verifier($rotatedStorage, rswVerificationKeys: $keyring);
+        $outcome = $rotatedVerifier->verify($rotatedToken, Vectors::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), 'the keyring verifies the rotated record: '.$outcome->code());
+
+        // Without the keyring and without the active pair the record is
+        // unreachable: the reconstruction refuses and verification fails
+        // closed (a rotation must drain, or carry the keyring).
+        [$bareChallenge, $bareRecord, $bareStorage] = $freshChallenge();
+        $bareToken = $this->solveToken($bareChallenge->nonce, $bareChallenge->prefix, $bareChallenge->t);
+        $bareIssuer = new Issuer(new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8), $bareStorage);
+        self::assertNull($bareIssuer->responseFromRecord($bareRecord), 'an unknown identity never reconstructs');
+        $bare = (new Verifier($bareStorage))->verify($bareToken, Vectors::SECRET, 'login', '198.51.100.7');
+        self::assertFalse($bare->isOk(), 'a verifier without the trapdoor fails closed');
+        self::assertSame('unsupported_rsw_params', $bare->code());
+
+        // A legacy rsw record without the identity resolves through the
+        // active pair (the pre-binding shape: protocol v2, no identity).
+        $legacy = ChallengeRecord::fromArray(array_replace(
+            \array_diff_key($record->toArray(), ['rsw_modulus_sha256' => true]),
+            ['protocol_version' => 2],
+        ));
+        self::assertNull($legacy->rswModulusSha256);
+        $legacyIssuer = new Issuer(new Config(
+            secretKey: Vectors::SECRET,
+            algorithm: PoWAlgorithm::Rsw,
+            targetBits: 8,
+            rswModulusN: RswFixture::MODULUS_N_B64,
+            rswLambda: RswFixture::LAMBDA_B64,
+            rswT: Config::MIN_RSW_T,
+        ), $storage);
+        self::assertSame(
+            RswFixture::MODULUS_N_B64,
+            $legacyIssuer->responseFromRecord($legacy)?->rswModulus,
+            'a legacy record resolves through the active pair',
+        );
     }
 
     public function testTrapdoorExpectationEqualsSequentialSquaring(): void
@@ -662,6 +854,7 @@ final class RswTest extends TestCase
         $salt = base64_encode(random_bytes(16));
         $bindingTag = Issuer::bindingTag($nonce, '198.51.100.7', Vectors::SECRET);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             'login',
             $bindingTag,

@@ -105,7 +105,9 @@ fetched `worker.<hash>.js` asset, so `worker-src 'self'` applies and
 `blob:` is never required. The inline compatibility tier builds its
 worker from a Blob URL, so it needs `worker-src blob:`. With
 `asset_mode: files` the same directives cover the widget: the asset
-URLs are same-origin and the lazy runtime and worker fetches use
+URLs are same-origin and the lazy runtime and worker fetches (the
+memory-hard solve tier and the glue-less SHA-256 solve, which
+dispatches through the same worker) use
 `connect-src 'self'`. The recommended profile is in
 [getting-started.md](getting-started.md#content-security-policy).
 
@@ -172,7 +174,7 @@ procedure and its failure modes are maintainer material in
 
 Execution-armed issuance (`risk.execution_challenge: on`) writes
 protocol v4 — the decoy-capable canonical plus the signed
-`|execution_version|execution_commitment` segments (hex SHA-256 of the
+`|e=execution_version,execution_commitment` segment (hex SHA-256 of the
 stored program) inside the HMAC canonical, so stripping, substituting
 or injecting a program always invalidates the challenge.
 Older binaries reject protocol 4 as unknown, so the same two-phase
@@ -281,11 +283,23 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 2 min_policy_epoch 2
 ```
 
-The issuance side must then also bump `risk.policy_version` before new
-challenges are minted. The monitor revokes old challenges; the issuer
-stamps the new epoch. The max-stale fail-closed window
-(`risk.security_epoch_max_stale_secs`) bounds how long a node serves
-from a cached read: past it, the node stops issuing and verifying
+Issuance stamps the effective epoch max(configured, central
+`min_policy_epoch`), so a central bump revokes older challenges while
+new ones verify immediately. An explicit `risk.policy_version` bump is
+only needed for a coordinated policy cutover.
+
+A mixed-epoch cutover needs a declared rollout window: with nodes
+split across epochs N and N+1, strict equality would spuriously reject
+every N-stamped record on the N+1 nodes. Setting
+`risk.policy_rollout_min_epoch: N` declares the window — the verifier
+then accepts records stamped with any epoch from N through the
+effective one, so an N/N+1 fleet redeems cross-node with zero spurious
+rejections. The window is explicit, never derived from observed
+traffic: unset (the default) keeps strict equality, and a wrong epoch
+is still rejected. Remove the knob once every node runs the new
+epoch. The max-stale fail-closed
+window (`risk.security_epoch_max_stale_secs`) bounds how long a node
+serves from a cached read: past it, the node stops issuing and verifying
 rather than trusting a potentially-revoked cache.
 
 ## Asymmetric result receipts

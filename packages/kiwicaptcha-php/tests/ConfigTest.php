@@ -17,7 +17,7 @@ final class ConfigTest extends TestCase
         'secretKey', 'algorithm', 'mKib', 't', 'p', 'targetBits',
         'argon2TargetBits', 'ttlSecs', 'minDurationMs', 'solverMaxHashes',
         'bindingMode', 'policyVersion', 'issuer', 'kid', 'executionKey',
-        'rswModulusN', 'rswLambda', 'rswT',
+        'rswModulusN', 'rswLambda', 'rswT', 'tenantId',
     ];
 
     private static function captureVarDump(object $value): string
@@ -308,7 +308,7 @@ final class ConfigTest extends TestCase
     public function testShortSecretRejected(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('at least 16 bytes');
+        $this->expectExceptionMessage('at least 32 bytes');
 
         new Config(...$this->base(['secretKey' => 'tooshort']));
     }

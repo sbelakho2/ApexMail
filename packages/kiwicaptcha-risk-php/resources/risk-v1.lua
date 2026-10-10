@@ -3,7 +3,7 @@
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
 --   max keys touched:     10 (KEYS[1..10])
---   max Redis calls:      22 (1 TIME + 9 HMGET + 6 HSET + 4 EXPIRE +
+--   max Redis calls:      21 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
 --                           1 GET + 1 SET — every call is fixed-cost;
 --                           no KEYS/SCAN/EVAL nesting, no iteration over
 --                           attacker-sized collections)
@@ -281,6 +281,53 @@ local function apply_principal_event(s, event, scope)
     end
 end
 
+-- ── Every TTL argument is validated here, BEFORE the first write. A
+-- non-positive TTL would make a risk hash persistent (save() skips
+-- EXPIRE on ttl <= 0) or issue an invalid `SET ... EX 0`; a TTL above
+-- the Redis expire ceiling would abort the script after the HSET had
+-- already landed, leaving a persistent risk hash behind. The ceiling
+-- (2147483647 seconds) is the largest expire value every Redis version
+-- accepts. The PHP and Rust store constructors enforce the identical
+-- positive-and-bounded rule at their public boundary.
+local EXPIRY_CEILING_SECS = 2147483647
+
+local function ttl_out_of_bounds(value)
+    if value == nil or value < 1 or value > EXPIRY_CEILING_SECS then
+        return true
+    end
+    return value ~= math.floor(value)
+end
+
+local dedupe_ttl = tonumber(ARGV[5])
+local state_ttl = tonumber(ARGV[6])
+local session_ttl = tonumber(ARGV[21])
+local principal_ttl = tonumber(ARGV[22])
+if ttl_out_of_bounds(dedupe_ttl) then
+    return redis.error_reply('risk-v1: dedupe_ttl_s must be a positive integer no greater than 2147483647 (a persistent or immediately-expired risk hash is not admissible)')
+end
+if ttl_out_of_bounds(state_ttl) then
+    return redis.error_reply('risk-v1: state_ttl_s must be a positive integer no greater than 2147483647 (a persistent source/subnet risk hash is not admissible)')
+end
+if ttl_out_of_bounds(session_ttl) then
+    return redis.error_reply('risk-v1: session_ttl_s must be a positive integer no greater than 2147483647 (a persistent session risk hash is not admissible)')
+end
+if ttl_out_of_bounds(principal_ttl) then
+    return redis.error_reply('risk-v1: principal_ttl_s must be a positive integer no greater than 2147483647 (a persistent principal risk hash is not admissible)')
+end
+
+-- ── Numeric argument validation BEFORE any write. ──
+-- Redis does not roll back: the historical order wrote the dedupe marker
+-- first and parsed the numeric arguments afterwards, so a missing or
+-- non-numeric saturation ARGV errored (nil comparison) AFTER the event
+-- was marked seen. The event was silently lost and an identical retry
+-- was refused as a duplicate. Every numeric argument is validated here,
+-- before the first write.
+for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
+    if tonumber(ARGV[i]) == nil then
+        return redis.error_reply('risk-v1: ARGV['..i..'] must be numeric')
+    end
+end
+
 -- ── Dedupe: identical event_id must not double-increment state. On a
 -- duplicate, SKIP the event application but still decay/read/return the
 -- current signals (shared risk-v1 semantics across Rust and PHP).
@@ -289,15 +336,19 @@ if ARGV[4] ~= '' then
     if redis.call('GET', KEYS[10]) then
         is_duplicate = true
     else
-        redis.call('SET', KEYS[10], '1', 'EX', tonumber(ARGV[5]))
+        redis.call('SET', KEYS[10], '1', 'EX', dedupe_ttl)
     end
 end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
-local state_ttl = tonumber(ARGV[6])
 local has_session = tonumber(ARGV[19]) == 1
 local has_principal = tonumber(ARGV[20]) == 1
+
+-- The zero-skip in save() stays intentional for the GLOBAL rolling state
+-- (KEYS[9], the one no-expiry record, written with ttl 0 below). The
+-- ephemeral per-identity TTLs were already validated above, before the
+-- first write.
 
 -- ── Source: update current epoch, read ±1 for boundary continuity. ──
 local src = read_state(KEYS[1], now)
@@ -329,19 +380,30 @@ if has_session and not is_duplicate then
         -- SourceRateLimitHit: session half of the source/session-only rule.
         sess.bad = sess.bad + 3000
     end
-    save(KEYS[7], sess, tonumber(ARGV[21]))
+    save(KEYS[7], sess, session_ttl)
 end
 local prin = read_state(KEYS[8], now)
 if has_principal and not is_duplicate then
     apply_principal_event(prin, event, scope)
-    save(KEYS[8], prin, tonumber(ARGV[22]))
+    save(KEYS[8], prin, principal_ttl)
 end
 
 -- ── Global: rolling (no expiry). The global hash's `scope` field carries
 -- the CURRENT LEVEL; apply_event clobbers it with the event scope, so the
--- level is captured BEFORE the event and restored after the ratchet. ──
+-- level is captured BEFORE the event and restored after the ratchet. The
+-- state is saved ONCE, after the ratchet — the event application only
+-- mutates the in-memory table `g`; the single unconditional save below
+-- persists the final level, cooldown and channels in one HSET (a save
+-- inside the non-duplicate branch here would be a strict subset of it:
+-- the same fields one HSET earlier, doubled for no effect).
 local g = read_state(KEYS[9], now)
-local prev_level = g.scope
+-- Corrupt or tampered stored levels above the hysteresis table are
+-- clamped into range (the Rust core applies the same .min(4)); a nil
+-- exit entry would otherwise error mid-transition after the dedupe
+-- marker was written. The floor stays 0: a fresh state legitimately
+-- starts at level 0, and forcing a minimum of 1 here would raise every
+-- namespace's baseline pressure.
+local prev_level = math.min(4, tonumber(g.scope) or 0)
 if not is_duplicate then
     apply_event(g, event, scope)
     if event == 16 then
@@ -350,7 +412,6 @@ if not is_duplicate then
         -- source/session/principal reputation.
         g.bad = g.bad + 3000
     end
-    save(KEYS[9], g, 0)
 end
 
 -- ── Global pressure level with hysteresis (normalized thresholds). ──

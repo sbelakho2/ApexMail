@@ -127,6 +127,25 @@ the tests in [docs/claims-registry.md](docs/claims-registry.md).
 - Accessibility: WCAG 2.2 AA evidence, scope and limitations in
   [`Resources/ACCESSIBILITY.md`](Resources/ACCESSIBILITY.md).
 
+## Migrating an incumbent integration
+
+`kiwicaptcha:migrate` scans a codebase for incumbent captcha
+integrations (reCAPTCHA, hCaptcha, Turnstile, Altcha, Friendly
+Captcha) and emits the shim config: the client script block, the
+sitekey-to-scope mapping table and the server-side siteverify swap
+instructions.
+
+```
+bin/console kiwicaptcha:migrate /path/to/app --format=text   # or json
+bin/console kiwicaptcha:migrate /path/to/app --out=plan.md --dry-run
+```
+
+The scan is read-only and bounded: known text extensions, files up to
+512 KiB, and the dependency and build trees are skipped. Lines carrying
+kiwi's own markers (the shim attributes, `kiwi__token`, kiwi route
+paths) never count as findings, so an already migrated tree scans
+clean.
+
 ## Related
 
 - [`SECURITY.md`](../../../../SECURITY.md): the authoritative security

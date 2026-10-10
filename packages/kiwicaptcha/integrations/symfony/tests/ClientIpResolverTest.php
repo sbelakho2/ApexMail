@@ -172,6 +172,53 @@ final class ClientIpResolverTest extends TestCase
         ])), 'untrusted peers are never ambiguous — their headers are ignored');
     }
 
+    /** A request whose raw header carries more than one occurrence. */
+    private function requestWithRepeatedHeader(string $peer, string $name, array $values): Request
+    {
+        $request = $this->request($peer);
+        $request->headers->set($name, $values);
+
+        return $request;
+    }
+
+    public function testDuplicateForwardingHeadersAreAmbiguousInEveryMode(): void
+    {
+        // The solve/validation path calls the resolver without the
+        // challenge controller's duplicate scan, so the resolver owns
+        // the boundary: more than one occurrence of a forwarding header
+        // it understands is parser ambiguity before parsing anything.
+        foreach ([ClientIpResolver::MODE_DIRECT, ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES] as $mode) {
+            $resolver = new ClientIpResolver($mode, ['10.0.0.0/8'], true);
+            foreach (['X-Forwarded-For', 'Forwarded'] as $name) {
+                try {
+                    $resolver->resolve($this->requestWithRepeatedHeader('198.51.100.7', $name, ['203.0.113.9', '203.0.113.10']));
+                    self::fail(sprintf('a duplicate %s header must be refused as ambiguous in %s mode', $name, $mode));
+                } catch (AmbiguousForwardingException $e) {
+                    self::assertStringContainsString($name, $e->getMessage());
+                }
+            }
+        }
+    }
+
+    public function testDuplicateForwardingHeadersAreLoggedAndIgnoredWhenAmbiguityIsAllowed(): void
+    {
+        $logger = new class extends NullLogger {
+            /** @var list<string> */
+            public array $seen = [];
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->seen[] = (string) $message;
+            }
+        };
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8'], false, $logger);
+
+        $ip = $resolver->resolve($this->requestWithRepeatedHeader('198.51.100.7', 'X-Forwarded-For', ['203.0.113.9', '203.0.113.10']));
+        self::assertSame('198.51.100.7', $ip, 'with ambiguity explicitly allowed the socket peer is the canonical IP');
+        self::assertCount(1, $logger->seen, 'the duplicate anomaly must be logged');
+        self::assertStringContainsString('X-Forwarded-For', $logger->seen[0]);
+    }
+
     public function testInvalidModeIsRefused(): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -317,6 +364,50 @@ final class ClientIpResolverTest extends TestCase
         // A valid chain still resolves normally.
         $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for=203.0.113.66, for=10.0.0.8']));
         self::assertSame('203.0.113.66', $ip);
+        Request::setTrustedProxies([], -1);
+    }
+
+    public function testAForLessNearestElementTerminatesTheForwardedChain(): void
+    {
+        // The nearest element must carry exactly one for= before the walk
+        // may move past it. An element that carries other parameters only
+        // (the common `proto=https` a proxy appends) has no node identity
+        // at all: promoting the earlier attacker-controlled for= to the
+        // nearest hop is exactly the spoof this parse refuses.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8']);
+        $cases = [
+            // The nearest element is for-less: the attacker for= must NOT
+            // become the nearest usable hop.
+            'for=203.0.113.66, proto=https',
+            'for=203.0.113.66, by=proxy',
+            'for=203.0.113.66, host=example.com',
+            'proto=https',
+            // A for-less middle element is just as unusable: the chain
+            // cannot be walked through it.
+            'for=203.0.113.66, proto=https, for=10.0.0.8',
+            // Duplicate for= within ONE element is ambiguous (the
+            // comma form is a valid three-hop chain and is covered by the
+            // controls below; the semicolon form is the ambiguous one).
+            'for=203.0.113.66; for=198.51.100.9, for=10.0.0.8',
+            // A malformed parameter and an unterminated quote refuse the
+            // whole header.
+            'for=203.0.113.66, proto, for=10.0.0.8',
+            'for="203.0.113.66, proto=https',
+        ];
+        foreach ($cases as $value) {
+            self::assertSame(
+                '10.1.2.3',
+                $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => $value])),
+                'the header "'.$value.'" has no usable nearest hop: the socket peer wins, never the earlier attacker address',
+            );
+        }
+
+        // Controls: a fully for-bearing chain still resolves, quoted
+        // values parse, and a comma inside a quoted value does not
+        // fabricate an element.
+        self::assertSame('203.0.113.66', $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for="203.0.113.66", for=10.0.0.8'])));
+        self::assertSame('203.0.113.66', $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for=203.0.113.66;proto=https, for=10.0.0.8'])));
         Request::setTrustedProxies([], -1);
     }
 }

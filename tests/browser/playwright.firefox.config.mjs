@@ -18,7 +18,7 @@ export default defineConfig({
     { name: 'firefox', use: { browserName: 'firefox', channel: 'firefox' } },
   ],
   webServer: {
-    command: 'KIWI_FIXTURE_RUN_ID="run-$(date +%s)-$$" php -d opcache.jit=off -S 127.0.0.1:8089 router.php',
+    command: 'php -d opcache.jit=off -S 127.0.0.1:8089 router.php',
     url: 'http://127.0.0.1:8089/',
     reuseExistingServer: false,
     timeout: 30_000,

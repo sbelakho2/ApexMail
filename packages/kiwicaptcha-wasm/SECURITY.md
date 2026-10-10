@@ -4,10 +4,10 @@ This package ships nine browser assets (`assets/`):
 
 | Asset | Purpose |
 |---|---|
-| `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64; also carries the embedded worker source as `window.__kiwiCaptchaWasm.workerSource` (generated from `kiwi-worker.js`). |
-| `kiwi-worker.js` | standalone same-origin worker solver; served as the versioned `worker.<hash>.js` asset in files mode. |
+| `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64; also carries the embedded worker solver source as `window.__kiwiCaptchaWasm.workerSource` (generated from the solver source tail of `kiwi-worker.js`). |
+| `kiwi-worker.js` | the glue-embedded same-origin worker solver asset: a machine-written head (the `var window = self;` prelude plus the full `kiwicaptcha-wasm.js` glue text, assembled by tools/embed-worker) followed by the canonical worker solver source; served as the versioned `worker.<hash>.js` asset in files mode, so the worker boots with wasm in scope. |
 | `widget-driver.js` | the always-loaded eager driver core and the solver protocol id; reads the worker source off the glue (inline mode) or hands the worker asset to the lazy `widget-risk.js` module (files mode) — it no longer embeds the worker bytes. |
-| `widget-risk.js` | the lazy adaptive-risk module: the argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, the decoy/honeypot rendering and the coarse client-context descriptor; the core loads it on a memory-hard challenge or an armed response. |
+| `widget-risk.js` | the lazy adaptive-risk module: the argon2id/rsw worker solve tier, the glue-less SHA-256 worker dispatch, the ExecutionChallengeV1 runner, the decoy/honeypot rendering and the coarse client-context descriptor; the core loads it on a memory-hard challenge, an armed response, or a glue-less SHA-256 solve. |
 | `widget-telemetry.js` | the lazy telemetry session module, loaded only when a widget enables telemetry. |
 | `widget-locales.js` | the lazy non-default locale packs (de/fr/es/it/nl/pl/pt/ar, RTL included); loaded only when the core resolves a non-default language, never embedded inline. |
 | `widget-compat.js` | the incumbent compatibility loader module, delivered inside the `/api.js` loader response and never fetched elsewhere. |
@@ -45,27 +45,24 @@ widget.css           sha384-<VALUE-FROM-SRI.txt>
 Use the SRI script-tag pattern for every asset you serve:
 
 ```html
-<script src="https://cdn.example.com/kiwicaptcha/v1.7.0/widget-driver.js"
-        integrity="sha384-<VALUE-FROM-SRI.txt>"
+<script src="https://cdn.example.com/kiwicaptcha/v1.6.20/widget-driver.js"
+        integrity="sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR"
         crossorigin="anonymous"></script>
 ```
 
-The example path uses the release version; the integrity value is a
-placeholder on purpose — a literal hash pasted into this document goes
-stale on the next asset rebuild, and copying it would pin bytes that no
-longer exist. Always paste the value the tool just printed for YOUR
-build (or the release's `SRI.txt`).
+The example path uses the release version.
 The solver protocol id is a protocol/ABI label, not an artifact identity; see the Immutable versioned URLs section below.
 
 Notes:
 
 - `integrity` + `crossorigin="anonymous"` are a pair.
   An SRI-protected cross-origin script without `crossorigin` will be blocked.
+- The driver's own files-mode asset preflight (the runtime and worker fetches inside `widget-risk.js`) verifies `sha256-`, `sha384-` and `sha512-` digests, so any of the three forms this tool emits is accepted there; native script-tag SRI accepts all three as well.
 - Re-run the tool after every rebuild and update the tags.
   A hash mismatch means the bytes on the wire are not the bytes you pinned.
 - **Workers cannot use `integrity=`:** `new Worker(url)` has no SRI parameter, so the worker and the runtime the browser APIs load must be protected differently.
-  - files mode: the driver fetches the versioned `worker.<hash>.js` asset itself, hashes the fetched bytes, and compares them against the page-issued digest (a cryptographic preflight in the SRI digest format). Only then does it hand the content-addressed same-origin URL to the browser APIs: the `Worker` constructor loads the worker asset, and the worker's `importScripts` loads the runtime. The browser loads the preflight-verified bytes because the URLs are content-addressed and immutable (an unknown hash is a 404); this is preflight verification of the fetched bytes, not literal executed-byte SRI. A worker URL without the digest keeps the legacy direct-construction path.
-  - the bundled driver's inline tier builds a Blob worker from the glue's embedded worker source (local code, no network fetch at all).
+  - files mode: the driver fetches the versioned `worker.<hash>.js` asset itself, hashes the fetched bytes, and compares them against the page-issued digest (a cryptographic preflight in the SRI digest format). Only then does it hand the content-addressed same-origin URL to the browser APIs: the `Worker` constructor loads the worker asset, and the worker's `importScripts` loads the runtime. Be honest about the residual here. The preflight covers the first fetch only; the browser's `new Worker(url)` performs a second, independent fetch of the same URL, and that fetch cannot carry `integrity=`. Those executed bytes are trusted to the content-addressed immutable-URL contract: the digest is part of the URL and an unknown hash is a 404. An attacker who can rewrite responses at that URL can equally strip SRI from page scripts, so the contract is the boundary, not the preflight. This is preflight verification of the fetched bytes, not literal executed-byte SRI. A worker URL without the digest keeps the legacy direct-construction path (no preflight at all; the driver warns once per page that verification is off). The same worker construction serves every worker-tier solve: argon2id, rsw, and a SHA-256 solve on this glue-less page (the SHA dispatch happens after issuance, and a refused worker degrades to the driver's in-page JS solver).
+  - the bundled driver's inline tier builds a Blob worker from the glue's embedded worker source (local code, no network fetch at all). The compat tier (/api.js) likewise rebuilds its worker prelude from glue constants embedded in the very loader response that executed on the page, verified against the assembly-stamped digest at boot — again no network fetch to rewrite.
   - The worker's own protocol-id handshake (`ready`/`done` messages, plus the wasm glue's exported `solver_protocol_version()` verified before `ready`) makes the driver refuse a stale/mismatched worker.
     A cached old worker can never contribute a solution.
 
@@ -136,7 +133,7 @@ var KIWI_SOLVER_PROTOCOL_VERSION = 2;           // integer, checked against
 
 Exact byte identity is guaranteed by the release tag + `SHA256SUMS` + `SRI.txt` + SLSA attestation, never by this label.
 
-The worker (the standalone `kiwi-worker.js`, its copy embedded in the glue, and the fetched files-mode asset) declares the same constant and reports it in its handshake messages:
+The worker (the glue-embedded `kiwi-worker.js`, the fetched files-mode asset, and the solver source its glue copy carries as `workerSource`) declares the same constant and reports it in its handshake messages:
 
 - on startup: `{ type: "ready", v: 1, buildId: "2026-08-r2" }`
 - on success: `{ type: "done", v: 1, counter: <n>, buildId: "2026-08-r2" }`
@@ -147,7 +144,7 @@ No invalid tokens are produced, and there is no fallback to a stale worker.
 
 Expectation for integrators: the driver, the worker, and the wasm glue served to a page must come from the **same build id**.
 Mixed versions (e.g. a cached `kiwi-worker.js` from an older release next to a new driver) produce the controlled mismatch state until the serving layer is corrected.
-When the solver protocol changes, bump `KIWI_SOLVER_PROTOCOL_ID` + `KIWI_SOLVER_PROTOCOL_VERSION` in `kiwi-worker.js` (the generator embeds it into the glue) and the Rust `SOLVER_PROTOCOL_VERSION` constant (they must stay identical), rebuild, and re-run the SRI tool.
+When the solver protocol changes, bump `KIWI_SOLVER_PROTOCOL_ID` + `KIWI_SOLVER_PROTOCOL_VERSION` in the worker solver source (the tail of `kiwi-worker.js`; the embed-worker generator embeds it into the glue) and the Rust `SOLVER_PROTOCOL_VERSION` constant (they must stay identical), rebuild, and re-run the SRI tool.
 
 ## Widget runtime guarantees (recap)
 

@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 use crate::challenge::{
-    binding_tag, hash_ip, payload_from_record, verify_signature, verify_signature_v2,
-    ChallengeRecord, PoWAlgorithm,
+    binding_tag_for_tenant, hash_ip, payload_from_record, verify_signature,
+    verify_signature_v2_with_tenant, ChallengeRecord, PoWAlgorithm,
 };
 use crate::rsw::RswTrapdoor;
 
@@ -155,6 +155,14 @@ pub struct VerifyContext<'a> {
     pub record: &'a mut ChallengeRecord,
     /// The HMAC secret key (to re-verify the challenge signature).
     pub secret_key: &'a str,
+    /// The tenant id the purpose keys derive under (validated like
+    /// `region`: 1..=64 bytes of the narrow identifier alphabet, see
+    /// [`crate::keys::DerivedKeys`]). A record issued under tenant `t1`
+    /// verifies only under `Some("t1")` — a different tenant and the
+    /// global (`None`) keys reject the signature and the IP binding.
+    /// `None` (the default) derives the global purpose keys,
+    /// byte-identical to the tenant-free verification.
+    pub tenant: Option<&'a str>,
     /// Optional per-key-id secrets: `kid → master secret`. When
     /// present, the record's `kid` selects the secret for the signature (and
     /// IP-binding) checks — the secret rotation map. An unknown kid — or a
@@ -233,6 +241,14 @@ pub struct VerifyContext<'a> {
     /// [`VerifyError::WrongPolicyVersion`] — outstanding challenges die
     /// immediately on policy revocation.
     pub expected_policy_version: Option<u32>,
+    /// The rollout-window floor for [`VerifyContext::expected_policy_version`]:
+    /// during a declared N → N+1 policy rollout a mixed fleet legitimately
+    /// redeems challenges issued under either epoch, so a floor of N with an
+    /// expected version of N+1 accepts `floor <= policy_version <= expected`
+    /// — strict equality otherwise (the default, `None`). A floor greater
+    /// than the expected version accepts nothing (fail closed). Ignored when
+    /// no expected version is set.
+    pub policy_version_floor: Option<u32>,
     /// The current client's IP address. In v2 the binding is the
     /// nonce-bound HMAC tag: verification recomputes the tag from the
     /// challenge nonce + canonical client IP under the derived purpose key
@@ -297,6 +313,16 @@ pub struct VerifyContext<'a> {
     /// persist it beside client material. Never stored on the record
     /// and never sent to the client.
     pub rsw_lambda: Option<&'a str>,
+    /// The rsw trapdoor rotation keyring (see
+    /// [`crate::rsw::RswKeyring`]): historical pairs indexed by their
+    /// authenticated modulus identity. A record whose authenticated
+    /// `rsw_modulus_sha256` is not the active pair resolves through
+    /// this keyring, so a rotated/mixed-node outstanding challenge
+    /// still verifies. `None` = only the active pair resolves. The
+    /// selection is exact and never falls through to an arbitrary
+    /// active pair: an unknown identity fails closed with
+    /// [`VerifyError::UnsupportedRswParams`].
+    pub rsw_keyring: Option<&'a crate::rsw::RswKeyring>,
 }
 
 /// Outcome of a verification.
@@ -324,8 +350,11 @@ pub enum VerifyOutcome {
         /// distinguish a new proof from a retained-state replay.
         from_stored_result: bool,
         /// The server-measured solve duration in milliseconds: the span
-        /// between the record's signed issuance clock (`issued_at_ns`,
-        /// epoch microseconds) and this verification's receipt instant —
+        /// between the record's server-written issuance clock
+        /// (`issued_at_ns`, epoch microseconds; server-side metadata
+        /// outside the challenge HMAC, authenticated by the record's
+        /// `server_mac`) and this verification's
+        /// receipt instant —
         /// unforgeable behavioral evidence the risk layer can consume as a
         /// graded signal. The client-reported token `duration_ms` is
         /// forgeable and is never consulted; only server-written
@@ -476,11 +505,17 @@ pub enum VerifyError {
     #[error("challenge store unavailable — the challenge is presumed intact and can be retried once the store recovers")]
     StorageUnavailable,
     /// The atomic consume (the pending→consumed transition) failed with
-    /// an uncertain I/O error —
-    /// the challenge may or may not have been consumed on the server. The
-    /// consumer MUST NOT retry the consume automatically (the record may
-    /// already be burned); treat the token as unknown instead of replaying
-    /// it. See the consume no-retry rule in `redis_verify`.
+    /// an uncertain I/O error — the challenge may or may not have been
+    /// consumed on the server. The verifier MUST NOT retry the consume
+    /// automatically (the reply may still be in flight and the record may
+    /// already be burned; a blind retry can corrupt the record the first
+    /// attempt did transition). What a caller may do depends on its
+    /// idempotency contract, see the consume no-retry rule in
+    /// `redis_verify`: an idempotent caller that recorded an operation
+    /// identity and key may re-present the same token, because a
+    /// completed consume replays its retained result and an unexecuted
+    /// one is still redeemable; a caller without that identity must treat
+    /// the token as unknown (re-issue) rather than replay it.
     #[error("challenge consumption is indeterminate (storage I/O failure) — the challenge may or may not have been consumed; do not blindly retry this token")]
     ConsumeIndeterminate,
     /// The challenge was already consumed by an earlier verification, and
@@ -628,7 +663,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // window), 2 (unarmed), 3 (decoy-capable) and 4 (execution-capable)
     // exist — anything else is a corrupt/foreign record. The
     // protocol-vs-decoy-vs-execution grammar is explicit and total: the
-    // `|decoy_field` segment is a protocol v3/v4 canonical extension, so
+    // tagged `d=` segment is a protocol v3/v4 canonical extension, so
     // a v2 record carrying a `decoy_field` is rejected here (the v2
     // canonical never includes the segment and such a record cannot have
     // been signed by a conforming issuer — an armed issuance writes
@@ -646,20 +681,43 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if !(1..=crate::challenge::MAX_PROTOCOL_VERSION).contains(&record.protocol_version) {
         return Err(VerifyError::MalformedRecord);
     }
-    if record.protocol_version == 2 && record.decoy_field.is_some() {
+    // The record-metadata MAC, when present, has the exact wire shape
+    // (64 lowercase hex) — the PHP ChallengeRecord boundary twin.
+    if let Some(tag) = record.server_mac.as_deref() {
+        if !crate::challenge::is_server_state_mac_shape(tag) {
+            return Err(VerifyError::MalformedRecord);
+        }
+    }
+    // The protocol-vs-extension grammar is the one shared table (the
+    // stored-record decoder applies the same matrix at its boundary),
+    // so the verifier and the decoder can never disagree about which
+    // records are structurally valid.
+    if !crate::challenge::protocol_extension_grammar_ok(
+        record.protocol_version,
+        record.decoy_field.is_some(),
+        record.execution_program.is_some(),
+        record.rsw_modulus_sha256.is_some(),
+    ) {
         return Err(VerifyError::MalformedRecord);
     }
-    if record.protocol_version == 3 && record.decoy_field.is_none() {
-        return Err(VerifyError::MalformedRecord);
+    // The authenticated rsw modulus identity: when present it must be 64
+    // lowercase hex and may only ride an rsw record (the stored-record
+    // decoder enforces the same on the persisted path; this closes the
+    // hand-rolled-record surface). The grammar above guarantees a v5
+    // record always carries it and a v2..=4 record's identity is the
+    // pre-v5 legacy shape.
+    if let Some(identity) = record.rsw_modulus_sha256.as_deref() {
+        if record.algorithm != PoWAlgorithm::Rsw
+            || identity.len() != 64
+            || !identity
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(VerifyError::MalformedRecord);
+        }
     }
     let execution_present = record.execution_program.is_some();
-    if (record.protocol_version == 2 || record.protocol_version == 3) && execution_present {
-        return Err(VerifyError::MalformedRecord);
-    }
-    if record.protocol_version == 4 && !execution_present {
-        return Err(VerifyError::MalformedRecord);
-    }
-    // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix: the
+    // The exact armed/unarmed equivalence contract: the
     // signed commitment is the exact mirror of the stored program.
     // A hand-rolled record that carries a program without the commitment
     // triplet, a commitment without the program, or a program whose hash
@@ -938,12 +996,20 @@ fn read_clock(ctx: &mut VerifyContext<'_>) -> u64 {
     }
 }
 
-/// The real system clock in Unix seconds.
+/// The real system clock in Unix seconds. A failed clock read keeps the
+/// fail-closed value 0 and warns: every expiry check treats 0 as
+/// long-expired, so a broken clock rejects challenges instead of
+/// accepting stale ones.
 pub(crate) fn real_now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "KiwiCaptcha: system clock read failed — verification clock falls back to 0"
+            );
+            0
+        })
 }
 
 /// The server-measured solve duration of a verified record, in
@@ -962,13 +1028,14 @@ pub(crate) fn real_now_unix() -> u64 {
 /// time cannot be measured reliably — `None`; beyond the tolerance
 /// the record is rejected as `TooFast` and never reaches a valid
 /// outcome). A record whose issuance clock is unknown
-/// (`issued_at_ns == 0`) is equally unmeasurable. Sub-millisecond
-/// spans floor toward zero.
+/// (`issued_at_ns == 0`) or unauthenticated (no `server_mac`; the MAC
+/// itself is verified with the signature) is equally unmeasurable.
+/// Sub-millisecond spans floor toward zero.
 pub(crate) fn measurable_solve_duration_ms(
     record: &ChallengeRecord,
     receipt_ns: u64,
 ) -> Option<u64> {
-    if record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
+    if record.server_mac.is_none() || record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
         return None;
     }
     Some((receipt_ns - record.issued_at_ns) / 1_000)
@@ -1026,24 +1093,29 @@ pub(crate) fn check_execution_binding(
                     }
                     _ => None,
                 };
-                let verified = match trace {
-                    Some(t) => crate::execution::verify_executed_trace(program, &record.nonce, &t),
-                    None => None,
+                // The program decodes exactly once: the trace walk and
+                // the digest computation below share the parsed program.
+                let Some(trace) = trace else {
+                    return Err(VerifyError::ExecutionMismatch);
                 };
-                let verified = match verified {
-                    Some(v) => v,
-                    None => return Err(VerifyError::ExecutionMismatch),
+                let Some(decoded) = crate::execution::decode(program) else {
+                    return Err(VerifyError::ExecutionMismatch);
                 };
-                let expected = match crate::execution::expected_digest_over_trace(
+                let Some(verified) =
+                    crate::execution::verify_executed_trace_decoded(&decoded, &trace)
+                else {
+                    return Err(VerifyError::ExecutionMismatch);
+                };
+                let Some(expected) = crate::execution::expected_digest_over_trace_decoded(
                     program,
+                    &decoded,
                     &record.nonce,
                     &verified,
-                ) {
-                    Some(digest) => digest,
+                ) else {
                     // The record's program failed the parse
                     // (validate_record already rejects this shape;
                     // defense in depth).
-                    None => return Err(VerifyError::MalformedRecord),
+                    return Err(VerifyError::MalformedRecord);
                 };
                 if !ct_eq(expected.as_bytes(), presented.as_bytes()) {
                     return Err(VerifyError::ExecutionMismatch);
@@ -1061,6 +1133,62 @@ pub(crate) fn check_execution_binding(
             Ok(())
         }
     }
+}
+
+/// One verification call's execution-evidence memo: the armed-record
+/// check (program decode, trace walk, digest) is a pure function of
+/// the stored program, the record nonce and the presented evidence, so
+/// the post-consume re-check of the same inputs reuses the first
+/// verdict instead of re-deriving it. The entry is keyed by the full
+/// input tuple — any change is a miss and re-derives — and the cache
+/// lives for a single verification, never across calls (a later
+/// verification of the same record re-derives from scratch).
+#[cfg(feature = "redis")] // the production verifier (redis_verify) is the sole consumer
+#[derive(Default)]
+pub(crate) struct ExecutionEvidenceCache {
+    entry: Option<ExecutionEvidenceEntry>,
+}
+
+#[cfg(feature = "redis")]
+struct ExecutionEvidenceEntry {
+    program: String,
+    nonce: String,
+    digest: Option<String>,
+    trace: Option<String>,
+    verdict: Result<(), VerifyError>,
+}
+
+/// The cached [`check_execution_binding`]: an armed record consults the
+/// single-entry memo first; an unarmed record (the cheap majority)
+/// bypasses the cache entirely.
+#[cfg(feature = "redis")] // the production verifier (redis_verify) is the sole consumer
+pub(crate) fn check_execution_binding_cached(
+    record: &ChallengeRecord,
+    execution_digest: Option<&str>,
+    execution_trace: Option<&str>,
+    cache: &mut ExecutionEvidenceCache,
+) -> Result<(), VerifyError> {
+    let Some(program) = record.execution_program.as_deref() else {
+        return check_execution_binding(record, execution_digest, execution_trace);
+    };
+    if let Some(entry) = &cache.entry {
+        if entry.program == program
+            && entry.nonce == record.nonce
+            && entry.digest.as_deref() == execution_digest
+            && entry.trace.as_deref() == execution_trace
+        {
+            return entry.verdict.clone();
+        }
+    }
+    let verdict = check_execution_binding(record, execution_digest, execution_trace);
+    cache.entry = Some(ExecutionEvidenceEntry {
+        program: program.to_string(),
+        nonce: record.nonce.clone(),
+        digest: execution_digest.map(str::to_string),
+        trace: execution_trace.map(str::to_string),
+        verdict: verdict.clone(),
+    });
+    verdict
 }
 
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
@@ -1130,15 +1258,32 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         // field carried the legacy hash_ip). Verified for the migration
         // window (max TTL) alongside v2.
         1 => verify_signature(&payload_from_record(ctx.record), sig, secret),
-        _ => verify_signature_v2(ctx.record, sig, secret),
+        _ => verify_signature_v2_with_tenant(ctx.record, sig, secret, ctx.tenant),
     };
     match sig_ok {
         Ok(true) => {}
         Ok(false) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
     }
+    // 1b'. The record-metadata MAC: when the signed canonical commits
+    //      the m=1 marker, a valid `server_mac` is required and verified
+    //      regardless of the timing floor. A present MAC always verifies.
+    //      A rewritten issuance clock or hostname is a forged record
+    //      (BadSignature), exactly like the PHP verifier.
+    let signed_mac = crate::challenge::signed_canonical_commits_record_meta(&ctx.record.challenge);
+    if signed_mac && ctx.record.server_mac.is_none() {
+        return VerifyOutcome::Invalid(VerifyError::BadSignature);
+    }
+    if ctx.record.server_mac.is_some()
+        && !crate::challenge::verify_record_meta(
+            &crate::keys::DerivedKeys::from_master(secret, ctx.tenant),
+            ctx.record,
+        )
+    {
+        return VerifyOutcome::Invalid(VerifyError::BadSignature);
+    }
 
-    // 1c. Hard Argon2id parameter ceilings — validated after the
+    // 1b''. Hard Argon2id parameter ceilings — validated after the
     //     signature has been authenticated and before any Params::new or
     //     memory allocation: even a properly signed record must never drive
     //     an out-of-bounds memory-hard computation.
@@ -1209,7 +1354,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         };
         let expected = match ctx.record.protocol_version {
             1 => hash_ip(client_ip, secret),
-            _ => match binding_tag(&ctx.record.nonce, client_ip, secret) {
+            _ => match binding_tag_for_tenant(&ctx.record.nonce, client_ip, secret, ctx.tenant) {
                 Ok(tag) => tag,
                 Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
             },
@@ -1229,11 +1374,14 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 
     // 7b. Security-policy epoch: the policy that authorized this challenge
-    //     must still be in force.
-    if let Some(expected) = ctx.expected_policy_version {
-        if ctx.record.policy_version != expected {
-            return VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion);
-        }
+    //     must still be in force (or, during a declared rollout window, be
+    //     one of the two in-flight epochs — see [`policy_version_accepted`]).
+    if !policy_version_accepted(
+        ctx.record.policy_version,
+        ctx.expected_policy_version,
+        ctx.policy_version_floor,
+    ) {
+        return VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion);
     }
 
     // 7c. Issuer identity: a verifier that expects a specific
@@ -1276,6 +1424,12 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
     let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
+    if floor > 0 && ctx.record.server_mac.is_none() {
+        // The issuance clock is unauthenticated (no record-metadata
+        // MAC): a storage writer could have backdated it, so the floor
+        // cannot be evaluated and fails closed.
+        return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+    }
     if floor > 0 {
         if ctx.now_ns >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
@@ -1322,19 +1476,30 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 5. Re-derive and check the proof. The rsw record derives no hash:
     //    the presented final value is compared against the trapdoor
-    //    expectation (constant-time over the fixed 512-hex wire form);
-    //    the trapdoor pair is the verifier's own configuration, decoded
-    //    per verification on this generic path (the production verifier
-    //    holds the decoded pair). A verifier without the pair refuses
-    //    the authentic record with UnsupportedRswParams.
-    let trapdoor = match (ctx.rsw_modulus_n, ctx.rsw_lambda) {
-        (Some(modulus), Some(lambda)) => match RswTrapdoor::new(modulus, lambda) {
-            Ok(trapdoor) => Some(trapdoor),
-            Err(_) => return VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+    //    expectation (constant-time over the fixed 512-hex wire form).
+    //    The trapdoor is selected by the record's authenticated modulus
+    //    identity — the rotation keyring first, then the active pair —
+    //    through the one resolver both this generic path and the
+    //    production verifier use: the legacy base64-text alias resolves
+    //    a pre-v5 identity only, a v5 identity resolves its canonical
+    //    fingerprint exactly, and an identity in neither fails closed
+    //    with UnsupportedRswParams (never an arbitrary active pair).
+    //    The process-wide validated-pair memo keeps the expensive
+    //    primality tests once per configured pair; every later
+    //    verification of the same pair is a cache hit.
+    let trapdoor = match crate::rsw::resolve_rsw_trapdoor(
+        match (ctx.rsw_modulus_n, ctx.rsw_lambda) {
+            (Some(modulus), Some(lambda)) => Some((modulus, lambda)),
+            _ => None,
         },
-        _ => None,
+        ctx.rsw_keyring,
+        ctx.record.rsw_modulus_sha256.as_deref(),
+        ctx.record.protocol_version,
+    ) {
+        Ok(trapdoor) => trapdoor,
+        Err(_) => return VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
     };
-    let valid = match proof_is_valid(ctx.record, ctx.counter, ctx.rsw_proof, trapdoor.as_ref()) {
+    let valid = match proof_is_valid(ctx.record, ctx.counter, ctx.rsw_proof, trapdoor.as_deref()) {
         Ok(valid) => valid,
         Err(e) => return VerifyOutcome::Invalid(e),
     };
@@ -1355,6 +1520,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         final_now,
         ctx.expected_region,
         ctx.expected_policy_version,
+        ctx.policy_version_floor,
         ctx.expected_issuer,
     ) {
         return VerifyOutcome::Invalid(e);
@@ -1377,6 +1543,30 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 }
 
+/// The policy-epoch acceptance predicate, shared by the cheap-phase gate,
+/// [`final_revalidate`] and the production verifier's deployment check.
+///
+/// With no expected version every record passes (the check is disabled).
+/// With an expected version `e` and no floor the check is the strict
+/// equality `record == e` — outstanding challenges die immediately on
+/// policy revocation. During a declared rollout window the operator sets a
+/// floor `f < e`: a mixed N/N+1 fleet then redeems challenges issued under
+/// either epoch, `f <= record <= e`. A floor `f > e` is an empty interval
+/// and accepts nothing (fail closed, never fail open on a misconfiguration).
+pub(crate) fn policy_version_accepted(
+    record: u32,
+    expected: Option<u32>,
+    floor: Option<u32>,
+) -> bool {
+    match expected {
+        None => true,
+        Some(e) => match floor {
+            None => record == e,
+            Some(f) => f <= record && record <= e,
+        },
+    }
+}
+
 /// Post-derive final re-validation: re-check the challenge's
 /// validity with the current server time and the current verifier
 /// expectations, after the (potentially long) proof derivation succeeded but
@@ -1392,13 +1582,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 /// Checks, in order:
 /// - `now_unix >= expires_at` → [`VerifyError::Expired`];
 /// - expected region mismatch → [`VerifyError::WrongRegion`];
-/// - expected policy epoch mismatch → [`VerifyError::WrongPolicyVersion`];
+/// - expected policy epoch mismatch (outside a declared rollout window;
+///   see [`policy_version_accepted`]) → [`VerifyError::WrongPolicyVersion`];
 /// - expected issuer mismatch → [`VerifyError::WrongIssuer`].
 pub(crate) fn final_revalidate(
     record: &ChallengeRecord,
     now_unix: u64,
     expected_region: Option<&str>,
     expected_policy_version: Option<u32>,
+    policy_version_floor: Option<u32>,
     expected_issuer: Option<&str>,
 ) -> Result<(), VerifyError> {
     if now_unix >= record.expires_at {
@@ -1409,10 +1601,12 @@ pub(crate) fn final_revalidate(
             return Err(VerifyError::WrongRegion);
         }
     }
-    if let Some(expected) = expected_policy_version {
-        if record.policy_version != expected {
-            return Err(VerifyError::WrongPolicyVersion);
-        }
+    if !policy_version_accepted(
+        record.policy_version,
+        expected_policy_version,
+        policy_version_floor,
+    ) {
+        return Err(VerifyError::WrongPolicyVersion);
     }
     if let Some(expected) = expected_issuer {
         if record.issuer.as_deref() != Some(expected) {
@@ -1450,6 +1644,11 @@ pub(crate) fn signature_from_challenge(record: &ChallengeRecord) -> &str {
 /// Convenience: produce a *valid* counter for a record (used by tests and by a
 /// server-side solver for the dev-bypass path). This brute-forces until the
 /// difficulty target is met.
+///
+/// Test/dev-bypass surface only: it performs the solve the client is
+/// supposed to perform, so it must never sit on a production admission
+/// path — production verifies client-presented counters and never
+/// mints its own proof.
 pub fn solve_for_test(record: &ChallengeRecord) -> Option<u64> {
     // Capped at the real solver's search space: a counter at or above the
     // solver cap is rejected by verify_solution (CounterTooLarge), so the
@@ -1471,8 +1670,7 @@ pub fn solve_for_test(record: &ChallengeRecord) -> Option<u64> {
 pub fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    result.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(hasher.finalize())
 }
 
 /// True when a telemetry payload carries no signal at all: the empty object
@@ -1491,12 +1689,18 @@ fn telemetry_is_empty(telemetry: &serde_json::Value) -> bool {
 ///
 /// Hard rejection signals:
 /// - `webdriver` flag is set (Chrome DevTools Protocol / Selenium).
-/// - Solve completes in >30s with zero mouse/key events (headless solver).
-/// - Solve takes >300s total (well beyond the ~30s expected for targetBits=14).
+/// - Solve takes >300s total: well beyond any expected solve (the
+///   highest shipped profile is 20 target bits — ~1.05M expected
+///   hashes, seconds even on a slow device) while still allowing very
+///   slow hardware. There is deliberately NO "long solve with zero
+///   interaction" rule: the widget auto-solves and its listeners sit on
+///   the widget itself, so a real user on a slow device, or on an
+///   Argon2id profile, produces no events and must not be rejected.
+/// - A full synthetic event stream with near-zero timing variance
+///   (see the entropy check below).
 ///
-/// Soft signals (logged but NOT rejected):
-/// - `hardwareConcurrency=0` AND `deviceMemory=0` (likely headless browser).
-/// - `plugins.length=0` AND `hardwareConcurrency=0` (likely headless).
+/// The historical hc/dm/pl soft signals are gone: the widget never sends
+/// those fields, so they fired for every legitimate user.
 pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
     let wd = telemetry
         .get("wd")
@@ -1506,39 +1710,27 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         return true;
     }
 
-    let me = telemetry.get("me").and_then(|v| v.as_u64()).unwrap_or(0);
-    let ke = telemetry.get("ke").and_then(|v| v.as_u64()).unwrap_or(0);
-    let hc = telemetry.get("hc").and_then(|v| v.as_u64()).unwrap_or(0);
-    let dm = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
-    let pl = telemetry.get("pl").and_then(|v| v.as_u64()).unwrap_or(0);
-
     // Hard rejection signals:
-    // 1. Solve completes in >30s with zero mouse/key events (headless solver).
-    if duration_ms > 30_000 && me == 0 && ke == 0 {
-        tracing::warn!(
-            duration_ms,
-            me,
-            ke,
-            "KiwiCaptcha: bot suspected — solve took >30s with zero interaction"
-        );
-        return true;
-    }
-
-    // 2. Solve takes >300s total (well beyond expected — a generous bound
-    //    that allows for very slow devices).
+    // 1. Solve takes >300s total (well beyond expected — a generous bound
+    //    that allows for very slow devices). There is deliberately NO
+    //    "long solve with zero interaction" rule: the widget auto-solves
+    //    and its listeners sit only on the widget, so a real user on a
+    //    slow device (or on an Argon2id profile) has no reason to
+    //    interact and would be misclassified as a bot.
     if duration_ms > 300_000 {
         tracing::warn!(duration_ms, "KiwiCaptcha: bot suspected — solve took >300s");
         return true;
     }
 
-    // 3. Entropy check: if there are interactions, check for timing variance.
+    // 2. Entropy check: if there are interactions, check for timing variance.
     //    Bots often simulate events with perfectly uniform intervals.
     //
     //    This check is deliberately conservative:
     //    - It only considers *discrete* events (the widget records pointerdown,
-    //      non-repeat keydown, wheel, and click — never coalesced mousemove or
-    //      OS key auto-repeat), so a uniform interval across 24+ discrete
-    //      human events is not something a person can produce.
+    //      non-repeat keydown, and click — never coalesced mousemove, wheel
+    //      scrolling, or OS key auto-repeat), so a uniform interval across 24+ discrete
+    //      human events is not something a person can produce. The widget
+    //      records up to 32 timings, so this 24-event floor is reachable.
     //    - The coefficient of variation must be near zero (< 2%) AND the mean
     //      interval must be ≥ 8 ms, so a burst of sub-frame events (which can
     //      round to identical millisecond timestamps) is never misclassified.
@@ -1583,23 +1775,9 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         }
     }
 
-    // Soft signals (logged but NOT rejected):
-    if hc == 0 && dm == 0 {
-        tracing::info!(
-            hc,
-            dm,
-            "KiwiCaptcha: possible headless client (hc=0, dm=0) — soft signal, not rejected"
-        );
-    }
-
-    if hc == 0 && pl == 0 {
-        tracing::info!(
-            hc,
-            pl,
-            "KiwiCaptcha: possible headless client (hc=0, pl=0) — soft signal, not rejected"
-        );
-    }
-
+    // The historical hc/dm/pl soft signals are gone: the widget never
+    // sends those fields (they would fire for every legitimate user),
+    // and this function returns true only for a real rejection.
     false
 }
 
@@ -1637,6 +1815,7 @@ mod tests {
             VerifyError::InsufficientWork,
             VerifyError::MalformedRecord,
             VerifyError::UnsupportedArgon2Params,
+            VerifyError::UnsupportedRswParams,
             VerifyError::BotDetected,
             VerifyError::MalformedToken,
             VerifyError::RecordNotFound,
@@ -1645,7 +1824,13 @@ mod tests {
             VerifyError::AlreadyConsumed,
             VerifyError::CapacityExceeded,
             VerifyError::AdmissionUnavailable,
+            VerifyError::ExecutionMismatch,
         ];
+        assert_eq!(
+            variants.len(),
+            26,
+            "the table must cover EVERY VerifyError variant"
+        );
         let codes: Vec<&str> = variants.iter().map(|v| v.code()).collect();
         for code in &codes {
             assert!(
@@ -1683,12 +1868,13 @@ mod tests {
 
     fn make_record_at(target_bits: u32, now_unix: u64, now_ns: u64) -> ChallengeRecord {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 100,
             t: 1,
@@ -1716,7 +1902,8 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
-            secret_key: "test-key-16-bytes!".into(),
+            tenant: None,
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
@@ -1744,7 +1931,8 @@ mod tests {
     fn verify(record: &mut ChallengeRecord, counter: u64, duration_ms: u64) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -1757,10 +1945,12 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             execution_digest: None,
             execution_trace: None,
             telemetry: None,
@@ -1775,11 +1965,239 @@ mod tests {
     /// valid v2 signature — the ceiling checks must fire on
     /// properly signed records, not on signature failures.
     fn resign_v2(record: &mut ChallengeRecord, secret: &str) {
+        resign_v2_tenant(record, secret, None);
+    }
+
+    fn resign_v2_tenant(record: &mut ChallengeRecord, secret: &str, tenant: Option<&str>) {
+        // The production order: a placeholder MAC commits the m=1 marker
+        // before signing, then the real tag is sealed over the signed
+        // challenge. A record without a MAC signs without the marker.
+        let had_mac = record.server_mac.is_some();
+        record.server_mac = if had_mac { Some(String::new()) } else { None };
         let canonical = super::super::challenge::canonical_signing_input_v2(record);
-        let sig = super::super::challenge::sign_canonical_v2(&canonical, secret).unwrap();
+        let sig = super::super::challenge::sign_canonical_v2(&canonical, secret, tenant).unwrap();
         let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
         record.challenge = challenge.clone();
         record.prefix = format!("{challenge}|{}|", record.salt);
+        if had_mac {
+            // The server-state MAC authenticates the unsigned server-side
+            // fields (issued_at_ns, hostname) against the exact challenge
+            // string: a re-sign changes the challenge, so the MAC must be
+            // re-sealed exactly as the production issuer seals it after
+            // signing.
+            record.server_mac = Some(super::super::challenge::record_meta_mac(
+                &super::super::keys::DerivedKeys::from_master(secret, tenant),
+                &record.challenge,
+                record.issued_at_ns,
+                record.hostname.as_deref(),
+            ));
+        }
+    }
+
+    // ── tenant-scoped verification ─────────────────────────────────────
+
+    /// The cross-language tenant vector inputs: tenant id `t1` under the
+    /// shared reference master (the tenant-root construction pinned by
+    /// the keys suite).
+    const TENANT_MASTER: &str = "0123456789abcdef0123456789abcdef";
+
+    fn tenant_record(tenant: Option<&str>) -> ChallengeRecord {
+        let config = ChallengeConfig {
+            secret_key: TENANT_MASTER.into(),
+            kid: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: tenant.map(str::to_string),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        };
+        issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
+            .unwrap()
+            .record
+    }
+
+    fn verify_tenant(
+        record: &mut ChallengeRecord,
+        counter: u64,
+        tenant: Option<&str>,
+    ) -> VerifyOutcome {
+        let mut ctx = VerifyContext {
+            record,
+            secret_key: TENANT_MASTER,
+            tenant,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            policy_version_floor: None,
+            client_ip: Some("1.2.3.4"),
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+            execution_digest: None,
+            execution_trace: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        verify_solution(&mut ctx)
+    }
+
+    #[test]
+    fn tenant_round_trip_and_cross_tenant_negatives() {
+        // The t1-issued record verifies under tenant t1 and fails under
+        // t2 and under the global keys — the cross-tenant record is a
+        // BadSignature before any proof work.
+        let mut t1 = tenant_record(Some("t1"));
+        let counter = solve_for_test(&t1).expect("4-bit sha solves");
+        assert!(
+            matches!(
+                verify_tenant(&mut t1, counter, Some("t1")),
+                VerifyOutcome::Valid { .. }
+            ),
+            "the t1 record round-trips under the t1 context"
+        );
+        let mut cross = tenant_record(Some("t1"));
+        assert_eq!(
+            verify_tenant(&mut cross, counter, Some("t2")),
+            VerifyOutcome::Invalid(VerifyError::BadSignature),
+            "a t2 context rejects the t1 record"
+        );
+        let mut global_ctx = tenant_record(Some("t1"));
+        assert_eq!(
+            verify_tenant(&mut global_ctx, counter, None),
+            VerifyOutcome::Invalid(VerifyError::BadSignature),
+            "the global context rejects the t1 record"
+        );
+        // The None context keeps accepting None-issued records.
+        let mut unscoped = tenant_record(None);
+        let unscoped_counter = solve_for_test(&unscoped).expect("4-bit sha solves");
+        assert!(matches!(
+            verify_tenant(&mut unscoped, unscoped_counter, None),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "redis")]
+    fn the_execution_evidence_cache_serves_identical_inputs_and_rederives_on_change() {
+        // The per-verification memo: identical inputs return the first
+        // verdict, and any changed input (the presented digest) is a
+        // miss that re-derives and returns its own verdict.
+        let config = ChallengeConfig {
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
+            kid: 1,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
+            execution_key: Some("test-key-32-bytes-0123456789abcd".into()),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        };
+        let issued = crate::challenge::issue_challenge_with_execution(
+            &config,
+            "login",
+            "1.2.3.4",
+            NOW_UNIX,
+            NOW_NS,
+            0,
+            None,
+            true,
+            Some("verify-action"),
+            Some(1),
+            false,
+        )
+        .unwrap();
+        let program = issued.record.execution_program.as_deref().unwrap();
+        let decoded = crate::execution::decode(program).expect("the issued program parses");
+        let trace = crate::execution::fixtures::executed_trace_for(&decoded);
+        let trace_b64: String = B64
+            .encode(trace.as_bytes())
+            .replace('+', "-")
+            .replace('/', "_")
+            .trim_end_matches('=')
+            .to_string();
+        let digest =
+            crate::execution::expected_digest_over_trace(program, &issued.record.nonce, &trace)
+                .expect("the digest over the executed trace");
+
+        let mut cache = ExecutionEvidenceCache::default();
+        assert_eq!(
+            check_execution_binding_cached(
+                &issued.record,
+                Some(&digest),
+                Some(&trace_b64),
+                &mut cache
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_execution_binding_cached(
+                &issued.record,
+                Some(&digest),
+                Some(&trace_b64),
+                &mut cache
+            ),
+            Ok(()),
+            "identical inputs return the memoized verdict"
+        );
+        let wrong_digest = "f".repeat(64);
+        assert_eq!(
+            check_execution_binding_cached(
+                &issued.record,
+                Some(&wrong_digest),
+                Some(&trace_b64),
+                &mut cache
+            ),
+            Err(VerifyError::ExecutionMismatch),
+            "a changed input is a miss and re-derives its own verdict"
+        );
+        // An unarmed record bypasses the memo entirely.
+        let unarmed = make_record(4);
+        let mut fresh = ExecutionEvidenceCache::default();
+        assert_eq!(
+            check_execution_binding_cached(&unarmed, None, None, &mut fresh),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1806,7 +2224,8 @@ mod tests {
             let counter = solve_for_test(&record).expect("8-bit sha solves");
             let mut ctx = VerifyContext {
                 record: &mut record,
-                secret_key: "test-key-16-bytes!",
+                secret_key: "test-key-32-bytes-0123456789abcd",
+                tenant: None,
                 secrets_by_kid: None,
                 revoked_kids: None,
                 counter,
@@ -1820,8 +2239,10 @@ mod tests {
                 rsw_proof: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
+                rsw_keyring: None,
                 expected_issuer: Some("prod"),
                 expected_policy_version: Some(2),
+                policy_version_floor: None,
                 client_ip,
                 execution_digest: None,
                 execution_trace: None,
@@ -1947,12 +2368,13 @@ mod tests {
     fn argon2_issuance_rejects_invalid_memory_params() {
         // m_kib < 8 * p must fail at issuance, not at verification time.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 4,
             t: 3,
@@ -1979,12 +2401,13 @@ mod tests {
         // reject it so cross-language verification can never silently fail.
         for t in [0u32, 1, 2] {
             let config = ChallengeConfig {
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t,
@@ -2015,12 +2438,13 @@ mod tests {
         // Expired — no acceptable submission time exists (verification
         // checks expiry before the floor).
         let base = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2057,12 +2481,13 @@ mod tests {
         // TTL cap (300) and TTL 0 is meaningless — issuance must refuse to
         // mint a record it would later declare malformed.
         let base = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2099,12 +2524,13 @@ mod tests {
         // structurally acceptable — but issuance refuses t above 6, the
         // browser-solver ceiling (PHP Config already does; Rust must match).
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 7,
@@ -2131,12 +2557,13 @@ mod tests {
     #[test]
     fn argon2_issuance_rejects_libsodium_unrepresentable_p() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -2162,12 +2589,13 @@ mod tests {
         // The verifier already rejects records above the argon2 solver memory
         // ceiling (64 MiB — the wasm heap cap); issuance must never mint one.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1,
             t: 3,
@@ -2212,7 +2640,8 @@ mod tests {
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
-                secret_key: "test-key-16-bytes!".into(),
+                tenant: None,
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 algorithm: PoWAlgorithm::Argon2id,
@@ -2242,12 +2671,13 @@ mod tests {
         }
         // The maximum is accepted.
         let max_bits = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -2266,6 +2696,39 @@ mod tests {
             policy_version: 1,
         };
         assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_ok());
+    }
+
+    #[test]
+    fn protocol_version_one_with_a_decoy_is_malformed() {
+        // The legacy v1 canonical signs neither extension segment, so a
+        // stored v1 record carrying a decoy holds semantics the
+        // signature never authenticated: the grammar matrix rejects the
+        // combination structurally, before any signature work.
+        let mut record = make_record(8);
+        record.protocol_version = 1;
+        record.decoy_field = Some("company_website".to_string());
+        let counter = solve_for_test(&record).unwrap();
+        assert_eq!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn protocol_version_one_with_the_execution_triplet_is_malformed() {
+        // The same invariant on the execution side: a v1 record carrying
+        // the execution extension is malformed (the legacy canonical
+        // never signs the commitment), rejected before any work.
+        let mut record = make_record(8);
+        record.protocol_version = 1;
+        record.execution_program = Some("AAAA".to_string());
+        record.execution_version = Some(1);
+        record.execution_commitment = Some("a".repeat(64));
+        let counter = solve_for_test(&record).unwrap();
+        assert_eq!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
     }
 
     #[test]
@@ -2288,7 +2751,7 @@ mod tests {
 
     #[test]
     fn protocol_version_two_with_a_decoy_is_rejected_explicitly() {
-        // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
+        // The protocol-vs-decoy grammar: the tagged `d=` segment is a
         // protocol v3 canonical extension, so a v2 record carrying a
         // decoy is malformed — the v2 canonical never includes the
         // segment, and such a record cannot have been signed by a
@@ -2311,7 +2774,7 @@ mod tests {
         let mut record = make_record(8);
         record.protocol_version = 3;
         record.decoy_field = Some("company_website".to_string());
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         assert!(matches!(
             verify(&mut record, counter, 5000),
@@ -2392,7 +2855,7 @@ mod tests {
         record.execution_version = Some(1);
         // The commitment does not match the stored program's hash.
         record.execution_commitment = Some("0".repeat(64));
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         let outcome = verify(&mut record, counter, 5000);
         assert_eq!(
@@ -2404,9 +2867,18 @@ mod tests {
     #[test]
     fn wrong_counter_is_rejected() {
         let mut record = make_record(8);
-        // Find a valid counter, then use a different one.
+        // Find a valid counter, then a counter that provably does not
+        // meet the target (the alternate small counter can also solve it,
+        // which made the earlier `if valid == 0 { 1 } else { 0 }` guess
+        // flaky).
         let valid = solve_for_test(&record).unwrap();
-        let bad = if valid == 0 { 1 } else { 0 };
+        let bad = (0u64..)
+            .find(|counter| {
+                *counter != valid
+                    && derive_hash(&record, *counter)
+                        .is_ok_and(|hash| leading_zero_bits(&hash) < record.target_bits)
+            })
+            .expect("a non-solving counter exists");
         assert_eq!(
             verify(&mut record, bad, 5000),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -2419,7 +2891,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2435,12 +2908,14 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             accept_legacy_v1: false,
         };
         assert_eq!(
@@ -2460,7 +2935,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2476,9 +2952,11 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2501,7 +2979,8 @@ mod tests {
         // Elapsed: 0 µs (immediately after issuance) — impossibly fast.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2517,6 +2996,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2524,6 +3004,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2550,7 +3031,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY-16-bytes!",
+            secret_key: "WRONG-KEY-32-bytes-0123456789abc",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2561,6 +3043,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
@@ -2569,6 +3052,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2582,7 +3066,7 @@ mod tests {
 
     #[test]
     fn short_secret_key_rejects_as_bad_signature() {
-        // A secret below the 16-byte minimum can never have signed a valid
+        // A secret below the 32-byte minimum can never have signed a valid
         // challenge — verification must fail closed (BadSignature), and the
         // attempt is still accounted on the record.
         let mut record = make_record(8);
@@ -2590,6 +3074,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "x", // 1 byte — below the hard minimum
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2597,6 +3082,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
@@ -2608,6 +3094,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2628,7 +3115,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2644,6 +3132,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2651,6 +3140,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2667,7 +3157,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2683,6 +3174,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2690,6 +3182,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2700,12 +3193,13 @@ mod tests {
         // verifies without an IP — binding is genuinely disabled. Issued
         // properly so the v2 signature (which covers the tag) stays valid.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2729,11 +3223,13 @@ mod tests {
         let counter2 = solve_for_test(&unbound).unwrap();
         let mut ctx2 = VerifyContext {
             record: &mut unbound,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
@@ -2749,6 +3245,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2768,7 +3265,8 @@ mod tests {
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter: wrong,
@@ -2784,6 +3282,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -2791,6 +3290,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2799,7 +3299,8 @@ mod tests {
         // Second call — the correct counter, but the attempt budget is gone.
         let mut ctx2 = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2815,6 +3316,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -2822,6 +3324,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx2),
@@ -2838,7 +3341,8 @@ mod tests {
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter: wrong,
@@ -2854,6 +3358,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -2861,6 +3366,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         verify_solution(&mut ctx); // wrong counter
         let attempts = record.attempts_used;
@@ -2870,7 +3376,9 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
-            secret_key: "test-key-16-bytes!",
+            rsw_keyring: None,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2886,6 +3394,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -2907,7 +3416,8 @@ mod tests {
         // webdriver=true with enforcement → rejected.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2923,6 +3433,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -2930,6 +3441,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2945,7 +3457,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -2961,6 +3474,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: true,
             max_attempts: 0,
@@ -2968,6 +3482,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2985,7 +3500,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3001,11 +3517,13 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
@@ -3019,8 +3537,10 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3036,6 +3556,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!([])),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -3055,7 +3576,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3071,6 +3593,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!(null)),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -3078,6 +3601,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3094,7 +3618,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3110,6 +3635,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({
                 "wd": false, "hc": 8, "dm": 8, "me": 5, "ke": 2, "et": []
             })),
@@ -3119,6 +3645,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3133,7 +3660,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3149,6 +3677,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3156,6 +3685,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3168,13 +3698,15 @@ mod tests {
         // Records without a high-resolution issuance timestamp (issued_at_ns
         // == 0) are rejected as MalformedRecord — there is no client-duration
         // fallback: the floor can only be enforced with a
-        // server-measured elapsed time.
-        let mut record = make_record(8);
-        record.issued_at_ns = 0;
+        // server-measured elapsed time. The record is issued with ns=0 so
+        // its server-state MAC is valid: the malformed gate is what
+        // refuses it, not the MAC.
+        let mut record = make_record_at(8, NOW_UNIX, 0);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3190,6 +3722,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3197,10 +3730,53 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+
+        // Rewriting the issuance clock of a properly issued record
+        // without re-sealing the server-state MAC is the fraud the MAC
+        // exists to catch: it fails closed as a signature error, never as
+        // a merely malformed record.
+        let mut rewritten = make_record(8);
+        rewritten.issued_at_ns = 0;
+        let counter = solve_for_test(&rewritten).unwrap();
+        let mut rewritten_ctx = VerifyContext {
+            record: &mut rewritten,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 60_000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 10_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            execution_digest: None,
+            execution_trace: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            policy_version_floor: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+        };
+        assert_eq!(
+            verify_solution(&mut rewritten_ctx),
+            VerifyOutcome::Invalid(VerifyError::BadSignature),
+            "a rewritten issuance clock must fail the server-state MAC"
         );
     }
 
@@ -3214,7 +3790,8 @@ mod tests {
         assert!(record.min_duration_ms > 0, "record floor must be positive");
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3230,6 +3807,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3237,6 +3815,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3253,7 +3832,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3269,6 +3849,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3276,6 +3857,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3312,9 +3894,12 @@ mod tests {
         // Too slow rejection
         assert!(score_telemetry(&t1, 301_000));
 
-        // Zero interaction long solve rejection
+        // A long solve with zero interaction is NOT rejected: the widget
+        // auto-solves with widget-local listeners, so a slow device or an
+        // Argon2id profile legitimately produces no events.
         let t3 = json!({"wd": false, "me": 0, "ke": 0});
-        assert!(score_telemetry(&t3, 31_000));
+        assert!(!score_telemetry(&t3, 31_000));
+        assert!(!score_telemetry(&t3, 299_000));
 
         // Bot simulation rejection: 24+ discrete events at perfectly uniform
         // intervals (CV ~ 0, mean >= 8ms).
@@ -3423,7 +4008,8 @@ mod tests {
         let mut clock_calls = 0;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3443,6 +4029,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -3453,6 +4040,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3469,7 +4057,8 @@ mod tests {
         let counter2 = solve_for_test(&record2).unwrap();
         let mut ctx2 = VerifyContext {
             record: &mut record2,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter: counter2,
@@ -3482,6 +4071,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -3492,6 +4082,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx2),
@@ -3513,7 +4104,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3526,6 +4118,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -3536,6 +4129,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -3553,14 +4147,16 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_rejects_long_headless_solve_without_interaction() {
+    fn telemetry_does_not_reject_long_auto_solve_without_interaction() {
         use serde_json::json;
         let t = json!({ "wd": false, "me": 0, "ke": 0, "et": [] });
-        assert!(score_telemetry(&t, 31_000));
-        assert!(score_telemetry(&t, 301_000));
-        // A normal-duration solve with no interaction is fine (users may not
-        // touch the page while it auto-solves).
+        // The widget auto-solves and listens only on the widget: no
+        // interaction is the ordinary case, not a bot signal.
+        assert!(!score_telemetry(&t, 31_000));
+        assert!(!score_telemetry(&t, 299_000));
         assert!(!score_telemetry(&t, 4000));
+        // The absolute solve bound still rejects.
+        assert!(score_telemetry(&t, 301_000));
     }
 
     #[test]
@@ -3601,9 +4197,9 @@ mod tests {
         );
 
         // The cap value itself is also rejected: the official decoder
-        // rejects counter >= 5,000,000 (the JS solver searches
-        // 0..4,999,999), so the direct verifier must match (protocol
-        // parity).
+        // rejects counter >= the solver cap (20,000,000; the JS solver
+        // searches 0..19,999,999), so the direct verifier must match the
+        // protocol contract.
         let mut record2 = make_record(4);
         let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
         assert_eq!(
@@ -3633,7 +4229,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3649,6 +4246,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3656,6 +4254,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3670,7 +4269,8 @@ mod tests {
         let expires_at = record.expires_at;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3686,6 +4286,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3693,6 +4294,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3707,7 +4309,8 @@ mod tests {
         let expires_at = record.expires_at;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3723,6 +4326,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3730,6 +4334,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3796,7 +4401,7 @@ mod tests {
         let counter = solve_for_test(&sane).unwrap();
         let mut absurd = sane.clone();
         absurd.m_kib = crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1;
-        resign_v2(&mut absurd, "test-key-16-bytes!");
+        resign_v2(&mut absurd, "test-key-32-bytes-0123456789abcd");
         assert_eq!(
             verify(&mut absurd, counter, 5000),
             VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
@@ -3813,7 +4418,8 @@ mod tests {
         assert_eq!(record.min_duration_ms, 5);
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3829,6 +4435,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3836,6 +4443,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3843,7 +4451,8 @@ mod tests {
         ));
         let mut ctx_fast = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3859,6 +4468,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3866,6 +4476,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_fast),
@@ -4015,6 +4626,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -4043,7 +4655,7 @@ mod tests {
 
     #[test]
     fn binding_tag_is_nonce_bound() {
-        let secret = "0123456789abcdef0123456789abcdef"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
+        let secret = "0123456789abcdef0123456789abcdef";
         let a = binding_tag("nonce-a", "192.168.1.5", secret).unwrap();
         let b = binding_tag("nonce-b", "192.168.1.5", secret).unwrap();
         assert_ne!(a, b, "same IP, different nonce → different tag");
@@ -4060,8 +4672,8 @@ mod tests {
 
     #[test]
     fn binding_tag_canonicalizes_ipv4_mapped_and_parses_families() {
-        let secret = "0123456789abcdef0123456789abcdef"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
-                                                         // IPv4-mapped IPv6 normalizes to 4-byte IPv4.
+        let secret = "0123456789abcdef0123456789abcdef";
+        // IPv4-mapped IPv6 normalizes to 4-byte IPv4.
         assert_eq!(
             binding_tag("n", "::ffff:192.168.1.5", secret).unwrap(),
             binding_tag("n", "192.168.1.5", secret).unwrap()
@@ -4087,12 +4699,13 @@ mod tests {
         // even though the submitting IP differs from the issuance IP.
         let issued = issue_challenge(
             &ChallengeConfig {
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 100,
                 t: 1,
@@ -4122,7 +4735,8 @@ mod tests {
         let counter = solve_for_test(&issued.record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut issued.record.clone(),
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4135,12 +4749,14 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4158,7 +4774,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4171,12 +4788,14 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             execution_digest: None,
             execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4201,11 +4820,12 @@ mod tests {
         // issued for another region.
         let mut record = make_record(8);
         record.region = Some("eu".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed into the canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // region is signed into the canonical payload
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4218,6 +4838,7 @@ mod tests {
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4228,6 +4849,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4244,7 +4866,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4257,6 +4880,7 @@ mod tests {
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4267,6 +4891,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4278,12 +4903,13 @@ mod tests {
     fn matching_region_verifies_and_unmatched_expectation_never_fires() {
         let mut record = make_record(8);
         record.region = Some("us".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed into the canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // region is signed into the canonical payload
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4296,6 +4922,7 @@ mod tests {
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4306,6 +4933,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_match),
@@ -4315,10 +4943,12 @@ mod tests {
         // No expected region → the record's region is ignored entirely.
         let mut ctx_none = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4331,6 +4961,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4354,11 +4985,12 @@ mod tests {
         // challenges issued by another issuer.
         let mut record = make_record(8);
         record.issuer = Some("auth-gw-eu".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed into the v2 canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // issuer is signed into the v2 canonical payload
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4371,6 +5003,7 @@ mod tests {
             expected_region: None,
             expected_issuer: Some("auth-gw-us"),
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4381,6 +5014,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4398,7 +5032,8 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4411,6 +5046,7 @@ mod tests {
             expected_region: None,
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4421,6 +5057,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4432,12 +5069,13 @@ mod tests {
     fn matching_issuer_verifies_and_no_expectation_never_fires() {
         let mut record = make_record(8);
         record.issuer = Some("auth-gw".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed into the v2 canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // issuer is signed into the v2 canonical payload
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4450,6 +5088,7 @@ mod tests {
             expected_region: None,
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4460,6 +5099,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_match),
@@ -4469,7 +5109,8 @@ mod tests {
         // No expected issuer → the record's issuer is ignored entirely.
         let mut ctx_none = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4482,6 +5123,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4492,6 +5134,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_none),
@@ -4539,6 +5182,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
         };
         issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
             .unwrap()
@@ -4563,7 +5207,8 @@ mod tests {
         secrets.insert(2, key_b.to_string());
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY-16-bytes!",
+            secret_key: "WRONG-KEY-32-bytes-0123456789abc",
+            tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: None,
             counter,
@@ -4576,6 +5221,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4586,6 +5232,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -4595,10 +5242,11 @@ mod tests {
         // The same kid with a different secret → BadSignature (the secret
         // selection is real, not cosmetic).
         let mut wrong: HashMap<u32, String> = HashMap::new();
-        wrong.insert(2, "WRONG-KEY-16-bytes!".to_string());
+        wrong.insert(2, "WRONG-KEY-32-bytes-0123456789abc".to_string());
         let mut ctx_wrong = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY-16-bytes!",
+            secret_key: "WRONG-KEY-32-bytes-0123456789abc",
+            tenant: None,
             secrets_by_kid: Some(&wrong),
             revoked_kids: None,
             counter,
@@ -4611,6 +5259,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4621,6 +5270,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_wrong),
@@ -4631,6 +5281,7 @@ mod tests {
         let mut ctx_plain = VerifyContext {
             record: &mut record,
             secret_key: key_b,
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4643,6 +5294,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4653,6 +5305,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_plain),
@@ -4675,6 +5328,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: key_a, // the correct key — must NOT rescue the record
+            tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: None,
             counter,
@@ -4687,6 +5341,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4697,6 +5352,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4707,6 +5363,7 @@ mod tests {
         let mut ctx_empty = VerifyContext {
             record: &mut record,
             secret_key: key_a,
+            tenant: None,
             secrets_by_kid: Some(&empty),
             revoked_kids: None,
             counter,
@@ -4719,6 +5376,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4729,6 +5387,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_empty),
@@ -4754,6 +5413,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: key,
+            tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: None,
             counter,
@@ -4766,6 +5426,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4776,6 +5437,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4790,6 +5452,7 @@ mod tests {
         let mut ctx_boundary = VerifyContext {
             record: &mut record2,
             secret_key: key,
+            tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: None,
             counter: counter2,
@@ -4802,6 +5465,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4812,6 +5476,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_boundary),
@@ -4826,6 +5491,7 @@ mod tests {
         let mut ctx_rolled = VerifyContext {
             record: &mut record,
             secret_key: key,
+            tenant: None,
             secrets_by_kid: Some(&rolled_forward),
             revoked_kids: None,
             counter,
@@ -4838,6 +5504,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4848,6 +5515,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_rolled),
@@ -4877,6 +5545,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: key,
+            tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: Some(&revoked),
             counter,
@@ -4889,6 +5558,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4899,6 +5569,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4910,6 +5581,7 @@ mod tests {
         let mut ctx_plain = VerifyContext {
             record: &mut record,
             secret_key: key,
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: Some(&revoked),
             counter,
@@ -4922,6 +5594,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4932,6 +5605,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_plain),
@@ -4957,6 +5631,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: key,
+            tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: Some(&revoked),
             counter,
@@ -4969,6 +5644,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4979,6 +5655,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -5196,11 +5873,12 @@ mod tests {
         let mut record = make_record(8);
         record.issued_at = NOW_UNIX + 62; // > now + 60 → anomaly
         record.expires_at = record.issued_at + 120;
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5213,6 +5891,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5223,6 +5902,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5234,11 +5914,12 @@ mod tests {
         let mut record = make_record(8);
         record.issued_at = NOW_UNIX + 61; // == now + 60
         record.expires_at = record.issued_at + 120;
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5251,6 +5932,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5261,6 +5943,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5283,7 +5966,8 @@ mod tests {
         // Cheap phase + derive + final re-check all pass just before expiry.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5296,6 +5980,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5306,6 +5991,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5316,15 +6002,15 @@ mod tests {
         // exact expiry boundary (the ProductionVerifier re-reads the real
         // clock at this step — see tests/redis_verify.rs).
         assert_eq!(
-            final_revalidate(&record, cheap_now, None, None, None),
+            final_revalidate(&record, cheap_now, None, None, None, None),
             Ok(())
         );
         assert_eq!(
-            final_revalidate(&record, record.expires_at, None, None, None),
+            final_revalidate(&record, record.expires_at, None, None, None, None),
             Err(VerifyError::Expired)
         );
         assert_eq!(
-            final_revalidate(&record, record.expires_at + 5, None, None, None),
+            final_revalidate(&record, record.expires_at + 5, None, None, None, None),
             Err(VerifyError::Expired)
         );
     }
@@ -5339,7 +6025,8 @@ mod tests {
         let now_unix = NOW_UNIX + 1;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5352,6 +6039,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5362,6 +6050,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5371,24 +6060,176 @@ mod tests {
         // Each expectation re-checked at the final step fails closed when it
         // no longer matches the record.
         assert_eq!(
-            final_revalidate(&record, now_unix, None, Some(2), None),
+            final_revalidate(&record, now_unix, None, Some(2), None, None),
             Err(VerifyError::WrongPolicyVersion),
             "policy version changed between cheap and final → rejected"
         );
         assert_eq!(
-            final_revalidate(&record, now_unix, Some("us"), None, None),
+            final_revalidate(&record, now_unix, Some("us"), None, None, None),
             Err(VerifyError::WrongRegion),
             "region expectation changed between cheap and final → rejected"
         );
         assert_eq!(
-            final_revalidate(&record, now_unix, None, None, Some("auth-gw")),
+            final_revalidate(&record, now_unix, None, None, None, Some("auth-gw")),
             Err(VerifyError::WrongIssuer),
             "issuer expectation changed between cheap and final → rejected"
         );
+        // A declared rollout window (floor 1, expected 2) redeems the record's
+        // epoch 1 at the final gate too — the window is not a cheap-phase-only
+        // relaxation.
+        assert_eq!(
+            final_revalidate(&record, now_unix, None, Some(2), Some(1), None),
+            Ok(()),
+            "inside a rollout window the floor epoch redeems at the final gate"
+        );
         // The matching configuration passes.
         assert_eq!(
-            final_revalidate(&record, now_unix, None, None, None),
+            final_revalidate(&record, now_unix, None, None, None, None),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn policy_version_acceptance_window_matrix() {
+        // The rollout-window predicate's truth table: strict equality by
+        // default, floor <= record <= expected inside a declared window,
+        // an inverted window (floor > expected) accepts nothing (fail
+        // closed), and no expectation disables the check entirely.
+        for (record, expected, floor, accepted) in [
+            // Strict equality — no declared rollout window.
+            (2u32, Some(2u32), None, true),
+            (1, Some(2), None, false),
+            (3, Some(2), None, false),
+            // Declared rollout window [1, 2]: a mixed N/N+1 fleet redeems.
+            (1, Some(2), Some(1), true),
+            (2, Some(2), Some(1), true),
+            (0, Some(2), Some(1), false),
+            (3, Some(2), Some(1), false),
+            // A degenerate one-epoch window is strict equality again.
+            (2, Some(2), Some(2), true),
+            (1, Some(2), Some(2), false),
+            // An inverted window accepts nothing — never fail open on a
+            // misconfiguration.
+            (1, Some(1), Some(2), false),
+            (2, Some(1), Some(2), false),
+            // No expectation disables the epoch check (floor is moot).
+            (0, None, None, true),
+            (99, None, Some(1), true),
+        ] {
+            assert_eq!(
+                policy_version_accepted(record, expected, floor),
+                accepted,
+                "record {record}, expected {expected:?}, floor {floor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rollout_window_redeems_a_mixed_fleet_cross_epoch() {
+        // Done-when: inside a declared N/N+1 rollout window an outstanding
+        // challenge issued under the floor epoch redeems on a node already
+        // expecting N+1 — the cheap-phase gate AND the post-derive final
+        // re-validation both use the window predicate; outside a window a
+        // wrong epoch is still rejected (strict equality).
+        let make = |policy_version: u32| {
+            let mut config = ChallengeConfig {
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
+                kid: 1,
+                execution_key: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
+                algorithm: PoWAlgorithm::Sha256,
+                m_kib: 100,
+                t: 1,
+                p: 1,
+                target_bits: 8,
+                argon2_target_bits: 8,
+                ttl_secs: 120,
+                min_duration_ms: None,
+                auto_tune: false,
+                auto_tune_min_bits: 8,
+                auto_tune_max_bits: 24,
+                binding_mode: BindingMode::Bound,
+                region: None,
+                issuer: None,
+                policy_version,
+            };
+            let _ = &mut config;
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
+                .unwrap()
+                .record
+        };
+        for (record_version, expected, floor, should_verify) in [
+            // Rollout window [1, 2]: both fleet epochs redeem.
+            (1u32, Some(2u32), Some(1u32), true),
+            (2, Some(2), Some(1), true),
+            // Outside the window's bounds: rejected.
+            (0, Some(2), Some(1), false),
+            (3, Some(2), Some(1), false),
+            // No declared window: strict equality only.
+            (1, Some(2), None, false),
+            (2, Some(2), None, true),
+            // A degenerate one-epoch window is strict equality again.
+            (2, Some(2), Some(2), true),
+            (1, Some(2), Some(2), false),
+            // An inverted window accepts nothing.
+            (2, Some(1), Some(2), false),
+        ] {
+            let mut record = make(record_version);
+            let counter = solve_for_test(&record).unwrap();
+            let mut ctx = VerifyContext {
+                record: &mut record,
+                secret_key: "test-key-32-bytes-0123456789abcd",
+                tenant: None,
+                secrets_by_kid: None,
+                revoked_kids: None,
+                counter,
+                duration_ms: 5000,
+                now_unix: Some(&mut || NOW_UNIX + 1),
+                now_ns: NOW_NS + 5_000_000,
+                min_duration_ms: 0,
+                expected_scope: None,
+                expected_request_binding: RequestBindingExpectation::Unenforced,
+                expected_region: None,
+                expected_issuer: None,
+                expected_policy_version: expected,
+                policy_version_floor: floor,
+                client_ip: Some("1.2.3.4"),
+                execution_digest: None,
+                execution_trace: None,
+                telemetry: None,
+                enforce_telemetry: false,
+                max_attempts: 0,
+                accept_legacy_v1: false,
+                rsw_proof: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_keyring: None,
+            };
+            let label = format!("record {record_version}, expected {expected:?}, floor {floor:?}");
+            if should_verify {
+                assert!(
+                    matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
+                    "{label}: inside the rollout window the epoch must redeem (cheap + final gates)"
+                );
+            } else {
+                assert_eq!(
+                    verify_solution(&mut ctx),
+                    VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion),
+                    "{label}: outside the acceptance window the epoch must be rejected"
+                );
+            }
+        }
+        // The final gate applies the same window bounds on its own: below
+        // the floor epoch the window rejects there too.
+        let mut record = make(0);
+        let _ = &mut record;
+        assert_eq!(
+            final_revalidate(&record, NOW_UNIX + 1, None, Some(2), Some(1), None),
+            Err(VerifyError::WrongPolicyVersion),
+            "below the floor epoch the final gate rejects inside the window"
         );
     }
 
@@ -5456,7 +6297,8 @@ mod tests {
         // intdiv semantics): 1234.567 ms -> 1234.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5469,6 +6311,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5479,6 +6322,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5499,7 +6343,8 @@ mod tests {
         let counter = solve_for_test(&record).expect("8-bit sha solves");
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5512,6 +6357,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5522,6 +6368,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5543,11 +6390,12 @@ mod tests {
         // its duration — a second, later read would report a larger span.
         let mut record = make_record(8);
         record.min_duration_ms = 5000;
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).expect("8-bit sha solves");
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5560,6 +6408,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5570,6 +6419,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5634,7 +6484,7 @@ mod tests {
                 "t" => record.t = value,
                 _ => unreachable!(),
             }
-            resign_v2(&mut record, "test-key-16-bytes!");
+            resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
             assert_eq!(
                 verify(&mut record, 0, 5000),
                 VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params),
@@ -5644,34 +6494,40 @@ mod tests {
     }
 
     #[test]
-    fn signed_argon2_record_at_max_parallelism_verifies() {
-        // Ceiling outcome for p: the parallelism ceiling is 4, so a
-        // properly signed record with p=4 (and m_kib >= 8*p, t >= 3) must
-        // verify.
+    fn signed_argon2_record_at_the_pinned_parallelism_verifies() {
+        // The parallelism space is pinned to p == 1 (the libsodium-backed
+        // PHP verifier has no p parameter and refuses anything else), so
+        // the floor/ceiling pair is 1/1 and the shipped profile verifies.
         let mut record = make_argon2_record(4, 64);
-        record.p = 4;
-        record.m_kib = 64; // >= 8 * 4
-        resign_v2(&mut record, "test-key-16-bytes!");
-        assert!(record.p <= crate::challenge::MAX_PARALLELISM);
-        let counter = solve_for_test(&record).expect("p=4 argon solve finds a counter");
+        record.p = 1;
+        record.m_kib = 64;
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
+        assert_eq!(crate::challenge::MIN_PARALLELISM, 1);
+        assert_eq!(crate::challenge::MAX_PARALLELISM, 1);
+        let counter = solve_for_test(&record).expect("argon solve finds a counter");
         assert!(
             matches!(
                 verify(&mut record, counter, 5000),
                 VerifyOutcome::Valid { .. }
             ),
-            "p=4 (at the parallelism ceiling) must verify"
+            "the pinned p=1 profile must verify"
         );
     }
 
     #[test]
-    fn signed_argon2_record_above_max_parallelism_is_rejected() {
-        let mut record = make_argon2_record(4, 128);
-        record.p = 5; // above the parallelism ceiling
-        resign_v2(&mut record, "test-key-16-bytes!");
-        assert_eq!(
-            verify(&mut record, 0, 5000),
-            VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
-        );
+    fn signed_argon2_record_above_the_pinned_parallelism_is_rejected() {
+        // A signed p >= 2 record is authentic but unsupported: Rust and
+        // PHP must agree that it is never derivable.
+        for p in [2u32, 4, 5] {
+            let mut record = make_argon2_record(4, 128);
+            record.p = p;
+            resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
+            assert_eq!(
+                verify(&mut record, 0, 5000),
+                VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params),
+                "p={p} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -5686,7 +6542,7 @@ mod tests {
     }
 
     // ── Shared fixture vectors (byte-exact; PHP mirrors these) ─────────
-    // secret = "0123456789abcdef0123456789abcdef" // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
+    // secret = "0123456789abcdef0123456789abcdef"
     // nonce  = base64("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")  (32 ASCII bytes)
     // salt   = base64("1234567890abcdef")  (16 ASCII bytes)
     // scope = "login"; issued_at = 1700000000; expires_at = 1700000120;
@@ -5700,8 +6556,14 @@ mod tests {
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
         "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
-    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
-    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8fHwx.145669d338579ed579537accc7be3f9b4004e01af9bc5a5ede4e5761df9bde88";
+    const FIXTURE_CANONICAL_V2: &str = "v4|2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
+    const FIXTURE_CHALLENGE_V2: &str = "djR8MnxRVUpEUkVWR1IwaEpTa3RNVFU1UFVGRlNVMVJWVmxkWVdWcGhZbU5rWldZPXxsb2dpbnw1YjEwNTQyNGZlM2E1Y2ZhM2FmZGNjZGE5NWY3MzRjOWU2NmVlNzAzZThiOGQ0MjZhMDdjZmUxY2I5Yzg5NTRmfDE3MDAwMDAwMDB8MTcwMDAwMDEyMHxzaGEyNTZ8MHwxfDF8OHxNVEl6TkRVMk56ZzVNR0ZpWTJSbFpnPT18MHx8MXx8fDE=.b4f93cd65ffa1184b72854237382c225fb8fe195f6657682a8aa4e542759500f";
+    // The signed record-metadata MAC vector: the same base canonical plus
+    // the m=1 marker, and the server-state MAC the issuer seals over it.
+    const FIXTURE_CANONICAL_V2_MAC: &str = "v4|2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1|m=1";
+    const FIXTURE_CHALLENGE_V2_MAC: &str = "djR8MnxRVUpEUkVWR1IwaEpTa3RNVFU1UFVGRlNVMVJWVmxkWVdWcGhZbU5rWldZPXxsb2dpbnw1YjEwNTQyNGZlM2E1Y2ZhM2FmZGNjZGE5NWY3MzRjOWU2NmVlNzAzZThiOGQ0MjZhMDdjZmUxY2I5Yzg5NTRmfDE3MDAwMDAwMDB8MTcwMDAwMDEyMHxzaGEyNTZ8MHwxfDF8OHxNVEl6TkRVMk56ZzVNR0ZpWTJSbFpnPT18MHx8MXx8fDF8bT0x.faac3b0327610efab95b2595f12ba6cccfd5d414a6130b5c869fb15cb36bdbfb";
+    const FIXTURE_SERVER_MAC: &str =
+        "e78e7182608185bf8fa24b46bedc2816b99224c5e6a57fd301f42a97f646a7b6";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
@@ -5749,6 +6611,8 @@ mod tests {
             execution_commitment: None,
             hostname: None,
             decoy_field: None,
+            rsw_modulus_sha256: None,
+            server_mac: None,
         }
     }
 
@@ -5757,10 +6621,12 @@ mod tests {
         let mut ctx = VerifyContext {
             record,
             secret_key: FIXTURE_SECRET,
+            tenant: None,
             secrets_by_kid: None,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             revoked_kids: None,
             counter,
             duration_ms: 5000,
@@ -5775,6 +6641,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -5804,6 +6671,12 @@ mod tests {
         // The challenge's base64 half is byte-exactly the v2 canonical.
         let b64 = FIXTURE_CHALLENGE_V2.split('.').next().unwrap();
         assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V2.as_bytes());
+        // No MAC at issue means no signed marker, and the floorless
+        // record stays verifiable: the documented floorless path.
+        assert!(record.server_mac.is_none());
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            &record.challenge
+        ));
         assert!(
             matches!(
                 verify_fixture(&mut record, false),
@@ -5844,12 +6717,89 @@ mod tests {
     }
 
     #[test]
+    fn v2_fixture_record_with_signed_mac_verifies_and_refuses_tampering() {
+        // The signed m=1 vector: the canonical carries the marker and the
+        // record carries the server-state MAC over the exact challenge.
+        let mut record = fixture_record(2);
+        record.challenge = FIXTURE_CHALLENGE_V2_MAC.into();
+        record.prefix = format!("{}|{FIXTURE_SALT}|", record.challenge);
+        record.server_mac = Some(FIXTURE_SERVER_MAC.into());
+        let b64 = FIXTURE_CHALLENGE_V2_MAC.split('.').next().unwrap();
+        assert_eq!(
+            B64.decode(b64).unwrap(),
+            FIXTURE_CANONICAL_V2_MAC.as_bytes()
+        );
+        assert!(crate::challenge::signed_canonical_commits_record_meta(
+            &record.challenge
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            FIXTURE_CHALLENGE_V2
+        ));
+        let mut signed = record.clone();
+        assert!(
+            matches!(
+                verify_fixture(&mut signed, false),
+                VerifyOutcome::Valid { .. }
+            ),
+            "the signed m=1 fixture must verify"
+        );
+
+        // Stripping the MAC leaves the signed marker without its tag:
+        // the required-MAC gate refuses the record.
+        let mut stripped = record.clone();
+        stripped.server_mac = None;
+        assert_eq!(
+            verify_fixture(&mut stripped, false),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+
+        // Rewriting the sealed clock keeps the marker and breaks the MAC.
+        let mut backdated = record.clone();
+        backdated.issued_at_ns -= 1;
+        assert_eq!(
+            verify_fixture(&mut backdated, false),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+
+        // A no-marker record with a foreign MAC fails the MAC check.
+        let mut forged = fixture_record(2);
+        forged.server_mac = Some(FIXTURE_SERVER_MAC.into());
+        assert_eq!(
+            verify_fixture(&mut forged, false),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn record_meta_marker_parser_rejects_malformed_challenges() {
+        // The marker parser is total: no dot, invalid base64, a non-v4
+        // revision and a canonical without the trailing marker all read
+        // as uncovered, so only a signed v4 marker can demand a MAC.
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            "no-dot"
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            "!!!.###"
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            &format!("{}.00", B64.encode(b"v3|1|...|m=1"))
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            &format!("{}.00", B64.encode(b"v4|1|..."))
+        ));
+        assert!(crate::challenge::signed_canonical_commits_record_meta(
+            &format!("{}.00", B64.encode(b"v4|1|...|m=1"))
+        ));
+    }
+
+    #[test]
     fn v2_fixture_rejects_wrong_scope_with_wrong_scope_error() {
         let mut record = fixture_record(2);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: FIXTURE_SECRET,
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -5865,6 +6815,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -5872,6 +6823,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5916,12 +6868,13 @@ mod tests {
 
     fn make_rsw_record(t: u32) -> ChallengeRecord {
         let mut config = crate::challenge::ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
             rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
             rsw_t: t,
+            tenant: None,
             algorithm: PoWAlgorithm::Rsw,
             m_kib: 0,
             t: 1,
@@ -5950,7 +6903,7 @@ mod tests {
         let mut record = issued.record;
         if t == 0 {
             record.t = 0;
-            resign_v2(&mut record, "test-key-16-bytes!");
+            resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         }
         record
     }
@@ -5964,7 +6917,8 @@ mod tests {
     ) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter: 0,
@@ -5977,10 +6931,12 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: proof,
             rsw_modulus_n: trapdoor.then_some(crate::rsw::fixtures::MODULUS_N_B64),
             rsw_lambda: trapdoor.then_some(crate::rsw::fixtures::LAMBDA_B64),
+            rsw_keyring: None,
             execution_digest: None,
             execution_trace: None,
             telemetry: None,
@@ -6091,12 +7047,13 @@ mod tests {
     /// token carries the digest:trace evidence AND the rsw final value.
     fn make_rsw_execution_record() -> ChallengeRecord {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: Some("0123456789abcdef0123456789abcdef".into()),
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
             rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
             rsw_t: crate::challenge::MIN_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Rsw,
             m_kib: 0,
             t: 1,
@@ -6113,7 +7070,13 @@ mod tests {
             issuer: None,
             policy_version: 1,
         };
-        crate::challenge::issue_challenge_with_execution(
+        // The composition confirms the v5 ceiling explicitly: the
+        // capability-free default would emit the identityless shape.
+        crate::challenge::issue_challenge_with_execution_capabilities(
+            crate::challenge::EmissionCapabilities::confirmed(
+                crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &config,
             "login",
             "1.2.3.4",
@@ -6161,7 +7124,8 @@ mod tests {
     ) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -6174,10 +7138,12 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: proof,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64),
             rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64),
+            rsw_keyring: None,
             execution_digest: digest,
             execution_trace: trace_b64,
             telemetry: None,
@@ -6196,7 +7162,7 @@ mod tests {
         // (the fifth and sixth segments) and verifies. This is the
         // acceptance the mutually-exclusive decoder used to break.
         let mut record = make_rsw_execution_record();
-        assert_eq!(record.protocol_version, 4);
+        assert_eq!(record.protocol_version, 5);
         let proof =
             crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
         let (digest, trace_b64) = execution_evidence(&record);

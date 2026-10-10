@@ -80,6 +80,9 @@ final class VerifierHardeningTest extends TestCase
             minDurationMs: $record->minDurationMs,
             issuedAtNs: $record->issuedAtNs,
             protocolVersion: 1,
+            // The rebuilt challenge needs a fresh record-metadata MAC
+            // (it covers the challenge), exactly as the issuer writes it.
+            serverMac: \KiwiCaptcha\ServerStateMac::recordMeta(\KiwiCaptcha\ServerStateMac::key(Vectors::SECRET, null), $challenge, $record->issuedAtNs, null),
         );
     }
 
@@ -283,20 +286,93 @@ final class VerifierHardeningTest extends TestCase
         self::assertNull($storage->find($record->nonce), 'the untimed record must be burned');
     }
 
-    public function testTelemetryRejectedOnlyWhenEnforced(): void
+    public function testProtocolVersionOneWithADecoyIsMalformed(): void
     {
+        // The grammar matrix: the legacy v1 canonical signs neither
+        // extension segment, so a stored v1 record carrying a decoy
+        // field holds semantics its signature never authenticated and
+        // is rejected as malformed before any signature work.
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
 
+        $withDecoy = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->ipHash(),
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: 0,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 1,
+            decoyField: 'company_website',
+        );
+        $mutated = new ArrayStorage();
+        $mutated->store($withDecoy);
+
+        $outcome = (new Verifier($mutated, acceptLegacyV1: true))->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a v1 record carrying a decoy is malformed');
+    }
+
+    public function testProtocolVersionOneWithTheExecutionTripletIsMalformed(): void
+    {
+        // The same invariant on the execution side: the legacy canonical
+        // never signs the commitment, so a v1 record carrying the
+        // execution extension is rejected before any work.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+
+        $withExecution = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->ipHash(),
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: 0,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 1,
+            executionProgram: 'AAAA',
+            executionVersion: 1,
+            executionCommitment: str_repeat('a', 64),
+        );
+        $mutated = new ArrayStorage();
+        $mutated->store($withExecution);
+
+        $outcome = (new Verifier($mutated, acceptLegacyV1: true))->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a v1 record carrying the execution triplet is malformed');
+    }
+
+    public function testTelemetryRejectedOnlyWhenEnforced(): void
+    {
+        [$record, $token] = $this->issueAndSolve(new ArrayStorage(), minDurationMs: 0);
+
         $botToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, ['wd' => true])->encode();
 
-        $verifier = new Verifier($storage, acceptLegacyV1: true);
-        $storage->store($record);
-        $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77');
+        // A fresh storage per case: store() never rewinds a consumed
+        // record, so each posture needs its own pending envelope.
+        $off = new ArrayStorage();
+        $off->store($record);
+        $outcome = (new Verifier($off, acceptLegacyV1: true))->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertTrue($outcome->isOk(), 'telemetry must be ignored when enforcement is off');
 
-        $storage->store($record);
-        $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
+        $on = new ArrayStorage();
+        $on->store($record);
+        $outcome = (new Verifier($on, acceptLegacyV1: true))->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
         self::assertSame(VerifyError::TelemetryRejected, $outcome->error);
     }
 
@@ -324,6 +400,42 @@ final class VerifierHardeningTest extends TestCase
         $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify($emptyToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertTrue($outcome->isOk(), sprintf('empty telemetry must pass when enforcement is off, got %s', $outcome->code()));
+    }
+
+    public function testTheTelemetryGateSkipsTheFusedCleanupEvalOnAConsumedSnapshot(): void
+    {
+        // The runtime-state snapshot already resolved the terminal
+        // Consumed kind: consumed is terminal, so the fused
+        // delete-if-pending eval could never observe anything else. The
+        // strict-telemetry replay of a consumed record resolves the
+        // retained outcome from the held snapshot without issuing the
+        // cleanup eval (the gate is replay-exempt client-side solve
+        // evidence; the identity-proven stored success replays).
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $client = new \KiwiCaptcha\Tests\Fixtures\FakePredisClient();
+        $storage = new \KiwiCaptcha\Storage\RedisStorage($client);
+        $issuer = new Issuer($this->makeConfig(0), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.77');
+        $counter = $this->solveSha256($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+        $identity = 'op-'.hash('sha256', 'telemetry-skip');
+
+        // The first redemption with enforcement off: fresh valid
+        // derivation, consumed with the identity, committed valid result.
+        $verifier = new Verifier($storage);
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', operationIdentity: $identity);
+        self::assertTrue($first->isOk(), sprintf('the setup redemption must verify fresh, got %s', $first->code()));
+
+        // The strict-telemetry replay: the empty payload fails the gate,
+        // and no Lua transition runs — the snapshot answers.
+        $evalsBefore = \count($client->evals);
+        $replay = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', operationIdentity: $identity, enforceTelemetry: true);
+        self::assertTrue($replay->isOk(), sprintf('the exempt telemetry failure replays the stored success for the proven operation, got %s', $replay->code()));
+        self::assertTrue($replay->fromStoredResult, 'the replay is the stored result, never a fresh derivation');
+        self::assertSame($evalsBefore, \count($client->evals), 'the consumed snapshot must not issue the fused delete-if-pending eval');
+        self::assertNotNull($client->store['kiwicaptcha:'.$challenge->nonce] ?? null, 'the consumed evidence is retained');
     }
 
     public function testScopeLongerThan128BytesThrows(): void

@@ -5,18 +5,19 @@
 //! - `solve_argon2_chunk`  — memory-hard Argon2id PoW (chosen to resist specialized hardware).
 //!
 //! Both take the challenge prefix and salt as raw pointer/length pairs (the
-//! widget allocates the buffers with `__wbindgen_malloc`, copies the bytes,
-//! and frees them with `__wbindgen_free`) and search a half-open counter
+//! widget allocates the buffers with [`alloc`], copies the bytes, and
+//! frees them with [`dealloc`]) and search a half-open counter
 //! range `[start_counter, start_counter + chunk_size)`, returning the first
 //! counter whose hash meets `target_bits` leading-zero bits, or -1 if the
 //! chunk is exhausted. Chunking lets the widget yield to the UI between calls.
 //!
 //! The SHA chunk is TIME-budgeted (see [`SHA_CHUNK_TIME_BUDGET_MS`]): the
-//! loop stops after approximately that much wall time and reports how far
-//! it got, so the synchronous work per yield is bounded by wall time, never
-//! by a hash count (a fixed hash-count chunk can block the UI for ~100 ms on
-//! slow devices). The Argon2id chunk stays hash-count-budgeted — each hash
-//! is memory-hard and inherently slow, and it always runs in a worker.
+//! loop stops after approximately that much elapsed time and reports how far
+//! it got, so the synchronous work per yield is bounded by elapsed time,
+//! never by a hash count (a fixed hash-count chunk can block the UI for
+//! ~100 ms on slow devices). The Argon2id chunk stays hash-count-budgeted —
+//! each hash is memory-hard and inherently slow, and it always runs in a
+//! worker.
 //!
 //! The counter is encoded as its decimal representation (identical to the
 //! server verifier in `kiwicaptcha::verify::derive_hash` and to the pure-JS
@@ -24,11 +25,13 @@
 //! the SHA-256 hash of the prefix, the decimal counter and the salt, or
 //! the same password layout for Argon2id.
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use js_sys::Date;
 use sha2::{Digest, Sha256};
 use std::alloc::Layout;
+use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 /// Install the panic hook that forwards Rust panics to console.error.
 /// Safe to call multiple times; only the first call installs the hook.
@@ -71,6 +74,38 @@ mod tests {
     fn solver_protocol_version_is_the_documented_generation() {
         assert_eq!(solver_protocol_version(), 2);
     }
+
+    #[test]
+    fn argon2_memory_sizing_matches_the_crate_block_count() {
+        let params = Params::new(64, 1, 1, Some(32)).expect("valid params");
+        assert_eq!(params.block_count(), 64);
+    }
+
+    #[test]
+    fn argon2_memory_buffer_is_reused_and_resized() {
+        let first = with_argon2_memory(32, |blocks| blocks.as_ptr() as usize);
+        let second = with_argon2_memory(32, |blocks| blocks.as_ptr() as usize);
+        assert_eq!(first, second);
+        let shrunk = with_argon2_memory(16, |blocks| blocks.len());
+        assert_eq!(shrunk, 16);
+    }
+
+    #[test]
+    fn argon2_solver_matches_the_allocating_hash() {
+        let params = Params::new(8, 1, 1, Some(32)).expect("valid params");
+        let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone());
+        let mut expected = [0u8; 32];
+        hasher
+            .hash_password_into(b"prefix42", b"saltsalt", &mut expected)
+            .expect("hash");
+        let mut actual = [0u8; 32];
+        with_argon2_memory(params.block_count(), |blocks| {
+            hasher
+                .hash_password_into_with_memory(b"prefix42", b"saltsalt", &mut actual, blocks)
+                .expect("hash");
+        });
+        assert_eq!(expected, actual);
+    }
 }
 
 /// Allocate `len` bytes in WASM linear memory and return the pointer.
@@ -111,7 +146,7 @@ pub fn alloc(len: usize) -> *mut u8 {
         // never passed to `dealloc` (the JS glue only frees real buffers).
         return layout.align() as *mut u8;
     }
-    let ptr = unsafe { std::alloc::alloc(layout) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
+    let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -133,15 +168,14 @@ pub unsafe fn dealloc(ptr: *mut u8, len: usize) {
         return;
     }
     let layout = Layout::from_size_align(len, 8).expect("allocation size overflows isize::MAX");
-    unsafe { std::alloc::dealloc(ptr, layout) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
+    unsafe { std::alloc::dealloc(ptr, layout) };
 }
 
-/// The wall-time budget of one `solve_sha256_chunk` call in milliseconds.
-/// The loop reads the clock and stops once approximately this much time has
-/// elapsed since the chunk started, so the synchronous work per yield is
-/// hardware-independent (≈ 8–12 ms even on slow devices). The clock is
-/// `Date.now()` (via js-sys) — available on the page AND in workers, and
-/// monotonic enough for a sub-second budget.
+/// The time budget of one `solve_sha256_chunk` call in milliseconds.
+/// The loop reads a monotonic clock and stops once approximately this much
+/// time has elapsed since the chunk started, so the synchronous work per
+/// yield is hardware-independent (≈ 8–12 ms even on slow devices). The
+/// clock is `performance.now()`, which never jumps with the wall clock.
 const SHA_CHUNK_TIME_BUDGET_MS: f64 = 10.0;
 
 /// Clock checks are throttled to every 256 hashes: at the slowest realistic
@@ -150,11 +184,31 @@ const SHA_CHUNK_TIME_BUDGET_MS: f64 = 10.0;
 /// import call overhead stays out of the per-hash hot path.
 const SHA_CLOCK_CHECK_INTERVAL: u32 = 256;
 
+/// Read a monotonic clock in milliseconds.
+///
+/// `performance.now()` comes through web-sys, works on the page and in
+/// workers, and never jumps with the wall clock. The `Date.now()` branch is
+/// a fallback for embedders that expose no performance timer.
+fn monotonic_now_ms() -> f64 {
+    let performance = if let Some(window) = web_sys::window() {
+        window.performance()
+    } else {
+        js_sys::global()
+            .dyn_into::<web_sys::WorkerGlobalScope>()
+            .ok()
+            .and_then(|scope| scope.performance())
+    };
+    match performance {
+        Some(performance) => performance.now(),
+        None => Date::now(),
+    }
+}
+
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose
 /// SHA-256 hash of the prefix, the decimal counter and the salt has at
 /// least `target_bits` leading zero bits.
 ///
-/// The chunk is TIME-budgeted (≈ [`SHA_CHUNK_TIME_BUDGET_MS`] of wall
+/// The chunk is TIME-budgeted (≈ [`SHA_CHUNK_TIME_BUDGET_MS`] of elapsed
 /// time), so the caller yields back to the event loop at roughly constant
 /// latency regardless of the device. Return contract:
 /// - `counter >= 0`    — a solution at that counter;
@@ -176,8 +230,8 @@ pub fn solve_sha256_chunk(
     if prefix_ptr.is_null() || salt_ptr.is_null() {
         return -1;
     }
-    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
+    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) };
+    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
 
     let end_counter = bounded_end(start_counter, chunk_size);
 
@@ -186,7 +240,7 @@ pub fn solve_sha256_chunk(
 
     let mut buf = [0u8; 12];
 
-    let deadline = Date::now() + SHA_CHUNK_TIME_BUDGET_MS;
+    let deadline = monotonic_now_ms() + SHA_CHUNK_TIME_BUDGET_MS;
     let mut scanned: u32 = 0;
     for counter in start_counter..end_counter {
         let mut hasher = hasher_base.clone();
@@ -201,13 +255,35 @@ pub fn solve_sha256_chunk(
             return counter as i32;
         }
         scanned += 1;
-        if scanned % SHA_CLOCK_CHECK_INTERVAL == 0 && Date::now() >= deadline {
+        if scanned % SHA_CLOCK_CHECK_INTERVAL == 0 && monotonic_now_ms() >= deadline {
             // Time budget elapsed mid-chunk: report the partial progress so
             // the caller resumes exactly where work stopped.
             return -((scanned + 1) as i32);
         }
     }
     -1
+}
+
+thread_local! {
+    /// The module's Argon2 memory buffer, one per thread.
+    static ARGON2_MEMORY: RefCell<Vec<Block>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with an Argon2 memory buffer sized for `block_count` blocks.
+///
+/// The buffer persists across calls and is reallocated only when the
+/// requested size changes, so a chunk of hashes performs one allocation
+/// instead of one per hash. Assigning the fresh vector releases the
+/// superseded allocation, so a large solve never pins memory for later
+/// small ones.
+fn with_argon2_memory<T>(block_count: usize, f: impl FnOnce(&mut [Block]) -> T) -> T {
+    ARGON2_MEMORY.with(|cell| {
+        let mut blocks = cell.borrow_mut();
+        if blocks.len() != block_count {
+            *blocks = vec![Block::default(); block_count];
+        }
+        f(&mut blocks[..])
+    })
 }
 
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose
@@ -217,6 +293,9 @@ pub fn solve_sha256_chunk(
 /// `m_kib`/`t`/`p` are the Argon2id parameters; they must match the server's
 /// issued challenge parameters exactly. Invalid parameters return -1 so the
 /// widget can fall back cleanly.
+///
+/// The memory buffer is reused across hashes and calls; its size follows
+/// `m_kib` and it is reallocated only when that parameter changes.
 #[wasm_bindgen]
 pub fn solve_argon2_chunk(
     prefix_ptr: *const u8,
@@ -233,8 +312,8 @@ pub fn solve_argon2_chunk(
     if prefix_ptr.is_null() || salt_ptr.is_null() {
         return -1;
     }
-    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
+    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) };
+    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
 
     // Protocol unit: m_kib is in kibibytes (65536 = 64 MiB); the argon2
     // crate takes the same 1 KiB blocks. The solver MUST use the exact
@@ -243,6 +322,8 @@ pub fn solve_argon2_chunk(
         Ok(p) => p,
         Err(_) => return -1,
     };
+    // One block per kibibyte of memory cost, matching the crate's own sizing.
+    let block_count = params.block_count();
     let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let end_counter = bounded_end(start_counter, chunk_size);
@@ -260,10 +341,10 @@ pub fn solve_argon2_chunk(
         let len = write_decimal(counter, &mut buf);
         password.extend_from_slice(&buf[..len]);
 
-        if hasher
-            .hash_password_into(&password, salt, &mut output)
-            .is_err()
-        {
+        let hashed = with_argon2_memory(block_count, |blocks| {
+            hasher.hash_password_into_with_memory(&password, salt, &mut output, blocks)
+        });
+        if hashed.is_err() {
             return -1;
         }
         if leading_zero_bits(&output) >= target_bits {

@@ -50,8 +50,13 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use num_bigint::BigUint;
+use num_integer::Integer as _;
+use rand::Rng as _;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The modulus is a 2048-bit composite: exactly 256 bytes.
 pub const MODULUS_BYTES: usize = 256;
@@ -61,6 +66,29 @@ pub const MODULUS_BYTES: usize = 256;
 /// trapdoor expectation render into this exact shape, so the
 /// constant-time comparison runs over equal-length strings.
 pub const PROOF_HEX_LENGTH: usize = 512;
+
+/// The process-wide memo of validated `(modulus, lambda)` pairs (see
+/// [`RswTrapdoor::validated`]). The pair strings are operator
+/// configuration, never client input, so the map stays tiny and
+/// unbounded growth is not a concern.
+type ValidatedPairs = Mutex<HashMap<(String, String), Arc<RswTrapdoor>>>;
+static VALIDATED_PAIRS: OnceLock<ValidatedPairs> = OnceLock::new();
+
+/// Process-wide count of [`RswTrapdoor::validated`] invocations — a
+/// one-relaxed-atomic observability seam proving the memo works: the
+/// second validation of the same pair must not re-run the expensive
+/// primality tests (the count still advances on the cache hit; the
+/// derivation-count seam in `crate::keys` is the model). Diagnostic
+/// only; not part of the stable API surface.
+static VALIDATION_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// The number of [`RswTrapdoor::validated`] calls this process has
+/// made (the validated-pair memo's observability seam — see
+/// [`VALIDATION_CALLS`]).
+#[doc(hidden)]
+pub fn validation_call_count() -> u64 {
+    VALIDATION_CALLS.load(Ordering::Relaxed)
+}
 
 /// A decoded and validated rsw trapdoor: the public 2048-bit composite
 /// modulus `n = p*q` and the secret `lambda = lcm(p-1, q-1)`.
@@ -137,6 +165,12 @@ impl RswTrapdoor {
 
         let n = BigUint::from_bytes_be(&n_bytes);
         let lambda = BigUint::from_bytes_be(&lambda_bytes);
+        // A zero lambda passes the parity check (it is even) and makes
+        // the consistency spot-check vacuous (base^0 is 1 modulo n), so
+        // it is refused here, before the proof path can divide by zero.
+        if lambda == BigUint::from(0u8) {
+            return Err(RswError::InvalidLambdaTrapdoor);
+        }
         if let Some(factor) = small_prime_factor(&n) {
             return Err(RswError::InvalidModulusSmallFactor(factor));
         }
@@ -148,6 +182,44 @@ impl RswTrapdoor {
         }
 
         Ok(RswTrapdoor { n, lambda })
+    }
+
+    /// Resolve a validated trapdoor through the process-wide memo: the
+    /// first validation of a `(modulus, lambda)` pair runs the full
+    /// decode (the ~10 2048-bit modexps of Miller-Rabin, the strong
+    /// Lucas test and the 8-base spot-check), and every later
+    /// validation of the same pair is served from the cache. Both
+    /// call sites — issuance validation and the generic verifier's
+    /// per-verification decode — run operator-configured pairs, so the
+    /// cache turns the repeated cost into one HashMap hit. `None` when
+    /// the pair fails validation (a failed pair is not memoized: the
+    /// failure report stays the caller's, and validation of the same
+    /// bad pair simply re-runs).
+    pub fn validated(modulus_b64: &str, lambda_b64: &str) -> Option<Arc<RswTrapdoor>> {
+        VALIDATION_CALLS.fetch_add(1, Ordering::Relaxed);
+        let key = (modulus_b64.to_string(), lambda_b64.to_string());
+        let map = VALIDATED_PAIRS.get_or_init(|| Mutex::new(HashMap::new()));
+        // Poison recovery: the guarded map only ever holds decoded
+        // operator-configured pairs, so a panicking holder cannot leave
+        // it logically inconsistent — a poisoned lock is recovered
+        // rather than propagated as a second panic on every later
+        // verification.
+        {
+            let guard = map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(cached) = guard.get(&key) {
+                return Some(Arc::clone(cached));
+            }
+        }
+        let trapdoor = Arc::new(RswTrapdoor::new(modulus_b64, lambda_b64).ok()?);
+        // The first computed allocation of a pair wins and is served
+        // forever (or-insert, never overwrite): concurrent first
+        // validations of the same pair resolve to one stable identity.
+        let mut guard = map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(Arc::clone(guard.entry(key).or_insert_with(|| trapdoor)))
     }
 
     /// The decoded modulus n.
@@ -162,7 +234,28 @@ impl RswTrapdoor {
     pub fn expected_proof_hex(&self, prefix: &str, nonce: &str, t: u64) -> String {
         let base = derive_base(prefix, nonce, &self.n);
         let exponent = BigUint::from(2u8).modpow(&BigUint::from(t), &self.lambda);
-        proof_hex(&base.modpow(&exponent, &self.n))
+        proof_hex(&base.modpow(&self.blind_exponent(&base, exponent), &self.n))
+    }
+
+    /// Exponent blinding for the trapdoor exponentiation.
+    ///
+    /// `num-bigint`'s `modpow` is not constant-time, and the true
+    /// exponent is the deployment-stable secret `2^T mod lambda`: a
+    /// timing attacker who recovers lambda defeats RSW entirely. Adding
+    /// a random multiple of lambda leaves the result unchanged for every
+    /// base coprime to n (Euler's theorem), and it randomizes the
+    /// exponent's bit pattern across verifications, so an attacker's
+    /// measurements average over independent exponents instead of
+    /// extracting the secret one. The negligible `gcd(base, n) != 1`
+    /// case (base is a 256-bit residue of a 2048-bit modulus; a shared
+    /// factor means factoring n) falls back to the unblinded exponent so
+    /// the result stays exact for every base.
+    fn blind_exponent(&self, base: &BigUint, exponent: BigUint) -> BigUint {
+        if base.gcd(&self.n) != BigUint::from(1u8) {
+            return exponent;
+        }
+        let blind: u128 = rand::rngs::OsRng.gen();
+        exponent + BigUint::from(blind) * &self.lambda
     }
 }
 
@@ -170,13 +263,19 @@ impl RswTrapdoor {
 /// concatenated with the nonce bytes, interpreted as a 256-bit
 /// big-endian integer and reduced modulo n. The reduction is a no-op
 /// for a conforming modulus (n is at least 2^2047 and the digest at
-/// most 2^256-1), and it keeps the residue canonical for any n.
+/// most 2^256-1), and it keeps the residue canonical for any nonzero
+/// n. A zero modulus has no canonical residue, so the base is zero
+/// there (fail closed, never a division by zero).
 pub fn derive_base(prefix: &str, nonce: &str, n: &BigUint) -> BigUint {
     let mut hasher = Sha256::new();
     hasher.update(prefix.as_bytes());
     hasher.update(nonce.as_bytes());
     let digest = hasher.finalize();
-    BigUint::from_bytes_be(&digest) % n
+    let value = BigUint::from_bytes_be(&digest);
+    if n == &BigUint::from(0u8) {
+        return BigUint::from(0u8);
+    }
+    value % n
 }
 
 /// The fixed 512-hex wire form of a residue: 256 bytes of big-endian,
@@ -273,6 +372,12 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
 /// guarantees that, and the pass verdict is the strongest consistency
 /// evidence a configuration validator without the primes can hold.
 pub fn trapdoor_consistent(n: &BigUint, lambda: &BigUint) -> bool {
+    // A zero modulus or a zero lambda has no consistent trapdoor and
+    // would panic inside modpow, so both are refused as inconsistent
+    // (fail closed, never a panic).
+    if n == &BigUint::from(0u8) || lambda == &BigUint::from(0u8) {
+        return false;
+    }
     SELFTEST_BASES
         .iter()
         .all(|base| BigUint::from(*base).modpow(lambda, n) == BigUint::from(1u8))
@@ -504,6 +609,248 @@ pub mod fixtures {
     }
 }
 
+/// The canonical rsw modulus identity: lowercase-hex SHA-256 of the
+/// decoded 256-byte modulus.
+///
+/// This is exactly the `rsw_modulus_n_sha256` the shipped
+/// `tools/rsw-keygen` prints, so the generator, the identity riding an
+/// issued record and the verifier's resolution share one semantic rule.
+/// The base64 must be the canonical padded round-trip of exactly
+/// [`MODULUS_BYTES`] bytes before anything is hashed: a non-canonical
+/// spelling of the same bytes never mints a second identity.
+pub fn modulus_fingerprint_hex(modulus_b64: &str) -> Result<String, RswError> {
+    modulus_fingerprint_hex_of_bytes(&canonical_base64_bytes(modulus_b64)?)
+}
+
+/// The canonical fingerprint of an already-decoded modulus: lowercase-hex
+/// SHA-256 of exactly [`MODULUS_BYTES`] bytes. The bytes-level primitive
+/// the base64 entry point and the offline `tools/rsw-keygen` share, so
+/// the generator output and the service-side identity can never diverge.
+pub fn modulus_fingerprint_hex_of_bytes(n_bytes: &[u8]) -> Result<String, RswError> {
+    if n_bytes.len() != MODULUS_BYTES {
+        return Err(RswError::InvalidModulusSize);
+    }
+    Ok(hex::encode(Sha256::digest(n_bytes)))
+}
+
+/// The legacy (pre-migration) identity: SHA-256 of the base64 text
+/// itself — the rule PHP applied before the canonical-byte fingerprint.
+/// It disagrees with the keygen's `rsw_modulus_n_sha256` and exists only
+/// so identity-bearing records issued before the protocol v5 grammar
+/// keep resolving during their bounded lifetime. Never mint new
+/// identities with this value.
+pub fn legacy_base64_text_fingerprint_hex(modulus_b64: &str) -> String {
+    hex::encode(Sha256::digest(modulus_b64.as_bytes()))
+}
+
+/// Whether `identity` is an accepted identity form of the modulus: the
+/// canonical fingerprint always, the legacy base64-text alias only when
+/// `allow_legacy_alias` is set (identity-bearing records below protocol
+/// v5; never a v5 record or new issuance).
+pub fn identity_matches(identity: &str, modulus_b64: &str, allow_legacy_alias: bool) -> bool {
+    let canonical = modulus_fingerprint_hex(modulus_b64)
+        .map(|fingerprint| fingerprint == identity)
+        .unwrap_or(false);
+    canonical || (allow_legacy_alias && legacy_base64_text_fingerprint_hex(modulus_b64) == identity)
+}
+
+/// Why a keyring entry is refused at configuration time.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RswKeyringError {
+    /// The operator-supplied identity is neither the canonical
+    /// fingerprint nor the legacy base64-text alias of the paired
+    /// modulus.
+    #[error("the rsw keyring identity is neither the canonical SHA-256 of the decoded modulus nor its legacy base64-text alias")]
+    MismatchedIdentity,
+    /// The modulus is not canonical standard base64 of exactly 256 bytes.
+    #[error("the rsw keyring modulus_n is not canonical standard base64 of exactly 256 bytes")]
+    InvalidModulus,
+    /// The pair fails the same trapdoor validation the active pair goes
+    /// through (size, small factors, probable primality, lambda
+    /// consistency), so it could never verify a proof.
+    #[error("the rsw keyring pair fails trapdoor validation")]
+    InvalidTrapdoor,
+}
+
+/// The rsw trapdoor rotation keyring: historical trapdoor pairs indexed
+/// by their authenticated modulus identity, the verifier-side half of
+/// the documented rotation mechanism (PHP `$rswVerificationKeys`).
+///
+/// Each inserted pair is registered under the operator-supplied
+/// identity and the canonical computed identity form; the legacy
+/// base64-text alias is registered only while the explicit migration
+/// mode is enabled ([`RswKeyring::with_legacy_aliases`]), so the
+/// temporary compatibility grammar is removable. An entry whose
+/// identity does not match its modulus (under the active mode) is
+/// refused: resolution then fails closed rather than mapping a signed
+/// identity onto an unrelated pair.
+#[derive(Clone, Debug, Default)]
+pub struct RswKeyring {
+    by_identity: HashMap<String, (String, String)>,
+    legacy_aliases: bool,
+}
+
+impl RswKeyring {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable the legacy base64-text identity alias (the
+    /// bounded migration window for records issued before the canonical
+    /// fingerprint rule). Default: disabled.
+    pub fn with_legacy_aliases(mut self, enabled: bool) -> Self {
+        self.legacy_aliases = enabled;
+        self
+    }
+
+    /// Whether the legacy base64-text alias is currently accepted.
+    pub fn legacy_aliases_enabled(&self) -> bool {
+        self.legacy_aliases
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_identity.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_identity.len()
+    }
+
+    /// Register the pair under `identity` and every computed identity
+    /// form of the modulus. The entry is fully validated before it is
+    /// stored: the modulus must canonical-decode to exactly 256 bytes,
+    /// the identity must be an accepted form of that modulus, and the
+    /// pair must pass the same [`RswTrapdoor::validated`] check the
+    /// active pair goes through. An invalid historical entry can
+    /// therefore never shadow a valid active pair in
+    /// [`resolve_rsw_trapdoor`].
+    pub fn insert(
+        &mut self,
+        identity: &str,
+        modulus_b64: &str,
+        lambda_b64: &str,
+    ) -> Result<(), RswKeyringError> {
+        // Canonical decode first: the legacy alias comparison hashes the
+        // supplied string, so it must never be the only validation.
+        let canonical =
+            modulus_fingerprint_hex(modulus_b64).map_err(|_| RswKeyringError::InvalidModulus)?;
+        // With the migration mode off, a legacy-alias identity is not an
+        // accepted form: the operator must address the pair by its
+        // canonical fingerprint (or explicitly enable the migration).
+        if !identity_matches(identity, modulus_b64, self.legacy_aliases) {
+            return Err(RswKeyringError::MismatchedIdentity);
+        }
+        if RswTrapdoor::validated(modulus_b64, lambda_b64).is_none() {
+            return Err(RswKeyringError::InvalidTrapdoor);
+        }
+        self.by_identity.insert(
+            identity.to_string(),
+            (modulus_b64.to_string(), lambda_b64.to_string()),
+        );
+        self.by_identity
+            .entry(canonical)
+            .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
+        if self.legacy_aliases {
+            self.by_identity
+                .entry(legacy_base64_text_fingerprint_hex(modulus_b64))
+                .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// The raw pair registered under the exact identity form.
+    pub fn lookup(&self, identity: &str) -> Option<&(String, String)> {
+        self.by_identity.get(identity)
+    }
+}
+
+/// Why the trapdoor resolution refused a record.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RswResolutionError {
+    /// The record's authenticated identity is in neither the keyring nor
+    /// the active pair (the identity is exact: the resolver never falls
+    /// through to an arbitrary active pair).
+    #[error("the record's authenticated rsw modulus identity is unknown to this verifier")]
+    UnknownIdentity,
+    /// The identity DID name a configured pair, but that pair fails
+    /// trapdoor validation. Configuration-time insert() validation
+    /// prevents this; if it is ever observed the record still fails
+    /// closed instead of falling through to another pair.
+    #[error("the rsw pair named by the record's authenticated identity fails trapdoor validation")]
+    InvalidTrapdoor,
+    /// A protocol v5 record carries no identity — the v5 canonical
+    /// requires it. The structural gate rejects this shape; the
+    /// resolver keeps the same rule as defense in depth.
+    #[error("the protocol v5 rsw canonical requires the authenticated modulus identity")]
+    IdentityRequired,
+}
+
+/// Resolve the rsw trapdoor of a record from its authenticated modulus
+/// identity.
+///
+/// Selection is exact, never a fall-through:
+/// - identity present: the keyring first, then the active pair, both
+///   accepted only when the identity is an identity form of that
+///   modulus (`allow_legacy_alias` for protocols <= 4, the pre-v5
+///   migration window; a v5 record resolves its canonical fingerprint
+///   exactly). An identity in neither is [`RswResolutionError::UnknownIdentity`].
+/// - identity absent: the active pair only (the explicit legacy
+///   behavior for pre-identity records); a v5 record without the
+///   identity is [`RswResolutionError::IdentityRequired`].
+///
+/// `Ok(None)` means the record may not use a trapdoor here (no active
+/// pair configured and no identity entry): the caller answers the
+/// authentic-but-unsupported outcome, exactly the invalid-pair
+/// semantics.
+pub fn resolve_rsw_trapdoor(
+    active: Option<(&str, &str)>,
+    keyring: Option<&RswKeyring>,
+    identity: Option<&str>,
+    protocol_version: u8,
+) -> Result<Option<Arc<RswTrapdoor>>, RswResolutionError> {
+    let Some(identity) = identity else {
+        if protocol_version >= crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION {
+            return Err(RswResolutionError::IdentityRequired);
+        }
+
+        return Ok(active.and_then(|(modulus, lambda)| RswTrapdoor::validated(modulus, lambda)));
+    };
+    // The legacy base64-text alias resolves only inside the bounded
+    // migration window AND only while the configured keyring enables the
+    // mode; without it, pre-v5 identity-bearing records fail closed with
+    // UnknownIdentity instead of keeping the temporary grammar alive.
+    let allow_legacy_alias = protocol_version <= 4
+        && keyring
+            .map(|ring| ring.legacy_aliases_enabled())
+            .unwrap_or(false);
+    let mut named_invalid_pair = false;
+    if let Some((modulus, lambda)) = keyring.and_then(|ring| ring.lookup(identity)) {
+        if identity_matches(identity, modulus, allow_legacy_alias) {
+            named_invalid_pair = true;
+            // Configuration-time insert() validation makes this Some; a
+            // pair that somehow fails here must NOT shadow the active
+            // pair — fall through and fail closed below.
+            if let Some(trapdoor) = RswTrapdoor::validated(modulus, lambda) {
+                return Ok(Some(trapdoor));
+            }
+        }
+    }
+    if let Some((modulus, lambda)) = active {
+        if identity_matches(identity, modulus, allow_legacy_alias) {
+            return match RswTrapdoor::validated(modulus, lambda) {
+                Some(trapdoor) => Ok(Some(trapdoor)),
+                None => Err(RswResolutionError::InvalidTrapdoor),
+            };
+        }
+    }
+    if named_invalid_pair {
+        return Err(RswResolutionError::InvalidTrapdoor);
+    }
+
+    Err(RswResolutionError::UnknownIdentity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +915,28 @@ mod tests {
     #[test]
     fn fixture_trapdoor_pair_still_validates() {
         assert!(RswTrapdoor::new(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64).is_ok());
+    }
+
+    #[test]
+    fn the_second_validation_of_a_pair_is_served_from_the_memo() {
+        // A repeat of the same pair reuses the cached allocation
+        // (pointer identity) without re-running the expensive primality
+        // tests, and a failing pair is never memoized. The exact
+        // call-count window (the counter seam) is pinned by the
+        // dedicated tests/rsw_cache.rs binary — this shared binary's
+        // parallel issuance tests pollute global counts.
+        let first = RswTrapdoor::validated(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64)
+            .expect("the fixture pair validates");
+        let second = RswTrapdoor::validated(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64)
+            .expect("the memo serves the same pair");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same pair must reuse the cached trapdoor"
+        );
+        assert!(
+            RswTrapdoor::validated(PROBABLE_PRIME_N_B64, fixtures::LAMBDA_B64).is_none(),
+            "a weak modulus is refused"
+        );
     }
 
     #[test]

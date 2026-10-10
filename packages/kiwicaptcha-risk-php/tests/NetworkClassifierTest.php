@@ -20,6 +20,29 @@ final class CidrNetworkClassifierTest extends TestCase
         ]);
     }
 
+    public function testMappedAndCompatibleIpv4CidrsFoldToV4Entries(): void
+    {
+        $mapped = new CidrNetworkClassifier([
+            ['cidr' => '::ffff:192.0.2.0/120', 'flags' => ['reserved']],
+        ]);
+        self::assertTrue(
+            $mapped->classify('192.0.2.7')->reserved,
+            'the mapped CIDR must match the IPv4 address it canonicalizes to'
+        );
+        self::assertFalse(
+            $mapped->classify('2001:db8::1')->reserved,
+            'the mapped CIDR must not flag unrelated v6 addresses'
+        );
+
+        $compatible = new CidrNetworkClassifier([
+            ['cidr' => '::192.0.2.0/120', 'flags' => ['reserved']],
+        ]);
+        self::assertTrue($compatible->classify('192.0.2.7')->reserved);
+
+        $this->expectException(\InvalidArgumentException::class);
+        new CidrNetworkClassifier([['cidr' => '::ffff:192.0.2.0/95', 'flags' => []]]);
+    }
+
     public function testHostingCidr(): void
     {
         $flags = $this->classifier()->classify('203.0.113.27');

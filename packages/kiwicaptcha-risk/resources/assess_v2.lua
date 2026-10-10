@@ -12,11 +12,14 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     13 (KEYS[1..13])
---   max Redis calls:      26 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
---                           3 GET + 4 SET — every
---                           call is fixed-cost; no KEYS/SCAN/EVAL nesting,
---                           no iteration over attacker-sized collections)
+--   max keys touched:     16 (KEYS[1..16])
+--   max Redis calls:      32 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
+--                           3 GET + 4 SET + 2 PFADD + 2 PFCOUNT +
+--                           1 PEXPIRE — every call is fixed-cost; no
+--                           KEYS/SCAN/EVAL nesting, no iteration over
+--                           attacker-sized collections; the HLL
+--                           cardinality is bounded by Redis' sparse
+--                           representation and the target TTL)
 --   max collection cardinality: 12 flat fields per state hash (the
 --                           HMGET reply of STATE_FIELDS); the sum3/max3/
 --                           max4 aggregation touches at most 4 elements.
@@ -24,7 +27,10 @@
 -- by the constants above regardless of traffic volume.
 --
 -- One atomic assessment: read → decay → apply event → aggregate → normalize,
--- across (all keys share the hash tag {kiwi:<deployment>} — Redis Cluster safe):
+-- across (KEYS[1..13] share the hash tag {kiwi:<deployment>}; the target
+-- slots KEYS[14..16] ride their own family tag
+-- {kiwi:<deployment>:target:<hex2>} so a stuffing storm never hammers
+-- the shared primary):
 --   KEYS[1]  source current-epoch state (hash)   — updated
 --   KEYS[2]  source epoch-1 state (hash)         — read-only (boundary)
 --   KEYS[3]  source epoch+1 state (hash)         — read-only (boundary)
@@ -42,6 +48,14 @@
 --   KEYS[13] outcome-ledger entry (string, JSON) — SET NX EX when
 --            ARGV[25] is non-empty (the pending entry mirrors
 --            outcome_register.lua byte-for-byte)
+--   KEYS[14] target failure state (hash: ts, fails, first_ms, last_ms) —
+--            the leaky-bucket auth-failure counter of the target
+--            dimension (change.md 3.2.1), touched when ARGV[48]=1;
+--            on the target family tag
+--   KEYS[15] target source-spread HyperLogLog — PFADD of the failing
+--            source on a target failure (target family tag)
+--   KEYS[16] target asn-spread HyperLogLog — PFADD of the failing asn
+--            bucket on a target failure (target family tag)
 --
 -- ARGV:
 --   [1]  event             RiskEventKind int (1..21)
@@ -95,6 +109,16 @@
 --        network_risk, trust_credit, principal_credit)
 --   [45..47] the 3 risk-v2 weights in RiskV2Weights order (honeypot,
 --        session_inconsistency, tls)
+--   [48] has_target       0/1 — when 1 the target dimension (KEYS[14..16])
+--        is maintained and reported for this assessment
+--   [49] spread source element ('' = none; PFADDed to KEYS[15] on a
+--        target failure)
+--   [50] spread asn element ('' = none; PFADDed to KEYS[16] on a
+--        target failure)
+--   [51] target_ttl_s     the target-dimension retention (24h default;
+--        required when has_target = 1)
+--   [52] target_failure_pressure weight (default 0 when absent)
+--   [53] target_spread weight (default 0 when absent)
 --
 -- Returns (SignalVector order + extras):
 --   source_fast, source_slow, subnet_fast, issue_debt, bad_proof, malformed,
@@ -102,7 +126,12 @@
 --   trust_credit, principal_credit, global_level(0..4), cooldown_until_ms,
 --   is_duplicate (0/1), existing_context_tag ('' when none), existing_tls_tag
 --   ('' when none), registration_status (0/1; 0 when no registration
---   requested or the decision is already registered)
+--   requested or the decision is already registered), target_failures
+--   (the decayed failure count of the target dimension; 0 without a
+--   target), target_spread_sources (the distinct-source spread of the
+--   target dimension; 0 without a target), target_spread_asns (the
+--   distinct-ASN spread; 0 without a target — the two counts are kept
+--   separate, never summed)
 --
 -- Event semantics (risk-v1 v3):
 --   PreIssue (1)            → request velocity + scope-hopping
@@ -153,6 +182,75 @@
 local function num(v)
     if not v then return 0 end
     return tonumber(v) or 0
+end
+
+-- ── Every TTL argument is validated here, BEFORE the first write. A
+-- non-positive TTL would make a state/session/principal hash or the
+-- outcome ledger persistent (save() skips EXPIRE on ttl <= 0) or issue
+-- an invalid `SET ... EX 0`; a TTL above the Redis expire ceiling would
+-- abort the script after a write had already landed, leaving persistent
+-- state behind. The ceiling (2147483647 seconds) is the largest expire
+-- value every Redis version accepts. The PHP and Rust store
+-- constructors enforce the identical positive-and-bounded rule before
+-- the script is ever called; the outcome TTL is required only when a
+-- registration is requested (ARGV[25] non-empty).
+local EXPIRY_CEILING_SECS = 2147483647
+
+local function ttl_out_of_bounds(value)
+    if value == nil or value < 1 or value > EXPIRY_CEILING_SECS then
+        return true
+    end
+    return value ~= math.floor(value)
+end
+
+local session_ttl = tonumber(ARGV[21])
+local state_ttl = tonumber(ARGV[6])
+local principal_ttl = tonumber(ARGV[22])
+local dedupe_ttl = tonumber(ARGV[5])
+if ttl_out_of_bounds(session_ttl) then
+    return redis.error_reply('assess_v2: session_ttl_s must be a positive integer no greater than 2147483647 (a persistent session record is not admissible)')
+end
+if ttl_out_of_bounds(state_ttl) then
+    return redis.error_reply('assess_v2: state_ttl_s must be a positive integer no greater than 2147483647 (a persistent source/subnet risk hash is not admissible)')
+end
+if ttl_out_of_bounds(principal_ttl) then
+    return redis.error_reply('assess_v2: principal_ttl_s must be a positive integer no greater than 2147483647 (a persistent principal risk hash is not admissible)')
+end
+if ttl_out_of_bounds(dedupe_ttl) then
+    return redis.error_reply('assess_v2: dedupe_ttl_s must be a positive integer no greater than 2147483647 (a persistent or immediately-expired risk hash is not admissible)')
+end
+
+-- ── Numeric argument validation BEFORE any write. ──
+-- Redis does not roll back: a missing or non-numeric numeric ARGV used
+-- to error mid-transition AFTER the dedupe marker was written, losing
+-- the event and refusing an identical retry as a duplicate. Validate
+-- every numeric slot up front, before the first write.
+-- Required numeric slots: a missing value would reach a nil comparison
+-- mid-transition, so it is refused here.
+for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
+    if tonumber(ARGV[i]) == nil then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric')
+    end
+end
+-- Optional numeric slots (registration/outcome fields): callers that do
+-- not request the feature legitimately omit trailing arguments, so a
+-- missing slot is left to the feature-specific checks below; any slot
+-- that IS present must be numeric, or it would error after a write.
+for _, i in ipairs({26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47}) do
+    if ARGV[i] ~= nil and ARGV[i] ~= '' and tonumber(ARGV[i]) == nil then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric when present')
+    end
+end
+if ARGV[25] and ARGV[25] ~= '' and ttl_out_of_bounds(tonumber(ARGV[27])) then
+    return redis.error_reply('assess_v2: outcome_ttl_s must be a positive integer no greater than 2147483647 (a persistent outcome ledger is not admissible)')
+end
+local has_target_arg = ARGV[48] or '0'
+if has_target_arg ~= '0' and has_target_arg ~= '1' then
+    return redis.error_reply('assess_v2: has_target must be 0 or 1')
+end
+local has_target = has_target_arg == '1'
+if has_target and ttl_out_of_bounds(tonumber(ARGV[51])) then
+    return redis.error_reply('assess_v2: target_ttl_s must be a positive integer no greater than 2147483647 (a persistent target record is not admissible)')
 end
 
 -- Distributed clock authority: Redis TIME, not the application clock.
@@ -322,6 +420,15 @@ local function apply_principal_event(s, event, scope)
     end
 end
 
+-- ── Contract bounds (last line of defense): the presented session tags
+-- are bounded to 64 bytes by the engines; a direct script caller that
+-- exceeds the bound rejects the whole assessment BEFORE any state
+-- mutation — never a silent truncation, which would split one session's
+-- identity across tag records.
+if #ARGV[23] > 64 or #ARGV[24] > 64 then
+    return redis.error_reply('session tag exceeds 64 bytes')
+end
+
 -- ── Dedupe: identical event_id must not double-increment state. On a
 -- duplicate, SKIP the event application but still decay/read/return the
 -- current signals (shared risk-v1 semantics across Rust and PHP).
@@ -330,13 +437,12 @@ if ARGV[4] ~= '' then
     if redis.call('GET', KEYS[10]) then
         is_duplicate = true
     else
-        redis.call('SET', KEYS[10], '1', 'EX', tonumber(ARGV[5]))
+        redis.call('SET', KEYS[10], '1', 'EX', dedupe_ttl)
     end
 end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
-local state_ttl = tonumber(ARGV[6])
 local has_session = tonumber(ARGV[19]) == 1
 local has_principal = tonumber(ARGV[20]) == 1
 
@@ -370,12 +476,12 @@ if has_session and not is_duplicate then
         -- SourceRateLimitHit: session half of the source/session-only rule.
         sess.bad = sess.bad + 3000
     end
-    save(KEYS[7], sess, tonumber(ARGV[21]))
+    save(KEYS[7], sess, session_ttl)
 end
 local prin = read_state(KEYS[8], now)
 if has_principal and not is_duplicate then
     apply_principal_event(prin, event, scope)
-    save(KEYS[8], prin, tonumber(ARGV[22]))
+    save(KEYS[8], prin, principal_ttl)
 end
 
 -- ── Global: rolling (no expiry). The global hash's `scope` field carries
@@ -387,7 +493,13 @@ end
 -- inside the non-duplicate branch here would be a strict subset of it:
 -- the same fields one HSET earlier, doubled for no effect).
 local g = read_state(KEYS[9], now)
-local prev_level = g.scope
+-- Corrupt or tampered stored levels above the hysteresis table are
+-- clamped into range (the Rust core applies the same .min(4)); a nil
+-- exit entry would otherwise error mid-transition after the dedupe
+-- marker was written. The floor stays 0: a fresh state legitimately
+-- starts at level 0, and forcing a minimum of 1 here would raise every
+-- namespace's baseline pressure.
+local prev_level = math.min(4, tonumber(g.scope) or 0)
 if not is_duplicate then
     apply_event(g, event, scope)
     if event == 16 then
@@ -448,7 +560,7 @@ local net_rf = sum3(net.rf, net_prev.rf, net_next.rf)
 -- the tags stay ephemeral and session-keyed.
 local existing_ctx = ''
 if ARGV[23] ~= '' then
-    local ok = redis.call('SET', KEYS[11], ARGV[23], 'EX', tonumber(ARGV[21]), 'NX')
+    local ok = redis.call('SET', KEYS[11], ARGV[23], 'EX', session_ttl, 'NX')
     if ok then
         existing_ctx = ARGV[23]
     else
@@ -458,7 +570,7 @@ if ARGV[23] ~= '' then
 end
 local existing_tls = ''
 if ARGV[24] ~= '' then
-    local ok = redis.call('SET', KEYS[12], ARGV[24], 'EX', tonumber(ARGV[21]), 'NX')
+    local ok = redis.call('SET', KEYS[12], ARGV[24], 'EX', session_ttl, 'NX')
     if ok then
         existing_tls = ARGV[24]
     else
@@ -494,6 +606,60 @@ local sig_principal_credit = normalize(prin.trust, tonumber(ARGV[18]))
 -- possible here beyond the SET NX collision (a retried decision_id);
 -- a script error still fails the whole assessment (fail-closed), exactly
 -- as any risk-v1 observation error does.
+-- ── Target-account protection (change.md 3.2.1 / 3.3.3): the failure
+-- counter and the source/asn spread HLLs of the target dimension. An
+-- AuthenticationFailure (11) reported against the target increments the
+-- leaky bucket and PFADDs the failing source/asn; the assessment reply
+-- carries the decayed failure pressure and the spread so the decision
+-- path can protect the account (the marks stage maps an attacked target
+-- to exactly the interactive step-up). Failures are stored by THIS
+-- engine state, never by callers: a denied attempt never reaches
+-- authentication and so never writes here. The same pressure and spread
+-- feed the ledger score so the numeric decision reacts to a stuffed
+-- target, not only the policy stage.
+local target_failures = 0
+local target_spread_sources = 0
+local target_spread_asns = 0
+if has_target then
+    local LEAK_MS = 60000
+    local v = redis.call('HMGET', KEYS[14], 'ts', 'fails')
+    local ts = tonumber(v[1]) or 0
+    local fails = tonumber(v[2]) or 0
+    if ts > 0 then
+        local elapsed = now - ts
+        if elapsed < 0 then elapsed = 0 end
+        -- The leak watermark advances only by whole leaked minutes
+        -- (ts + leaked * LEAK_MS), never to `now`: resetting it on
+        -- every failure would erase the sub-minute remainder and
+        -- suspend the leak for as long as failures keep arriving less
+        -- than a minute apart (mirror of target_failure.lua).
+        local leaked = math.floor(elapsed / LEAK_MS)
+        fails = fails - leaked
+        if fails < 0 then fails = 0 end
+        ts = ts + leaked * LEAK_MS
+    end
+    if event == 11 and not is_duplicate then
+        fails = fails + 1
+        if ts == 0 then ts = now end
+        redis.call('HSET', KEYS[14], 'ts', ts, 'fails', fails, 'last_ms', now)
+        redis.call('HSETNX', KEYS[14], 'first_ms', now)
+        redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
+        if ARGV[49] and ARGV[49] ~= '' then
+            redis.call('PFADD', KEYS[15], ARGV[49])
+            redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[51]) * 1000)
+        end
+        if ARGV[50] and ARGV[50] ~= '' then
+            redis.call('PFADD', KEYS[16], ARGV[50])
+            redis.call('PEXPIRE', KEYS[16], tonumber(ARGV[51]) * 1000)
+        end
+    end
+    target_failures = fails
+    -- The source and ASN spreads are kept separate: summing them would
+    -- let one dimension's growth masquerade as the other's.
+    target_spread_sources = redis.call('PFCOUNT', KEYS[15])
+    target_spread_asns = redis.call('PFCOUNT', KEYS[16])
+end
+
 local registration_status = 0
 if ARGV[25] ~= '' then
     local score_gp = sig_global_pressure
@@ -528,6 +694,14 @@ if ARGV[25] ~= '' then
     risk = risk + weighted(v2_honeypot, tonumber(ARGV[45]))
     risk = risk + weighted(v2_session, tonumber(ARGV[46]))
     risk = risk + weighted(v2_tls, tonumber(ARGV[47]))
+    -- Target pressure and spread: five failures or twenty distinct
+    -- sources saturate at 1000, matching the engine's target helpers.
+    -- The scored spread is the wider of the two dimensions (never the
+    -- sum: sources+asns would double-count one campaign's growth).
+    local v2_tfail = normalize(target_failures, 5)
+    local v2_tspread = normalize(math.max(target_spread_sources, target_spread_asns), 20)
+    risk = risk + weighted(v2_tfail, tonumber(ARGV[52] or '0'))
+    risk = risk + weighted(v2_tspread, tonumber(ARGV[53] or '0'))
     if risk < 0 then risk = 0 elseif risk > 1000 then risk = 1000 end
     local ledger = cjson.encode({
         o = 'P',
@@ -560,5 +734,8 @@ return {
     is_duplicate and 1 or 0,
     existing_ctx,
     existing_tls,
-    registration_status
+    registration_status,
+    target_failures,
+    target_spread_sources,
+    target_spread_asns
 }

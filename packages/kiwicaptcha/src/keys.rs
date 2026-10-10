@@ -9,6 +9,7 @@
 //! K_challenge = HKDF-Expand(PRK, "kiwi/v2/challenge-sign", 32)
 //! K_ip_bind   = HKDF-Expand(PRK, "kiwi/v2/ip-bind", 32)
 //! K_result    = HKDF-Expand(PRK, "kiwi/v2/result-token", 32)
+//! K_server_state = HKDF-Expand(PRK, "kiwi/v2/server-state", 32)
 //! ```
 //!
 //! Tenant-scoped deployments additionally derive a per-tenant root and the
@@ -43,6 +44,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// the master secret, never from this string.
 pub const HKDF_DEPLOY_SALT: &[u8] = b"kiwicaptcha/deploy-salt/v1";
 
+/// The minimum master-secret length at the derivation boundary: the same
+/// 32-byte core Config contract PHP enforces (`Config::__construct`
+/// rejects a secret key shorter than 32 bytes). Every signature, binding
+/// and token path routes its length gate through this single constant.
+pub const MIN_MASTER_BYTES: usize = 32;
+
+/// The minimum execution-key length at the execution-generation boundary:
+/// the same 32-byte contract PHP enforces in
+/// `ExecutionChallengeGenerator::validateKey`.
+pub const MIN_EXECUTION_KEY_BYTES: usize = 32;
+
+/// The derivation boundary refused the master secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedKeysError {
+    /// The master secret is shorter than [`MIN_MASTER_BYTES`].
+    MasterTooShort {
+        /// The supplied length in bytes.
+        got: usize,
+    },
+}
+
+impl fmt::Display for DerivedKeysError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DerivedKeysError::MasterTooShort { got } => write!(
+                f,
+                "the master secret must be at least {MIN_MASTER_BYTES} bytes (got {got})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DerivedKeysError {}
+
 /// Process-wide count of `DerivedKeys::from_master` invocations. A cheap
 /// (one relaxed atomic) observability seam proving the per-kid derivation
 /// cache works: production verifiers route every signature / IP-binding
@@ -64,6 +99,11 @@ pub const INFO_CHALLENGE_SIGN: &[u8] = b"kiwi/v2/challenge-sign";
 pub const INFO_IP_BIND: &[u8] = b"kiwi/v2/ip-bind";
 /// Info label for the result/solution-token purpose key.
 pub const INFO_RESULT_TOKEN: &[u8] = b"kiwi/v2/result-token";
+/// Info label for the server-state purpose key: the HMAC over the
+/// server-written record metadata (`server_mac`) and the committed
+/// consumed result (`consumed_result.mac`). See
+/// [`crate::challenge::record_meta_mac`].
+pub const INFO_SERVER_STATE: &[u8] = b"kiwi/v2/server-state";
 /// Prefix of the tenant-root info label: `"kiwi/v2/tenant/" + tenant_id`.
 pub const INFO_TENANT_ROOT_PREFIX: &[u8] = b"kiwi/v2/tenant/";
 
@@ -82,6 +122,7 @@ pub struct DerivedKeys {
     challenge: [u8; 32],
     ip_bind: [u8; 32],
     result: [u8; 32],
+    server_state: [u8; 32],
 }
 
 impl fmt::Debug for DerivedKeys {
@@ -90,11 +131,29 @@ impl fmt::Debug for DerivedKeys {
             .field("challenge", &"<redacted>")
             .field("ip_bind", &"<redacted>")
             .field("result", &"<redacted>")
+            .field("server_state", &"<redacted>")
             .finish()
     }
 }
 
 impl DerivedKeys {
+    /// Derives the purpose keys, refusing a master shorter than the
+    /// minimum length at the derivation boundary.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedKeysError::MasterTooShort`] when `master` is shorter
+    /// than [`MIN_MASTER_BYTES`].
+    pub fn try_from_master(
+        master: &str,
+        tenant: Option<&str>,
+    ) -> Result<DerivedKeys, DerivedKeysError> {
+        if master.len() < MIN_MASTER_BYTES {
+            return Err(DerivedKeysError::MasterTooShort { got: master.len() });
+        }
+        Ok(Self::derive(master, tenant))
+    }
+
     /// Derive the three purpose keys from the master secret.
     ///
     /// - `master` — the deployment master secret (the HMAC secret key).
@@ -103,7 +162,18 @@ impl DerivedKeys {
     ///   (`"kiwi/v2/tenant/" + tenant_id`), so tenants of a shared master
     ///   secret cannot forge each other's challenges, binding tags, or
     ///   result tokens.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the master is shorter than [`MIN_MASTER_BYTES`]; use
+    /// [`DerivedKeys::try_from_master`] for a fallible path.
     pub fn from_master(master: &str, tenant: Option<&str>) -> DerivedKeys {
+        Self::try_from_master(master, tenant).expect(
+            "the master secret must be at least 32 bytes; use try_from_master for a fallible path",
+        )
+    }
+
+    fn derive(master: &str, tenant: Option<&str>) -> DerivedKeys {
         FROM_MASTER_CALLS.fetch_add(1, Ordering::Relaxed);
         let prk = Hkdf::<Sha256>::new(Some(HKDF_DEPLOY_SALT), master.as_bytes());
         match tenant {
@@ -111,6 +181,7 @@ impl DerivedKeys {
                 challenge: expand(&prk, INFO_CHALLENGE_SIGN),
                 ip_bind: expand(&prk, INFO_IP_BIND),
                 result: expand(&prk, INFO_RESULT_TOKEN),
+                server_state: expand(&prk, INFO_SERVER_STATE),
             },
             Some(tenant_id) => {
                 let mut root_info =
@@ -127,6 +198,7 @@ impl DerivedKeys {
                     challenge: expand(&prk_t, INFO_CHALLENGE_SIGN),
                     ip_bind: expand(&prk_t, INFO_IP_BIND),
                     result: expand(&prk_t, INFO_RESULT_TOKEN),
+                    server_state: expand(&prk_t, INFO_SERVER_STATE),
                 }
             }
         }
@@ -148,6 +220,12 @@ impl DerivedKeys {
     /// issued after a successful verification.
     pub fn result_key(&self) -> &[u8; 32] {
         &self.result
+    }
+
+    /// The server-state key (`K_server_state`): HMAC over the
+    /// server-written record metadata and the committed consumed result.
+    pub fn server_state_key(&self) -> &[u8; 32] {
+        &self.server_state
     }
 }
 
@@ -223,11 +301,25 @@ mod tests {
     }
 
     #[test]
+    fn try_from_master_refuses_short_secrets() {
+        assert_eq!(
+            DerivedKeys::try_from_master("", None).unwrap_err(),
+            DerivedKeysError::MasterTooShort { got: 0 }
+        );
+        assert_eq!(
+            DerivedKeys::try_from_master(&"s".repeat(31), None).unwrap_err(),
+            DerivedKeysError::MasterTooShort { got: 31 }
+        );
+        assert!(DerivedKeys::try_from_master(&"s".repeat(31), None).is_err());
+        assert!(DerivedKeys::try_from_master(&"s".repeat(32), None).is_ok());
+    }
+
+    #[test]
     fn derivation_is_deterministic() {
         let a = DerivedKeys::from_master(MASTER, None);
         let b = DerivedKeys::from_master(MASTER, None);
         assert_eq!(a, b);
-        let c = DerivedKeys::from_master("another-master-16-bytes!", None);
+        let c = DerivedKeys::from_master("another-master-32-bytes-0123456789", None);
         assert_ne!(a, c, "a different master must derive different keys");
     }
 
@@ -248,7 +340,7 @@ mod tests {
         // keys are the effective signing/IP-binding/result-token material.
         assert_eq!(
             format!("{keys:?}"),
-            "DerivedKeys { challenge: \"<redacted>\", ip_bind: \"<redacted>\", result: \"<redacted>\" }"
+            "DerivedKeys { challenge: \"<redacted>\", ip_bind: \"<redacted>\", result: \"<redacted>\", server_state: \"<redacted>\" }"
         );
         assert!(!format!("{keys:?}").contains(MASTER));
     }

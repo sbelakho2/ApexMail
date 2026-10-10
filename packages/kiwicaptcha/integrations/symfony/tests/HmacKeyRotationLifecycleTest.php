@@ -17,11 +17,10 @@ use PHPUnit\Framework\TestCase;
 /**
  * End-to-end HMAC key-rotation lifecycle against the real php-core Issuer
  * and Verifier, using the exact keyring the bundle wires (the
- * VerificationSecurityContext->acceptedKeys() effective ring). This is the
- * regression test for the security-audit finding: the verifier used to
- * receive only the historical secrets_by_kid map, so a freshly issued
- * challenge under the rotated (current) kid failed UnknownKid the moment
- * the map was non-empty.
+ * VerificationSecurityContext->acceptedKeys() effective ring). The
+ * verifier must receive the effective ring, not only the historical
+ * secrets_by_kid map: a freshly issued challenge under the rotated
+ * (current) kid verifies even while the historical map is non-empty.
  *
  * The lifecycle mirrors the documented rotation procedure:
  *  1. issue under kid 2 / key A, verify OK;
@@ -81,7 +80,7 @@ final class HmacKeyRotationLifecycleTest extends TestCase
         $challenge3 = $issuer3->issue('login', self::IP);
         $outcome = $verifier2->verify($this->solveToken($challenge3), self::KEY_B, 'login', self::IP);
         self::assertTrue($outcome->isOk(), sprintf(
-            'stage 2: a fresh kid-3 challenge signed with key B must verify (the audit-fix regression: got %s: %s)',
+            'stage 2: a fresh kid-3 challenge signed with key B must verify (the key-rotation regression: got %s: %s)',
             $outcome->code(),
             (string) $outcome->detail,
         ));
@@ -157,8 +156,8 @@ final class HmacKeyRotationLifecycleTest extends TestCase
     {
         // Default (strictKidMode false, empty historical map): the ring
         // stays empty and the core's legacy single-secret path accepts
-        // any record kid under the current secret — the pre-fix behavior
-        // is preserved byte-for-byte.
+        // any record kid under the current secret — the legacy
+        // single-secret semantics are preserved byte-for-byte.
         $storage = new ArrayStorage();
         $issuer5 = $this->issuer($storage, 5, self::KEY_A);
         $foreignChallenge = $issuer5->issue('login', self::IP);

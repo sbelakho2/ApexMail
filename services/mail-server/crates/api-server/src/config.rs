@@ -1414,8 +1414,18 @@ impl Config {
         )?;
         if self.kiwi_enabled {
             // KiwiCaptcha is fully self-contained (no external service), so the
-            // only production requirement is a strong HMAC secret key.
-            validate_secret("KIWI_SECRET_KEY", &self.kiwi_secret_key, 16, &["dev"])?;
+            // only production requirement is a strong HMAC secret key. The
+            // floor comes from the crate's key-derivation minimum
+            // (`kiwicaptcha::keys::MIN_MASTER_BYTES`, currently 32): a shorter
+            // secret is refused at ISSUANCE time (`SignError::KeyTooShort`),
+            // which would surface every auth page as a captcha outage — so the
+            // deployment config rejects it up front.
+            validate_secret(
+                "KIWI_SECRET_KEY",
+                &self.kiwi_secret_key,
+                kiwicaptcha::keys::MIN_MASTER_BYTES,
+                &["dev"],
+            )?;
         }
         if self.placement_enabled && self.placement_encrypt_passwords {
             validate_secret(
@@ -1626,7 +1636,7 @@ pub(crate) mod tests {
             placement_encryption_secret: "test-placement-encryption-secret".into(),
 
             kiwi_enabled: true,
-            kiwi_secret_key: "prod-kiwi-secret-key-67890".into(),
+            kiwi_secret_key: "prod-kiwi-secret-key-67890-abcdefghijkl".into(),
             waf_enabled: false,
             waf_enforce: false,
             kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,

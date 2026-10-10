@@ -5954,3 +5954,497 @@ async fn sweep_overage_only_cli_runs_the_canonical_sweep_on_demand() {
 
     h.finish().await;
 }
+
+// ---------------------------------------------------------------------------
+// COMMERCIAL CONTRACT — pricing authority (docs/pricing-authority.md)
+//
+// Authoritative plan facts live in `platform-catalog` and `plans.rs`.
+// Marketing `pricing.json` is presentation-only. These tests pin the
+// commercial/compliance contract so a drift (30k/mo Free, 10% annual,
+// 10 IPs, silent quota drop) FAILS here before it reaches a customer.
+// ---------------------------------------------------------------------------
+
+/// Free = €0, 3,000 emails/month RECURRING + a ONE-TIME 30,000 launch
+/// allowance (first 30 days) — NOT 30k/month forever.
+#[test]
+fn catalog_free_is_3000_recurring_plus_one_time_30000_launch_allowance() {
+    let free = platform_catalog::plan_by_name("free").expect("free plan in catalog");
+    assert_eq!(free.price_monthly_cents, 0, "Free is €0");
+    assert_eq!(free.price_yearly_cents, 0);
+    // The RECURRING included volume is 3 000/month — the 2026-09-08 review
+    // moved Free off the historical 30 000/month give-away.
+    assert_eq!(
+        free.email_limit, 3_000,
+        "Free recurring included volume must be 3 000, not 30 000"
+    );
+    assert_ne!(
+        free.email_limit, 30_000,
+        "30 000 is the ONE-TIME launch allowance, never the monthly ceiling"
+    );
+    // The launch allowance is a separate one-time grant.
+    assert_eq!(
+        platform_catalog::FREE_LAUNCH_ALLOWANCE,
+        30_000,
+        "one-time launch allowance is 30 000 emails"
+    );
+    assert_eq!(
+        platform_catalog::FREE_LAUNCH_WINDOW_DAYS,
+        30,
+        "launch allowance window is 30 days, then the 3 000/month ceiling applies"
+    );
+
+    // The billing seed must mirror the catalog (never 30k as email_limit).
+    let free_seed = billing_service::plans::builtin_plan_seed(Some("free"));
+    assert_eq!(free_seed.email_limit, 3_000);
+    assert_eq!(free_seed.api_call_limit, 30_000);
+    assert_eq!(free_seed.price_monthly, 0);
+    assert!(
+        free_seed.description.contains("3,000 emails/month"),
+        "description must state the recurring 3 000/month: {}",
+        free_seed.description
+    );
+    assert!(
+        free_seed
+            .description
+            .contains("one-time 30,000-email launch allowance"),
+        "description must state the launch allowance is ONE-TIME: {}",
+        free_seed.description
+    );
+    // A missing plans row resolves to these same free limits (fail closed
+    // to the basic set, never to an invented paid ceiling).
+    assert_eq!(
+        billing_service::plans::builtin_quota_limits(Some("plan-does-not-exist")),
+        (3_000, 30_000)
+    );
+}
+
+/// Annual = 10 monthly payments (≈16.7% savings), NOT a 10% discount.
+/// `price_yearly_cents` is the 12-month charge at the effective annual
+/// rate; twelve monthly payments would be `12 * price_monthly_cents`.
+#[test]
+fn annual_effective_discount_is_ten_monthly_payments_not_ten_percent() {
+    for catalog in platform_catalog::PLANS {
+        if catalog.price_monthly_cents <= 0 {
+            assert_eq!(
+                catalog.price_yearly_cents, 0,
+                "{}: free/payg have no annual charge",
+                catalog.name
+            );
+            continue;
+        }
+        let twelve_monthly = catalog.price_monthly_cents * 12;
+        // Exact commercial fact: annual is billed as TEN monthly payments.
+        assert_eq!(
+            catalog.price_yearly_cents,
+            catalog.price_monthly_cents * 10,
+            "{}: annual must be exactly 10 monthly payments (not 11, not 12, not 12 * 0.90)",
+            catalog.name
+        );
+        let effective_discount = 1.0 - (catalog.price_yearly_cents as f64 / twelve_monthly as f64);
+        // 1 - 10/12 = 1/6 ≈ 0.1667. NOT 0.10.
+        assert!(
+            (effective_discount - 2.0 / 12.0).abs() < 1e-9,
+            "{}: effective discount must be 2/12 (≈16.7%), got {effective_discount:.4}",
+            catalog.name
+        );
+        assert!(
+            (effective_discount - 0.10).abs() > 0.05,
+            "{}: the annual discount is NOT 10% (got {effective_discount:.4})",
+            catalog.name
+        );
+    }
+
+    // The billing seeds mirror the same 10-payment ladder.
+    for seed in billing_service::plans::default_plans() {
+        if seed.price_monthly > 0 {
+            assert_eq!(
+                seed.price_yearly,
+                seed.price_monthly * 10,
+                "{}: seed annual is 10 monthly payments",
+                seed.name
+            );
+        }
+    }
+}
+
+/// Entitlements fail closed: an unknown plan resolves to the BASIC (free)
+/// set and must NOT grant `custom_templates` or dedicated IPs.
+#[test]
+fn unknown_plan_feature_set_excludes_custom_templates_and_dedicated_ips() {
+    // Quota lookup falls back to free for unknown names — the feature set
+    // that comes with it is the deny-most basic set.
+    let fallback = billing_service::plans::builtin_plan_seed(Some("not-a-real-plan"));
+    assert_eq!(fallback.name, "free", "unknown plan → basic set");
+    assert!(
+        !fallback.features.custom_templates,
+        "unknown plan must not include custom_templates"
+    );
+    assert!(
+        !fallback.features.dedicated_ip,
+        "unknown plan must not include dedicated_ip"
+    );
+    assert_eq!(
+        fallback.features.dedicated_ip_count, 0,
+        "unknown plan grants zero dedicated IPs"
+    );
+
+    // EntitlementSnapshot fail-closed: missing booleans DENY. A plan row
+    // with an empty/unknown feature document never invents paid grants.
+    let empty = serde_json::json!({});
+    let snap = billing_entitlements::EntitlementSnapshot::from_plan_features_json(
+        "ten_unknown",
+        "not-a-real-plan",
+        &empty,
+    );
+    assert!(
+        !snap.has_feature(billing_entitlements::FeatureKey::CustomTemplates),
+        "missing custom_templates must deny"
+    );
+    assert!(
+        !snap.has_feature(billing_entitlements::FeatureKey::DedicatedIp),
+        "missing dedicated_ip must deny"
+    );
+    assert_eq!(
+        snap.capacity(billing_entitlements::CapacityKey::DedicatedIps),
+        0,
+        "missing dedicated_ip_count must be 0 (deny), never an invented quota"
+    );
+    assert!(
+        snap.require_feature(billing_entitlements::FeatureKey::CustomTemplates)
+            .is_err(),
+        "require_feature must refuse custom_templates on an unknown plan"
+    );
+    assert!(
+        snap.require_feature(billing_entitlements::FeatureKey::DedicatedIp)
+            .is_err(),
+        "require_feature must refuse dedicated_ip on an unknown plan"
+    );
+
+    // Corrupt persisted features must FAIL CLOSED (typed error), never
+    // silently repair into a paid feature set. `builtin_plan_seed` itself
+    // only falls back for unknown NAMES; a present-but-invalid features
+    // JSONB is rejected by `PlanRow::try_into_plan` /
+    // `get_entitlement_snapshot` with `BillingError::CorruptPlanFeatures`.
+    let free = billing_service::plans::builtin_plan_seed(Some("free"));
+    assert!(!free.features.custom_templates);
+    assert!(!free.features.dedicated_ip);
+}
+
+/// Enterprise IP quotas match the catalog seed: 3 included dedicated IPs,
+/// NOT the marketing myth of 10.
+#[test]
+fn enterprise_included_ip_quota_is_three_not_ten() {
+    let enterprise = billing_service::plans::builtin_plan_seed(Some("enterprise"));
+    assert_eq!(
+        enterprise.features.dedicated_ip_count, 3,
+        "Enterprise Cloud includes up to 3 dedicated IPs (2026-09-08 review §10)"
+    );
+    assert_ne!(
+        enterprise.features.dedicated_ip_count, 10,
+        "Enterprise does NOT include 10 dedicated IPs"
+    );
+
+    let scale = billing_service::plans::builtin_plan_seed(Some("scale"));
+    assert_eq!(
+        scale.features.dedicated_ip_count, 1,
+        "Business includes 1 dedicated IP (a second is assigned where traffic justifies it)"
+    );
+    let growth = billing_service::plans::builtin_plan_seed(Some("growth"));
+    assert_eq!(growth.features.dedicated_ip_count, 1);
+    let pro = billing_service::plans::builtin_plan_seed(Some("pro"));
+    assert_eq!(
+        pro.features.dedicated_ip_count, 0,
+        "Pro is add-on only; zero IPs included by default"
+    );
+}
+
+/// SLA/credits matrix is PLAN-SCOPED. Only Business (`scale`) and
+/// Enterprise Cloud carry `sla_guarantee`; the credit caps are 30% and 25%.
+/// No other plan may invent coverage.
+#[test]
+fn sla_credit_matrix_is_plan_scoped_with_no_invented_coverage() {
+    let expected: &[(&str, bool, i32)] = &[
+        ("free", false, 0),
+        ("starter", false, 0),
+        ("pro", false, 0),
+        ("growth", false, 0),
+        ("scale", true, 30),
+        ("enterprise", true, 25),
+        ("payg", false, 0),
+    ];
+    for (name, guarantee, credit_pct) in expected {
+        let seed = billing_service::plans::builtin_plan_seed(Some(name));
+        assert_eq!(
+            seed.features.sla_guarantee, *guarantee,
+            "{name}.sla_guarantee (SLA coverage is a Business/Enterprise entitlement only)"
+        );
+        assert_eq!(
+            seed.features.sla_credit_percentage, *credit_pct,
+            "{name}.sla_credit_percentage must match the published plan cap"
+        );
+    }
+
+    // The uncapped ladder is documented in docs/sla.md §3.1; the plan cap
+    // is what the sweep enforces (maintenance.rs reads sla_credit_percentage).
+    // A plan without sla_guarantee must never receive a credit percentage.
+    for seed in billing_service::plans::default_plans() {
+        if !seed.features.sla_guarantee {
+            assert_eq!(
+                seed.features.sla_credit_percentage, 0,
+                "{}: no SLA guarantee ⇒ no credit cap, no invented coverage",
+                seed.name
+            );
+        } else {
+            assert!(
+                (1..=100).contains(&seed.features.sla_credit_percentage),
+                "{}: an SLA plan must carry a real credit cap",
+                seed.name
+            );
+        }
+    }
+}
+
+/// Usage over the hard cap returns the named quota refusal — never a silent
+/// drop and never a 500.
+#[test]
+fn hard_cap_refusal_carries_the_named_quota_error_string() {
+    // The send-admission refusal's stable Display contract.
+    assert_eq!(
+        billing_service::send_admission::SendAdmissionError::QuotaExceeded.to_string(),
+        "email quota exceeded",
+        "quota refusal must name the condition (never empty, never 'internal error')"
+    );
+
+    // The REST send-endpoint contract string (api-server messages.rs
+    // QUOTA_EXCEEDED_MESSAGE) is the customer-visible refusal. Pin the
+    // exact text so a wording drift is a test failure, not a support ticket.
+    let messages_src = include_str!("../../api-server/src/routes/messages.rs");
+    let expected = "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling";
+    assert!(
+        messages_src.contains(&format!(
+            "const QUOTA_EXCEEDED_MESSAGE: &str = \"{expected}\""
+        )),
+        "QUOTA_EXCEEDED_MESSAGE must stay exactly:\n{expected}"
+    );
+}
+
+/// Usage/overage math is exact: ceil to whole cents, named plan rates from
+/// the catalog ladder (80/60/35/35 millicents), Free/PAYG/unknown quote 0.
+#[test]
+fn overage_math_is_exact_and_quotes_only_catalog_rates() {
+    use billing_service::plans::{
+        calculate_overage_cost_with_rate, calculate_plan_overage_cost, plan_overage_rate_millicents,
+    };
+
+    // Catalog ladder — never a second hardcoded rate table.
+    assert_eq!(plan_overage_rate_millicents("free"), None);
+    assert_eq!(plan_overage_rate_millicents("starter"), Some(80));
+    assert_eq!(plan_overage_rate_millicents("pro"), Some(60));
+    assert_eq!(plan_overage_rate_millicents("growth"), Some(35));
+    assert_eq!(plan_overage_rate_millicents("scale"), Some(35));
+    assert_eq!(plan_overage_rate_millicents("enterprise"), Some(35));
+    assert_eq!(plan_overage_rate_millicents("payg"), None);
+    assert_eq!(plan_overage_rate_millicents("no-such-plan"), None);
+
+    // Exact boundaries: no overage at/below the limit.
+    assert_eq!(calculate_plan_overage_cost("starter", 50_000, 50_000), 0);
+    assert_eq!(calculate_plan_overage_cost("starter", 49_999, 50_000), 0);
+
+    // 1 000 overage emails on Developer at 80 millicents/email
+    // = 80 000 millicents = 80 cents. Exact.
+    assert_eq!(calculate_plan_overage_cost("starter", 51_000, 50_000), 80);
+    // Pro: 1 000 * 60 = 60 cents.
+    assert_eq!(calculate_plan_overage_cost("pro", 151_000, 150_000), 60);
+    // Growth/Business: 1 000 * 35 = 35 cents.
+    assert_eq!(calculate_plan_overage_cost("growth", 501_000, 500_000), 35);
+    assert_eq!(
+        calculate_plan_overage_cost("scale", 2_001_000, 2_000_000),
+        35
+    );
+
+    // Free and unknown names quote 0 (the quota gate blocks; never bill).
+    assert_eq!(calculate_plan_overage_cost("free", 100_000, 3_000), 0);
+    assert_eq!(calculate_plan_overage_cost("payg", 100_000, -1), 0);
+    assert_eq!(
+        calculate_plan_overage_cost("no-such-plan", 100_000, 3_000),
+        0
+    );
+
+    // Ceil to whole cents: 1 email at 80 millicents = 80/1000 cents → 1 cent.
+    assert_eq!(calculate_overage_cost_with_rate(1, 0, 80), 1);
+    // 12 emails * 80 = 960 millicents → still 1 cent (ceil).
+    assert_eq!(calculate_overage_cost_with_rate(12, 0, 80), 1);
+    // 13 emails * 80 = 1 040 millicents → 2 cents.
+    assert_eq!(calculate_overage_cost_with_rate(13, 0, 80), 2);
+    // Unlimited plan never overage-bills.
+    assert_eq!(calculate_overage_cost_with_rate(1_000_000, -1, 80), 0);
+    // Exactly at the limit is 0.
+    assert_eq!(calculate_overage_cost_with_rate(100, 100, 80), 0);
+    // One over is ceil(1 * 80 / 1000) = 1.
+    assert_eq!(calculate_overage_cost_with_rate(101, 100, 80), 1);
+}
+
+/// Stripe-unverified ≠ paid: a subscription event whose price id is not
+/// bound to a plan must never grant a paid plan (fail closed to free).
+db_test!(unverified_stripe_price_never_grants_a_paid_plan, |h| {
+    let app = billing_service::routes::router(h.state.clone());
+    let tenant = "cov_unverified_price";
+    seed_tenant(&h, tenant, "free").await;
+    // A plans row exists but its stripe price id is NOT the one in the event.
+    seed_stripe_plan(&h, "growth", "price_official_monthly").await;
+
+    let now = Utc::now().timestamp();
+    let payload = stripe_event(
+        "evt_cov_unverified",
+        "customer.subscription.updated",
+        subscription_object(
+            tenant,
+            "sub_cov_unverified",
+            "active",
+            "price_forged_or_unmapped",
+            now,
+            now + 2_592_000,
+        ),
+    );
+    let (status, _) = post_signed_webhook(&app, &payload, now).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unbound Stripe price must be refused, not silently mapped"
+    );
+
+    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .expect("tenant plan");
+    assert_eq!(plan, "free", "Stripe-unverified must never equal paid");
+    let subs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("count subscriptions");
+    assert_eq!(subs, 0, "refused events write no subscription rows");
+});
+
+/// Double-webhook (same event id) is idempotent for BOTH `invoice.paid` and
+/// `customer.subscription.updated`: exactly one state transition, one row.
+db_test!(
+    double_webhook_invoice_paid_and_subscription_updated_is_one_transition,
+    |h| {
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant = "cov_wh_double";
+        seed_tenant(&h, tenant, "free").await;
+        seed_stripe_plan(&h, "growth", "price_cov_monthly").await;
+        seed_billing_address(&h, tenant, "US").await;
+
+        let now = Utc::now().timestamp();
+
+        // ── customer.subscription.updated, delivered twice ────────────────
+        let sub_payload = stripe_event(
+            "evt_cov_double_sub",
+            "customer.subscription.updated",
+            subscription_object(
+                tenant,
+                "sub_cov_double",
+                "active",
+                "price_cov_monthly",
+                now,
+                now + 2_592_000,
+            ),
+        );
+        expect_webhook_ok(&h, &app, &sub_payload, "evt_cov_double_sub").await;
+        expect_webhook_ok(&h, &app, &sub_payload, "evt_cov_double_sub").await;
+
+        let (sub_rows, plan): (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, MIN(t.plan) FROM stripe_subscriptions s
+         JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .expect("subscription state");
+        assert_eq!(
+            sub_rows, 1,
+            "duplicate subscription.updated must not insert twice"
+        );
+        assert_eq!(plan, "growth", "one plan transition to growth");
+        let watermark: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT event_watermark FROM stripe_subscriptions WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .expect("watermark");
+        assert!(watermark.is_some(), "watermark recorded exactly once");
+        let claims: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_double_sub'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("webhook claim rows");
+        assert_eq!(claims, 1, "one claim row per Stripe event id");
+
+        // ── invoice.paid, delivered twice ─────────────────────────────────
+        sqlx::query(
+        "INSERT INTO stripe_subscriptions
+             (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, stripe_customer_id)
+         VALUES ($1, 'sub_cov_double', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')",
+    )
+    .bind(tenant)
+    .bind((now - 86_400) as f64)
+    .bind((now + 2_592_000) as f64)
+    .execute(&h.pool)
+    .await
+    .expect("ensure subscription row for invoice resolution");
+
+        let invoice_payload = stripe_event(
+            "evt_cov_double_inv",
+            "invoice.paid",
+            serde_json::json!({
+                "id": "in_cov_double",
+                "amount_due": 4900,
+                "amount_paid": 4900,
+                "currency": "eur",
+                "subtotal": 4900,
+                "tax": 0,
+                "total": 4900,
+                "number": "2026-000077",
+                "subscription_details": { "metadata": { "tenant_id": tenant } },
+                "subscription": "sub_cov_double",
+            }),
+        );
+        expect_webhook_ok(&h, &app, &invoice_payload, "evt_cov_double_inv").await;
+        expect_webhook_ok(&h, &app, &invoice_payload, "evt_cov_double_inv").await;
+
+        let invoices: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoices WHERE stripe_invoice_id = 'in_cov_double'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("count local invoices");
+        assert_eq!(
+            invoices, 1,
+            "duplicate invoice.paid must settle exactly one local invoice"
+        );
+        let inv_claims: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_double_inv'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("invoice webhook claim rows");
+        assert_eq!(inv_claims, 1, "one claim row for the invoice event id");
+        let processed: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_double_inv'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("invoice webhook status");
+        assert_eq!(
+            processed, "processed",
+            "the single transition lands in processed"
+        );
+    }
+);

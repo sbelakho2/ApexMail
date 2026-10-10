@@ -222,7 +222,7 @@ final class ReplayIdentityGateTest extends TestCase
         foreach ([['txn-A', 'txn-A', true], ['txn-A', 'txn-B', false], [null, null, true], [null, 'txn-A', false]] as [$recordBinding, $expected, $shouldPass]) {
             [$inner, $record, $token] = $this->issueAndSolve(requestBinding: $recordBinding);
             $inner->consumeWithOperationIdentity($record->nonce, self::identityFor('m-'.$expected ?? 'null'));
-            self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+            self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($inner, $record->nonce, true, $record->requestBinding), 'the committed result lands');
             $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT + 10_000);
             $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: self::identityFor('m-'.$expected ?? 'null'), expectedRequestBinding: $expected, bindingExpectation: RequestBindingExpectation::exact($expected));
             self::assertSame($shouldPass, $outcome->isOk(), sprintf('replay row record=%s expected=%s pass=%s got=%s', var_export($recordBinding, true), var_export($expected, true), var_export($shouldPass, true), $outcome->code()));

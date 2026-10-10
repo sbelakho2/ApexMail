@@ -36,11 +36,12 @@ final class NoBindingIntegrationTest extends KernelTestCase
         $storage = $container->get('kiwi_captcha.storage.array');
         $challenge = $issuer->issue('login', '203.0.113.9');
 
-        // The signed v2 canonical must carry an empty binding-tag segment.
+        // The signed revision-4 canonical must carry an empty
+        // binding-tag segment (v4|protocol_version|nonce|scope|tag).
         $canonical = base64_decode(explode('.', $challenge->challenge)[0], true);
         $parts = explode('|', (string) $canonical);
-        self::assertSame('v2', $parts[0]);
-        self::assertSame('', $parts[3], 'binding_mode none must produce an empty binding tag');
+        self::assertSame('v4', $parts[0]);
+        self::assertSame('', $parts[4], 'binding_mode none must produce an empty binding tag');
 
         // Solve + verify from a different IP: must pass (no binding).
         $counter = 0;

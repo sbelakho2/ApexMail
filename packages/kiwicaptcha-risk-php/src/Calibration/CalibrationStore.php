@@ -41,7 +41,7 @@ use KiwiCaptcha\Risk\RiskAction;
  *     without its receipt), consumed exactly once atomically inside
  *     confirm.lua. The outcome is either fully recorded or not consumed,
  *     with no crash window between reading and incrementing the bucket.
- *   - outcome ledger: {kiwi:<ns>}:cal:ledger:<decision_id> (JSON string
+ *   - outcome ledger: {kiwi:<ns>}:outcome:<decision_id> (JSON string
  *     {"o","scope","hour","score","w"}), the always-on exactly-once
  *     authority, written by register_decision.lua (pending) and flipped by
  *     confirm.lua / correction.lua.

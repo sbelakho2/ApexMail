@@ -73,6 +73,12 @@ final class ChainModel
     /** The monotonic required-rank floor (never lowered). */
     public int $rank = 1;
 
+    /** The monotonic requirement generation: every raise increments it. */
+    public int $requirementGeneration = 1;
+
+    /** The generation the current reservation was taken against (null outside reserved). */
+    public ?int $reservedGeneration = null;
+
     /** The chain's own obligation id (the mapping key it was created under). */
     public string $obligationId;
 
@@ -167,7 +173,19 @@ final class ChainModel
     private function createOrGet(int $rank): string
     {
         if ($this->alive && $this->obligationPresent && $this->state !== self::ABSENT) {
-            $this->rank = max($this->rank, $rank);
+            if ($rank > $this->rank) {
+                $this->rank = $rank;
+                ++$this->requirementGeneration;
+                if ($this->state === self::ISSUED || $this->state === self::VERIFIED) {
+                    // A stronger requirement on an already-issued chain
+                    // fails closed to the terminal step-up state: the stale
+                    // nonce can never be upgraded in place.
+                    $this->state = self::STEP_UP_REQUIRED;
+                    $this->owner = null;
+                    $this->leaseLive = false;
+                    $this->reservedGeneration = null;
+                }
+            }
 
             return 'existing';
         }
@@ -182,6 +200,8 @@ final class ChainModel
         // generations (a fresh chain of the same transaction can start
         // weaker after a weaker reassessment).
         $this->rank = max(1, $rank);
+        $this->requirementGeneration = 1;
+        $this->reservedGeneration = null;
         $this->everTerminal = false;
         $this->verifiedNonces = [];
         $this->verifiedNewCount = 0;
@@ -216,11 +236,13 @@ final class ChainModel
             }
             $this->owner = $owner;
             $this->leaseLive = true;
+            $this->reservedGeneration = $this->requirementGeneration;
 
             return 'taken_over';
         }
         $this->owner = $owner;
         $this->leaseLive = true;
+        $this->reservedGeneration = $this->requirementGeneration;
         $this->state = self::RESERVED;
 
         return 'available';
@@ -234,6 +256,7 @@ final class ChainModel
         $this->state = self::AVAILABLE;
         $this->owner = null;
         $this->leaseLive = false;
+        $this->reservedGeneration = null;
     }
 
     private function markIssued(string $owner, string $nonce): string
@@ -245,10 +268,17 @@ final class ChainModel
             if ($this->owner !== $owner) {
                 return 'not_owner';
             }
+            // The reservation CAS: a raise since the reservation bumped the
+            // generation, so the challenge minted for the weaker
+            // requirement must never be installed.
+            if ($this->reservedGeneration !== $this->requirementGeneration) {
+                return 'stale_requirement';
+            }
             $this->state = self::ISSUED;
             $this->nonce = $nonce;
             $this->owner = null;
             $this->leaseLive = false;
+            $this->reservedGeneration = null;
             ++$this->issuedNewCount;
 
             return 'issued_new';
@@ -583,9 +613,18 @@ final class ChainModel
             Assert::assertSame($from->owner, $args['owner'], $context.': the legacy completion is owner-scoped');
             Assert::assertSame($args['nonce'], $to->nonce, $context.': the legacy completion pins the exact nonce');
         }
-        // The create-or-get guard: an existing obligation never changes state.
+        // The create-or-get guard: an existing obligation never changes
+        // state, with ONE exception — a strictly stronger requirement
+        // arriving on an already-issued chain fails closed to the
+        // terminal step-up state (the stale nonce can never be upgraded in
+        // place).
         if ($transition === 'createOrGet' && $outcome === 'existing') {
-            Assert::assertSame($from->state, $to->state, $context.': the create-or-get recovery never mutates the chain state');
+            if ($from->state === self::ISSUED && $to->state === self::STEP_UP_REQUIRED) {
+                Assert::assertGreaterThan($from->rank, $to->rank, $context.': the issued-chain fail-closed requires a stronger requirement');
+                Assert::assertSame($from->requirementGeneration + 1, $to->requirementGeneration, $context.': the fail-closed bumps the requirement generation');
+            } else {
+                Assert::assertSame($from->state, $to->state, $context.': the create-or-get recovery never mutates the chain state');
+            }
             Assert::assertSame($from->owner, $to->owner, $context.': the create-or-get recovery never mutates the reservation');
             Assert::assertSame($from->nonce, $to->nonce, $context.': the create-or-get recovery never mutates the nonce');
             Assert::assertSame($from->obligationPresent, $to->obligationPresent, $context.': the create-or-get recovery keeps the obligation');

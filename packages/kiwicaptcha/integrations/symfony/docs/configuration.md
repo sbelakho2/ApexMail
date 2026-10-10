@@ -14,7 +14,7 @@ environment, and the DSN builds every Redis-backed service:
 ```yaml
 # config/packages/kiwi_captcha.yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility
     secret_key: '%env(KIWI_SECRET_KEY)%'
     public_base_url: '%env(KIWI_PUBLIC_URL)%'
     redis_dsn: '%env(KIWI_REDIS_DSN)%'
@@ -39,6 +39,12 @@ kiwi_captcha:
   no credentials, no path, no query, no fragment.
   An invalid resolved origin fails closed with an error naming
   `kiwi_captcha.public_base_url`.
+  The verified-agents plane reconstructs `@target-uri` as this value
+  concatenated with the request URI (never the request Host header).
+  Behind a reverse proxy that strips an external mount prefix before
+  the request reaches the application, `public_base_url` must include
+  that mount prefix so the reconstruction matches the absolute URI the
+  agent signed; a base without the prefix fails the signature.
 - Predis is a direct dependency of the bundle, so the DSN path works
   out of the box; no separate client install is needed.
 - The Flex recipe ships this exact file; see
@@ -132,13 +138,13 @@ The layering semantics:
 
 ```yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility | ha_safe
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility | ha_safe
 ```
 
 | Knob | balanced | privacy_strict | high_abuse | compatibility | ha_safe |
 |------|----------|----------------|------------|---------------|---------|
 | `algorithm` | sha256 | sha256 | sha256 | sha256 | sha256 |
-| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 |
+| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 4 | 18 / 4 | 18 / 4 | 18 / 4 | 18 / 4 |
 | `argon_m_kib` / `argon_t` / `argon_p` | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 |
 | `challenge_ttl_secs` | 120 | 120 | 120 | 300 | 120 |
 | `rate_limit` | 10 | 10 | 5 | 10 | 10 |
@@ -203,8 +209,90 @@ Profile rationale:
 The profiles never override an explicitly configured knob: the profile
 defaults are merged as the lowest-precedence layer, so they apply only
 where the key is absent from your configuration. `protection_profile:
-null` (the default) selects no profile, and any value outside the five
+null` (the default) selects no profile, and any value outside the six
 names is refused.
+
+### The abuse_first name
+
+`abuse_first` is the specification name of the abuse posture (the
+project's change document, Part 5, calls the default profile
+`abuse_first`). It selects the identical matrix as `high_abuse`: the
+same derived knobs, the same chained step-up conditional, the same
+stage composition below. Either spelling is accepted everywhere the
+profile name appears; pick one and stay with it for readability.
+
+### Risk engine stage composition
+
+Beyond the knob table above, the profile decides which decision stages
+of the adaptive risk engine ride the composed engine (the stage list of
+the change document, Part 3). Every stage knob accepts an explicit
+boolean in any layer; `null` (the default) resolves from the profile:
+
+| Stage | Knob | abuse_first, high_abuse | balanced, ha_safe, privacy_strict, none | compatibility |
+|-------|------|--------------------------|------------------------------------------|---------------|
+| Long-memory marks with attacker denial | `risk.marks.enabled` | on | on | off |
+| Continuous work pricing | `risk.pricing.enabled` | on | on | off |
+| Bucket trust (ASN-bucket-local credit) | follows `risk.pricing.enabled` | on | on | off |
+| Target identifier resolver | per-scope `risk.scopes.<name>.target_field` | wired when configured | wired when configured | wired when configured |
+| Names-only decision explanation | `risk.explain` | on | off | off |
+| Typed outcomes facade (the mark writer) | rides the marks stage | on | on | off |
+| ASN dataset dimension | `risk.asn.dataset_path` | when configured | when configured | when configured |
+
+The stages and their knobs:
+
+- `risk.marks.enabled` wires the store-backed marks reader into the
+  engine. Every decision then consults the long-memory marks on the
+  requesting identity's own dimensions (session, principal, the ASN
+  bucket). A live mark escalates the action to at least the maximum
+  challenge rung. A mark combined with corroborating attacker evidence
+  (bad proof, replay, malformed traffic or decoy evidence at the policy
+  floor) denies for the remaining mark TTL. An unreadable marks surface
+  floors the request fail-closed instead of fabricating a deny.
+- `risk.pricing.enabled` wires the price context into the engine. Every
+  decision is then additionally priced as work: the risk score weighted
+  by the scope's value class, plus a pressure term gated by the
+  session's bucket trust. The price may only raise the composed action.
+  A trusted identity stays within one rung under a full-pressure storm;
+  an unproven one takes the whole ramp.
+- `risk.scopes.<name>.value_class` (low, standard, high, critical;
+  default standard) is the per-scope worth of the protected action for
+  the pricing stage. The class weights are 800, 1000, 1200 and 1400 per
+  mille of the risk score. The calibrated declared abuse values (the
+  solver reference table: the measured attacker cost per 1000 solves
+  over the 10x calibration margin) are 0.00005, 0.0001, 0.0001 and
+  0.0002 dollars per 1000. A scope whose real stake exceeds its rung's
+  measured ceiling cannot be priced by raw proof of work. The doctor
+  then advises the escalation answer: set the scope's
+  `risk.scopes.<name>.minimum` to `step_up` or `deny` so the
+  disposition ladder carries what the rung cannot price.
+- `risk.asn.dataset_path` points at a local, versioned IP-to-ASN
+  dataset file (the free IPtoASN tsv shapes, one
+  `first_ip TAB last_ip TAB asn` row per line, `#` comments). No
+  network call ever happens: the file is read once at boot into sorted
+  interval tables. A literal path that cannot be read or parsed fails
+  the container build. Without a dataset the pricing stage reads zero
+  bucket credit (fail closed) and the marks reader drops the asn
+  dimension; every other stage is unaffected.
+- `risk.explain` surfaces the names-only decision explanation through
+  the risk gateway (`currentDecisionExplanation()`, request-scoped
+  beside the decision id). The explanation carries reason names,
+  identity dimension names, the chosen action and the priced rung when
+  pricing is composed. The type has no path for pseudonym values, so a
+  serialized explanation can never leak a hex digest. On by default
+  under the abuse profiles, where operator-visible decisions are part
+  of the posture; off under the neutral postures, whose behavior
+  surface stays byte-identical.
+
+The typed outcomes facade arms with the marks stage (it is the mark
+writer): the application's own abuse confirmations always have a
+reporter, independently of the security auto-bridge and the step-up
+plane. The `risk.outcomes.auto_bridge` kill switch governs the bridge,
+never the facade.
+
+The ASN dataset is data, not a flag: the trust and marks stages engage
+their ASN dimension the moment a dataset path is configured. A
+deployment that does not ship routing-table data loses no other stage.
+
 
 ## HA authority: the mechanical replay-safety posture
 
@@ -372,7 +460,7 @@ The dimension is controlled by these knobs:
   invalidates the challenge. The gate is inert without an
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
-- `kiwi_captcha.execution_required_version` (int 1..4, default 1):
+- `kiwi_captcha.execution_required_version` (int 1..5, default 1):
   the server-owned required execution tier. When set above 1, an
   execution-armed request from a client below that tier is refused
   with the deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED`
@@ -386,8 +474,14 @@ The dimension is controlled by these knobs:
   spelling stays valid through the one-major-version compatibility
   window, so an existing deployment never needs to change its config.
 
-- `kiwi_captcha.execution_version` (int 1..4, default 1): the
-  node's execution-program grammar cap. Version 4 is the nested-tree
+- `kiwi_captcha.execution_version` (int 1..5, default 1): the
+  node's execution-program grammar cap. The upper bound is the core
+  generator maximum (`KiwiCaptcha\\ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`),
+  so the deployable grammar can never lag the generator. Version 5 adds the
+  causal object-graph arms: fragment append, deep clone,
+  reparent, attribute reflection, event-phase dispatch, text mutation,
+  select-depth walking and URL canonicalization of the current node
+  (see docs/execution-v5-design.md). Version 4 is the nested-tree
   grammar: the child opcode (35) builds nodes under the current node
   and the depth probe (36) walks the real ancestor chain. Version 3
   is the sibling-index traversal grammar (opcode 34); version 2 is
@@ -473,6 +567,12 @@ kiwi_captcha:
     rsw_modulus_n: '%env(RSW_MODULUS_N)%'   # base64 of n = p*q, 256 bytes
     rsw_lambda: '%env(RSW_LAMBDA)%'         # base64 of lcm(p-1, q-1)
     rsw_t: 75000             # sequential squarings, 10000..300000
+    rsw_identity: false      # writer switch: sign the modulus identity (protocol v5)
+    rsw_legacy_identity: false  # bounded migration: accept the pre-v5 base64-text identity alias
+    rsw_verification_keys:   # rotation keyring: keep outstanding challenges verifiable
+        '<rsw_modulus_n_sha256>':
+            modulus_n: '%env(RSW_OLD_MODULUS_N)%'
+            lambda: '%env(RSW_OLD_LAMBDA)%'
 ```
 
 ### Modulus setup
@@ -500,7 +600,9 @@ the repository.
 
 Record the modulus fingerprint printed by the keygen
 (rsw_modulus_n_sha256, the sha256 of the canonical 256-byte n). It is
-the way to state which modulus a deployment holds. The command
+the way to state which modulus a deployment holds and — since the
+identity-bearing protocol v5 — the exact value the issuance signs
+into the record and resolves against. The command
 `rsw-keygen --fingerprint` recomputes it from a configured n, and a
 redeployment audit compares the two. Validation refuses the weak
 shapes up front: an even or mis-sized modulus, a modulus with a small
@@ -512,6 +614,81 @@ proof that lambda is the true Carmichael value of n: only the keygen
 p/q construction guarantees that. The full lcm relation still cannot
 be verified without the primes, which is why the keygen provenance
 and the fingerprint matter.
+
+### The authenticated modulus identity (protocol v5)
+
+`rsw_identity: true` arms the identity writer: issuance signs the
+canonical-byte modulus fingerprint (exactly the keygen's
+`rsw_modulus_n_sha256`) into the canonical as the final segment and
+stamps the record protocol v5. The verifier then resolves the
+trapdoor by the record's authenticated identity, never by whatever
+pair happens to be active. An accepted proof is therefore always
+under the exact authenticated modulus, and a challenge signed for A
+can never be satisfied under a different configured B.
+
+The switch defaults to false because v5 is a two-phase fleet
+rollout: a pre-v5 verifier rejects the unknown protocol version, so
+every serving binary must read v5 first. Enabling the switch alone is
+not enough. The challenge controller arms the identity only when the
+confirmed central floor reaches the feature version
+(`ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION`, 5) — compared
+against that constant, never the binary's global maximum, so a later
+protocol v6 cannot shut the feature off. The safe default lives in the
+core issuance API as an explicit emission-capability ceiling. A direct
+`Issuer::issue()` caller emits the legacy identityless v2 shape unless
+it passes a confirmed `maxProtocolVersionToEmit >= 5`, mirrored by the
+Rust `EmissionCapabilities`. No integration can leak v5 by forgetting
+the gate. Every uncertainty fails safe
+to the legacy identityless v2 shape with a once-per-process warning:
+a lower floor, an absent or corrupt policy hash, an unreadable
+central policy, or no security Redis. By default, and whenever the
+floor is not confirmed, rsw issuance keeps the legacy identityless
+protocol v2 shape.
+
+The v5 grammar binds the identity exactly. A v5 record must carry
+it, and the canonical fingerprint is the only accepted identity form
+for v5. That requirement is what refuses a signed identityless record
+whose stored version is flipped to 5, because such a record keeps the
+plain canonical bytes.
+
+The legacy base64-text alias exists so records issued by a release that
+hashed the base64 *text* keep verifying, and it is never used for new
+issuance. It is a removable compatibility mode, not permanent protocol
+surface. The `rsw_legacy_identity` option (default false) accepts the
+alias only for pre-v5 identity-bearing records and as an
+`rsw_verification_keys` key. Enable it for the upgrade drain, then
+retire it. Once the last writer that emits the alias is gone, wait one
+maximum retained challenge lifetime (the configured TTL) plus the
+allowed clock skew and any retained-record margin. Then set the option
+back to false: a drained deployment refuses the alias fail-closed and
+rejects a legacy-alias keyring key at container build.
+
+### Rotating the modulus
+
+Rotating the pair while rsw challenges are outstanding requires the
+rotation keyring, `rsw_verification_keys`: a map of the modulus
+identity (the 64-lowercase-hex `rsw_modulus_n_sha256` from the
+keygen, or its legacy base64-text alias during the migration window)
+to that historical `{modulus_n, lambda}` pair. Both the Issuer's
+stored-response reconstruction and the Verifier resolve a record by
+its authenticated identity through this keyring, so an outstanding A
+challenge still reconstructs and verifies after the active pair moved
+to B. A record whose identity is in neither the keyring nor the
+active pair fails closed with `unsupported_rsw_params`, and the
+extension refuses a keyring entry whose key is not an identity form
+of its paired modulus at container build.
+
+The bootstrap rule: identityless rsw challenges carry no identity.
+That covers records issued before the v5 identity landed, or while
+the writer switch is off. No keyring entry can tell which historical
+modulus such a record belongs to: it resolves only through the pair
+active when it was issued. Before the first modulus rotation after
+deploying this feature, let all outstanding identityless challenges
+drain for one maximum retained challenge lifetime (the configured
+TTL), or accept that they fail closed with `unsupported_rsw_params`.
+Once the writer switch is on and the fleet floor is confirmed, every
+new record carries its identity and rotations use the keyring
+instead.
 
 ### The sequential cost T
 
@@ -558,7 +735,7 @@ and documented; a knob set explicitly always wins over the profile.
 
 ```yaml
 kiwi_captcha:
-    secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 16 bytes
+    secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 32 bytes
     algorithm: sha256                       # sha256 | argon2id
     difficulty_bits: 18                     # SHA-256 leading zero bits (18 = the ordinary default; 20 = the elevated rung, reached via adaptive risk escalation)
     argon_m_kib: 0                          # Argon2id memory (KiB); 0 = sha256 only
@@ -625,25 +802,33 @@ The runtime and the worker are the lazy heavy modules: the page never
 downloads them eagerly. The widget container carries
 `data-kiwi-runtime-src` + `data-kiwi-runtime-integrity` and
 `data-kiwi-worker-src` + `data-kiwi-worker-integrity`, and the driver
-fetches the WASM runtime and the Argon worker asset only when a
-memory-hard challenge actually arrives. A page that only ever receives
-SHA-256 challenges pays no request for the Argon machinery. The driver
+fetches the WASM runtime and the worker asset only when a challenge
+needs the worker tier: a memory-hard (argon2id) or rsw challenge, or a
+SHA-256 solve. This tier never embeds the glue on the page, so the
+SHA-256 solve dispatches to the same worker at the solve phase, and
+the lazy load never delays the challenge request because it happens
+strictly after issuance. The driver
 hashes the fetched bytes and compares them against the page-issued
 digests (a cryptographic preflight). Then the content-addressed
 same-origin URLs are loaded by the browser APIs: the Worker constructor
 for the worker asset, and the worker's importScripts for its WASM glue.
 No Blob URL is created, so the worker download is deduplicated across
-widgets like the runtime.
+widgets like the runtime. A SHA-256 solve whose worker tier cannot load
+degrades to the driver's in-page pure-JS solver (SHA-256 is
+main-thread-safe), never a hard unavailable state. The inline tier
+keeps its page-wasm solve with zero asset requests.
 
 The driver itself is split the same way: the
 always-loaded eager core (`widget-driver.js`) carries the bootstrap,
 the challenge request, the SHA-256 solve, the state machine and the
-lazy-module loader. The adaptive-risk solve tier and the armed-evidence
-machinery (the Argon2id/rsw worker solve, the ExecutionChallengeV1
+lazy-module loader. The worker solve tier and the armed-evidence
+machinery (the argon2id/rsw worker solve, the glue-less SHA-256 worker
+dispatch, the ExecutionChallengeV1
 runner, the decoy rendering and the coarse client-context descriptor)
 live in `widget-risk.js`. The core loads that module lazily when a
 memory-hard challenge, an armed response or the risk-context opt-in
-needs it. The non-default locale packs (de/fr/es/it/nl/pl/pt/ar) live
+needs it, and at the solve phase for a glue-less SHA-256 challenge.
+The non-default locale packs (de/fr/es/it/nl/pl/pt/ar) live
 in `widget-locales.js`, loaded only when the core resolves a
 non-default language (English pages pay zero bytes; a failed load
 degrades to the English fallback with a console warning). The
@@ -765,12 +950,13 @@ What the DSN builds:
 
 Validation notes:
 
-- `secret_key`: at least 16 bytes; 32 random bytes recommended.
+- `secret_key`: at least 32 bytes of random material (a 16-character hex string is only 64 bits).
 - `difficulty_bits`: SHA-256 difficulty, 1..=20 (the browser solver
   ceiling); the config tree ceiling tracks the core constant. The
   default 18 is the ordinary baseline (mean ≈ 262k hashes, p99 ≈
-  1.21M, exhaustion ≈ 5.2×10⁻⁹ within the solver cap); 20 is the
-  elevated rung, reached via adaptive risk escalation.
+  1.21M, exhaustion ≈ 7.3×10⁻³⁴ within the 20,000,000-hash solver
+  cap); 20 is the elevated rung (exhaustion ≈ 5.2×10⁻⁹ within the
+  same cap), reached via adaptive risk escalation.
 - `argon_t >= 3` and `argon_p == 1`: the intentional Argon2id protocol
   profile (libsodium's raw Argon2id interface, so Rust and PHP verify
   identical hashes).
@@ -967,6 +1153,28 @@ is never forced) are the privacy contract; see
     #                                       # deployments sharing one Redis
     #                                       # instance must use different
     #                                       # namespaces
+    # namespace_key_version: 1              # 1 = the legacy sanitized key
+    #                                       # shape (assumed when omitted, so
+    #                                       # an existing deployment keeps its
+    #                                       # key space; the extension emits a
+    #                                       # configuration advisory); 2 = the
+    #                                       # digest key shape. Version 2
+    #                                       # changes every derived key family
+    #                                       # at once and requires
+    #                                       # namespace_migration: drained or
+    #                                       # fresh.
+    # namespace_migration: none             # none (default) = keep the legacy
+    #                                       # derivation; migrating_v2 = the
+    #                                       # transitional digest phase: the
+    #                                       # pre-cutover state was quiesced
+    #                                       # and drained, and the policy,
+    #                                       # chain and pin readers still
+    #                                       # consult the legacy namespace;
+    #                                       # drained = the migration is
+    #                                       # complete (digest-only, no legacy
+    #                                       # reads); fresh = a new install
+    #                                       # with no pre-cutover state
+    #                                       # (digest-only).
     # redis_service: null                   # optional Redis client service id
     #                                       # (\Redis or Predis\Client) for the
     #                                       # cross-worker Argon2 admission
@@ -1078,7 +1286,10 @@ kiwi_captcha:
         # and risk.enabled without any Predis client fails at container
         # compile.
         # redis_service: kiwicaptcha.risk.redis
-        namespace: '%kernel.project_dir%'   # {kiwi:<namespace>} hash tag
+        namespace: '%kernel.project_dir%'   # {kiwi:<namespace>} hash tag;
+        #                                   # the raw value is derived
+        #                                   # through the versioned
+        #                                   # derivation above
         # master_secret: '%env(KIWI_RISK_SECRET)%'
         #                                   # HKDF master for the risk
         #                                   # identity keys. The normal
@@ -1175,8 +1386,9 @@ kiwi_captcha:
         #                                   # DIFFICULTY, never the memory
         #     argon_escalation_target_bits: [1, 2, 4] # EXACTLY 3
         #                                   # entries (Argon16/32/64), each
-        #                                   # 1..20 — the expected nonce
-        #                                   # search space escalation
+        #                                   # 1..Config::MAX_ARGON2_TARGET_BITS
+        #                                   # (currently 10) — the expected
+        #                                   # nonce search space escalation
         #     security_epoch_cache_secs: 1  # cache of the central
         #                                   # security-policy read (1..30) —
         #                                   # revocation latency is one window
@@ -1214,23 +1426,99 @@ kiwi_captcha:
         #                                   # result verification stays
         #                                   # CENTRAL-ONLY)
         #     max_challenges_per_scope_per_minute: 0 # per-scope
-        #                                   # fixed-window issuance cap
+        #                                   # sliding-window issuance cap
         #                                   # (0 = unlimited); > 0 requires
-        #                                   # Redis; the window key carries
-        #                                   # hex(hmac_sha256(scope, K_scope))
-        #                                   # — the raw scope is never a
-        #                                   # Redis key component
+        #                                   # Redis; one per-scope sorted
+        #                                   # set (pruned to the last 60 s
+        #                                   # in one atomic Lua script)
+        #                                   # bounds admissions so any 60 s
+        #                                   # window allows at most the
+        #                                   # cap — a boundary-straddling
+        #                                   # burst yields exactly the
+        #                                   # cap, never twice. The window
+        #                                   # key carries the canonical
+        #                                   # server-owned scope id
+        #                                   # (UNKNOWN_QUOTA_ID for an
+        #                                   # unmapped scope) — the raw
+        #                                   # scope is never a Redis key
+        #                                   # component. A warning is
+        #                                   # logged as the cap is
+        #                                   # approached (80%)
         #     policy_version: 1             # CHALLENGE security-policy epoch,
         #                                   # signed into every issued record
-        #                                   # and enforced at verification —
-        #                                   # BUMP it to immediately
-        #                                   # invalidate ALL outstanding
-        #                                   # challenges (origin/action-policy
-        #                                   # changes, emergency revocation,
-        #                                   # compromised tenant); cosmetic
-        #                                   # changes must NOT bump it.
-        #                                   # Independent of the risk-v1
+        #                                   # and enforced at verification. A
+        #                                   # node stamps and enforces the
+        #                                   # effective epoch max(configured,
+        #                                   # central min_policy_epoch):
+        #                                   # raising the central
+        #                                   # {kiwi:<ns>}:security-policy
+        #                                   # min_policy_epoch revokes only
+        #                                   # older challenges while new
+        #                                   # issuances verify immediately,
+        #                                   # and the readiness probe stays
+        #                                   # ready for a node whose configured
+        #                                   # value is behind. Outside a
+        #                                   # declared rollout window the
+        #                                   # strict-equality contract
+        #                                   # stays — a record stamped
+        #                                   # under a different effective
+        #                                   # epoch is rejected with
+        #                                   # WrongPolicyVersion. Changing this
+        #                                   # configured value is a coordinated
+        #                                   # cutover, not a local restart:
+        #                                   # challenges issued earlier are
+        #                                   # invalidated across every node
+        #                                   # that follows the central state.
+        #                                   # Cosmetic changes must NOT bump
+        #                                   # it. Independent of the risk-v1
         #                                   # contract version.
+        #     policy_rollout_min_epoch: ~   # declared rollout window for
+        #                                   # a mixed-epoch cutover. When
+        #                                   # set (and below
+        #                                   # policy_version), the
+        #                                   # verifier accepts records
+        #                                   # stamped with any epoch from
+        #                                   # this floor through the
+        #                                   # effective epoch, so an N/N+1
+        #                                   # fleet redeems cross-node
+        #                                   # with zero spurious
+        #                                   # rejections during the
+        #                                   # cutover. Unset (default):
+        #                                   # strict equality, a wrong
+        #                                   # epoch is still rejected.
+        #                                   # Remove the knob once every
+        #                                   # node runs the new epoch.
+        #     outcomes:                     # the typed outcomes plane
+        #         auto_bridge: true         # the Symfony security
+        #                                   # auto-bridge (default true):
+        #                                   # LoginSuccessEvent reports
+        #                                   # authenticationSuccess on
+        #                                   # the principal pseudonym,
+        #                                   # LoginFailureEvent and
+        #                                   # observable CheckPassport
+        #                                   # errors report
+        #                                   # authenticationFailure on
+        #                                   # the target pseudonym (the
+        #                                   # scope's target_field) or
+        #                                   # the session pseudonym.
+        #                                   # Reports are idempotent
+        #                                   # per request id and never
+        #                                   # break authentication
+        #         scope: ~                  # the risk scope the auth
+        #                                   # events book under (e.g.
+        #                                   # "login"); null (default)
+        #                                   # leaves the bridge
+        #                                   # unregistered
+        #     metrics:
+        #         secret: ~                 # the metrics exporter
+        #                                   # secret (min 32 bytes;
+        #                                   # %env(KIWI_METRICS_SECRET)%
+        #                                   # recommended). Accepted as
+        #                                   # an Authorization Bearer
+        #                                   # credential or the secret
+        #                                   # query parameter. Null
+        #                                   # (default) leaves
+        #                                   # {prefix}/metrics absent
         #     weights: { ... }              # 13 risk-v1 weights (defaults = contract)
         #     global_floors:                # minimum action per global level
         #         1: sha16
@@ -1250,6 +1538,21 @@ kiwi_captcha:
         #             #                       # kiwi.post_solve_rejected,
         #             #                       # step_up -> 422
         #             #                       # kiwi.post_solve_step_up_required)
+        #             # target_field: username  # OPTIONAL form field
+        #             #                       # carrying this scope's
+        #             #                       # TARGET IDENTIFIER (the
+        #             #                       # pre-auth claimed id,
+        #             #                       # e.g. the username or
+        #             #                       # email field of a login
+        #             #                       # form). When set, the
+        #             #                       # engine's target
+        #             #                       # resolver stores only
+        #             #                       # the HMAC pseudonym of
+        #             #                       # the submitted value
+        #             #                       # and the outcome
+        #             #                       # bridge's failure lane
+        #             #                       # addresses the report
+        #             #                       # by that pseudonym
         #         signup:
         #             base_risk: 200
         #     unknown_scope:                 # scopes NOT configured above

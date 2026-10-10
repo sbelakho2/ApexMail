@@ -45,6 +45,24 @@ final class ContinuityCookie
         if ($this->ttlSecs < 0) {
             throw new \InvalidArgumentException('Continuity cookie TTL must be >= 0');
         }
+        // The browser contract of the __Host- prefix: Secure, no Domain
+        // and Path=/. Secure is forced in cookie(); the path is refused
+        // here, because a __Host- cookie with any other path is dropped
+        // by browsers and session continuity silently disappears.
+        if (str_starts_with($this->name, '__Host-') && $this->path !== '/') {
+            throw new \InvalidArgumentException(
+                'A __Host- prefixed continuity cookie requires path "/" (browsers refuse any other path)'
+            );
+        }
+        // SameSite=None is only meaningful on a Secure cookie; modern
+        // browsers reject it otherwise (the cookie is dropped, not
+        // weakened). The __Host- prefix forces Secure, so it satisfies
+        // the requirement too.
+        if ($this->sameSite === 'none' && $this->secure !== true && !str_starts_with($this->name, '__Host-')) {
+            throw new \InvalidArgumentException(
+                'Continuity cookie SameSite=None requires an effectively Secure cookie (secure: true, or a __Host- prefixed name)'
+            );
+        }
     }
 
     /**
@@ -53,7 +71,10 @@ final class ContinuityCookie
      */
     public function read(Request $request): ?string
     {
-        $value = $request->cookies->get($this->name);
+        // The raw parameter map, never the typed accessor: an array-shaped
+        // cookie (session[]=x) makes the typed accessor throw, while here
+        // any non-string shape simply reads as absent.
+        $value = $request->cookies->all()[$this->name] ?? null;
         if (!\is_string($value) || preg_match(self::VALUE_PATTERN, $value) !== 1) {
             return null;
         }
@@ -72,11 +93,21 @@ final class ContinuityCookie
 
     /**
      * The Symfony Cookie to attach to a response so the client carries the
-     * session value in subsequent requests.
+     * session value in subsequent requests. A `__Host-` prefixed name
+     * forces Secure=true regardless of the request scheme. The browser
+     * contract for the prefix requires Secure (and no Domain attribute,
+     * path /), and behind a TLS-terminating proxy the request scheme at
+     * the PHP layer is plain http even though the client connection is
+     * HTTPS. A scheme-derived Secure flag would then silently drop the
+     * cookie and the session signal would never survive the first
+     * response.
      */
     public function cookie(Request $request, string $value): Cookie
     {
         $secure = $this->secure ?? $request->isSecure();
+        if (str_starts_with($this->name, '__Host-')) {
+            $secure = true;
+        }
 
         return new Cookie(
             name: $this->name,

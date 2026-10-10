@@ -33,8 +33,8 @@ final class StrictParserTest extends TestCase
             't' => 1,
             'p' => 1,
             'target_bits' => 8,
-            'salt' => 'c2FsdA==',
-            'prefix' => 'prefix',
+            'salt' => 'c2FsdHNhbHRzYWx0c2FsdA==',
+            'prefix' => 'challenge|c2FsdHNhbHRzYWx0c2FsdA==|',
             'challenge' => 'challenge',
             'min_duration_ms' => 0,
             'issued_at_ns' => 1_800_000_000_000_000,
@@ -78,12 +78,12 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
-        self::assertSame(27, \count(ChallengeRecord::WIRE_KEYS));
-        // An unarmed record omits the optional decoy_field and
-        // execution keys entirely (the skip_serializing_if mirror), so
-        // toArray() emits exactly the 23 always-present keys.
+        self::assertSame(29, \count(ChallengeRecord::WIRE_KEYS));
+        // An unarmed record omits the optional decoy_field, execution
+        // and server_mac keys entirely (the skip_serializing_if mirror),
+        // so toArray() emits exactly the 23 always-present keys.
         self::assertSame(
-            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment'])),
+            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment', 'rsw_modulus_sha256', 'server_mac'])),
             \array_keys($record->toArray()),
         );
         self::assertNull($record->decoyField);
@@ -192,6 +192,10 @@ final class StrictParserTest extends TestCase
         yield 'algorithm alias trailing space' => [self::mutate('algorithm', 'sha256 '), 'must be exactly'];
 
         yield 'algorithm alias argon2' => [self::mutate('algorithm', 'argon2'), 'must be exactly'];
+
+        // The rejection vocabulary names every accepted algorithm, rsw
+        // included.
+        yield 'unknown algorithm names all three accepted values' => [self::mutate('algorithm', 'scrypt'), '"sha256", "argon2id" or "rsw"'];
 
         // Unknown algorithm strings must be rejected identically to the
         // Rust parser (PoWAlgorithm enum: exact lowercase names only, no
@@ -304,19 +308,19 @@ final class StrictParserTest extends TestCase
         // The protocol-vs-execution grammar: v2/v3 never carry execution.
         yield 'protocol v2 with an execution program rejected' => [
             self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => hash('sha256', $program)],
-            'protocol v4 canonical extension',
+            'field combination',
         ];
 
         yield 'protocol v3 with an execution program rejected' => [
             self::mutate('protocol_version', 3) + ['decoy_field' => 'company_website', 'execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => hash('sha256', $program)],
-            'protocol v4 canonical extension',
+            'field combination',
         ];
 
         // A v4 record without the execution triplet is malformed (the
         // stored-version-flip window closes).
         yield 'protocol v4 without the execution triplet rejected' => [
             self::mutate('protocol_version', 4),
-            'must carry',
+            'field combination',
         ];
 
         // A program whose hash does not equal the signed commitment is
@@ -514,40 +518,161 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->decoyField);
     }
 
-    public function testProtocolVersionWithinU8RangeIsAccepted(): void
+    public function testProtocolVersionsOutsideTheCanonicalRangeAreRejected(): void
     {
-        // serde accepts any u8 — 99 is within range and deserializes (the
-        // verifier's validateRecord rejects it later, exactly like Rust).
-        $record = ChallengeRecord::fromArray(self::mutate('protocol_version', 99));
-
-        self::assertSame(99, $record->protocolVersion);
+        // The canonical protocol bounds are enforced at the parse
+        // boundary, mirroring the Rust serde boundary: 0 is not a
+        // protocol version, and everything above MAX_PROTOCOL_VERSION is
+        // a corrupt or foreign value no conforming issuer writes. A bare
+        // v5 (the identity-bearing grammar) without the rsw identity is
+        // rejected too: the version exists but its grammar requires the
+        // identity, so a version-only bump can never look valid.
+        foreach ([0, 6, 99, 255] as $version) {
+            try {
+                ChallengeRecord::fromArray(self::mutate('protocol_version', $version));
+                self::fail("protocol_version $version must be rejected at parse");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString('protocol_version', $e->getMessage());
+            }
+        }
+        try {
+            ChallengeRecord::fromArray(self::mutate('protocol_version', 5));
+            self::fail('a v5 record without the rsw identity must be rejected at parse');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('protocol_version', $e->getMessage());
+        }
     }
 
-    public function testBase64IsNotValidatedAtParseTime(): void
+    public function testZeroKidAndZeroPolicyVersionStayParseable(): void
     {
-        // serde treats nonce/salt as plain strings — the differential fuzz
-        // corpus pins both parsers to the same acceptance split, so a
-        // non-canonical base64 string must still parse here.
-        $record = ChallengeRecord::fromArray(self::mutate('salt', 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY'));
-
-        self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
+        // The u32 widths are the parse boundary (the Rust serde
+        // boundary agrees): epoch 0 is the legitimate pre-epoch state a
+        // policy rotation walks forward from, and a stored 0 for either
+        // field decodes while every out-of-width value still rejects.
+        foreach (['kid', 'policy_version'] as $field) {
+            $record = ChallengeRecord::fromArray(self::mutate($field, 0));
+            self::assertSame(0, $field === 'kid' ? $record->kid : $record->policyVersion);
+            try {
+                ChallengeRecord::fromArray(self::mutate($field, 4_294_967_296));
+                self::fail("$field above the u32 width must be rejected at parse");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString($field, $e->getMessage());
+            }
+        }
     }
 
-    public function testWireKeySetIsPinnedTo27(): void
+    public function testProtocolOneExtensionCombinationsAreRejectedAtDecode(): void
     {
-        // decoy_field, execution_program, execution_version and
-        // execution_commitment are the Option keys omitted from
-        // toArray() when null (the Rust skip_serializing_if mirror);
-        // every other key is always present. The three execution keys
-        // are present together or all absent.
+        // The decoder applies the same grammar matrix as the verifier:
+        // the legacy v1 shape admits neither extension, so a stored v1
+        // record carrying a decoy or the execution triplet fails
+        // decode instead of parsing and failing later at verification.
+        $v1Decoy = self::mutate('protocol_version', 1);
+        $v1Decoy['decoy_field'] = 'company_website';
+        try {
+            ChallengeRecord::fromArray($v1Decoy);
+            self::fail('a v1 record carrying a decoy must fail decode');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('field combination', $e->getMessage());
+        }
+
+        $v1Execution = self::mutate('protocol_version', 1);
+        $program = self::validProgram();
+        $v1Execution['execution_program'] = $program;
+        $v1Execution['execution_version'] = 1;
+        $v1Execution['execution_commitment'] = hash('sha256', $program);
+        try {
+            ChallengeRecord::fromArray($v1Execution);
+            self::fail('a v1 record carrying the execution triplet must fail decode');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('field combination', $e->getMessage());
+        }
+
+        // The valid shapes still decode: v1 bare, v3 with the decoy,
+        // v4 with the triplet (and v4 with both).
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray(self::mutate('protocol_version', 1)));
+        $v3 = self::mutate('protocol_version', 3);
+        $v3['decoy_field'] = 'company_website';
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v3));
+        $v4 = self::mutate('protocol_version', 4);
+        $v4['execution_program'] = $program;
+        $v4['execution_version'] = 1;
+        $v4['execution_commitment'] = hash('sha256', $program);
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v4));
+        $v4Both = $v4;
+        $v4Both['decoy_field'] = 'company_website';
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v4Both));
+    }
+
+    public function testNonceSaltShapesAreValidatedAtParseTime(): void
+    {
+        // The decode boundary applies the full structural contract on
+        // both sides of the wire (the Rust serde reconstruction calls
+        // `validate_record` before any typed record surfaces — see
+        // packages/kiwicaptcha/tests/corpus.rs, which pins that no
+        // corpus mutation decodes). A nonce that is not the 44-char
+        // standard-base64 encoding of 32 bytes, or a salt that is not
+        // the 24-char encoding of 16 bytes, is corrupt or foreign and
+        // must be refused here exactly like Rust refuses it — the old
+        // "plain strings at parse" split was a parser differential.
+        foreach ([
+            'salt' => ['QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', '44-char salt (32 bytes)'],
+            'salt-short' => ['c2FsdA==', '8-char salt'],
+            'nonce-short' => [str_repeat('A', 43), '43-char nonce'],
+        ] as $label => [$value, $what]) {
+            $key = str_starts_with($label, 'nonce') ? 'nonce' : 'salt';
+            try {
+                ChallengeRecord::fromArray(self::mutate($key, $value));
+                self::fail("a {$what} must be refused at the parse boundary");
+            } catch (MalformedRecordException) {
+                self::assertTrue(true);
+            }
+        }
+        // The wire-valid shapes parse byte-exactly.
+        $record = ChallengeRecord::fromArray(self::base());
+        self::assertSame(self::base()['salt'], $record->salt);
+        self::assertSame(self::base()['nonce'], $record->nonce);
+    }
+
+    public function testWireKeySetIsPinnedTo29(): void
+    {
+        // decoy_field, execution_program, execution_version,
+        // execution_commitment, rsw_modulus_sha256 and server_mac are the
+        // Option keys omitted from toArray() when null (the Rust
+        // skip_serializing_if mirror); every other key is always
+        // present. The three execution keys are present together or all
+        // absent, and the rsw identity rides only an rsw record.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
             'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
-            'execution_version', 'execution_commitment',
+            'execution_version', 'execution_commitment', 'rsw_modulus_sha256',
+            'server_mac',
         ], ChallengeRecord::WIRE_KEYS);
+    }
+
+    public function testServerMacMustBeSixtyFourLowercaseHex(): void
+    {
+        $ok = self::base();
+        $ok['server_mac'] = str_repeat('0a', 32);
+        self::assertSame(str_repeat('0a', 32), ChallengeRecord::fromArray($ok)->serverMac);
+        self::assertSame(str_repeat('0a', 32), ChallengeRecord::fromArray($ok)->toArray()['server_mac']);
+        $absent = self::base();
+        unset($absent['server_mac']);
+        self::assertNull(ChallengeRecord::fromArray($absent)->serverMac);
+
+        foreach ([str_repeat('0A', 32), str_repeat('0a', 31), str_repeat('0a', 32)."\n", 'zz'.str_repeat('0a', 31), 7, true, []] as $bad) {
+            $data = self::base();
+            $data['server_mac'] = $bad;
+            try {
+                ChallengeRecord::fromArray($data);
+                self::fail('a malformed server_mac must fail decode: '.var_export($bad, true));
+            } catch (MalformedRecordException) {
+                self::addToAssertionCount(1);
+            }
+        }
     }
 
     public function testRuntimeStorageFieldsAreNotWireKeys(): void

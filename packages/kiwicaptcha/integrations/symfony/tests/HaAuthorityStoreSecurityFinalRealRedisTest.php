@@ -253,7 +253,7 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         // the store (the claim
         // rides the mutation lane; the guard verification warms the
         // window) and warm the ordinary lane too.
-        [$claim, $owner] = $store->claim('backend', 'idem-1', 'response-hash', 300, 'fp', null, 'binding');
+        [$claim, $owner] = $store->claim('backend', 'idem-1', hash('sha256', 'response-hash'), 300, hash('sha256', 'fp'), null, hash('sha256', 'binding'));
         self::assertSame(IdempotencyClaim::Claimed, $claim);
         self::assertIsString($owner);
         $wrapped->set('warm', '1');
@@ -266,13 +266,13 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         self::assertNotSame($pinnedRunId, $this->runIdOf($client));
         self::assertSame('1', $wrapped->get('warm'), 'the ordinary lane serves inside the window: the cache is warm, not invalidated');
 
-        $recordKey = '{'.self::NS.'}:siteverify-idem:backend:idem-1';
+        $recordKey = '{kiwi:'.self::NS.'}:siteverify-idem:backend:idem-1';
         $raw = $this->client($port);
         $before = json_decode((string) $raw->get($recordKey), true, 8, JSON_THROW_ON_ERROR);
         self::assertSame('pending', $before['state'], 'the claim is pending before the finalize attempt');
 
         try {
-            $store->finalize('backend', 'idem-1', 'response-hash', $owner, ['valid' => true]);
+            $store->finalize('backend', 'idem-1', hash('sha256', 'response-hash'), $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::fail('the siteverify finalize must refuse inside the window after the authority changed');
         } catch (PinnedAuthorityRefusalException $e) {
             self::assertStringContainsString('pinned master|'.$pinnedRunId, $e->getMessage());
@@ -302,11 +302,11 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         $wrapped = new AuthorityGuardedPredisClient($guard, $client);
         $store = new RedisSiteVerifyIdempotencyStore($wrapped, self::NS, 1);
 
-        [$claim, $owner] = $store->claim('backend', 'idem-ok', 'response-hash', 300, 'fp', null, 'binding');
+        [$claim, $owner] = $store->claim('backend', 'idem-ok', hash('sha256', 'response-hash'), 300, hash('sha256', 'fp'), null, hash('sha256', 'binding'));
         self::assertSame(IdempotencyClaim::Claimed, $claim);
 
-        self::assertTrue($store->finalize('backend', 'idem-ok', 'response-hash', $owner, ['valid' => true]));
-        $record = json_decode((string) $this->client($port)->get('{'.self::NS.'}:siteverify-idem:backend:idem-ok'), true, 8, JSON_THROW_ON_ERROR);
+        self::assertTrue($store->finalize('backend', 'idem-ok', hash('sha256', 'response-hash'), $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]));
+        $record = json_decode((string) $this->client($port)->get('{kiwi:'.self::NS.'}:siteverify-idem:backend:idem-ok'), true, 8, JSON_THROW_ON_ERROR);
         self::assertSame('complete', $record['state'], 'a legitimate finalize still succeeds on the pinned authority');
     }
 

@@ -110,6 +110,7 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
     {
         $boundaries = [
             'read' => static fn () => $store->read($chainId),
+            'obligationChainId' => static fn () => $store->obligationChainId($obligationId),
             'reserve' => static fn () => $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15),
             'markIssued' => static fn () => $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
             'markVerified' => static fn () => $store->markVerified($chainId, ChainStateWalk::NONCES[0]),
@@ -153,10 +154,12 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
     }
 
     /**
-     * The tamper on the Array mirror and the heal assertion, the exact
-     * mirror of the Redis side of the corrupt-record test.
+     * The tamper on the Array mirror and the fail-closed assertion.
+     * This mirrors the Redis side of the corrupt-record test: corrupt
+     * state is never healed, so the create-or-get throws with zero
+     * writes and the mapping keeps pointing at the corrupt chain.
      */
-    private function assertArrayMirrorHeals(string $label, \Closure $tamper, string $prepare, string $obligationId): void
+    private function assertArrayMirrorFailsClosed(string $label, \Closure $tamper, string $prepare, string $obligationId): void
     {
         $array = new ArrayChainedChallengeStateStore();
         $arrayService = new ChainedChallengeTicketService($array, self::SECRET, 300, 15);
@@ -170,12 +173,19 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         $this->assertEveryBoundaryFailsClosed($array, $requirement->chainId, $obligationId, 'array-mirror '.$label);
 
         $fresh = 'array-healed-'.$label;
-        $returned = $array->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-adv', 'sha16', 1, 1, time() + 300, 300);
-        self::assertSame($fresh, $returned, 'the Array create-or-get must heal the corrupt mapping with a fresh chain');
-        self::assertSame($fresh, $array->obligationChainId($obligationId), 'the Array obligation now points at the fresh chain');
-        $freshRecord = $array->read($fresh);
-        self::assertIsArray($freshRecord, 'the healed Array chain strictly decodes');
-        self::assertSame('available', $freshRecord['state']);
+        try {
+            $array->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-adv', 'sha16', 1, 1, time() + 300, 300);
+            self::fail($label.': the Array create-or-get must fail closed on a corrupt chain, never heal');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            self::assertSame($requirement->chainId, $array->obligationChainId($obligationId), 'the Array obligation still points at the corrupt chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read throws on the corrupt chain:
+            // the mapping was NOT dropped either way.
+        }
+        self::assertNull($array->read($fresh), 'no fresh Array chain was created');
     }
 
     // ── 1. corrupt and forged chain records on Redis ─────────────────────
@@ -217,7 +227,7 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
     }
 
     #[DataProvider('corruptProvider')]
-    public function testCorruptChainRecordEveryBoundaryFailsClosedAndTheMappingHeals(string $label, \Closure $tamper, string $prepare): void
+    public function testCorruptChainRecordEveryBoundaryFailsClosedAndTheMappingIsPreserved(string $label, \Closure $tamper, string $prepare): void
     {
         $store = $this->store();
         $service = $this->service();
@@ -235,30 +245,44 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         // The refusal matrix: every boundary throws the strict decode
         // exception, twice, and the obligation mapping stays untouched.
         $this->assertEveryBoundaryFailsClosed($store, $requirement->chainId, $obligationId, 'redis '.$label);
-        self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the refusals leave the mapping alone');
+        try {
+            self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the refusals leave the mapping alone');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped.
+        }
 
-        // The create-or-get heals: compare-delete the stale mapping and
-        // create the chain fresh in one script.
+        // Corrupt state is never healed: the create-or-get fails closed
+        // with zero writes, and the mapping keeps pointing at the corrupt
+        // chain. Only a missing or signed-expired record may be repaired.
         $fresh = 'chain-healed-'.$label;
-        $repaired = $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-adv', 'sha16', 1, 1, time() + 300, 300);
-        self::assertSame($fresh, $repaired, 'the Redis create-or-get must heal the corrupt mapping with a fresh chain');
-        self::assertSame($fresh, $store->obligationChainId($obligationId), 'the obligation now points at the fresh chain');
-        $freshRecord = $store->read($fresh);
-        self::assertIsArray($freshRecord, 'the healed chain strictly decodes');
-        self::assertSame('available', $freshRecord['state']);
-        ChainModel::assertSchemaInvariants($this->modelForRecord($freshRecord), 'healed '.$label);
+        try {
+            $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-adv', 'sha16', 1, 1, time() + 300, 300);
+            self::fail($label.': the Redis create-or-get must fail closed on a corrupt chain, never heal');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the obligation still points at the corrupt chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped and no fresh chain exists.
+        }
+        self::assertNull($store->read($fresh), 'no fresh chain was created');
 
-        // The orphaned corrupt record still fails closed on Redis (its
-        // own TTL sweeps it later).
+        // The corrupt record still fails closed on Redis (its own TTL
+        // sweeps it later).
         try {
             $store->read($requirement->chainId);
-            self::fail($label.': the orphaned corrupt record must stay fail-closed on Redis');
+            self::fail($label.': the corrupt record must stay fail-closed on Redis');
         } catch (MalformedChainedChallengeStateException) {
         }
 
         // The Array mirror observes the identical machine: same throws,
-        // same heal.
-        $this->assertArrayMirrorHeals($label, $tamper, $prepare, $obligationId);
+        // same refusal to heal.
+        $this->assertArrayMirrorFailsClosed($label, $tamper, $prepare, $obligationId);
     }
 
     public function testMalformedStage2NonceWriteIsRefusedDeterministicallyOnBothStores(): void
@@ -299,8 +323,9 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         self::assertNull($store->obligationChainId($obligationId), 'the genuine flow passes and clears the obligation');
 
         // A legacy malformed record (a forged nonce written around the
-        // boundary, as if from a pre-fix server) still fails closed on
-        // read and the mapping heals with a fresh chain.
+        // boundary, as if from an older server) still fails closed on
+        // read, and the create-or-get refuses without healing: corrupt
+        // state is preserved, only missing/expired state repairs.
         $legacyObligationId = $service->obligationIdFor('login', 'txn-legacy', 1);
         $legacy = $service->requireStage2(ChainStateWalk::S1_NONCE, 'login', 'txn-legacy', 1, RiskAction::Sha16, time() + 300);
         $this->prepareState($store, $legacy->chainId, 'reserved');
@@ -309,13 +334,26 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         $legacyRecord['state'] = 'issued';
         $legacyRecord['owner'] = null;
         $legacyRecord['leaseUntil'] = null;
-        $this->client->set($this->chainKey($legacy->chainId), (string) json_encode($legacyRecord, JSON_THROW_ON_ERROR), 'EX', 300);
+        $legacyRecord['reservedRequirementGeneration'] = null;
+        $legacyCorrupt = (string) json_encode($legacyRecord, JSON_THROW_ON_ERROR);
+        $this->client->set($this->chainKey($legacy->chainId), $legacyCorrupt, 'EX', 300);
         $this->assertEveryBoundaryFailsClosed($store, $legacy->chainId, $legacyObligationId, 'legacy-malformed-mint');
-        $fresh = 'chain-healed-malformed-mint';
-        $repaired = $store->createOrGetObligation($legacyObligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-legacy', 'sha16', 1, 1, time() + 300, 300);
-        self::assertSame($fresh, $repaired, 'the create-or-get heals the legacy malformed mapping with a fresh chain');
-        self::assertSame($fresh, $store->obligationChainId($legacyObligationId));
-        self::assertSame('available', $store->read($fresh)['state']);
+        $fresh = 'chain-fresh-malformed-mint';
+        try {
+            $store->createOrGetObligation($legacyObligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-legacy', 'sha16', 1, 1, time() + 300, 300);
+            self::fail('the create-or-get must fail closed on the malformed legacy record, never heal');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            self::assertSame($legacy->chainId, $store->obligationChainId($legacyObligationId), 'the mapping still points at the corrupt chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped.
+        }
+        self::assertSame($legacyCorrupt, $this->client->get($this->chainKey($legacy->chainId)), 'the corrupt bytes are preserved');
+        self::assertNull($store->read($fresh), 'no fresh chain was created');
 
         // The Array mirror refuses identically at the same boundaries.
         $array = new ArrayChainedChallengeStateStore();
@@ -647,21 +685,40 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         self::assertSame(-1, (int) $this->client->ttl($key), 'the tampered key carries no lifetime');
         $before = $this->client->get($key);
 
-        // Every mutating transition fails closed like the reservation
-        // does: a lifetime can never be manufactured for a TTL-less
-        // chain, deterministic, zero mutation.
-        self::assertSame('missing', $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15), 'the reservation refuses the lifetime-less key');
-        self::assertSame('missing', $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]), 'the issuance refuses the lifetime-less key');
-        self::assertSame('missing', $store->markVerified($chainId, ChainStateWalk::NONCES[0]), 'the verification refuses the lifetime-less key');
-        self::assertSame('missing', $store->markStepUpRequired($chainId, ChainStateWalk::NONCES[0]), 'the step-up refuses the lifetime-less key');
-        self::assertSame('missing', $store->markDenied($chainId, ChainStateWalk::NONCES[0]), 'the denial refuses the lifetime-less key');
-        self::assertSame('missing', $store->markTransactionDenied($chainId, $obligationId), 'the transaction denial refuses the lifetime-less key');
-        self::assertSame('missing', $store->markTransactionStepUpRequired($chainId, $obligationId), 'the transaction step-up refuses the lifetime-less key');
-        self::assertFalse($store->rearmIssued($chainId, ChainStateWalk::NONCES[0]), 'the rearm refuses the lifetime-less key');
-        self::assertNull($store->complete($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]), 'the completion refuses the lifetime-less key');
-        self::assertNull($store->read($chainId), 'the read refuses the lifetime-less record as corrupted state');
+        // Every boundary classifies the TTL-less retained record as
+        // corrupt (never the absence sentinel): the read and every
+        // transition fail closed with the typed exception, so a lifetime
+        // is never manufactured and a migrating_v2 dual-read can never
+        // hide the corrupt primary behind a legacy record.
+        $boundaries = [
+            'obligationChainId' => fn () => $store->obligationChainId($obligationId),
+            'reserve' => fn () => $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15),
+            'markIssued' => fn () => $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
+            'markVerified' => fn () => $store->markVerified($chainId, ChainStateWalk::NONCES[0]),
+            'markStepUpRequired' => fn () => $store->markStepUpRequired($chainId, ChainStateWalk::NONCES[0]),
+            'markDenied' => fn () => $store->markDenied($chainId, ChainStateWalk::NONCES[0]),
+            'markTransactionDenied' => fn () => $store->markTransactionDenied($chainId, $obligationId),
+            'markTransactionStepUpRequired' => fn () => $store->markTransactionStepUpRequired($chainId, $obligationId),
+            'rearmIssued' => fn () => $store->rearmIssued($chainId, ChainStateWalk::NONCES[0]),
+            'complete' => fn () => $store->complete($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
+            'read' => fn () => $store->read($chainId),
+        ];
+        foreach ($boundaries as $name => $boundary) {
+            try {
+                $boundary();
+                self::fail($name.': the lifetime-less record must fail closed as corrupt');
+            } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+                // expected
+            }
+        }
         self::assertSame($before, $this->client->get($key), 'the refusals left the lifetime-less record byte-identical');
-        self::assertSame($chainId, $store->obligationChainId($obligationId), 'the obligation mapping stays untouched');
+        try {
+            self::assertSame($chainId, $store->obligationChainId($obligationId), 'the obligation mapping stays untouched');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped.
+        }
 
         // The Array mirror's lifetime-equivalent corruption (its own
         // expiry swept into the past, the store has no key TTL): the
@@ -752,6 +809,92 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         $arrayFresh = 'array-healed-expiry';
         self::assertSame($arrayFresh, $array->createOrGetObligation($obligationId, $arrayFresh, ChainStateWalk::S1_NONCE, 'login', 'txn-adv', 'sha16', 1, 1, $clock + 300, 300), 'the Array create-or-get heals the expired mapping');
         self::assertSame($arrayFresh, $array->obligationChainId($obligationId));
+    }
+
+    // ── 6. creation-seam fault injection ────────────────────────────────
+
+    public function testFaultsAtTheChainCreationSeamNeverOrphanTheChain(): void
+    {
+        // The chain + obligation creation used to be two separate writes
+        // (the chain SET, then the obligation SET): a connection loss
+        // between them orphaned the chain — present, but unreachable
+        // through its obligation. The creation now rides the atomic
+        // create-or-get Lua (one script, both keys in the same hash tag;
+        // Redis executes it as a single unit), so the between-writes seam
+        // no longer exists: a connection loss before the script leaves
+        // neither key, and a lost reply after the script ran leaves both,
+        // mutually consistent. The faults are injected at the connection
+        // level, on the EVAL that performs the creation.
+        $obligationId = hash('sha256', 'txn-seam-before');
+        $chainId = 'chain-seam-before';
+        $faulting = new class($this->client) extends \Predis\Client {
+            public function __construct(private readonly \Predis\Client $inner)
+            {
+            }
+
+            public bool $failBeforeCreate = false;
+
+            public bool $dropCreateReply = false;
+
+            public function __call($commandID, $arguments)
+            {
+                if (\is_string($commandID) && strtolower($commandID) === 'eval'
+                    && isset($arguments[0]) && \is_string($arguments[0])
+                    && str_contains($arguments[0], 'Chain obligation create-or-get')) {
+                    if ($this->failBeforeCreate) {
+                        throw new \RuntimeException('simulated connection loss before the chain creation');
+                    }
+                    if ($this->dropCreateReply) {
+                        // The script runs on the server; only the reply is
+                        // lost — the exact lost-reply fault position.
+                        $this->inner->{$commandID}(...$arguments);
+                        throw new \RuntimeException('simulated lost chain-creation reply');
+                    }
+                }
+
+                return $this->inner->{$commandID}(...$arguments);
+            }
+        };
+        $store = new RedisChainedChallengeStateStore($faulting, self::NAMESPACE);
+
+        // The fault before the script: neither the chain record nor the
+        // obligation mapping may exist.
+        $faulting->failBeforeCreate = true;
+        try {
+            $store->createWithObligation($chainId, $obligationId, ChainStateWalk::S1_NONCE, 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected pre-write fault must surface');
+        } catch (\RuntimeException) {
+            // the injected connection loss
+        }
+        self::assertNull($this->client->get($this->chainKey($chainId)), 'a fault before any write creates no chain record');
+        self::assertNull($this->client->get($this->obligationKey($obligationId)), 'a fault before any write creates no obligation mapping');
+
+        // The retry after the pre-write fault converges on the intact
+        // pair: the mapping points at the chain and the chain record
+        // carries its obligation.
+        $faulting->failBeforeCreate = false;
+        $store->createWithObligation($chainId, $obligationId, ChainStateWalk::S1_NONCE, 'login', 'txn-seam-before', 'sha18', 1, 300);
+        self::assertSame($chainId, $this->client->get($this->obligationKey($obligationId)), 'the retried creation installs the obligation mapping');
+        self::assertSame($obligationId, $this->store()->read($chainId)['obligationId'], 'the retried creation writes the chain record bound to the obligation');
+
+        // The lost reply after the script ran: both halves exist and map
+        // to each other — never an orphaned chain — and a retried
+        // create-or-get recovers the same pair instead of creating a
+        // second one.
+        $lostChainId = 'chain-seam-after';
+        $lostObligationId = hash('sha256', 'txn-seam-after');
+        $faulting->dropCreateReply = true;
+        try {
+            $store->createWithObligation($lostChainId, $lostObligationId, ChainStateWalk::S1_NONCE, 'login', 'txn-seam-after', 'sha18', 1, 300);
+            self::fail('the injected lost reply must surface');
+        } catch (\RuntimeException) {
+            // the injected lost reply
+        }
+        self::assertSame($lostChainId, $this->client->get($this->obligationKey($lostObligationId)), 'the obligation mapping exists after the lost reply');
+        $lostRecord = json_decode((string) $this->client->get($this->chainKey($lostChainId)), true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame($lostObligationId, $lostRecord['obligationId'], 'the chain record exists after the lost reply and carries its obligation');
+        $recovered = $this->store()->createOrGetObligation($lostObligationId, 'chain-seam-retry', ChainStateWalk::S1_NONCE, 'login', 'txn-seam-after', 'sha18', 1, 1, time() + 300, 300);
+        self::assertSame($lostChainId, $recovered, 'the retry after the lost reply recovers the existing chain, never a second one');
     }
 
     /** @param array<string, mixed> $record */

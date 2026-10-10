@@ -209,6 +209,7 @@ final class ParityTest extends TestCase
             minDurationMs: 100,
             issuedAtNs: $issuedAtNs,
             protocolVersion: 1,
+            serverMac: \KiwiCaptcha\ServerStateMac::recordMeta(\KiwiCaptcha\ServerStateMac::key(Vectors::SECRET, null), $record->challenge, $issuedAtNs, null),
         );
         $storage = new ArrayStorage();
         $storage->store($recordWithFloor);
@@ -248,6 +249,7 @@ final class ParityTest extends TestCase
         // The challenge is base64(canonical v2 payload) . "." . hex(hmac).
         [$payloadB64, $signature] = explode('.', $challenge->challenge, 2);
         $canonical = Issuer::canonicalPayload(
+            2,
             $challenge->nonce,
             'login',
             $bindingTag,
@@ -260,6 +262,7 @@ final class ParityTest extends TestCase
             $challenge->targetBits,
             $challenge->salt,
             $challenge->minDurationMs,
+            serverMacCommitted: true,
         );
         self::assertSame($canonical, base64_decode($payloadB64, true));
         self::assertSame(Issuer::signPayloadV2($canonical, Vectors::SECRET), $signature, 'v2 signatures use the HKDF-derived K_challenge');

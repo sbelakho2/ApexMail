@@ -58,6 +58,7 @@ final class DifficultyBoundsTest extends TestCase
         $nonce = base64_encode(random_bytes(32));
         $salt = base64_encode(random_bytes(16));
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             'login',
             '',

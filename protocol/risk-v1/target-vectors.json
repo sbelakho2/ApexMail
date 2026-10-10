@@ -1,0 +1,235 @@
+{
+    "comment": "Cross-language target-identifier vectors (risk-v1): every input runs the shared normalization pipeline (nfkc, case fold, trim, per-provider email canonicalization) and HMAC-SHA256 under the master-derived target key with the pipeline version in the derivation context; both cores must derive the identical expected_id. expected_normalized pins the pipeline output itself.",
+    "master_key": "0123456789abcdef0123456789abcdef",
+    "pipeline_version": 1,
+    "vectors": [
+        {
+            "note": "plain identifier",
+            "input": "example.user",
+            "expected_normalized": "example.user",
+            "expected_id": "c774e6f2be2559027e8d044b8be159bdca5f8f0a449b855013a13591d4de529f"
+        },
+        {
+            "note": "plain identifier case",
+            "input": "Alice",
+            "expected_normalized": "alice",
+            "expected_id": "77c095c1bafb5dff46b051bf970b4b10d160e0152cd60a7d625b975c80b76a3e"
+        },
+        {
+            "note": "nfkc fullwidth letters",
+            "input": "\uff45\uff58\uff41\uff4d\uff50\uff4c\uff45",
+            "expected_normalized": "example",
+            "expected_id": "cc70d3eccd63266d8139e97b75eccfa5d12e83f21c7dd355d84748f401c807a1"
+        },
+        {
+            "note": "nfkc fi ligature",
+            "input": "\ufb01le42",
+            "expected_normalized": "file42",
+            "expected_id": "2f72de2bfb8e7fe5d5e4b1500618a9b0314dde04404c535de55a27b035a4d9d4"
+        },
+        {
+            "note": "nfkc roman numeral",
+            "input": "\u216b",
+            "expected_normalized": "xii",
+            "expected_id": "37a8a2261453f7daf22889d30e56464c4eaa076ee8138576f69054b607eca0f5"
+        },
+        {
+            "note": "nfkc fullwidth email",
+            "input": "\uff35\uff53\uff45\uff52\uff20\uff25\uff58\uff41\uff4d\uff50\uff4c\uff45\uff0e\uff43\uff4f\uff4d",
+            "expected_normalized": "user@example.com",
+            "expected_id": "be6ea96aee74c7ab4fcc9a7b0068619e72e0ea37b329e09c9c0282bd6941fbea"
+        },
+        {
+            "note": "fold mixed case",
+            "input": "Weird Spam",
+            "expected_normalized": "weird spam",
+            "expected_id": "91ae1529605fe2022ee835e2f409357e21cf97ce5526e1ee14f134dce0be7302"
+        },
+        {
+            "note": "fold sharp s stays",
+            "input": "Stra\u00dfe",
+            "expected_normalized": "stra\u00dfe",
+            "expected_id": "82adf56dd08c9ed56a685db69e367e78650d933154452fed369e00382e87ec32"
+        },
+        {
+            "note": "fold sharp s boundary distinct",
+            "input": "STRASSE",
+            "expected_normalized": "strasse",
+            "expected_id": "af1cbeae446408c28a99eee9d67003bf45132f17a13caa9b51b7b3c3aa5d1431"
+        },
+        {
+            "note": "fold turkish capital dotted i",
+            "input": "\u0130stanbul",
+            "expected_normalized": "i\u0307stanbul",
+            "expected_id": "eaec964a7a3a9843f5dff29709d7b433dd87d4ef2e6b97ea58dd554bdee74526"
+        },
+        {
+            "note": "fold turkish plain i distinct",
+            "input": "Istanbul",
+            "expected_normalized": "istanbul",
+            "expected_id": "e673991f335092427770f90eccf88f34f5cff16bbf27702bcf015776ab101fab"
+        },
+        {
+            "note": "fold dotless i stays",
+            "input": "\u0131\u0131ii",
+            "expected_normalized": "\u0131\u0131ii",
+            "expected_id": "a69a237dfb226fdbe2d119d7d54df88cdf03e3c647fca8bfea563e409411c382"
+        },
+        {
+            "note": "trim ascii edges",
+            "input": "  padded\t",
+            "expected_normalized": "padded",
+            "expected_id": "e23680bccb506dbceb44b9172285837316db7889a520ee69ce1f04d00f6177e8"
+        },
+        {
+            "note": "trim nbsp edges via nfkc",
+            "input": "\u00a0nbsp\u00a0",
+            "expected_normalized": "nbsp",
+            "expected_id": "786985ba1c1bb335712aa04099a34587a3d58aee92e279f8e172b9a8bdcd162d"
+        },
+        {
+            "note": "embedded space stays",
+            "input": "a b",
+            "expected_normalized": "a b",
+            "expected_id": "4ea9be577ac52b25cf2c2f66450c2538616f3c98b671f2148aef3197e7aaaad4"
+        },
+        {
+            "note": "embedded distinct pair",
+            "input": "ab",
+            "expected_normalized": "ab",
+            "expected_id": "2e24e7c70991487c683124a0ffcea10402379c5d69809908e179a46fb692fa26"
+        },
+        {
+            "note": "gmail dots collapse",
+            "input": "A..B@gmail.com",
+            "expected_normalized": "ab@gmail.com",
+            "expected_id": "056b81ade2ce7ca686257d5837e96f79a068bfc0cd39e49f0fe2d1ea1c9674ed"
+        },
+        {
+            "note": "gmail plus and dots collapse",
+            "input": "a.b+x@gmail.com",
+            "expected_normalized": "ab@gmail.com",
+            "expected_id": "056b81ade2ce7ca686257d5837e96f79a068bfc0cd39e49f0fe2d1ea1c9674ed"
+        },
+        {
+            "note": "googlemail rewrites to gmail",
+            "input": "a.b.x@GoogleMail.com",
+            "expected_normalized": "abx@gmail.com",
+            "expected_id": "a1f54e6131c56faf550c4811377462bf1e6c79db3e2dc4be0fdd048b668df1f2"
+        },
+        {
+            "note": "gmail domain case folds",
+            "input": "AB@GMAIL.COM",
+            "expected_normalized": "ab@gmail.com",
+            "expected_id": "056b81ade2ce7ca686257d5837e96f79a068bfc0cd39e49f0fe2d1ea1c9674ed"
+        },
+        {
+            "note": "gmail plain anchor",
+            "input": "ab@gmail.com",
+            "expected_normalized": "ab@gmail.com",
+            "expected_id": "056b81ade2ce7ca686257d5837e96f79a068bfc0cd39e49f0fe2d1ea1c9674ed"
+        },
+        {
+            "note": "outlook plus tag stripped",
+            "input": "First.Last+Etsy@Outlook.com",
+            "expected_normalized": "first.last@outlook.com",
+            "expected_id": "d9d5f7d3ba2e7edcfcb9c20fea6f0bfa5641ac494705dd6b0c00b768f2e5109a"
+        },
+        {
+            "note": "outlook dots stay",
+            "input": "a.b@outlook.com",
+            "expected_normalized": "a.b@outlook.com",
+            "expected_id": "3af9a2c45c789f4056718a83d5ed645098b655ce747b0270c7710dbd88c18343"
+        },
+        {
+            "note": "outlook dots distinct pair",
+            "input": "ab@outlook.com",
+            "expected_normalized": "ab@outlook.com",
+            "expected_id": "c06617e87fe2ace518ca5b6a58fff8299482cccbd96f81651fcc953160cd1608"
+        },
+        {
+            "note": "live plus tag stripped",
+            "input": "a.b.c+news@live.com",
+            "expected_normalized": "a.b.c@live.com",
+            "expected_id": "ec5e07a052b5bffdec5bd5a145a9a4d6b1143eed8b09ac7037c328d2f0dd2cfb"
+        },
+        {
+            "note": "hotmail plus tag stripped",
+            "input": "x.y+z@hotmail.com",
+            "expected_normalized": "x.y@hotmail.com",
+            "expected_id": "e78345c84a1aba06dd1a592d32c085ccacdac5db1432b54b06782155379f093b"
+        },
+        {
+            "note": "icloud plus tag stripped",
+            "input": "name+tag@icloud.com",
+            "expected_normalized": "name@icloud.com",
+            "expected_id": "74bac76f64fc7e5fba6cf1893a4c0bcfb8a5a2144e41ba1976ec905e29e1f2a3"
+        },
+        {
+            "note": "yahoo minus tag stripped",
+            "input": "ab-news@yahoo.com",
+            "expected_normalized": "ab@yahoo.com",
+            "expected_id": "f9c4d69739bd8e35ad07aaab1080567fbff61b0ac5c7226205da8fc9ac345f69"
+        },
+        {
+            "note": "yahoo plain anchor",
+            "input": "ab@yahoo.com",
+            "expected_normalized": "ab@yahoo.com",
+            "expected_id": "f9c4d69739bd8e35ad07aaab1080567fbff61b0ac5c7226205da8fc9ac345f69"
+        },
+        {
+            "note": "yahoo dots stay",
+            "input": "a.b@yahoo.com",
+            "expected_normalized": "a.b@yahoo.com",
+            "expected_id": "96e289980386e7ea357ace76650a647599c544e8c072c0c9a7f8466b8175202b"
+        },
+        {
+            "note": "proton plus tag stays",
+            "input": "a+b@proton.me",
+            "expected_normalized": "a+b@proton.me",
+            "expected_id": "ac6f381bd14e1d727a6c50080d8d41aeba2f6ea211f6903971a46530894ed418"
+        },
+        {
+            "note": "proton plain distinct pair",
+            "input": "ab@proton.me",
+            "expected_normalized": "ab@proton.me",
+            "expected_id": "efbe741dd8f1d878211eb7aed2542430e77cbed5bdbcc54b2b0d6449da34e224"
+        },
+        {
+            "note": "unknown provider untouched",
+            "input": "a.b+x@example.com",
+            "expected_normalized": "a.b+x@example.com",
+            "expected_id": "c14c9ae86ea272569179e844c43dae20391b147733a1f869bfef9f1c980ae674"
+        },
+        {
+            "note": "bare gmail domain not matched",
+            "input": "user@gmail",
+            "expected_normalized": "user@gmail",
+            "expected_id": "b2dd293932f71cbd316692d945b3867cbbe190d221116d55374e72e4bc3af230"
+        },
+        {
+            "note": "cyrillic a homoglyph stays",
+            "input": "\u0430lice",
+            "expected_normalized": "\u0430lice",
+            "expected_id": "f8c381a152a3bd8afd1d9fdbd975eff513b699f323603a3f5d4cc6e28550a56a"
+        },
+        {
+            "note": "latin a anchor distinct",
+            "input": "alice",
+            "expected_normalized": "alice",
+            "expected_id": "77c095c1bafb5dff46b051bf970b4b10d160e0152cd60a7d625b975c80b76a3e"
+        },
+        {
+            "note": "accent stays",
+            "input": "andr\u00e9@gmail.com",
+            "expected_normalized": "andr\u00e9@gmail.com",
+            "expected_id": "3f95c3e3bfd69c86f360d9e01181f7e2ea70f1d07ab65fea6dca9127e94b02c1"
+        },
+        {
+            "note": "accent stripped distinct pair",
+            "input": "andre@gmail.com",
+            "expected_normalized": "andre@gmail.com",
+            "expected_id": "0aa32b2c761dc9a25943659ffb52681e39eafed20353e5a54319d84c77cb9cfc"
+        }
+    ]
+}

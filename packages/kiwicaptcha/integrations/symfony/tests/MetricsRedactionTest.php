@@ -42,8 +42,8 @@ final class MetricsRedactionTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -105,8 +105,8 @@ final class MetricsRedactionTest extends TestCase
         };
 
         [, $gateway] = $this->stack($logger);
-        $decision = $gateway->preIssue('login', '198.51.100.7', 'session-cookie-value');
-        $gateway->challengeIssued('login', '198.51.100.7', 'session-cookie-value', $decision->decisionId);
+        $decision = $gateway->preIssue('login', '198.51.100.7', '5ae1a4b8c0d1e2f30011223344556677');
+        $gateway->challengeIssued('login', '198.51.100.7', '5ae1a4b8c0d1e2f30011223344556677', $decision->decisionId);
 
         self::assertNotEmpty($logger->contexts, 'the gateway must have logged decisions');
         foreach ($logger->contexts as $context) {

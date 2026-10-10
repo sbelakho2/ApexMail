@@ -1,0 +1,5 @@
+{
+  "schema": "kiwicaptcha.tester-keys/1",
+  "note": "The public-key allowlist for signed accessibility qualification evidence. Each entry maps a tester id to an Ed25519 SPKI PEM public key; a pass row's evidence.tester_id must appear here and the row's signature must verify over the canonical JSON of the evidence object. The allowlist starts empty on purpose: no qualification has been signed yet, so the release gate stays fail-closed until the maintainers provision the real tester keys (the private keys never enter the repository). Generate a keypair with: openssl genpkey -algorithm ED25519 -out tester.pem && openssl pkey -in tester.pem -pubout",
+  "testers": {}
+}

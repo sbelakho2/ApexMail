@@ -60,52 +60,81 @@ final class SolutionTokenTest extends TestCase
         SolutionToken::decode(base64_encode(self::NONCE.'..100.{}'));
     }
 
-    public function testAcceptsLeadingZeroCounter(): void
+    public function testRejectsLeadingZeroCounter(): void
     {
-        // Rust's u64 parse accepts "007" => 7.
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.007.100.{}'));
-        self::assertSame(7, $token->counter);
+        // The counter segment is canonical decimal: a leading zero is
+        // rejected unless the whole segment is exactly "0", so each value
+        // has exactly one wire spelling in both implementations.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('invalid_counter');
+        SolutionToken::decode(base64_encode(self::NONCE.'.007.100.{}'));
     }
 
     public function testRejectsCounterAboveSolverMaximum(): void
     {
-        // The browser/wasm solver caps at 5,000,000 hashes; 5,000,001
+        // The browser/wasm solver caps at 20,000,000 hashes; 20,000,001
         // cannot come from a legit solve.
         $this->expectException(DecodeError::class);
         $this->expectExceptionMessage('counter exceeds solver maximum');
-        SolutionToken::decode(base64_encode(self::NONCE.'.5000001.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.20000001.100.{}'));
     }
 
     public function testRejectsCounterAtSolverMaximum(): void
     {
-        // The JS solver searches counter < 5,000,000 (5M attempts), so
-        // the largest legitimate counter is 4,999,999; exactly 5,000,000
+        // The JS solver searches counter < 20,000,000 (20M attempts), so
+        // the largest legitimate counter is 19,999,999; exactly 20,000,000
         // was never minted by a real solve (off-by-one parity with
         // Rust).
         $this->expectException(DecodeError::class);
-        SolutionToken::decode(base64_encode(self::NONCE.'.5000000.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.20000000.100.{}'));
     }
 
     public function testAcceptsCounterJustBelowSolverMaximum(): void
     {
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.4999999.100.{}'));
-        self::assertSame(4_999_999, $token->counter);
+        // The four-way boundary: 4,999,999 (the 5M ceiling's last valid
+        // counter), 5,000,000 (the first counter the 5M contract refused
+        // but the 20M solver can mint) and 19,999,999 (the 20M last valid
+        // counter) all decode; 20,000,000 is refused by the sibling tests.
+        foreach ([4_999_999, 5_000_000, 19_999_999] as $counter) {
+            $token = SolutionToken::decode(base64_encode(self::NONCE.".{$counter}.100.{}"));
+            self::assertSame($counter, $token->counter);
+        }
     }
 
-    public function testRejectsCounterLongerThanSevenDigits(): void
+    public function testRejectsCounterLongerThanEightDigits(): void
     {
-        // 8 digits but numerically below the maximum — still rejected by
-        // the digit-length bound (an absurdly long string would otherwise
-        // silently clamp in the integer cast).
+        // 9 canonical digits — rejected by the digit-length bound before
+        // the value could clamp in the integer cast (the canonical rule
+        // leaves no 8-digit spelling at or above the 20M maximum).
         $this->expectException(DecodeError::class);
         $this->expectExceptionMessage('counter exceeds solver maximum');
-        SolutionToken::decode(base64_encode(self::NONCE.'.00000000.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.999999999.100.{}'));
     }
 
-    public function testAcceptsSevenDigitCounterWithLeadingZeros(): void
+    public function testRejectsAllZeroCounterThatIsNotExactlyZero(): void
     {
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.0000007.100.{}'));
-        self::assertSame(7, $token->counter);
+        // "00" is not the canonical spelling of 0; only the exact string
+        // "0" carries the value zero.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('invalid_counter');
+        SolutionToken::decode(base64_encode(self::NONCE.'.00.100.{}'));
+    }
+
+    public function testAcceptsExactlyZeroCounterAndDuration(): void
+    {
+        // "0" is the canonical spelling of zero for both numeric segments.
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.0.0.{}'));
+        self::assertSame(0, $token->counter);
+        self::assertSame(0, $token->durationMs);
+    }
+
+    public function testRejectsLeadingZeroDuration(): void
+    {
+        // The duration segment carries the same canonical-decimal rule:
+        // "0042" is not a spelling the widget ever emits.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('invalid_duration');
+        SolutionToken::decode(base64_encode(self::NONCE.'.0.0042.{}'));
     }
 
     public function testRejectsInvalidTelemetryJson(): void
@@ -228,6 +257,57 @@ final class SolutionTokenTest extends TestCase
         // 44 chars but not standard base64 with padding (contains '-').
         $this->expectException(DecodeError::class);
         SolutionToken::decode(base64_encode('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-.1.100.{}'));
+    }
+
+    public function testRejectsNonCanonicalNonceTrailingBitsInsideThePayload(): void
+    {
+        // Rust parity: `decode_rejects_noncanonical_nonce_inside_the_payload`
+        // in packages/kiwicaptcha/src/token.rs requires the inner nonce to
+        // decode to 32 bytes and re-encode byte-exact (`B64.decode` then
+        // `B64.encode(&bytes) == nonce`). Its vectors are an unpadded 43-char
+        // nonce (fails the length gate) and a url-safe alphabet swap (fails
+        // the alphabet gate); this test covers the one shape those two miss:
+        // a 43-char segment plus '=' that is shape-valid and strict-decodable
+        // but whose final sextet carries non-zero unused bits. PHP's strict
+        // base64_decode silently drops those bits, so only the canonical
+        // re-encode can reject the spelling — the exact Rust rule.
+        $canonical = self::NONCE;
+        self::assertSame('=', substr($canonical, -1), 'precondition: canonical nonce is padded');
+        self::assertSame('E', $canonical[42], 'precondition: 43rd char is the canonical final sextet');
+
+        // The 43rd character of a 32-byte encoding carries 4 meaningful bits
+        // and 2 unused bits that must be zero: 'E' (=4) is canonical, while
+        // F/G/H (=5/6/7) have identical meaningful bits, decode to the same
+        // 32 bytes, and re-encode to 'E'. Each is a distinct non-canonical
+        // wire spelling PHP must refuse, exactly like Rust.
+        $rejected = 0;
+        foreach (['F', 'G', 'H'] as $final) {
+            $nonce = substr($canonical, 0, 42).$final.'=';
+            self::assertSame(44, \strlen($nonce), 'precondition: 44 chars');
+            self::assertSame(1, preg_match('/^[A-Za-z0-9+\/]{43}=$/', $nonce), 'precondition: shape-valid');
+            $bytes = base64_decode($nonce, true);
+            self::assertNotFalse($bytes, 'precondition: strict decode accepts the spelling');
+            self::assertSame(32, \strlen($bytes));
+            self::assertSame($canonical, base64_encode($bytes), 'precondition: aliases the same 32 bytes');
+
+            try {
+                SolutionToken::decode(base64_encode($nonce.'.1.100.{}'));
+                self::fail("non-canonical nonce ending '$final=' must be rejected");
+            } catch (DecodeError) {
+                ++$rejected;
+            }
+        }
+        self::assertSame(3, $rejected, 'every shape-valid non-canonical nonce must be rejected');
+    }
+
+    public function testAcceptsCanonicalNonceControlForTrailingBits(): void
+    {
+        // The valid control for the trailing-bits matrix: the single
+        // canonical spelling (final sextet 'E', zero unused bits) still
+        // decodes in both implementations; the canonicality gate must not
+        // over-reject it.
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.1.100.{}'));
+        self::assertSame(self::NONCE, $token->nonce);
     }
 
     public function testRejectsBase64UrlVariant(): void

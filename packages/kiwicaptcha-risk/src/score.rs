@@ -102,6 +102,11 @@ pub struct RiskV2Weights {
     /// changed TLS classification tag raises the aggregate, a consistent or
     /// absent tag is neutral).
     pub tls: u16,
+    /// Weight of the target-account failure pressure (default 160: a
+    /// stuffed target raises the score before the marks stage escalates).
+    pub target_failure_pressure: u16,
+    /// Weight of the target-account source+asn spread (default 100).
+    pub target_spread: u16,
 }
 
 impl Default for RiskV2Weights {
@@ -110,13 +115,16 @@ impl Default for RiskV2Weights {
             honeypot: 200,
             session_inconsistency: 120,
             tls: 80,
+            target_failure_pressure: 160,
+            target_spread: 100,
         }
     }
 }
 
 /// Risk-v2 scoring: the risk-v1 score plus the weighted risk-v2 evidence
 /// factors (honeypot, session client-context inconsistency, trusted-edge
-/// TLS inconsistency), clamped to 0..=1000.
+/// TLS inconsistency, target-account pressure and spread), clamped to
+/// 0..=1000.
 ///
 /// With zero risk-v2 signals this is exactly [`score`] — the v1 contract
 /// semantics (the 13 signals and their weights) are unchanged; the v2
@@ -132,6 +140,8 @@ pub fn score_v2(
     risk += weighted(v2.honeypot, w2.honeypot);
     risk += weighted(v2.session_inconsistency, w2.session_inconsistency);
     risk += weighted(v2.tls_inconsistency, w2.tls);
+    risk += weighted(v2.target_failure_pressure, w2.target_failure_pressure);
+    risk += weighted(v2.target_spread, w2.target_spread);
     risk.min(1000) as u16
 }
 
@@ -463,9 +473,10 @@ mod tests {
 
     /// Asymmetric trust: the exact-IP (source) signals must
     /// outweigh the subnet (network) signals in the scorer weights, so one
-    /// attacker IP is always punished harder than the /64 aggregate it
-    /// shares. Pinned on the contract defaults; a future symmetric-weight
-    /// regression fails here.
+    /// attacker IP is always punished harder than the masked-subnet
+    /// aggregate it shares (default /24 IPv4, /56 IPv6 — NOT /64). Pinned
+    /// on the contract defaults; a future symmetric-weight regression
+    /// fails here.
     #[test]
     fn source_weights_outweigh_subnet_weights() {
         let w = RiskWeights::default();
@@ -740,5 +751,28 @@ mod tests {
                 score(100, &vector, &w),
             );
         }
+    }
+
+    #[test]
+    fn target_pressure_raises_the_score() {
+        let s = SignalVector::zero();
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let base = 100u16;
+        let calm = RiskV2Signals::default();
+        let stuffed = RiskV2Signals {
+            honeypot: 0,
+            session_inconsistency: 0,
+            tls_inconsistency: 0,
+            target_failure_pressure: 1000,
+            target_spread: 1000,
+        };
+        let calm_score = score_v2(base, &s, &w, &calm, &w2);
+        let stuffed_score = score_v2(base, &s, &w, &stuffed, &w2);
+        assert!(
+            stuffed_score > calm_score,
+            "a stuffed target must raise the numeric decision ({stuffed_score} vs {calm_score})"
+        );
+        assert!(stuffed_score - calm_score >= 200, "the default weights move the score meaningfully");
     }
 }

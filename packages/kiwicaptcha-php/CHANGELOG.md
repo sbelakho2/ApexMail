@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### Added
+- Declared policy-epoch rollout windows: `Verifier` gains an optional
+  `policyVersionFloor` (constructor parameter and
+  `setPolicyVersionFloor()`). When a floor is declared, the verifier
+  accepts records stamped with any epoch from the floor through the
+  expected one, so a mixed N/N+1 fleet redeems cross-node with zero
+  spurious rejections during a coordinated cutover. Without a floor the
+  strict-equality contract is unchanged: a record stamped under a
+  different epoch is still rejected with `WrongPolicyVersion`. A floor
+  above the expected epoch accepts nothing (fail closed).
+- `Config::withOverrides()`: every constructor parameter as an optional
+  override (null keeps the current value), re-validated by rebuilding
+  through the constructor, so an issuance variant can never drift from
+  the core invariants.
+- `Issuer::withConfig()`: an issuer carrying the given Config plus every
+  constructor field of the source issuer (storage, clock override,
+  region, rsw rotation keyring, legacy-identity mode), the
+  reflection-free seam for building issuance variants;
+  `Issuer::withTtl()` now delegates to it.
 - Protocol v4 (the execution-capable canonical): an execution-armed
   issuance writes `protocol_version` 4 and signs the
   `|execution_version|execution_commitment` segments inside the HMAC

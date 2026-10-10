@@ -36,6 +36,13 @@ final class ChainRequirement
         /** The reservation lease deadline, unix seconds (reserved). */
         public readonly ?int $leaseUntil,
         public readonly int $expiresAt,
+        /**
+         * The monotonic requirement generation at the time of the read.
+         * Every requirement raise bumps it; a reservation pins the
+         * generation it was taken against, so an issuance minted for a
+         * weaker requirement can never be installed.
+         */
+        public readonly int $requirementGeneration = 1,
     ) {
     }
 }

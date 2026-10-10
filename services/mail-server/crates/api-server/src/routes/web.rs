@@ -2682,6 +2682,7 @@ async fn perform_password_login(
 async fn form_mfa_verify(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let email = field(&form, "email").trim().to_string();
@@ -2694,6 +2695,25 @@ async fn form_mfa_verify(
     let return_to = safe_return_to(&form, "/dashboard");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/login", &state.config);
+    }
+    // KiwiCaptcha gate (scope `mfa-verify`): the MFA step is the second half
+    // of every login, for the console AND the control plane (both post this
+    // handler), and for the JSON twin. The per-user lockout bounds guesses
+    // from ONE source; a distributed attacker pacing under the lockout
+    // across many accounts still gets unlimited 6-digit guesses per account,
+    // so the step pays its own proof-of-work. Verified BEFORE the single-use
+    // challenge cookie/user lookups, and a refusal re-renders the challenge
+    // form (never the password form) with the captcha flash.
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
+    let challenge_location = format!(
+        "/login?mfa=1&email={}&return_to={}",
+        urlencode(&email),
+        urlencode(&return_to)
+    );
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "mfa-verify").await
+    {
+        return redirect_error(&message, &challenge_location, &state.config);
     }
     let challenge_cookie = headers
         .get(header::COOKIE)
@@ -3318,6 +3338,19 @@ async fn form_resend_verification(
     let email = field(&form, "email").trim().to_lowercase();
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/verify-email", &state.config);
+    }
+    // KiwiCaptcha gate (scope `resend-verification`): the resend form is a
+    // public, unauthenticated mail-queuing affordance, so an automated
+    // submitter must pay the proof-of-work before it can make the server
+    // enqueue mail for an address. Checked before the email shape check and
+    // the limiter so every submission path pays the same cost; a failed
+    // challenge reveals nothing about the address (the anti-enumeration
+    // contract below is about account existence, not about the captcha).
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "resend-verification").await
+    {
+        return redirect_error(&message, "/verify-email", &state.config);
     }
     if !valid_email(&email) {
         // Same neutral redirect for malformed input — an error naming the
@@ -16044,11 +16077,21 @@ mod tests {
         // ─── Wave D: adversarial gate matrix for the auth forms ──────
         mod wave_d_auth_gate_tests {
             use super::*;
+            // The signed-form / redirect / flash helpers live in the sibling
+            // `coverage_handler_tests` module (pub(crate)); qualify them so
+            // this module's own `flash_of` helper cannot shadow them.
+            use super::coverage_handler_tests::flash_text as response_flash_text;
+            use super::coverage_handler_tests::{location, signed_form};
             use crate::app::test_support::test_state_over_with_config;
             use axum::routing::post;
             use tower::ServiceExt;
 
             const PW: &str = "0ld#SweepPassw0rd";
+
+            /// A loopback peer socket for the direct handler calls.
+            fn wave_d_ip(octet: u8) -> SocketAddr {
+                SocketAddr::new(IpAddr::from([127, 0, 0, octet]), 0)
+            }
 
             /// A canonical-DB state whose config is derived from the real
             /// test_config with a caller mutation (production flag, kiwi
@@ -16072,6 +16115,13 @@ mod tests {
                     .route("/web/auth/signup", post(form_signup))
                     .route("/web/auth/forgot-password", post(form_forgot_password))
                     .route("/web/auth/reset-password", post(form_reset_password))
+                    // The K2 wave mounted the resend affordance's gate on the
+                    // real router too; the test twin must mirror it or the
+                    // CSRF/kiwi matrix probes a 404.
+                    .route(
+                        "/web/auth/resend-verification",
+                        post(form_resend_verification),
+                    )
                     .route("/web/auth/logout", post(form_logout))
                     .route("/web/cp/login", post(form_cp_login))
                     .with_state(state)
@@ -16357,6 +16407,7 @@ mod tests {
                     "/web/auth/signup",
                     "/web/auth/forgot-password",
                     "/web/auth/reset-password",
+                    "/web/auth/resend-verification",
                 ] {
                     let response = app
                         .clone()
@@ -16379,7 +16430,10 @@ mod tests {
                 }
 
                 // KiwiCaptcha enforced: no kiwi__token in the body is refused
-                // before any credential is consulted.
+                // before any credential is consulted — including the two
+                // surfaces added by the K2 wave (the MFA step, which used to
+                // ride the password step's consumed challenge, and the
+                // resend-verification mail affordance).
                 let state = gated_state(db, |config| {
                     config.kiwi_enabled = true;
                     config.kiwi_secret_key = "not-dev".into();
@@ -16389,9 +16443,11 @@ mod tests {
                 for uri in [
                     "/web/auth/login",
                     "/web/cp/login",
+                    "/web/auth/mfa/verify",
                     "/web/auth/signup",
                     "/web/auth/forgot-password",
                     "/web/auth/reset-password",
+                    "/web/auth/resend-verification",
                 ] {
                     let body = csrf_body(&state, &[("email", "x@example.com"), ("password", "y")]);
                     let response = app
@@ -16405,6 +16461,300 @@ mod tests {
                         "{uri} must refuse without a CAPTCHA token, got {flash:?}"
                     );
                 }
+            }
+
+            /// Mint + store + solve a REAL KiwiCaptcha challenge for `scope`,
+            /// mirroring the issuance route's Redis record exactly (same key
+            /// shape + TTL) so `verify_kiwi_token` verifies a genuine
+            /// solution. Callers must gate on a live TEST_REDIS_URL.
+            async fn mint_kiwi_token(state: &AppState, scope: &str, client_ip: &str) -> String {
+                let config = &state.config;
+                let kc_config = kiwicaptcha::ChallengeConfig {
+                    secret_key: config.kiwi_secret_key.clone(),
+                    algorithm: config.kiwi_algorithm,
+                    m_kib: config.kiwi_argon_m_kib,
+                    t: config.kiwi_argon_t,
+                    p: config.kiwi_argon_p,
+                    target_bits: config.kiwi_difficulty_bits,
+                    argon2_target_bits: config.kiwi_argon2_difficulty_bits,
+                    ttl_secs: config.kiwi_challenge_ttl_secs,
+                    min_duration_ms: config.kiwi_min_duration_ms,
+                    auto_tune: config.kiwi_auto_tune,
+                    auto_tune_min_bits: config.kiwi_auto_tune_min_bits,
+                    auto_tune_max_bits: config.kiwi_auto_tune_max_bits,
+                    binding_mode: kiwicaptcha::BindingMode::Bound,
+                    policy_version: 1,
+                    region: None,
+                    issuer: None,
+                    kid: 1,
+                    tenant: None,
+                    execution_key: None,
+                    rsw_modulus_n: None,
+                    rsw_lambda: None,
+                    rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+                };
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let issued = kiwicaptcha::issue_challenge(
+                    &kc_config,
+                    scope,
+                    client_ip,
+                    now_unix,
+                    now_unix * 1_000_000,
+                    0,
+                    None,
+                )
+                .expect("issuance succeeds with the wave-d test config");
+                let record_json = serde_json::to_string(&issued.record).expect("record serializes");
+                let mut conn = state
+                    .redis
+                    .get()
+                    .await
+                    .expect("live Redis for the wave-d kiwi mint");
+                let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+                    &mut *conn,
+                    format!("apexmail:kiwi:{}", issued.record.nonce),
+                    record_json,
+                    config.kiwi_challenge_ttl_secs,
+                )
+                .await
+                .expect("challenge record stored");
+                drop(conn);
+                let counter = kiwicaptcha::solve_for_test(&issued.record)
+                    .expect("the 8-bit test difficulty must be solvable");
+                kiwicaptcha::SolutionToken {
+                    nonce: issued.challenge.nonce.clone(),
+                    counter,
+                    duration_ms: 5000,
+                    // The wave-d config keeps kiwi_enforce_telemetry on, so a
+                    // strict-mode rejection must not mask the gate assertions:
+                    // a realistic, non-automation-shaped payload (see the
+                    // auth.rs kiwi tests for the same shape).
+                    telemetry: json!({
+                        "me": 3, "ke": 2, "hc": 8, "dm": 8, "pl": 3,
+                        "et": [10, 25, 40, 90],
+                    }),
+                    execution_digest: None,
+                    execution_trace: None,
+                    rsw_proof: None,
+                }
+                .encode()
+            }
+
+            fn wave_d_redis_or_skip(test_name: &str) -> bool {
+                if std::env::var("TEST_REDIS_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .is_none()
+                {
+                    crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
+                    eprintln!("skipping {test_name}: TEST_REDIS_URL unset");
+                    return false;
+                }
+                true
+            }
+
+            /// K2 wave: the resend-verification form is CAPTCHA-gated with
+            /// its own `resend-verification` scope — no token / wrong-scope
+            /// token / replayed token are all refused with the named CAPTCHA
+            /// flash, and a valid token proceeds to the neutral flash.
+            #[tokio::test]
+            async fn resend_verification_captcha_gate_binds_scope_and_consumes_once() {
+                if !wave_d_redis_or_skip(
+                    "resend_verification_captcha_gate_binds_scope_and_consumes_once",
+                ) {
+                    return;
+                }
+                let Some(db) = crate::test_db::canonical_pool("waved_resend_kiwi").await else {
+                    eprintln!("skipping resend_verification_captcha_gate: no TEST_DATABASE_URL");
+                    return;
+                };
+                let (_, email) = seed_user(
+                    &db,
+                    crate::routes::system_sender::SYSTEM_TENANT_ID,
+                    "owner",
+                    "active",
+                    false,
+                    false,
+                )
+                .await;
+                let state = gated_state(db, |config| {
+                    config.kiwi_enabled = true;
+                    config.kiwi_secret_key = "wave-d-kiwi-secret-0123456789abcdef".into();
+                    config.kiwi_difficulty_bits = 8;
+                })
+                .await;
+                let ip = Some(ConnectInfo(wave_d_ip(61)));
+                let neutral = "If that address needs verification, a fresh link is on the way.";
+
+                // No token at all: refused before the email is even shaped.
+                let (headers, form) = signed_form(&state.config, &[("email", email.as_str())]);
+                let response =
+                    form_resend_verification(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("CAPTCHA"),
+                    "a token-less resend must be refused by the captcha gate, got {flash:?}"
+                );
+                assert_eq!(location(&response), "/verify-email");
+
+                // A token minted for a DIFFERENT scope is refused: the scope
+                // binding is what stops a login challenge being replayed on
+                // the mail-queuing affordance.
+                let login_token = mint_kiwi_token(&state, "login", "127.0.0.61").await;
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[
+                        ("email", email.as_str()),
+                        ("kiwi__token", login_token.as_str()),
+                    ],
+                );
+                let response =
+                    form_resend_verification(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("CAPTCHA"),
+                    "a login-scope token on the resend form must be refused, got {flash:?}"
+                );
+
+                // A valid resend-verification token proceeds to the neutral
+                // (anti-enumeration) answer.
+                let token = mint_kiwi_token(&state, "resend-verification", "127.0.0.61").await;
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[("email", email.as_str()), ("kiwi__token", token.as_str())],
+                );
+                let response =
+                    form_resend_verification(State(state.clone()), headers, ip, Form(form)).await;
+                assert_eq!(
+                    response_flash_text(&response, &state.config),
+                    neutral,
+                    "a solved resend challenge must reach the neutral response"
+                );
+
+                // The challenge is single-use: replaying the same token now
+                // fails as a consumed challenge.
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[("email", email.as_str()), ("kiwi__token", token.as_str())],
+                );
+                let response =
+                    form_resend_verification(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("CAPTCHA"),
+                    "a replayed resend token must be refused, got {flash:?}"
+                );
+            }
+
+            /// K2 wave: the MFA step carries its own `mfa-verify` challenge on
+            /// BOTH surfaces that post the SSR handler (console and control
+            /// plane). The gate runs BEFORE the challenge cookie/code checks —
+            /// a missing or wrong-scope token re-renders the challenge form
+            /// with the CAPTCHA flash, and a consumed token is refused on
+            /// replay (single-use).
+            #[tokio::test]
+            async fn mfa_verify_captcha_gate_runs_before_the_code_checks() {
+                if !wave_d_redis_or_skip("mfa_verify_captcha_gate_runs_before_the_code_checks") {
+                    return;
+                }
+                let Some(db) = crate::test_db::canonical_pool("waved_mfa_kiwi").await else {
+                    eprintln!("skipping mfa_verify_captcha_gate: no TEST_DATABASE_URL");
+                    return;
+                };
+                let (_, email) = seed_user(
+                    &db,
+                    crate::routes::system_sender::SYSTEM_TENANT_ID,
+                    "admin",
+                    "active",
+                    true,
+                    true,
+                )
+                .await;
+                let state = gated_state(db, |config| {
+                    config.kiwi_enabled = true;
+                    config.kiwi_secret_key = "wave-d-kiwi-secret-0123456789abcdef".into();
+                    config.kiwi_difficulty_bits = 8;
+                })
+                .await;
+                let ip = Some(ConnectInfo(wave_d_ip(62)));
+
+                // No token: CAPTCHA refusal, and never the "window expired"
+                // message even though the request carries no challenge cookie
+                // — the gate precedes every other check.
+                let (headers, form) =
+                    signed_form(&state.config, &[("email", &email), ("code", "123456")]);
+                let response = form_mfa_verify(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("CAPTCHA"),
+                    "the MFA step must refuse without a captcha token, got {flash:?}"
+                );
+                assert!(
+                    !flash.contains("expired"),
+                    "the captcha gate must run before the challenge-cookie check, got {flash:?}"
+                );
+                assert!(
+                    location(&response).starts_with("/login?mfa=1&email="),
+                    "a captcha refusal must re-render the challenge form, got {}",
+                    location(&response)
+                );
+
+                // A login-scope token is refused on the MFA step.
+                let login_token = mint_kiwi_token(&state, "login", "127.0.0.62").await;
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[
+                        ("email", &email),
+                        ("code", "123456"),
+                        ("kiwi__token", &login_token),
+                    ],
+                );
+                let response = form_mfa_verify(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("CAPTCHA"),
+                    "a login-scope token must not satisfy the MFA gate, got {flash:?}"
+                );
+
+                // A correct-scope token passes the gate; the NEXT check (the
+                // absent challenge cookie) answers, proving the captcha was
+                // accepted without needing TOTP machinery here (the full
+                // TOTP success path is covered by the existing flow test and
+                // by the live browser E2E in the K2 report).
+                let token = mint_kiwi_token(&state, "mfa-verify", "127.0.0.62").await;
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[
+                        ("email", &email),
+                        ("code", "123456"),
+                        ("kiwi__token", &token),
+                    ],
+                );
+                let response = form_mfa_verify(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("verification window expired"),
+                    "a solved mfa-verify challenge must pass the gate to the challenge-cookie check, got {flash:?}"
+                );
+
+                // Single-use: the same token replayed is refused by the gate.
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[
+                        ("email", &email),
+                        ("code", "123456"),
+                        ("kiwi__token", &token),
+                    ],
+                );
+                let response = form_mfa_verify(State(state.clone()), headers, ip, Form(form)).await;
+                let flash = response_flash_text(&response, &state.config);
+                assert!(
+                    flash.contains("CAPTCHA"),
+                    "a replayed mfa-verify token must be refused, got {flash:?}"
+                );
             }
 
             /// Production sets the Secure attribute on every auth cookie the
@@ -18532,7 +18882,7 @@ mod coverage_auth_admin_tests {
 
         // Missing/garbage challenge cookie is refused.
         let (headers, form) = signed_form(&app.config, &[("email", &email), ("code", "123456")]);
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert!(flash_text(&response, &app.config).contains("expired"));
 
         // Non-numeric code is refused with the format message.
@@ -18553,7 +18903,7 @@ mod coverage_auth_admin_tests {
             );
             (headers, form)
         };
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert!(flash_text(&response, &app.config).contains("6-digit"));
 
         // A wrong 6-digit code is refused (and counted against the lockout).
@@ -18565,7 +18915,7 @@ mod coverage_auth_admin_tests {
                 .parse()
                 .unwrap(),
         );
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert!(flash_text(&response, &app.config).contains("did not match"));
 
         // The real code completes the login and mints the session.
@@ -18583,7 +18933,7 @@ mod coverage_auth_admin_tests {
             .parse()
             .unwrap(),
         );
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert_eq!(
             flash_text(&response, &app.config),
             "Signed in.",
@@ -18607,7 +18957,7 @@ mod coverage_auth_admin_tests {
             .parse()
             .unwrap(),
         );
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert!(
             flash_text(&response, &app.config).contains("did not match"),
             "a replayed TOTP code must be refused"
@@ -22212,7 +22562,7 @@ mod adversarial_auth_outage_tests {
         let config = state.config.clone();
         let (headers, form) =
             signed_form(&state, &[("email", "user@example.com"), ("code", "123456")]);
-        let response = form_mfa_verify(State(state.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(state.clone()), headers, None, Form(form)).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(!flash_of(&response, &config).is_empty());
         assert!(response
@@ -23608,7 +23958,7 @@ mod residual_zero_tests {
         form.insert("email".to_string(), email.clone());
         form.insert("code".to_string(), totp_code(&secret));
         form.insert("_csrf".to_string(), csrf.token);
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         let cookies = set_cookies(&response);
         assert!(
             cookies
@@ -23661,7 +24011,7 @@ mod residual_zero_tests {
         form.insert("email".to_string(), email);
         form.insert("code".to_string(), totp_code(&secret));
         form.insert("_csrf".to_string(), csrf.token);
-        let response = form_mfa_verify(State(state.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(state.clone()), headers, None, Form(form)).await;
         assert_eq!(
             flash_text(&response, &state.config),
             "Sign-in is temporarily unavailable. Try again."
@@ -28522,7 +28872,7 @@ mod deferred_feature_tests {
         form.insert("email".to_string(), email.clone());
         form.insert("recovery_code".to_string(), codes[0].clone());
         form.insert("_csrf".to_string(), csrf);
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(
             set_cookies(&response)
@@ -28551,7 +28901,7 @@ mod deferred_feature_tests {
         form.insert("email".to_string(), email);
         form.insert("code".to_string(), totp_code(&secret));
         form.insert("_csrf".to_string(), csrf);
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(
             set_cookies(&response)
@@ -28577,7 +28927,7 @@ mod deferred_feature_tests {
                 form.insert("email".to_string(), email);
                 form.insert("recovery_code".to_string(), code);
                 form.insert("_csrf".to_string(), csrf);
-                form_mfa_verify(State(state), headers, Form(form)).await
+                form_mfa_verify(State(state), headers, None, Form(form)).await
             }
         };
 
@@ -28641,7 +28991,7 @@ mod deferred_feature_tests {
                 form.insert("email".to_string(), email);
                 form.insert("recovery_code".to_string(), "wrong-code".to_string());
                 form.insert("_csrf".to_string(), csrf);
-                form_mfa_verify(State(state), headers, Form(form)).await
+                form_mfa_verify(State(state), headers, None, Form(form)).await
             }
         };
         for attempt in 0..MFA_VERIFY_MAX_ATTEMPTS {
@@ -28659,7 +29009,7 @@ mod deferred_feature_tests {
         form.insert("email".to_string(), email.clone());
         form.insert("recovery_code".to_string(), "good-code-1".to_string());
         form.insert("_csrf".to_string(), csrf);
-        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let response = form_mfa_verify(State(app.clone()), headers, None, Form(form)).await;
         assert_eq!(
             flash_text(&response, &app.config),
             "Too many verification attempts. Try again in a few minutes.",

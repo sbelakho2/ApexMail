@@ -281,6 +281,93 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(result.body.ok, `the version-1 solve must verify end to end (got ${result.body.code})`).toBe(true);
   });
 
+  test('a version-5 armed challenge runs the causal object-graph grammar in the browser and verifies end to end', async ({ page }) => {
+    // The v5 issuance knob (?exec_cap=5) raises the fixture's simulated
+    // deployment cap so the version-5 grammar is actually issued: the
+    // driver advertises Kiwi-Execution-Max-Version 5, and the effective
+    // grammar is the minimum of that advertisement and the fixture cap.
+    // A version-5 program carries the fixed six-op causal spine over the
+    // version-4 skeleton (clone, reparent, the u8 read of the reparent
+    // cell, the observed URL-canon op, the text mutation and the
+    // closing canonical serialization), so its trace must show those
+    // entries executed against the real DOM.
+    const execRequests = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/assets/execution.')) execRequests.push(request);
+    });
+    await armedPage(page, '&exec_cap=5');
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const plain = Buffer.from(token, 'base64').toString('utf8');
+    const parts = plain.split('.');
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
+    const trace = decodeTrace(evidence[1]);
+    expect(trace.includes('dclone('), 'the v5 spine must deep-clone the current node').toBe(true);
+    expect(trace.includes('drepar('), 'the v5 spine must reparent the clone under the drawn target').toBe(true);
+    expect(trace.includes('durlc('), 'the v5 spine must run the observed URL-canon op').toBe(true);
+    expect(trace.includes('dmutate('), 'the v5 spine must replace the text').toBe(true);
+    expect(trace.includes('sreal('), 'the v5 spine must close over the canonical serialization').toBe(true);
+    for (const m of trace.match(/durlc\([^)]+\)/g) ?? []) {
+      expect(m, 'every URL-canon entry is the 64-lowercase-hex digest').toMatch(/^durlc\([0-9a-f]{64}\)$/);
+    }
+
+    const result = await verifyToken(page, token);
+    expect(result.body.ok, `the version-5 solve must verify end to end (got ${result.body.code})`).toBe(true);
+    expect(execRequests, 'the v5 armed lifecycle must perform exactly one interpreter fetch').toHaveLength(1);
+
+    // The issuance itself is a version-5 mint: the same v5-cap
+    // advertisement produces the causal grammar (blob layout:
+    // format(1), scopeLen(1), scope, actionLen(1), action,
+    // opVersion(1)).
+    const resp = await page.request.post('http://127.0.0.1:8085/challenge?execution=1&exec_cap=5', {
+      headers: { 'Kiwi-Execution-Max-Version': '5' },
+      data: { scope: 'login' },
+    });
+    const challenge = await resp.json();
+    expect(typeof challenge.execution_program).toBe('string');
+    const blob = Buffer.from(challenge.execution_program, 'base64');
+    let pos = 1;
+    const scopeLen = blob[pos++];
+    pos += scopeLen;
+    const actionLen = blob[pos++];
+    pos += actionLen;
+    expect(blob[pos], 'the grammar version byte of a v5-capable issuance must be 5').toBe(5);
+  });
+
+  test('a version-7 program from a newer server is refused by the version byte: the controlled kiwi:execution-unavailable state, never a token', async ({ page }) => {
+    // The mixed-fleet decode fence: every interpreter version bounds
+    // its own opcode space, and a newer server's grammar is rejected
+    // by the declared version byte alone (the driver advertises 6, so
+    // the fixture mints 5 under the exec_cap=5 knob and the tamper
+    // below rewrites the op-version byte of the response's program to
+    // 7, the first unknown rung). The armed lifecycle must fail closed
+    // in the controlled kiwi:execution-unavailable state with no
+    // token — never a silent success, never an unarmed solve.
+    await page.route('**/challenge*', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (typeof body.execution_program === 'string' && body.execution_program.length > 0) {
+        const blob = Buffer.from(body.execution_program, 'base64');
+        let pos = 1;
+        const scopeLen = blob[pos++];
+        pos += scopeLen;
+        const actionLen = blob[pos++];
+        pos += actionLen;
+        blob[pos] = 7;
+        body.execution_program = Buffer.from(blob).toString('base64');
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto('/?assets=files&execution=1&exec_cap=5');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:execution-unavailable', {
+      timeout: 30_000,
+    });
+    expect(await page.locator('[data-kiwi-token]').inputValue(), 'no token may be minted without a runnable program').toBe('');
+  });
+
   test('an interpreter failure enters the controlled kiwi:execution-unavailable state, never a silent success', async ({ page }) => {
     // Route the interpreter asset to a 404: the iframe's script never
     // loads, no ready handshake arrives, and the driver must enter the

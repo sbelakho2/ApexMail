@@ -1,0 +1,97 @@
+{
+  "schema": "kiwicaptcha.autofill-surfaces/1",
+  "note": "The ONE canonical autofill/password-manager/assistive-technology surface registry, authoritative for the qualification matrix (tests/browser/qualification/autofill-matrix.json) and the protocol document (docs/autofill-qualification-protocol.md). Both refer to these stable surface ids. required=true marks a surface the broad third-party compatibility release claim needs; required=false entries are advisory (recommended, never gate). platform is the expected platform class, one of desktop|windows|macos|ios|android; a matrix row whose platform differs from its surface's expected class is rejected. exact_version=true means a pass row must record the exact tested surface version: CURRENT, TBD, unknown, blank and similar placeholders are rejected.",
+  "surfaces": [
+    {
+      "id": "chrome-builtin-autofill",
+      "product": "Chrome built-in autofill",
+      "platform": "desktop",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "edge-native-autofill",
+      "product": "Edge",
+      "platform": "windows",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "firefox-native-autofill",
+      "product": "Firefox",
+      "platform": "desktop",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "safari-autofill",
+      "product": "Safari",
+      "platform": "macos",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "ios-safari",
+      "product": "iOS Safari",
+      "platform": "ios",
+      "exact_version": true,
+      "required": false
+    },
+    {
+      "id": "android-chrome",
+      "product": "Android Chrome",
+      "platform": "android",
+      "exact_version": true,
+      "required": false
+    },
+    {
+      "id": "icloud-keychain",
+      "product": "iCloud Keychain",
+      "platform": "macos",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "1password",
+      "product": "1Password",
+      "platform": "desktop",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "bitwarden",
+      "product": "Bitwarden",
+      "platform": "desktop",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "voiceover-macos",
+      "product": "VoiceOver",
+      "platform": "macos",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "nvda-windows",
+      "product": "NVDA",
+      "platform": "windows",
+      "exact_version": true,
+      "required": true
+    },
+    {
+      "id": "second-major-manager",
+      "product": "LastPass or Dashlane",
+      "platform": "desktop",
+      "exact_version": true,
+      "required": false
+    },
+    {
+      "id": "jaws-windows",
+      "product": "JAWS",
+      "platform": "windows",
+      "exact_version": true,
+      "required": false
+    }
+  ]
+}

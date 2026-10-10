@@ -14,11 +14,12 @@ use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\VerificationAdmissionGate;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
+use KiwiCaptcha\Tests\Fixtures\ServerState;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Real-Redis regression for the terminal-state admission fix:
+ * Real-Redis regression for the terminal-state admission rule:
  * a cancelled or already-consumed Argon record resolves through the
  * pre-admission runtime-state read (the Rust mirror's runtime-state
  * resolution). The scarce admission slot is never acquired, and the
@@ -189,7 +190,7 @@ final class VerifierTerminalStateRealRedisTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolveArgon($client);
         $identity = 'op-'.hash('sha256', 'real-redis-replay');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
         $gate = $this->countingGate(1, $counters);
@@ -216,7 +217,7 @@ final class VerifierTerminalStateRealRedisTest extends TestCase
         self::assertNotNull($client);
         [$storage, $record, $token] = $this->issueAndSolveArgon($client);
         $storage->consumeWithOperationIdentity($record->nonce, 'op-'.hash('sha256', 'real-redis-replay'));
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
         $gate = $this->countingGate(1, $counters);
@@ -319,7 +320,7 @@ final class VerifierTerminalStateRealRedisTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolveArmedSha($client);
         $identity = 'op-'.hash('sha256', 'real-redis-armed-replay');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->verify(
             $token,
@@ -346,7 +347,7 @@ final class VerifierTerminalStateRealRedisTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolveArmedSha($client);
         $identity = 'op-'.hash('sha256', 'real-redis-armed-expired');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT + 121))->verify(
             $token,

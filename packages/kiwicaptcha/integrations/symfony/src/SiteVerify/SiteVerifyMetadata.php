@@ -63,17 +63,75 @@ final readonly class SiteVerifyMetadata
         if (isset($data['v']) && $data['v'] !== 1) {
             throw new SiteVerifyMetadataCorruptException('unsupported metadata envelope version');
         }
-        $action = isset($data['action']) && \is_string($data['action']) ? $data['action'] : null;
-        $cdata = isset($data['cdata']) && \is_string($data['cdata']) ? $data['cdata'] : null;
-        $sitekey = isset($data['sitekey']) && \is_string($data['sitekey']) ? $data['sitekey'] : null;
-        $scope = isset($data['scope']) && \is_string($data['scope']) ? $data['scope'] : null;
-        $chainId = isset($data['chainId']) && \is_string($data['chainId']) ? $data['chainId'] : null;
-        $chainDepth = isset($data['chainDepth']) && \is_int($data['chainDepth']) ? $data['chainDepth'] : 0;
+        // A present non-null value of the wrong type is corrupt
+        // persisted state, never a defaulted field: normalizing it
+        // would silently answer replays with emptied metadata instead
+        // of the retryable failure the corrupt-state contract
+        // promises. Absent or null keys keep their legacy defaults
+        // (records persisted before a field existed parse unchanged).
+        $action = self::optionalString($data, 'action');
+        $cdata = self::optionalString($data, 'cdata');
+        $sitekey = self::optionalString($data, 'sitekey');
+        $scope = self::optionalString($data, 'scope');
+        $chainId = self::optionalString($data, 'chainId');
+        $chainDepth = 0;
+        if (\array_key_exists('chainDepth', $data) && $data['chainDepth'] !== null) {
+            if (!\is_int($data['chainDepth'])) {
+                throw new SiteVerifyMetadataCorruptException('metadata field "chainDepth" must be an integer when present');
+            }
+            $chainDepth = $data['chainDepth'];
+        }
+        // The semantic layer: every present value must fit the same
+        // grammar its request-surface validation enforces, and the
+        // chain coordinates must arrive as the exact pair the chain
+        // controller stamps (a chain id sits at depth two; any other
+        // combination is a coordinate nobody can legitimately produce).
+        if ($action !== null && preg_match('/^[a-z0-9_-]{1,32}$/iD', $action) !== 1) {
+            throw new SiteVerifyMetadataCorruptException('metadata field "action" does not match the action grammar ([a-z0-9_-]{1,32})');
+        }
+        if ($cdata !== null && preg_match('/^[a-z0-9_-]{1,255}$/iD', $cdata) !== 1) {
+            throw new SiteVerifyMetadataCorruptException('metadata field "cdata" does not match the cdata grammar ([a-z0-9_-]{1,255})');
+        }
+        foreach (['sitekey', 'scope'] as $identifierField) {
+            $value = ${$identifierField};
+            if ($value !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $value) !== 1) {
+                throw new SiteVerifyMetadataCorruptException(sprintf('metadata field "%s" does not match the identifier grammar ([A-Za-z0-9._:-]{1,128})', $identifierField));
+            }
+        }
+        // The chain id carries the exact grammar the chain protocol
+        // mints and every chain component validates (the shared
+        // validator), never the looser identifier family: corrupted
+        // persisted state shaped like a foreign id fails closed.
+        if ($chainId !== null && !\BelConsulting\KiwiCaptchaBundle\Risk\ChainId::isValid($chainId)) {
+            throw new SiteVerifyMetadataCorruptException('metadata field "chainId" does not match the chain-id grammar ([A-Za-z0-9_-]{1,64})');
+        }
+        if ($chainDepth !== 0 && $chainDepth !== 2) {
+            throw new SiteVerifyMetadataCorruptException('metadata field "chainDepth" must be exactly 0 or 2');
+        }
+        if ($chainId === null && $chainDepth !== 0) {
+            throw new SiteVerifyMetadataCorruptException('metadata "chainDepth" is set without a chainId: the chain coordinates arrive as a pair');
+        }
+        if ($chainId !== null && $chainDepth !== 2) {
+            throw new SiteVerifyMetadataCorruptException('metadata "chainId" is set without chainDepth 2: the chain coordinates arrive as a pair');
+        }
         if ($action === null && $cdata === null && $sitekey === null && $scope === null && $chainId === null && $chainDepth === 0) {
             return null;
         }
 
         return new self($action, $cdata, $sitekey, $chainId, $chainDepth, $scope);
+    }
+
+    /** A present non-string throws; an absent or null key stays null. */
+    private static function optionalString(array $data, string $key): ?string
+    {
+        if (!\array_key_exists($key, $data) || $data[$key] === null) {
+            return null;
+        }
+        if (!\is_string($data[$key])) {
+            throw new SiteVerifyMetadataCorruptException(sprintf('metadata field "%s" must be a string when present', $key));
+        }
+
+        return $data[$key];
     }
 
     public function isEmpty(): bool

@@ -21,6 +21,7 @@ final class RiskKeysTest extends TestCase
         'session' => 'bbb44b7be31ee827d07e8e5079eaca4608bf0c85db54aa9ce8582c777186029f',
         'principal' => '40459f71b2d98dc45f78b2ebe6eea9d7e68b55c3006b5408762f2c6f10e95c48',
         'event' => '10def12a515d1fcaa2a0ca79916eb916197b99af76b98b8317081accd9fb3e1f',
+        'target' => 'cb0fcb40d7dc9a976acd653cc5f7a60b561598497e516b9aa419bc1c821ab18a',
     ];
 
     public function testKeysMatchReferenceHexes(): void
@@ -33,6 +34,7 @@ final class RiskKeysTest extends TestCase
         self::assertSame(self::MASTER_HEX_KEYS['session'], bin2hex($keys->session));
         self::assertSame(self::MASTER_HEX_KEYS['principal'], bin2hex($keys->principal));
         self::assertSame(self::MASTER_HEX_KEYS['event'], bin2hex($keys->event));
+        self::assertSame(self::MASTER_HEX_KEYS['target'], bin2hex($keys->target));
     }
 
     public function testKeysAreDistinctAnd32Bytes(): void
@@ -43,7 +45,21 @@ final class RiskKeysTest extends TestCase
         self::assertSame(32, strlen($keys->session));
         self::assertSame(32, strlen($keys->principal));
         self::assertSame(32, strlen($keys->event));
-        self::assertCount(5, array_unique([$keys->source, $keys->subnet, $keys->session, $keys->principal, $keys->event]));
+        self::assertSame(32, strlen($keys->target));
+        self::assertCount(6, array_unique([$keys->source, $keys->subnet, $keys->session, $keys->principal, $keys->event, $keys->target]));
+    }
+
+    public function testShortMasterIsRefusedAtTheDerivationBoundary(): void
+    {
+        foreach (['', 'tiny', str_repeat(chr(0x42), 15)] as $master) {
+            try {
+                RiskKeys::fromMaster($master);
+                self::fail(sprintf('the %d-byte master must be refused', strlen($master)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+            }
+        }
+        self::assertInstanceOf(RiskKeys::class, RiskKeys::fromMaster(str_repeat(chr(0x42), 16)));
     }
 
     public function testDifferentMasterDerivesDifferentKeys(): void
@@ -55,5 +71,6 @@ final class RiskKeysTest extends TestCase
         self::assertNotSame($a->session, $b->session);
         self::assertNotSame($a->principal, $b->principal);
         self::assertNotSame($a->event, $b->event);
+        self::assertNotSame($a->target, $b->target);
     }
 }

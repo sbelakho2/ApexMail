@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
@@ -132,7 +134,7 @@ final class RealRedisRegionClockSkewTest extends TestCase
         // The lease deadline is anchored at the server clock: the
         // sorted-set score equals Redis TIME plus the lease lifetime.
         $time = $this->client->time();
-        $score = (float) $this->client->zscore('kiwicaptcha:argon2:leases:'.$ns, $leaseA);
+        $score = (float) $this->client->zscore('{kiwicaptcha:argon2:leases:'.RedisNamespace::derive($ns).'}:global', $leaseA);
         $serverNowMs = (int) $time[0] * 1000 + (int) ((int) $time[1] / 1000);
         self::assertLessThanOrEqual($serverNowMs + 1000 + 1500, $score, 'the score is the server clock plus the lease lifetime');
         self::assertGreaterThanOrEqual($serverNowMs + 1000 - 1500, $score, 'the score is the server clock plus the lease lifetime');
@@ -171,7 +173,7 @@ final class RealRedisRegionClockSkewTest extends TestCase
         self::assertTrue($verifierB->verify($oldTokenB, self::SECRET, 'login', '198.51.100.7')->isOk(), 'an epoch-1 record verifies on region B before the bump');
 
         // The coordinated bump lands in the shared central hash.
-        $this->client->hset(sprintf('{kiwi:%s}:security-policy', $ns), SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $this->client->hset(sprintf('{kiwi:%s}:security-policy', RedisNamespace::deriveOr($ns, 'kiwi')), SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
 
         // Region A refreshes first, its window elapsed, and fails closed
         // on the stale policy immediately.
@@ -218,7 +220,7 @@ final class RealRedisRegionClockSkewTest extends TestCase
         self::assertTrue($verifier->verify($token, self::SECRET, 'login', '198.51.100.7')->isOk(), 'an epoch-1 record verifies before the bump');
 
         // The bump lands while this region's policy Redis is partitioned.
-        $this->client->hset(sprintf('{kiwi:%s}:security-policy', $ns), SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $this->client->hset(sprintf('{kiwi:%s}:security-policy', RedisNamespace::deriveOr($ns, 'kiwi')), SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
         $partitioned->failReads = true;
 
         // Inside the max-stale window the cached max keeps serving and

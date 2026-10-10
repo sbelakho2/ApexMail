@@ -56,6 +56,21 @@ final class RiskObservation
         if ($nowMs < 0) {
             throw new \InvalidArgumentException('nowMs must be >= 0');
         }
+        // Caller-supplied epochs must keep every derived key in the exact
+        // integer grammar: the store derives the epoch-1 and epoch+1 keys,
+        // so an epoch at the PHP_INT boundary would overflow to a float
+        // and leak scientific notation into the key. A non-int reaches
+        // this constructor only through a lossy coercion, which the range
+        // check below also refuses.
+        foreach (['sourceEpoch' => $sourceEpoch, 'subnetEpoch' => $subnetEpoch] as $name => $epoch) {
+            if (!\is_int($epoch) || $epoch <= PHP_INT_MIN || $epoch >= PHP_INT_MAX) {
+                throw new \InvalidArgumentException(sprintf(
+                    '%s must be an integer whose epoch-1 and epoch+1 neighbours are exactly representable (got %s)',
+                    $name,
+                    var_export($epoch, true),
+                ));
+            }
+        }
     }
 
     public static function newEventId(): string

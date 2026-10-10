@@ -133,7 +133,8 @@ interface ChainedChallengeStateStore
     /**
      * Atomic owner-scoped reservation with a short lease
      * (reservation_lease_secs, bounded by the record's own remaining TTL,
-     * KEEPTTL). A record without an expiry is corrupted state and answers
+     * KEEPTTL). A record without an expiry is corrupted state and fails
+     * closed with {@see MalformedChainedChallengeStateException}, never
      * 'missing'. Outcomes:
      *
      *  - 'available'   this call reserved the chain; the caller proceeds.
@@ -154,8 +155,10 @@ interface ChainedChallengeStateStore
      *  - 'step_up_required' / 'denied' the chain is terminal with the
      *                  transaction bound to its final disposition; the
      *                  caller must not issue.
-     *  - 'missing'     no state exists (never issued, expired, or corrupt
-     *                  without expiry).
+     *  - 'missing'     no state exists (never issued or expired; a corrupt
+     *                  record, including one without a key lifetime,
+     *                  throws the strict decode exception instead — fail
+     *                  closed).
      *
      * @param string $ownerToken random per-request owner token (16 bytes,
      *                           hex). The only handle that may release or

@@ -1,0 +1,13 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/contacts.rs b/services/mail-server/crates/api-server/src/routes/contacts.rs
+index c8256053..6e3d6534 100644
+--- a/services/mail-server/crates/api-server/src/routes/contacts.rs
++++ b/services/mail-server/crates/api-server/src/routes/contacts.rs
+@@ -244,7 +244,7 @@ async fn create_contact(
+ ) -> Result<(StatusCode, Json<ContactResponse>), ApiError> {
+     require_scopes(&auth, &["contacts:write"])?;
+ 
+-    if !apexmail_lib::validation::is_valid_email(&body.email) {
++    if false && !apexmail_lib::validation::is_valid_email(&body.email) { // MUTANT M10
+         return Err(ApiError::Validation(vec!["invalid email address".into()]));
+     }
+     validate_name(&body.name)?;

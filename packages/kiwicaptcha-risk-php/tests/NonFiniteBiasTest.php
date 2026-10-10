@@ -119,10 +119,10 @@ final class NonFiniteBiasTest extends TestCase
         $client = $this->requireClient();
         $scope = 1;
 
-        // NaN path: legit_score_sum = Inf and legit_count = Inf ->
+        // NaN path: legit_above_sum = Inf and legit_count = Inf ->
         // fp_mean = NaN -> raw = NaN -> final_mp = NaN -> guard -> +150.
         $client->hset($this->bucketKey($c, $scope), 'legit_count', '1e999');
-        $client->hset($this->bucketKey($c, $scope), 'legit_score_sum', '1e999');
+        $client->hset($this->bucketKey($c, $scope), 'legit_above_sum', '1e999');
 
         self::assertSame(150, $c->biasForScope($scope, $this->nowMs()), 'NaN must fail HIGH to +maxAdjustment (never 0)');
         $this->clearCache($c);
@@ -130,7 +130,7 @@ final class NonFiniteBiasTest extends TestCase
     }
 
     /**
-     * (a) Integration: corrupted bucket value "1e999" with a finite count
+     * (a) Integration: corrupted clipped sum "1e999" with a finite count
      * (fp_mean = +Inf -> error = -Inf) clamps at the raw -maxAdjustment
      * clamp inside the script — bounded int output, never NaN. The rate
      * window is pre-seeded so the proportional allowance (maxChangePerMinute
@@ -143,7 +143,7 @@ final class NonFiniteBiasTest extends TestCase
         $scope = 2;
 
         $client->hset($this->bucketKey($c, $scope), 'legit_count', '100');
-        $client->hset($this->bucketKey($c, $scope), 'legit_score_sum', '1e999');
+        $client->hset($this->bucketKey($c, $scope), 'legit_above_sum', '1e999');
         // Seed bias_mp = 0 / ts = Redis now - 60 s: the allowance is
         // 1_000_000 * 1000 * 60000 / 60000 = 1e9 milli-points >> 150 points.
         $client->hset($this->stateKey($c, $scope), 'bias_mp', '0');

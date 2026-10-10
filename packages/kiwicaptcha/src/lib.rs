@@ -70,4 +70,7 @@ pub use verify::{
     score_telemetry, solve_for_test, validate_record, verify_solution, RequestBindingExpectation,
     VerifyContext, VerifyError, VerifyOutcome,
 };
+// `solve_for_test` is a test/dev-bypass surface: it performs the solve
+// the client is supposed to perform, so it must never sit on a
+// production admission path.
 pub use widget::{kiwi_widget_html, kiwi_widget_html_default};

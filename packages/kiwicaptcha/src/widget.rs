@@ -23,6 +23,20 @@ use crate::kiwi_mark_svg;
 const KIWI_DRIVER_JS: &str = include_str!("../resources/widget-driver.js");
 const KIWI_CSS: &str = include_str!("../resources/widget.css");
 const KIWI_WASM_EMBED: &str = include_str!("../resources/kiwicaptcha-wasm.js");
+/// The risk/execution module: without it a memory-hard (Argon2id), RSW,
+/// execution-armed or decoy challenge has no solver tier and the widget
+/// enters the controlled unavailable state. Emitted inline by default so
+/// the quickstart's Argon2id path works without asset attributes.
+const KIWI_RISK_JS: &str = include_str!("../resources/widget-risk.js");
+/// The lazy locale packs (every non-English WCAG 3.1.2 pack): emitted
+/// inline when a non-default `lang` is requested, so the widget does not
+/// fall back to English on pages that pass no asset attributes.
+const KIWI_LOCALES_JS: &str = include_str!("../resources/widget-locales.js");
+/// The telemetry module: inlined on the emit_assets (first-widget) tier
+/// whenever no
+/// external asset pair is given, so the token actually carries a session
+/// (the driver awaits the module before sending).
+const KIWI_TELEMETRY_JS: &str = include_str!("../resources/widget-telemetry.js");
 
 /// Render the KiwiCaptcha widget HTML block.
 ///
@@ -39,29 +53,174 @@ const KIWI_WASM_EMBED: &str = include_str!("../resources/kiwicaptcha-wasm.js");
 /// application that post-processes the HTML to inject nonces after
 /// rendering).
 pub fn kiwi_widget_html(endpoint: &str, scope: &str, csp_nonce: Option<&str>) -> String {
+    kiwi_widget_html_with(&KiwiWidgetOptions {
+        endpoint,
+        scope,
+        csp_nonce,
+        ..KiwiWidgetOptions::default()
+    })
+}
+
+/// The renderer options: external asset attributes, the page language and
+/// the once-per-page asset emission switch.
+///
+/// Every `(src, integrity)` pair is emitted as the matching
+/// `data-kiwi-<kind>-src` / `data-kiwi-<kind>-integrity` attribute pair on
+/// the widget container; when a pair is present the corresponding inline
+/// asset is not emitted. `emit_assets: false` omits the shared inline
+/// style/scripts entirely for every widget after the first on a page —
+/// the driver is idempotent and the first copy's DOM scan and observer
+/// initialize later widgets and share one module registry.
+#[derive(Clone, Debug)]
+pub struct KiwiWidgetOptions<'a> {
+    pub endpoint: &'a str,
+    pub scope: &'a str,
+    pub csp_nonce: Option<&'a str>,
+    /// Emit the shared inline assets with this widget (default true).
+    pub emit_assets: bool,
+    /// Inline the risk module when no external risk pair is given
+    /// (default true): required for Argon2id, RSW, execution arms and the
+    /// decoy field.
+    pub risk: bool,
+    /// Inline the locale packs when `lang` is a non-default language
+    /// (default true).
+    pub locales: bool,
+    /// The widget language (`data-kiwi-lang`).
+    pub lang: Option<&'a str>,
+    /// Files-tier asset attributes: the content-addressed runtime glue.
+    pub runtime: Option<(&'a str, &'a str)>,
+    /// Files-tier asset attributes: the content-addressed worker asset.
+    pub worker: Option<(&'a str, &'a str)>,
+    /// An external risk/execution module (replaces the inline module).
+    pub risk_external: Option<(&'a str, &'a str)>,
+    /// External locale packs (replaces the inline packs).
+    pub locales_external: Option<(&'a str, &'a str)>,
+    /// The content-addressed execution interpreter asset.
+    pub execution: Option<(&'a str, &'a str)>,
+    /// Telemetry mode ("minimal" or "full").
+    pub telemetry: Option<&'a str>,
+    /// The content-addressed telemetry module asset.
+    pub telemetry_external: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> Default for KiwiWidgetOptions<'a> {
+    fn default() -> Self {
+        Self {
+            endpoint: "/api/kcaptcha/challenge",
+            scope: "login",
+            csp_nonce: None,
+            emit_assets: true,
+            risk: true,
+            locales: true,
+            lang: None,
+            runtime: None,
+            worker: None,
+            risk_external: None,
+            locales_external: None,
+            execution: None,
+            telemetry: None,
+            telemetry_external: None,
+        }
+    }
+}
+
+/// Render the widget with explicit options (see [`KiwiWidgetOptions`]).
+pub fn kiwi_widget_html_with(options: &KiwiWidgetOptions) -> String {
+    let endpoint = options.endpoint;
+    let scope = options.scope;
     let svg = kiwi_mark_svg();
-    let nonce_attr = csp_nonce
+    let nonce_attr = options
+        .csp_nonce
         .filter(|n| !n.is_empty())
         .map(|n| format!(" nonce=\"{}\"", html_attr_escape(n)))
         .unwrap_or_default();
+    let mut extra_attrs = String::new();
+    let mut pair = |name: &str, pair: Option<(&str, &str)>| {
+        if let Some((src, integrity)) = pair {
+            extra_attrs.push_str(&format!(
+                " {name}-src=\"{}\" {name}-integrity=\"{}\"",
+                html_attr_escape(src),
+                html_attr_escape(integrity)
+            ));
+        }
+    };
+    pair("data-kiwi-runtime", options.runtime);
+    pair("data-kiwi-worker", options.worker);
+    pair("data-kiwi-risk", options.risk_external);
+    pair("data-kiwi-locales", options.locales_external);
+    pair("data-kiwi-execution", options.execution);
+    pair("data-kiwi-telemetry", options.telemetry_external);
+    if let Some(mode) = options.telemetry.filter(|m| !m.is_empty()) {
+        extra_attrs.push_str(&format!(
+            " data-kiwi-telemetry=\"{}\"",
+            html_attr_escape(mode)
+        ));
+    }
+    if let Some(lang) = options.lang.filter(|l| !l.is_empty()) {
+        extra_attrs.push_str(&format!(" data-kiwi-lang=\"{}\"", html_attr_escape(lang)));
+    }
+    let lang_is_default = options
+        .lang
+        .map(|l| l.trim().to_ascii_lowercase().starts_with("en"))
+        .unwrap_or(true);
+    let inline_risk = options.emit_assets && options.risk && options.risk_external.is_none();
+    let inline_locales = options.emit_assets
+        && options.locales
+        && !lang_is_default
+        && options.locales_external.is_none();
+    // The telemetry module is embedded unconditionally on the inline
+    // tier (when no external asset is configured): the first widget's
+    // emit_assets block is the only place shared assets can land, and a
+    // later widget may enable telemetry after the first one did not.
+    // Gating the embed on the first widget's mode would leave that later
+    // widget without the module; the module itself is inert until a
+    // widget with a telemetry mode creates a session.
+    let inline_telemetry = options.emit_assets && options.telemetry_external.is_none();
+    let mut shared_assets = String::new();
+    if options.emit_assets {
+        shared_assets.push_str(&format!(
+            "<style{nonce}>\n{css}\n</style>\n<script{nonce}>\n{wasm}\n</script>\n<script{nonce}>\n{driver}\n</script>\n",
+            nonce = nonce_attr,
+            css = KIWI_CSS,
+            wasm = KIWI_WASM_EMBED,
+            driver = KIWI_DRIVER_JS,
+        ));
+        if inline_risk {
+            shared_assets.push_str(&format!(
+                "<script{nonce}>\n{risk}\n</script>\n",
+                nonce = nonce_attr,
+                risk = KIWI_RISK_JS,
+            ));
+        }
+        if inline_locales {
+            shared_assets.push_str(&format!(
+                "<script{nonce}>\n{locales}\n</script>\n",
+                nonce = nonce_attr,
+                locales = KIWI_LOCALES_JS,
+            ));
+        }
+        if inline_telemetry {
+            shared_assets.push_str(&format!(
+                "<script{nonce}>\n{telemetry}\n</script>\n",
+                nonce = nonce_attr,
+                telemetry = KIWI_TELEMETRY_JS,
+            ));
+        }
+    }
     format!(
-        "<style{nonce}>\n{css}\n</style>\n\
-        <div class=\"kiwi-container\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\">\n  \
+        "{shared_assets}\
+        <div class=\"kiwi-container\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\"{extra_attrs}>\n  \
         <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />\n  \
         <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\"\n       \
         role=\"group\" aria-label=\"KiwiCaptcha security check\">\n    \
         <div class=\"kiwi-icon-wrapper\" aria-hidden=\"true\">\n      {svg}\n    \
-        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security verification</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge hidden></span>\n      </div>\n      <div class=\"kiwi-slots\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>\n      <div class=\"kiwi-track\" aria-hidden=\"true\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n    <span class=\"kiwi-sr-only\" data-kiwi-status role=\"status\" aria-live=\"polite\"></span>\n  </div>\n\
-        </div>\n\
-        <script{nonce}>\n{wasm}\n</script>\n\
-        <script{nonce}>\n{driver}\n</script>",
-        nonce = nonce_attr,
-        css = KIWI_CSS,
+        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-slots\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>\n      <div class=\"kiwi-track\" aria-hidden=\"true\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n    <span class=\"kiwi-sr-only\" data-kiwi-status role=\"status\" aria-live=\"polite\"></span>\n  </div>\n\
+        </div>",
+        shared_assets = shared_assets,
         svg = svg,
         endpoint = html_attr_escape(endpoint),
         scope = html_attr_escape(scope),
-        wasm = KIWI_WASM_EMBED,
-        driver = KIWI_DRIVER_JS,
+        extra_attrs = extra_attrs,
     )
 }
 
@@ -127,13 +286,89 @@ mod tests {
     #[test]
     fn widget_applies_csp_nonce_to_style_and_scripts() {
         let html = kiwi_widget_html("/challenge", "login", Some("abc123XYZ"));
-        // Nonce on the style tag and both script tags.
+        // Nonce on the style tag and every inline script tag (glue,
+        // driver and the inline risk module).
         assert!(html.contains("<style nonce=\"abc123XYZ\">"));
         assert!(html.contains("<script nonce=\"abc123XYZ\">"));
-        assert_eq!(html.matches("<script nonce=\"abc123XYZ\">").count(), 2);
+        // style + wasm + driver + the unconditional inline telemetry
+        // module (a later widget may enable telemetry after the first).
+        assert_eq!(html.matches("<script nonce=\"abc123XYZ\">").count(), 4);
         // No nonce-less style/script remains.
         assert!(!html.contains("<style>\n"));
         assert!(!html.contains("<script>\n"));
+        assert!(!html.contains("</script>\n<script>"));
+    }
+
+    #[test]
+    fn widget_inlines_the_risk_module_for_argon2id_quickstart() {
+        let html = kiwi_widget_html_default();
+        // The quickstart offers PoWAlgorithm::Argon2id; the inline risk
+        // module is the worker/execution tier that makes it solvable.
+        assert!(html.contains("solveWorker"));
+        assert!(html.contains("runExecution"));
+        assert!(html.contains("renderDecoy"));
+    }
+
+    #[test]
+    fn widget_emits_external_asset_attributes_and_skips_inline_risk() {
+        let html = kiwi_widget_html_with(&KiwiWidgetOptions {
+            endpoint: "/challenge",
+            scope: "login",
+            risk_external: Some(("/assets/risk.abc.js", "sha256-AAAA")),
+            runtime: Some(("/assets/runtime.abc.js", "sha256-BBBB")),
+            worker: Some(("/assets/worker.abc.js", "sha256-CCCC")),
+            execution: Some(("/assets/execution.abc.js", "sha256-DDDD")),
+            locales_external: Some(("/assets/locales.abc.js", "sha256-EEEE")),
+            lang: Some("de"),
+            telemetry: Some("minimal"),
+            ..KiwiWidgetOptions::default()
+        });
+        assert!(html.contains("data-kiwi-risk-src=\"/assets/risk.abc.js\""));
+        assert!(html.contains("data-kiwi-risk-integrity=\"sha256-AAAA\""));
+        assert!(html.contains("data-kiwi-runtime-src=\"/assets/runtime.abc.js\""));
+        assert!(html.contains("data-kiwi-worker-src=\"/assets/worker.abc.js\""));
+        assert!(html.contains("data-kiwi-execution-src=\"/assets/execution.abc.js\""));
+        assert!(html.contains("data-kiwi-lang=\"de\""));
+        assert!(html.contains("data-kiwi-telemetry=\"minimal\""));
+        // The external risk pair replaces the inline module; the inline
+        // locale packs are replaced by the attribute and skipped.
+        assert!(!html.contains("function kiwiRunExecution"));
+        assert!(!html.contains("register(\"locales\""));
+    }
+
+    #[test]
+    fn widget_assets_once_omits_the_shared_inline_assets() {
+        let html = kiwi_widget_html_with(&KiwiWidgetOptions {
+            endpoint: "/challenge",
+            scope: "login",
+            emit_assets: false,
+            ..KiwiWidgetOptions::default()
+        });
+        assert!(html.contains("data-kiwi-widget"));
+        assert!(!html.contains("<style"));
+        assert!(!html.contains("KIWI_WASM_B64"));
+        assert!(!html.contains("window.KiwiCaptcha"));
+    }
+
+    #[test]
+    fn widget_inlines_locale_packs_for_a_non_default_language() {
+        let html = kiwi_widget_html_with(&KiwiWidgetOptions {
+            endpoint: "/challenge",
+            scope: "login",
+            lang: Some("pt-BR"),
+            ..KiwiWidgetOptions::default()
+        });
+        assert!(html.contains("data-kiwi-lang=\"pt-BR\""));
+        // The locale module registers itself on the core bridge.
+        assert!(html.contains("register(\"locales\""));
+        // English needs no packs.
+        let en = kiwi_widget_html_with(&KiwiWidgetOptions {
+            endpoint: "/challenge",
+            scope: "login",
+            lang: Some("en"),
+            ..KiwiWidgetOptions::default()
+        });
+        assert!(!en.contains("register(\"locales\""));
     }
 
     #[test]

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Regenerates the browser assets: assets/kiwicaptcha-wasm.js (the widget's
 # embedded WASM + glue, which also carries the embedded worker source as
-# window.__kiwiCaptchaWasm.workerSource, generated from assets/kiwi-worker.js
-# by the kiwicaptcha-embed-worker tool) and the standalone assets/kiwi-worker.js.
+# window.__kiwiCaptchaWasm.workerSource) and the glue-embedded
+# assets/kiwi-worker.js (the release worker asset: tools/embed-worker
+# prepends the full glue text to the worker solver source, so the
+# files-mode worker boots with wasm in scope).
 # The widget driver no longer embeds the worker bytes: inline mode reads them
 # off the glue, files mode fetches the versioned worker asset.
 # Requires: cargo, the wasm32-unknown-unknown target, and wasm-bindgen-cli
@@ -213,10 +215,12 @@ fi
 
 "$WASM_BINDGEN_BIN" --target web --out-dir pkg target/wasm32-unknown-unknown/release/kiwicaptcha_wasm.wasm
 cargo run --release --locked --manifest-path tools/embed/Cargo.toml -- pkg assets/kiwicaptcha-wasm.js
-# The embedded worker source is regenerated into the glue on every build
-# (assets/kiwi-worker.js is the source of truth; the driver reads the
-# glue's copy in inline mode and fetches the versioned worker asset in
-# files mode; CI's --check step fails on any manual drift).
+# The worker artifacts are regenerated on every build: embed-worker
+# writes the glue's workerSource section (assets/kiwi-worker.js's worker
+# solver source tail is the source of truth; inline mode reads the glue's
+# copy) AND the glue-embedded worker asset head (the prelude + the full
+# glue text, so files mode fetches one asset that carries the wasm
+# runtime). CI's --check step fails on any manual drift of either.
 cargo run --release --locked --manifest-path tools/embed-worker/Cargo.toml --
 echo "assets/kiwicaptcha-wasm.js regenerated"
 
@@ -224,8 +228,8 @@ echo "assets/kiwicaptcha-wasm.js regenerated"
 # resources/ directory (cargo package verification builds the tarball in
 # isolation and cannot reach outside the crate) — keep the copies
 # byte-identical; CI enforces it (widget-assets parity job).
-cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/resources/
-cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/integrations/symfony/Resources/public/
+cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget-shims.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/resources/
+cp assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget-shims.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/integrations/symfony/Resources/public/
 echo "kiwicaptcha core + symfony public resources synced"
 
 # Byte-parity enforcement: every mirrored destination must be byte-identical
@@ -233,7 +237,7 @@ echo "kiwicaptcha core + symfony public resources synced"
 # released bytes on every installation path. CI enforces the same parity.
 MIRROR_FAILED=0
 for mirror in ../kiwicaptcha/resources ../kiwicaptcha/integrations/symfony/Resources/public; do
-  for f in widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget.css kiwicaptcha-wasm.js kiwi-worker.js execution-interpreter.js; do
+  for f in widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js widget.css kiwicaptcha-wasm.js kiwi-worker.js execution-interpreter.js; do
     if ! cmp -s "assets/$f" "$mirror/$f"; then
       echo "ASSET PARITY FAILED: $mirror/$f differs from assets/$f" >&2
       MIRROR_FAILED=1

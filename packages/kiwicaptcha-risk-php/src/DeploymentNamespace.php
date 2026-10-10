@@ -73,13 +73,28 @@ final class DeploymentNamespace
      * `_` per byte, exactly like the historical `preg_replace` without
      * the `/u` modifier).
      *
+     * The refusal covers the derived value, not only the raw spelling:
+     * a raw whose disallowed bytes fold to `_` (for example `n/` plus
+     * 32 lowercase hex chars) sanitizes to the same digest-shaped
+     * string. Such a value would silently share the whole keyspace of
+     * the digest deployment whose namespace is that string.
+     *
      * @throws \InvalidArgumentException when the raw namespace is empty
+     *                                   or its sanitized output is
+     *                                   digest-shaped
      */
     public static function legacy(string $raw): string
     {
         self::requireNonEmpty($raw);
+        $derived = preg_replace('/[^A-Za-z0-9_.-]/', '_', $raw) ?? $raw;
+        if (preg_match('/^n_[0-9a-f]{32}$/', $derived) === 1) {
+            throw new \InvalidArgumentException(
+                'the legacy derivation refuses a namespace that derives to the digest shape (n_ plus 32 lowercase hex chars): '
+                . 'legacy(n_...) equals the digest deployment namespace and would share its keyspace'
+            );
+        }
 
-        return preg_replace('/[^A-Za-z0-9_.-]/', '_', $raw) ?? $raw;
+        return $derived;
     }
 
     /**

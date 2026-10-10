@@ -96,12 +96,13 @@ final class DecoyByteDeltaTest extends TestCase
         );
         // The delta is exactly the decoy field's own serialization cost:
         // the JSON key plus the quoted name (16 + len), plus TWO
-        // base64-encoded copies of the signed `|<name>` canonical segment
+        // base64-encoded copies of the signed `|d=<name>` canonical segment
         // (the `challenge` and `prefix` response fields both carry the
-        // canonical payload). The armed name is at most 47 bytes, so the
+        // canonical payload; appending k bytes grows base64 by at most
+        // 4*ceil(k/3)). The armed name is at most 47 bytes, so the
         // whole delta stays far under the 512-byte invariant.
         $nameLen = \strlen((string) $armed->decoyField);
-        $expectedDelta = 18 + $nameLen + 2 * (4 * intdiv($nameLen + 3, 3));
+        $expectedDelta = 18 + $nameLen + 2 * (4 * intdiv($nameLen + 3 + 2, 3));
         self::assertLessThanOrEqual(
             $expectedDelta,
             $delta,

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface;
@@ -117,12 +118,12 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
 
     private function idemKey(string $backendId, string $uuid): string
     {
-        return sprintf('{%s}:siteverify-idem:%s:%s', self::NAMESPACE, $backendId, $uuid);
+        return sprintf('{kiwi:%s}:siteverify-idem:%s:%s', self::NAMESPACE, $backendId, $uuid);
     }
 
     private function backendId(string $secret, int $epoch = 0, ?string $digest = null): string
     {
-        return hash('sha256', $secret.'|login|'.$epoch.'|'.$digest);
+        return hash_hmac('sha256', 'login|'.$epoch.'|'.$digest, $secret);
     }
 
     private function operationFingerprint(string $backendId, string $uuid, string $token, ?string $remoteIp = '127.0.0.1', ?string $binding = null): string
@@ -241,7 +242,7 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             // Every key finalized a deterministic stored outcome: the
             // winner's canonical success, each loser's duplicate failure.
             foreach ($keys as $i => $key) {
-                $stored = $idem->stored($backendId, $key);
+                $stored = SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId, $key, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
                 self::assertIsArray($stored, 'the key must finalize a stored result');
                 if ($i === 0) {
                     self::assertTrue($stored['success'] ?? false, 'the winner key stores the canonical success');
@@ -377,7 +378,7 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             $first = $controller->siteverify($envelope());
             self::assertSame(200, $first->getStatusCode(), 'the decoy-armed envelope must not break the genuine redemption');
             self::assertSame(true, $this->json((string) $first->getContent())['success'] ?? null);
-            $stored = $idem->stored($backendId, $uuid);
+            $stored = SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($stored, 'the keyed redemption finalizes');
             self::assertSame(true, $stored['success'] ?? false);
 
@@ -427,7 +428,10 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             ]));
             self::assertSame(503, $malicious->getStatusCode(), 'the rotated retry must fail closed');
             self::assertSame(['internal-error'], $this->json((string) $malicious->getContent())['error-codes']);
-            self::assertNull($idem->stored($backendId2, $uuid), 'the rotated namespace finalizes nothing');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId2, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the rotated namespace finalizes nothing',
+            );
             self::assertNull($storage->consumedState($nonce)?->consumedResult, 'the record stays resultless');
 
             // The same malicious replay under a different key is refused
@@ -439,7 +443,10 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             ]));
             self::assertSame(503, $otherReplay->getStatusCode(), 'a different-key rotated replay must fail closed too');
             self::assertSame(['internal-error'], $this->json((string) $otherReplay->getContent())['error-codes']);
-            self::assertNull($idem->stored($backendId2, $uuidOther), 'the different-key replay finalizes nothing');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId2, $uuidOther, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the different-key replay finalizes nothing',
+            );
 
             // After the lease expires the same-context retry (secret 1)
             // takes over its own pending claim and resumes the original
@@ -453,7 +460,10 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             self::assertSame(200, $recoveryResponse->getStatusCode());
             self::assertSame(true, $this->json((string) $recoveryResponse->getContent())['success'] ?? null, 'the secret-1 context still recovers its success');
             self::assertSame($this->expectedCanonicalSuccess($storage, $nonce), (string) $recoveryResponse->getContent());
-            self::assertNull($idem->stored($backendId2, $uuid), 'the secret-2 namespace stays untouched');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId2, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the secret-2 namespace stays untouched',
+            );
 
             // The attacker replays under secret 2 after the recovery: the
             // secret-1 success never leaks through the rotated backend.
@@ -501,7 +511,7 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             ]));
             self::assertSame(200, $first->getStatusCode());
             self::assertSame(true, $this->json((string) $first->getContent())['success'] ?? null);
-            self::assertSame(true, ($idem->stored($backendId0, $uuid)['success'] ?? false) === true, 'the epoch-0 namespace caches the success');
+            self::assertSame(true, (SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId0, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, 'the epoch-0 namespace caches the success');
 
             // The epoch rotates to 1; the malicious replay with the same
             // key lands in the epoch-1 namespace and the signed epoch-0
@@ -516,10 +526,10 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
             self::assertSame(200, $malicious->getStatusCode());
             self::assertFalse($maliciousBody['success'] ?? null, 'the epoch-rotated replay must never return the cached success');
             self::assertSame(['invalid-input-response'], $maliciousBody['error-codes'] ?? null, 'the signed-epoch mismatch is the hard provider verdict');
-            $stored1 = $idem->stored($backendId1, $uuid);
+            $stored1 = SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId1, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($stored1, 'the rotated replay finalizes its own deterministic failure');
             self::assertFalse($stored1['success'] ?? true);
-            self::assertSame(true, ($idem->stored($backendId0, $uuid)['success'] ?? false) === true, 'the epoch-0 cached success stays untouched');
+            self::assertSame(true, (SiteVerifyStoreAssert::completed($idem->storedForOperation($backendId0, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''))['success'] ?? false) === true, 'the epoch-0 cached success stays untouched');
             self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult, 'the epoch-0 redemption committed exactly once');
         } finally {
             $this->client->del([$idemKey0, $idemKey1, self::NAMESPACE.':'.$challenge->nonce]);

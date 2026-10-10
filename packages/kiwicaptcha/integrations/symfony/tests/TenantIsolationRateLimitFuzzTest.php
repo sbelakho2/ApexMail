@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\Issuer;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -88,7 +89,15 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
             '2001:0db8:0:0:0:0:0:1',
             '2400:cb00::1',
             '2400:cb00::2',
+            '2001:db8:1::1',
+            '2001:db8:2::1',
         ];
+    }
+
+    /** The limiter's bucket of a canonical identity: IPv6 truncates to the /64. */
+    private static function bucketOf(string $canonical): string
+    {
+        return \strlen($canonical) === 17 && $canonical[0] === "\x06" ? substr($canonical, 0, 9) : $canonical;
     }
 
     private function limiter(string $namespace, string $pepper, int $maxPerClient = 1, int $globalMax = 0): IssuanceRateLimiter
@@ -127,6 +136,16 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
                 if ($canonicalA === $canonicalB) {
                     continue;
                 }
+                // IPv6 clients are bucketed by /64 (a host controls at
+                // least a /64, so per-/128 budgets would be rotatable).
+                // Distinct addresses inside one /64 must share a window.
+                if (self::bucketOf($canonicalA) === self::bucketOf($canonicalB)) {
+                    $namespace = 'iso-rl-same64-'.$i.'-'.$j;
+                    $limiter = $this->limiter($namespace, 'pepper');
+                    self::assertTrue($limiter->allow($ipA), 'the first /64 address must be admitted');
+                    self::assertFalse($limiter->allow($ipB), sprintf('%s must not get a fresh budget beside %s inside one /64', $ipB, $ipA));
+                    continue;
+                }
                 $pairs++;
                 $namespace = 'iso-rl-'.$pairs;
                 $limiter = $this->limiter($namespace, 'pepper');
@@ -136,7 +155,7 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
                 self::assertFalse($limiter->allow($ipA), 'the first window must now be full');
                 self::assertFalse($limiter->allow($ipB), 'the second window must now be full');
 
-                $clientKeys = $this->client->keys('{kiwi:rl:'.$namespace.'}:client:*');
+                $clientKeys = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive($namespace).'}:client:*');
                 self::assertCount(2, $clientKeys, 'each client must own exactly one pseudonym key');
                 self::assertNotSame(
                     $clientKeys[0],
@@ -162,8 +181,8 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
             self::assertTrue($b->allow($ip), 'namespace B must have an independent window for the same IP');
             self::assertFalse($b->allow($ip), 'namespace B window must now be full');
 
-            $keysA = $this->client->keys('{kiwi:rl:iso-rl-ns-a}:client:*');
-            $keysB = $this->client->keys('{kiwi:rl:iso-rl-ns-b}:client:*');
+            $keysA = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-ns-a').'}:client:*');
+            $keysB = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-ns-b').'}:client:*');
             self::assertCount(1, $keysA, 'namespace A owns its client key');
             self::assertCount(1, $keysB, 'namespace B owns its client key');
             self::assertSame([], array_intersect($keysA, $keysB), 'the namespace key sets must be disjoint');
@@ -193,8 +212,8 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
         $b = $this->limiter('iso-rl-global-b', 'pepper', maxPerClient: 0, globalMax: 1);
         self::assertTrue($b->allow('198.51.100.7'), 'namespace B must have its own global budget');
 
-        $globalKeysA = $this->client->keys('{kiwi:rl:iso-rl-global-a}:global');
-        $globalKeysB = $this->client->keys('{kiwi:rl:iso-rl-global-b}:global');
+        $globalKeysA = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-global-a').'}:global');
+        $globalKeysB = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-global-b').'}:global');
         self::assertCount(1, $globalKeysA, 'namespace A owns its global key');
         self::assertCount(1, $globalKeysB, 'namespace B owns its global key');
         self::assertSame([], array_intersect($globalKeysA, $globalKeysB), 'the global keys must be disjoint');

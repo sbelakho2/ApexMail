@@ -2,7 +2,8 @@
 //!
 //! Incumbent captcha backends call a provider "siteverify" endpoint with
 //! `response` + `secret` (+ optional `remoteip`) and expect provider-shaped
-//! JSON: `success`, `challenge_ts`, `hostname`, `error-codes`. This module
+//! JSON: `success`, `challenge_ts`, `hostname`, `action`, `cdata`,
+//! `error-codes`. This module
 //! provides the response DTO and the mapping from the core verify outcome —
 //! the same atomic verifier the native path uses; there is no second
 //! verification implementation, and the deterministic consumed-result
@@ -26,6 +27,18 @@ pub struct SiteverifyResponse {
     pub success: bool,
     pub challenge_ts: Option<String>,
     pub hostname: Option<String>,
+    /// The action bound to the challenge at issuance (reCAPTCHA v3
+    /// vocabulary), echoed from server-side metadata, never from the
+    /// verification request. Always present in the emitted JSON — an
+    /// explicit null when no metadata store recorded one, the same shape
+    /// the PHP provider response (`SiteVerifyController::canonicalSuccess`)
+    /// always carries.
+    pub action: Option<String>,
+    /// The cdata bound to the challenge at issuance, echoed from
+    /// server-side metadata, never from the verification request. Always
+    /// present in the emitted JSON as an explicit null when unknown (PHP
+    /// parity: both keys are emitted on every response).
+    pub cdata: Option<String>,
     #[serde(rename = "error-codes")]
     pub error_codes: Vec<String>,
 }
@@ -39,17 +52,35 @@ pub fn siteverify_response(
     outcome: &VerifyOutcome,
     record: Option<&ChallengeRecord>,
 ) -> SiteverifyResponse {
+    siteverify_response_with_metadata(outcome, record, None, None)
+}
+
+/// Build the provider-shaped response with the server-side metadata the
+/// caller resolved (the PHP SiteVerifyController's metadata store
+/// mirror): `action` and `cdata` are issued with the challenge, never
+/// echoed from the verification request, and are always emitted — null
+/// when the metadata store recorded none (PHP parity).
+pub fn siteverify_response_with_metadata(
+    outcome: &VerifyOutcome,
+    record: Option<&ChallengeRecord>,
+    action: Option<&str>,
+    cdata: Option<&str>,
+) -> SiteverifyResponse {
     match outcome {
         VerifyOutcome::Valid { .. } => SiteverifyResponse {
             success: true,
             challenge_ts: record.map(|r| format_unix_ts(r.issued_at)),
             hostname: record.and_then(|r| r.hostname.clone()),
+            action: action.map(str::to_string),
+            cdata: cdata.map(str::to_string),
             error_codes: Vec::new(),
         },
         VerifyOutcome::Invalid(reason) => SiteverifyResponse {
             success: false,
             challenge_ts: None,
             hostname: None,
+            action: None,
+            cdata: None,
             error_codes: vec![map_error(reason)],
         },
     }
@@ -77,8 +108,9 @@ pub fn siteverify_response(
 ///   `CounterTooLarge`, `WrongScope`, `RequestBindingMismatch`,
 ///   `WrongRegion`, `WrongIssuer`, `WrongPolicyVersion`, `UnknownKid`,
 ///   `TooManyAttempts`, `InsufficientWork`, `MalformedRecord`,
-///   `UnsupportedArgon2Params`, `BotDetected`, `MalformedToken`,
-///   `RecordNotFound`): `invalid-input-response`.
+///   `UnsupportedArgon2Params`, `UnsupportedRswParams`, `BotDetected`,
+///   `MalformedToken`, `RecordNotFound`, `ExecutionMismatch`):
+///   `invalid-input-response`.
 fn map_error(reason: &VerifyError) -> String {
     match reason {
         VerifyError::Expired | VerifyError::AlreadyConsumed => "timeout-or-duplicate".into(),
@@ -142,6 +174,83 @@ mod tests {
     use crate::verify::VerifyOutcome;
 
     #[test]
+    fn success_response_echoes_the_issued_action_and_cdata_metadata() {
+        // action/cdata are bound at issuance and echoed from the
+        // server-side metadata, never from the verification request; the
+        // PHP provider response carries the same fields — as explicit
+        // nulls when unknown, never as absent keys.
+        let outcome = VerifyOutcome::Invalid(crate::verify::VerifyError::BadSignature);
+        let without = siteverify_response(&outcome, None);
+        assert_eq!(without.action, None);
+        assert_eq!(without.cdata, None);
+        let json = serde_json::to_value(&without).unwrap();
+        assert_eq!(json["action"], serde_json::Value::Null);
+        assert_eq!(json["cdata"], serde_json::Value::Null);
+        assert_eq!(
+            json["error-codes"],
+            serde_json::json!(["invalid-input-response"])
+        );
+
+        let record = crate::challenge::ChallengeRecord {
+            nonce: "n".into(),
+            scope: "login".into(),
+            binding_tag: "b".into(),
+            issued_at: 1_700_000_000,
+            expires_at: 1_700_000_120,
+            algorithm: crate::challenge::PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            salt: "c2FsdA==".into(),
+            prefix: String::new(),
+            challenge: String::new(),
+            min_duration_ms: 0,
+            issued_at_ns: 0,
+            attempts_used: 0,
+            protocol_version: 2,
+            region: None,
+            policy_version: 1,
+            request_binding: None,
+            issuer: None,
+            kid: 1,
+            execution_program: None,
+            execution_version: None,
+            execution_commitment: None,
+            hostname: None,
+            decoy_field: None,
+            rsw_modulus_sha256: None,
+            server_mac: None,
+        };
+        let outcome = VerifyOutcome::Valid {
+            nonce: "n".into(),
+            request_binding: None,
+            from_stored_result: false,
+            solve_duration_ms: Some(10),
+        };
+        let with = siteverify_response_with_metadata(
+            &outcome,
+            Some(&record),
+            Some("login"),
+            Some("cdata-1"),
+        );
+        assert_eq!(with.action.as_deref(), Some("login"));
+        assert_eq!(with.cdata.as_deref(), Some("cdata-1"));
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["action"], "login");
+        assert_eq!(json["cdata"], "cdata-1");
+
+        // A valid outcome without resolved metadata emits the same keys as
+        // explicit nulls — the PHP canonicalSuccess shape.
+        let without_metadata = siteverify_response(&outcome, Some(&record));
+        let json = serde_json::to_value(&without_metadata).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["action"], serde_json::Value::Null);
+        assert_eq!(json["cdata"], serde_json::Value::Null);
+        assert_eq!(json["error-codes"], serde_json::json!([]));
+    }
+
+    #[test]
     fn formats_unix_ts_as_rfc3339() {
         assert_eq!(format_unix_ts(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_unix_ts(1_752_632_400), "2025-07-16T02:20:00Z");
@@ -188,10 +297,7 @@ mod tests {
                 VerifyError::UnsupportedArgon2Params,
                 "invalid-input-response",
             ),
-            (
-                VerifyError::UnsupportedRswParams,
-                "invalid-input-response",
-            ),
+            (VerifyError::UnsupportedRswParams, "invalid-input-response"),
             (VerifyError::BotDetected, "invalid-input-response"),
             (VerifyError::MalformedToken, "invalid-input-response"),
             (VerifyError::RecordNotFound, "invalid-input-response"),
@@ -241,6 +347,8 @@ mod tests {
             execution_program: None,
             execution_version: None,
             execution_commitment: None,
+            rsw_modulus_sha256: None,
+            server_mac: None,
         };
         let _ = &mut record;
         let resp = siteverify_response(
@@ -256,5 +364,33 @@ mod tests {
         assert_eq!(resp.hostname.as_deref(), Some("login.example"));
         assert_eq!(resp.challenge_ts.as_deref(), Some("2025-07-16T02:20:00Z"));
         assert!(resp.error_codes.is_empty());
+        // The full emitted provider shape: both metadata keys always
+        // present, null when unknown — never absent (PHP parity).
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "success": true,
+                "challenge_ts": "2025-07-16T02:20:00Z",
+                "hostname": "login.example",
+                "action": null,
+                "cdata": null,
+                "error-codes": [],
+            })
+        );
+
+        // The Invalid arm pins the same key set with its provider code.
+        let invalid = siteverify_response(&VerifyOutcome::Invalid(VerifyError::Expired), None);
+        assert_eq!(
+            serde_json::to_value(&invalid).unwrap(),
+            serde_json::json!({
+                "success": false,
+                "challenge_ts": null,
+                "hostname": null,
+                "action": null,
+                "cdata": null,
+                "error-codes": ["timeout-or-duplicate"],
+            })
+        );
     }
 }

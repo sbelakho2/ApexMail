@@ -59,9 +59,7 @@ final class RedisConsumeRecoveryDriver implements ConsumeRecoveryDriver
 
     public function commit(string $nonce, bool $valid, ?string $owner): bool
     {
-        return $owner !== null
-            ? $this->storage->commitResultResume($nonce, $valid, null, $owner)
-            : $this->storage->commitResult($nonce, $valid, null);
+        return ServerState::commit($this->storage, $nonce, $valid, null, $owner, ConsumeRecoveryWalk::SECRET);
     }
 
     public function claim(string $nonce, int $ttlSecs): ?string

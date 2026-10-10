@@ -139,9 +139,6 @@ ${WIDGET_MARKUP}
 async function serveFormPage(page, endpoint) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-  // The lazy risk module (widget-risk.js) is embedded on every production
-  // inline page (the bundle's form_div_layout.html.twig embeds it after
-  // the driver); the fixture page mirrors that exact inline-tier shape.
   const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
@@ -404,10 +401,7 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
   test('multiple widgets on one page: independent solves, tokens and decoys, isolated reset', async ({ page }) => {
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-    // The lazy risk module (widget-risk.js) is embedded on every
-    // production inline page (the bundle's form_div_layout.html.twig);
-    // the fixture page mirrors that exact inline-tier shape.
-    const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="fa" action="/form-submit" method="post">
   <div class="kiwi-container" id="ca" data-kiwi-endpoint="/challenge?decoy=pool" data-kiwi-scope="login">
@@ -747,10 +741,7 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
     const PINNED = 'billing_address_line_a3f9c21d8e5b7401';
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-    // The lazy risk module (widget-risk.js) is embedded on every
-    // production inline page (the bundle's form_div_layout.html.twig);
-    // the fixture page mirrors that exact inline-tier shape.
-    const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
   <label>App field <input type="text" id="app-field" name="${PINNED}" value="legit app value" /></label>

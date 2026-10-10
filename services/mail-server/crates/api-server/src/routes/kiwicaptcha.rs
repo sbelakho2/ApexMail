@@ -224,11 +224,20 @@ async fn issue_challenge_handler(
         ));
     }
 
-    // Validate scope against an allowlist to prevent abuse.
+    // Validate scope against an allowlist to prevent abuse. Each scope is
+    // minted for exactly one auth surface and verified against that surface's
+    // handler scope (see `app::KIWI_AUTH_PAGES` — the two lists stay in
+    // lockstep).
     let scope = body.scope.as_str();
     if !matches!(
         scope,
-        "login" | "signup" | "forgot-password" | "reset-password" | "cp-login"
+        "login"
+            | "signup"
+            | "forgot-password"
+            | "reset-password"
+            | "cp-login"
+            | "resend-verification"
+            | "mfa-verify"
     ) {
         return Err(ApiError::Validation(vec!["invalid captcha scope".into()]));
     }
@@ -297,10 +306,14 @@ async fn issue_challenge_handler(
         // (verification currently does not pin an expected version).
         policy_version: 1,
         // Single-region, single-key deployment: no region/issuer binding and
-        // kid 1 (the primary key) signs every challenge.
+        // kid 1 (the primary key) signs every challenge. No per-tenant key
+        // root either — every ApexMail challenge derives under the global
+        // purpose keys (`tenant: None`), byte-identical to the tenant-free
+        // verification in `routes::auth::verify_kiwi_token`.
         region: None,
         issuer: None,
         kid: 1,
+        tenant: None,
         // ExecutionChallengeV1 and the RSW time-lock are not armed on this
         // deployment: no keyed-PRF key and no trapdoor parameters are
         // configured, so neither dimension is ever issued.
@@ -552,9 +565,12 @@ mod adversarial_tests {
         let Some(pool) = crate::test_db::canonical_pool("kiwi_scope").await else {
             return;
         };
-        let env =
-            AdvEnv::over_with_config(pool, kiwi_config(true, "kiwi-test-secret"), "unused".into())
-                .await;
+        let env = AdvEnv::over_with_config(
+            pool,
+            kiwi_config(true, "kiwi-test-secret-0123456789abcdef"),
+            "unused".into(),
+        )
+        .await;
         let (status, body) = env
             .post("/api/kcaptcha/challenge", r#"{"scope":"admin-login"}"#)
             .await;
@@ -599,6 +615,42 @@ mod adversarial_tests {
         assert!(!message.contains("internal"), "no internal leak: {body}");
     }
 
+    /// K2 wave: the two scopes added for the fully-integrated auth surfaces
+    /// (`resend-verification` on the verify-email resend form and
+    /// `mfa-verify` on both MFA steps) are accepted by the issuance
+    /// allowlist — a rejected scope would render a widget whose challenge
+    /// fetch 400s and whose form could never be submitted.
+    #[tokio::test]
+    async fn k2_auth_surface_scopes_are_issued() {
+        if !redis_available().await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_k2_scopes").await else {
+            return;
+        };
+        let env = AdvEnv::over_with_config(
+            pool,
+            kiwi_config(true, "kiwi-test-secret-0123456789abcdef"),
+            "unused".into(),
+        )
+        .await;
+        for scope in ["resend-verification", "mfa-verify"] {
+            let (status, body) = env
+                .post(
+                    "/api/kcaptcha/challenge",
+                    &format!(r#"{{"scope":"{scope}"}}"#),
+                )
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{scope}: {body}");
+            assert!(
+                !body["nonce"].as_str().unwrap_or_default().is_empty(),
+                "{scope} must mint a nonce"
+            );
+            assert_eq!(body["algorithm"], "sha256");
+        }
+    }
+
     #[tokio::test]
     async fn challenge_issuance_persists_and_rate_limits_per_ip() {
         if !redis_available().await {
@@ -610,7 +662,7 @@ mod adversarial_tests {
         };
         let mut env = AdvEnv::over_with_config(
             pool.clone(),
-            kiwi_config(true, "kiwi-test-secret"),
+            kiwi_config(true, "kiwi-test-secret-0123456789abcdef"),
             "unused".into(),
         )
         .await;
@@ -685,9 +737,12 @@ mod adversarial_tests {
         let Some(pool) = crate::test_db::canonical_pool("kiwi_cancel").await else {
             return;
         };
-        let env =
-            AdvEnv::over_with_config(pool, kiwi_config(true, "kiwi-test-secret"), "unused".into())
-                .await;
+        let env = AdvEnv::over_with_config(
+            pool,
+            kiwi_config(true, "kiwi-test-secret-0123456789abcdef"),
+            "unused".into(),
+        )
+        .await;
         for nonce in ["", "has spaces", "unicode-ñ", &"x".repeat(65)] {
             let (status, _body) = env
                 .post(

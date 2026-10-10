@@ -14,7 +14,10 @@ namespace KiwiCaptcha;
  * independently. The rsw final value is peeled first, exactly when the
  * last segment is 512 lowercase hex. The execution-evidence segment
  * that precedes it (digest or digest:trace) is peeled next. The
- * unarmed token keeps the exact four-segment shape.
+ * unarmed token keeps the exact four-segment shape. The numeric
+ * segments (counter, duration_ms) are canonical decimal: digits only,
+ * a leading zero rejected unless the whole segment is exactly "0", so
+ * each value has exactly one wire spelling in both implementations.
  *
  * An rsw token carries the client's final value as an optional final
  * segment: exactly 512 lowercase hex characters (the 256-byte
@@ -51,14 +54,15 @@ final class SolutionToken
     }
 
     /**
-     * The browser/wasm solver caps at 5,000,000 hashes, so a counter
-     * above it cannot come from a legit solve. 5,000,000 is 7 digits;
-     * the length bound rejects absurdly long digit strings before the
-     * integer cast could hide them.
+     * The browser/wasm solver caps its search at 20,000,000 hashes (the
+     * protocol/limits.json authority shared with the Rust core and the
+     * widget), so a counter above it cannot come from a legit solve.
+     * 20,000,000 is 8 digits; the length bound rejects absurdly long
+     * digit strings before the integer cast could hide them.
      */
-    private const MAX_SOLVER_COUNTER = 5_000_000;
+    private const MAX_SOLVER_COUNTER = 20_000_000;
 
-    /** The solver-cap ceiling (5M), exposed for tests. */
+    /** The solver-cap ceiling (20M), exposed for tests. */
     public static function maxSolverCounter(): int
     {
         return self::MAX_SOLVER_COUNTER;
@@ -75,9 +79,23 @@ final class SolutionToken
      * @param string|null          $rswProof         512-lowercase-hex rsw final
      *                                              value, or null for every
      *                                              other shape
+     *
+     * @throws \InvalidArgumentException when the execution evidence is a
+     *                                   partial pair: the wire grammar rides
+     *                                   the trace behind the digest
+     *                                   (`digest:trace`), so a trace without
+     *                                   a digest cannot be represented and
+     *                                   must never be silently dropped (the
+     *                                   submission would fall back to the
+     *                                   plain shape and grant as an unarmed
+     *                                   solution carrying no evidence).
      */
     public static function create(string $nonce, int $counter, int $durationMs, array $telemetry, ?string $executionDigest = null, ?string $executionTrace = null, ?string $rswProof = null): self
     {
+        if ($executionTrace !== null && $executionDigest === null) {
+            throw new \InvalidArgumentException('an execution trace must ride behind its digest (digest:trace): a trace without a digest is not representable on the wire');
+        }
+
         return new self($nonce, $counter, $durationMs, $telemetry, $executionDigest, $executionTrace, $rswProof);
     }
 
@@ -96,11 +114,11 @@ final class SolutionToken
         // The execution digest is an optional fifth segment: an unarmed
         // token stays byte-identical to the four-segment shape.
         if ($this->executionDigest !== null) {
-            // The trace travels on the wire as base64url, unpadded — the
+            // The trace travels on the wire as base64url, unpadded, the
             // driver's format (btoa + url-safe translation): the field
             // already holds the standard base64 of the plain trace, so
             // only the alphabet/padding translation applies ('+'/'-',
-            // '/'/'_', '=' stripped) — never a second encode.
+            // '/'/'_', '=' stripped), never a second encode.
             $plain .= '.'.$this->executionDigest.($this->executionTrace !== null ? ':'.rtrim(strtr($this->executionTrace, '+/', '-_'), '=') : '');
         }
         // The rsw final value rides as the final segment, after the
@@ -146,7 +164,7 @@ final class SolutionToken
 
         // The wire grammar splits on ALL dots: the first three segments
         // are nonce/counter/duration, and everything from the fourth
-        // segment onward is telemetry plus — at the tail — the optional
+        // segment onward is telemetry plus — at the tail, the optional
         // execution-evidence segment and the optional rsw final value.
         // The suffix peels run independently, right-to-left: the rsw
         // final value is peeled first exactly when the last segment is
@@ -211,26 +229,45 @@ final class SolutionToken
 
         // The nonce is base64(32 random bytes): exactly 44 chars, standard
         // alphabet with one padding '='. Anything else cannot come from
-        // Issuer::issue().
+        // Issuer::issue(). The shape check alone is not enough: the 43rd
+        // character of a 32-byte encoding carries only 4 meaningful bits,
+        // so a shape-valid spelling whose final sextet has non-zero unused
+        // bits (e.g. 'F' where the canonical char is 'E') decodes to the
+        // same 32 bytes but is not canonical. Mirror the Rust decoder
+        // (token.rs: decode to 32 bytes and re-encode byte-exact), so
+        // exactly one wire spelling per nonce is accepted.
         if (\strlen($nonce) !== 44 || preg_match('/^[A-Za-z0-9+\/]{43}=$/', $nonce) !== 1) {
             throw DecodeError::malformed();
         }
+        $nonceBytes = base64_decode($nonce, true);
+        if ($nonceBytes === false || \strlen($nonceBytes) !== 32 || base64_encode($nonceBytes) !== $nonce) {
+            throw DecodeError::malformed();
+        }
 
-        // Rust's `u64::from_str` accepts leading zeros ("007" -> 7) and
-        // rejects empty/"+1"/"1.5". ctype_digit mirrors that exactly.
+        // The numeric segments are canonical decimal: digits only, with a
+        // leading zero rejected unless the whole segment is exactly "0"
+        // ("0042" is not a number the solver or the widget ever emits).
+        // Both implementations enforce the identical rule, so the token
+        // language accepts exactly one spelling per value.
         if ($counterStr === '' || !ctype_digit($counterStr)) {
             throw DecodeError::invalidCounter();
         }
-        // Counter bound: the JS solver searches counter < 5,000,000
+        if (\strlen($counterStr) > 1 && $counterStr[0] === '0') {
+            throw DecodeError::invalidCounter();
+        }
+        // Counter bound: the JS solver searches counter < 20,000,000
         // attempts, so the largest counter it can ever produce is
-        // 4,999,999; anything >= 5,000,000 was not minted by a real
-        // solve.
-        if (\strlen($counterStr) > 7 || (int) $counterStr >= self::MAX_SOLVER_COUNTER) {
+        // 19,999,999; anything >= 20,000,000 was not minted by a real
+        // solve. Canonical 8-digit spellings below the ceiling are valid.
+        if (\strlen($counterStr) > 8 || (int) $counterStr >= self::MAX_SOLVER_COUNTER) {
             throw DecodeError::counterExceedsSolverMaximum();
         }
         $counter = (int) $counterStr;
 
         if ($durationStr === '' || !ctype_digit($durationStr)) {
+            throw DecodeError::invalidDuration();
+        }
+        if (\strlen($durationStr) > 1 && $durationStr[0] === '0') {
             throw DecodeError::invalidDuration();
         }
         // Duration is client telemetry only, but the wire protocol still

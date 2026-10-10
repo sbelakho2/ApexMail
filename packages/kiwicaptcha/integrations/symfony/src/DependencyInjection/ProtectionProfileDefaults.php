@@ -173,6 +173,44 @@ final class ProtectionProfileDefaults
                 ],
             ],
         ],
+        // The change.md Part 5 name of the abuse posture: the identical
+        // matrix under the specification's own spelling. RiskStageComposition
+        // keys both names onto the same full stage composition (marks,
+        // pricing, bucket trust, explanation surface), so a deployment may
+        // write either name and get byte-identical wiring.
+        'abuse_first' => [
+            'root' => [
+                'algorithm' => 'sha256',
+                'difficulty_bits' => 18,
+                'argon2_difficulty_bits' => 8,
+                'argon_m_kib' => 0,
+                'argon_t' => 3,
+                'argon_p' => 1,
+                'challenge_ttl_secs' => 120,
+                'rate_limit' => 5,
+                'rate_limit_global' => 2000,
+                'privacy_mode' => 'strict',
+                'telemetry' => 'off',
+                'enforce_telemetry' => false,
+                'binding_mode' => 'nonce_ip_hmac',
+                'resource_capacity' => ['issuance_per_second' => 2000],
+            ],
+            'risk' => [
+                'enabled' => true,
+                'decoy_v3_enabled' => true,
+                'client_context' => false,
+                'execution_challenge' => 'on',
+                'hard_limits' => ['process_per_second' => 5000],
+                'max_outstanding_challenges' => 10,
+                'max_outstanding_challenges_global' => 250000,
+                'weights' => [
+                    'bad_proof' => 320,
+                    'malformed' => 340,
+                    'replay' => 380,
+                    'action_failure' => 160,
+                ],
+            ],
+        ],
         'compatibility' => [
             'root' => [
                 'algorithm' => 'sha256',
@@ -339,7 +377,10 @@ final class ProtectionProfileDefaults
         if (self::selectedProfile($rawConfigs) === 'privacy_strict') {
             $config['risk']['execution_challenge'] = 'off';
         }
-        if (self::selectedProfile($rawConfigs) !== 'high_abuse'
+        // The abuse posture under either spelling (the specification name
+        // abuse_first and the integration name high_abuse share one matrix
+        // and one conditional).
+        if (!\in_array(self::selectedProfile($rawConfigs), ['high_abuse', 'abuse_first'], true)
             || ($config['risk']['request_binding_authority'] ?? null) === null
         ) {
             return $config;

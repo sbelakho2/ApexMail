@@ -2,10 +2,12 @@
 //! deterministic-outcome invariants of the ExecutionChallengeV1 decode
 //! and verify paths under attacker-controlled mutation.
 //!
-//! For every execution version 1..=MAX_EXECUTION_VERSION the corpus
+//! For every execution version up to `SYNTHESIS_MAX` the corpus
 //! builds a valid program and its executed trace through the fixture
 //! machinery (`generate` + `decode` + `fixtures::executed_trace_for`,
-//! the browser-equivalent synthesizer of the `test-fixtures` module),
+//! the browser-equivalent synthesizer of the `test-fixtures` module;
+//! the real-platform rung 6 needs a real engine and is covered by the
+//! fail-closed record sweep instead),
 //! then mutates, per case independently: the program base64 text, the
 //! decoded blob bytes, the header (scope length, action length, the
 //! execution-version byte, the op count), every opcode, every
@@ -27,7 +29,9 @@
 //! The record-level corpus rides the canonical record register (1..=
 //! MAX_EXECUTION_VERSION, the set `validate_record` accepts — the exact
 //! set of the PHP record/verifier gate); the fixture-level corpus spans
-//! the full execution-version range. The last section pins the
+//! the synthesis range, and the register sweep pins that an armed
+//! record at the real-platform maximum passes the record gate while a
+//! browserless trace fails closed with execution_mismatch. The last section pins the
 //! cross-language differential corpus shared with the PHP suite: the
 //! classifications of 19 adversarial program/trace cases must match
 //! `ExecutionDifferentialCorpusTest` case for case.
@@ -46,6 +50,13 @@ use kiwicaptcha::verify::{
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
+/// The highest rung the browserless trace synthesizer can reproduce:
+/// version 5, the last pure-semantics grammar. The real-platform rung
+/// (version 6) needs a real layout engine, so its traces never come
+/// from `fixtures::executed_trace_for`; the record-level sweep below
+/// pins its fail-closed behavior instead.
+const SYNTHESIS_MAX: u8 = 5;
 
 const KEY: &str = "0123456789abcdef0123456789abcdef";
 const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
@@ -91,6 +102,7 @@ fn config() -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -202,7 +214,7 @@ fn reencode(blob: &[u8]) -> String {
 fn program_mutations_never_panic_and_reject_deterministically() {
     let mut rng = StdRng::seed_from_u64(0x5EED_E2EC_0101);
     let mut cases = 0usize;
-    for version in 1..=execution::MAX_EXECUTION_VERSION {
+    for version in 1..=SYNTHESIS_MAX {
         let seed = build_seed(version);
         let b64 = &seed.program_b64;
         let what = |label: String| format!("v{version} {label}");
@@ -501,7 +513,7 @@ fn join_entries(entries: &[String]) -> String {
 #[test]
 fn trace_mutations_never_panic_and_reject_deterministically() {
     let mut cases = 0usize;
-    for version in 1..=execution::MAX_EXECUTION_VERSION {
+    for version in 1..=SYNTHESIS_MAX {
         let seed = build_seed(version);
         let entries = trace_entries(&seed.trace);
         let what = |label: String| format!("v{version} {label}");
@@ -759,7 +771,14 @@ fn issue_probe(version: u8) -> ArmedProbe {
     let decoded = execution::decode(&program_b64).expect("the issued program parses");
     assert_eq!(decoded.op_version, version);
     let trace = execution::fixtures::executed_trace_for(&decoded);
-    assert!(execution::verify_executed_trace(&program_b64, &record.nonce, &trace).is_some());
+    if version <= SYNTHESIS_MAX {
+        assert!(execution::verify_executed_trace(&program_b64, &record.nonce, &trace).is_some());
+    } else {
+        // Above the synthesis ceiling the browserless trace fails
+        // closed: the record is well formed but the trace is not a
+        // valid execution of the program.
+        assert!(execution::verify_executed_trace(&program_b64, &record.nonce, &trace).is_none());
+    }
     let digest = execution::expected_digest_over_trace(&program_b64, &record.nonce, &trace)
         .expect("the armed probe digests");
     let trace_b64: String = B64
@@ -787,6 +806,7 @@ fn verify_probe(
     let mut ctx = VerifyContext {
         record,
         secret_key: KEY,
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter: probe.counter,
@@ -799,6 +819,7 @@ fn verify_probe(
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some(IP),
         execution_digest: digest,
         execution_trace: trace_b64,
@@ -808,6 +829,7 @@ fn verify_probe(
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
         max_attempts: 0,
     };
     verify_solution(&mut ctx)
@@ -823,7 +845,7 @@ fn assert_invalid(what: &str, outcome: VerifyOutcome) {
 #[test]
 fn record_evidence_mutations_never_panic_and_reject_deterministically() {
     let mut cases = 0usize;
-    for version in 1..=execution::MAX_EXECUTION_VERSION {
+    for version in 1..=SYNTHESIS_MAX {
         let probe = issue_probe(version);
         let what = |label: String| format!("v{version} {label}");
 
@@ -1030,8 +1052,26 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
 fn record_execution_version_register_matches_the_php_gate_sweep() {
     let register = |v: u8| (1..=execution::MAX_EXECUTION_VERSION).contains(&v);
 
-    // A record armed at the current maximum issues and verifies end to
-    // end: the widened register accepts the full canonical set.
+    // A record armed at the synthesis ceiling issues and verifies end
+    // to end, and a record armed at the current maximum passes the
+    // record gate while its browserless trace fails closed with the
+    // deterministic execution_mismatch (the real-platform rung needs a
+    // real engine).
+    let ceiling_probe = issue_probe(SYNTHESIS_MAX);
+    let ceiling_label = format!("record armed at the synthesis ceiling {SYNTHESIS_MAX}");
+    let mut ceiling_control = ceiling_probe.record.clone();
+    let ceiling_outcome = guarded(&ceiling_label, || {
+        verify_probe(
+            &ceiling_probe,
+            &mut ceiling_control,
+            Some(&ceiling_probe.digest),
+            Some(&ceiling_probe.trace_b64),
+        )
+    });
+    assert!(
+        matches!(ceiling_outcome, VerifyOutcome::Valid { .. }),
+        "{ceiling_label} must verify end to end"
+    );
     let max_probe = issue_probe(execution::MAX_EXECUTION_VERSION);
     let label = format!(
         "record armed at the register maximum {}",
@@ -1052,8 +1092,11 @@ fn record_execution_version_register_matches_the_php_gate_sweep() {
         )
     });
     assert!(
-        matches!(outcome, VerifyOutcome::Valid { .. }),
-        "{label} must verify end to end"
+        matches!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::ExecutionMismatch)
+        ),
+        "{label} must fail closed on the browserless trace, got {outcome:?}"
     );
 
     // The full 0..=9 sweep on one signed-at-1 armed record: rows inside
@@ -1150,7 +1193,7 @@ const CORPUS: [CorpusCase; 19] = [
         name: "v5-valid",
         version: 5,
         program: "AQVsb2dpbgxsb2dpbi1hY3Rpb24FGBCuB1JVL0ZoMlEVA3h5ZRhbcHReK0AkOTwwKmRPdFkvaE4jTld6WVcSEDIHWkdpZEZ5UxEIED5kPzI2QkFwYGpCUXkqVkESI7kFSWxlZlojLgVHeUV3aQjHIQdSVS9GaDJRAAoACW4GHwdSVS9GaDJRIgdaR2lkRnlTJAVHeUV3aSYEeHorTxQnB1pHaWRGeVMOCg4qKxoiMGhZRTBFSCMoJS9qdVQ0T1Aie2FjPllULAwgIB4YAAQwO2IhdS8Ddg==",
-        trace: "dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)",
+        trace: "dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)",
         expected: "valid",
     },
     CorpusCase {

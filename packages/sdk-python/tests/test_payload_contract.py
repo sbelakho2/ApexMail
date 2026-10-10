@@ -136,6 +136,47 @@ class SendPayloadContract(unittest.TestCase):
         for absent in ("reply_to", "attachments", "headers", "cc", "bcc", "tags", "metadata"):
             self.assertNotIn(absent, payload)
 
+    def test_send_payload_never_emits_unknown_wire_keys(self) -> None:
+        """Adversarial request-shape pin: SendMessageRequest is
+        deny_unknown_fields, so a single extra key is a 422. The builder's
+        emitted key set must stay inside the documented wire surface even
+        when every accepted option is supplied."""
+        payload = build_send_payload(
+            from_="a@example.com",
+            to=["b@example.com"],
+            subject="s",
+            text="t",
+            html="<p>t</p>",
+            cc=["c@example.com"],
+            bcc=["d@example.com"],
+            reply_to="r@example.com",
+            tags=["x"],
+            metadata={"k": "v"},
+            attachments=[{"filename": "a.txt", "content": "eHg="}],
+            headers={"X-Custom": "yes"},
+            priority="high",
+            scheduled_at=datetime(2026, 9, 1, 9, tzinfo=timezone.utc),
+        )
+        allowed = {
+            "from",
+            "to",
+            "subject",
+            "text",
+            "html",
+            "cc",
+            "bcc",
+            "reply_to",
+            "tags",
+            "metadata",
+            "attachments",
+            "headers",
+            "priority",
+            "scheduled_at",
+        }
+        self.assertEqual(set(payload) - allowed, set(), f"unknown wire keys: {set(payload) - allowed}")
+        self.assertNotIn("scheduledAt", payload)
+        self.assertNotIn("replyTo", payload)
+
     def test_recipient_dicts_serialize_display_names(self) -> None:
         """F48: display names survive as "Name <addr>" wire forms."""
         payload = build_send_payload(

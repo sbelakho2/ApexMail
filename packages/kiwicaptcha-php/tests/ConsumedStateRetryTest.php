@@ -123,6 +123,37 @@ final class ConsumedStateRetryTest extends TestCase
         self::assertNull($nullBinding->binding);
     }
 
+    public function testSharedConsumedResultVectorsMatchTheContract(): void
+    {
+        // The shared vectors: exactly the boolean form and the legacy
+        // integer 1/0 are accepted, and the identical set is rejected by
+        // the Rust StoredConsumedResult boundary (its custom deserializer
+        // accepts true/false/1/0 only and keeps deny_unknown_fields).
+        $path = \dirname(__DIR__).'/../../protocol/risk-v1/fixtures.json';
+        $fixtures = json_decode((string) file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
+        $vectors = $fixtures['consumed_result_vectors'] ?? null;
+        self::assertIsArray($vectors);
+        self::assertNotEmpty($vectors);
+
+        foreach ($vectors as $vector) {
+            $result = $vector['result'];
+            if ($vector['accepted']) {
+                self::assertInstanceOf(
+                    ConsumedResult::class,
+                    ConsumedResult::fromArray($result),
+                    $vector['why'],
+                );
+            } else {
+                try {
+                    ConsumedResult::fromArray($result);
+                    self::fail($vector['why'].': the malformed result must be rejected');
+                } catch (\InvalidArgumentException) {
+                    // expected
+                }
+            }
+        }
+    }
+
     public function testDeleteRemovesConsumedRecordsToo(): void
     {
         [$storage, $record] = $this->issueAndSolve();

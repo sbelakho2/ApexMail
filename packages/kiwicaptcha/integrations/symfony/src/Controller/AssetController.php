@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\Asset\AssetDigestIndex;
+use BelConsulting\KiwiCaptchaBundle\Asset\EtagMatcher;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -18,6 +20,16 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * ETag), and an unknown hash is a 404. A page can only reference the
  * exact bytes the server serves, so a mismatch can never pair a stale
  * hash with different content.
+ *
+ * Rolling deploys: a page rendered by a new node can reference a hash an
+ * old node is serving, and the reverse. The controller therefore accepts
+ * an explicit list of previous-release asset directories and serves the
+ * requested content hash from the active directory first, then from each
+ * fallback in order. Deployments that keep their previous asset
+ * directories mounted keep lazy modules loading during the rollout.
+ * Moving content-addressed assets to shared storage or a CDN works too.
+ * Without fallbacks an unknown hash stays a 404, which degrades to
+ * worker-unavailable or English-only UI until the rollout settles.
  *
  * The same-origin, content-addressed URLs are CSP-compatible with the
  * existing recommended profile (`script-src 'self'`, `style-src 'self'`):
@@ -37,10 +49,23 @@ final class AssetController
         'risk' => ['file' => 'widget-risk.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'telemetry' => ['file' => 'widget-telemetry.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'locales' => ['file' => 'widget-locales.js', 'content_type' => 'application/javascript; charset=UTF-8'],
+        // The combined WebAuthn ceremony script: one file that branches
+        // on doc.ceremony (create vs get), so a strict-CSP deployment
+        // without per-request nonces can serve it as the external
+        // scriptSrc instead of copying the constant by hand.
+        'ceremony' => ['file' => 'webauthn-ceremony.js', 'content_type' => 'application/javascript; charset=UTF-8'],
     ];
 
+    /**
+     * @param list<string> $fallbackDirs previous-release asset directories
+     *                                   searched (in order) when the
+     *                                   requested hash is not the active
+     *                                   copy
+     */
     public function __construct(
         private readonly string $assetsDir,
+        private readonly array $fallbackDirs = [],
+        private readonly ?AssetDigestIndex $digestIndex = null,
     ) {
     }
 
@@ -55,19 +80,41 @@ final class AssetController
             // served as a script (or the reverse) is a malformed URL.
             throw new NotFoundHttpException();
         }
-        $body = (string) @file_get_contents(rtrim($this->assetsDir, '/').'/'.$spec['file']);
-        if ($body === '') {
-            throw new NotFoundHttpException();
+        // Resolve the requested content hash from the active directory
+        // first, then the previous-release fallbacks: the digest index
+        // answers the active copy without reading or hashing it.
+        $fullHash = null;
+        $body = null;
+        if ($this->digestIndex !== null) {
+            $active = $this->digestIndex->digest($spec['file']);
+            if ($active !== null && hash_equals($active, $hash)) {
+                $fullHash = $active;
+                $body = $this->digestIndex->read($spec['file']);
+            }
         }
-        $fullHash = hash('sha256', $body);
-        // The URL hash is the full 256-bit digest, the whole sha256
-        // hex, so the URL can only ever address the exact bytes the
-        // route serves, the same digest the ETag carries.
-        if (!hash_equals(substr($fullHash, 0, self::HASH_LENGTH), $hash)) {
+        if ($fullHash === null) {
+            foreach ([$this->assetsDir, ...$this->fallbackDirs] as $dir) {
+                $candidate = (string) @file_get_contents(rtrim($dir, '/').'/'.$spec['file']);
+                if ($candidate === '') {
+                    continue;
+                }
+                $candidateHash = hash('sha256', $candidate);
+                // The URL hash is the full 256-bit digest, the whole
+                // sha256 hex, so the URL can only ever address the exact
+                // bytes the route serves, the same digest the ETag
+                // carries.
+                if (hash_equals(substr($candidateHash, 0, self::HASH_LENGTH), $hash)) {
+                    $fullHash = $candidateHash;
+                    $body = $candidate;
+                    break;
+                }
+            }
+        }
+        if ($fullHash === null || $body === null || $body === '') {
             throw new NotFoundHttpException();
         }
         $etag = '"'.$fullHash.'"';
-        if ((string) $request->headers->get('If-None-Match') === $etag) {
+        if (EtagMatcher::matches($request->headers->get('If-None-Match'), $etag)) {
             return new Response('', Response::HTTP_NOT_MODIFIED, [
                 'ETag' => $etag,
                 'Cache-Control' => 'public, max-age='.self::MAX_AGE_SECS.', immutable',

@@ -5,11 +5,17 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ChainRedisFake;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RollbackFakeRedis;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
@@ -25,6 +31,7 @@ use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\ReplicaWaitException;
 use KiwiCaptcha\StorageInterface;
+use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -68,6 +75,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
         $policyConfig = [
             'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'weights' => [],
             'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
         ];
@@ -252,7 +260,9 @@ final class ChainedIssuanceRollbackTest extends TestCase
         // Once markStage2Issued() confirms issued(N), NO later failure
         // (here the risk feedback) may roll back the challenge record, the
         // outstanding memberships or the chain — a rolled-back membership
-        // would resurrect a valid-but-unaccounted challenge.
+        // would resurrect a valid-but-unaccounted challenge. Post-commit
+        // feedback is evidence only, so the hand-out still succeeds (200)
+        // even though the feedback write throws.
         $storage = new ArrayStorage();
         $client = new RollbackFakeRedis();
         $outstanding = new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
@@ -266,8 +276,8 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
         ]);
         $store = new ThrowingFeedbackRiskStore(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -281,8 +291,9 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $controller = $this->chainController($storage, $chainService, $risk, outstanding: $outstanding);
 
         $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
-        self::assertSame(503, $response->getStatusCode(), 'the post-commit feedback failure answers the private structured 503');
-        self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertSame(200, $response->getStatusCode(), 'the post-commit feedback failure is best-effort: the issued challenge is still handed out');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertNotSame('', (string) ($body['challenge'] ?? ''), 'the hand-out carries the minted challenge');
 
         // Nothing was rolled back: the chain stays issued(N), the record
         // exists, the outstanding memberships still hold N.
@@ -335,6 +346,162 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $records = (new \ReflectionObject($innerStore))->getProperty('records')->getValue($innerStore);
         self::assertSame('issued', $records[$chainId]['state'], 'the chain is durably issued — exactly why the rollback must NOT run');
     }
+
+    /**
+     * The execution-capability refusal happens after a stage-2
+     * request has already reserved its chain. Every other post-reservation
+     * refusal releases the reservation; this one must too, or the chain
+     * stays "reserved" for the whole lease and the legitimate client
+     * cannot retry with an upgraded widget.
+     */
+    public function testExecutionCapabilityRefusalReleasesTheStage2Reservation(): void
+    {
+        $storage = new ArrayStorage();
+        $client = new RollbackFakeRedis();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $chainService = $this->chainService(new ArrayChainedChallengeStateStore());
+        ['chainId' => $chainId, 'ticket' => $ticket] = $this->openChain($chainService);
+
+        // A confirmed central protocol floor >= 4 arms the execution
+        // dimension; the node cap and the required tier are both 2, and
+        // this request advertises no client capability, so the effective
+        // version is 1 and the deterministic refusal fires.
+        $monitorClient = new FakePredisClient();
+        $monitor = new SecurityEpochMonitor(new Verifier(new ArrayStorage()), $monitorClient, 'rollback-test', 1);
+        $monitorClient->hset($monitor->policyKey(), 'min_protocol_version', '4');
+        $issuer = new Issuer(
+            new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120, executionKey: str_repeat('e', 32)),
+            $storage,
+        );
+        $controller = new ChallengeController(
+            $issuer,
+            null,
+            true,
+            $this->riskStack(),
+            new ContinuityCookie(),
+            outstanding: $outstanding,
+            storage: $storage,
+            challengeTtlSecs: 120,
+            chainTickets: $chainService,
+            policyVersion: 1,
+            epochMonitor: $monitor,
+            executionGate: true,
+            executionVersionCap: 1,
+            executionRequiredVersion: 2,
+        );
+
+        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR);
+        $response = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(422, $response->getStatusCode(), (string) $response->getContent());
+        self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $response->getContent());
+        self::assertCount(0, (new \ReflectionObject($storage))->getProperty('records')->getValue($storage), 'the refusal must mint no challenge');
+
+        $requirement = $chainService->requirementFor($chainId);
+        self::assertNotNull($requirement);
+        self::assertSame('available', $requirement->state, 'the refusal must release the stage-2 reservation so the chain is not stuck busy for the lease');
+
+        // The released ticket stays reusable: a retry reaches the same
+        // deterministic refusal instead of a reserved/busy 503.
+        $second = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(422, $second->getStatusCode(), 'the released ticket must be retryable');
+        self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $second->getContent());
+
+        // A client that falsely claims version 2 cannot raise itself past
+        // the node's own tier: the claimed capability is capped by the
+        // deployment ceiling, so the refusal repeats.
+        $claimed = JsonRequest::create(
+            '/kiwi-captcha/challenge',
+            'POST',
+            [],
+            [],
+            [],
+            ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_KIWI_EXECUTION_MAX_VERSION' => '2'],
+            $body,
+        );
+        $third = $controller->challenge($claimed);
+        self::assertSame(422, $third->getStatusCode(), 'a claimed client capability must never override the node tier');
+        self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $third->getContent());
+    }
+
+    public function testFaultsAtTheChainCreationSeamNeverOrphanTheChain(): void
+    {
+        // The chain + obligation creation used to be two separate writes
+        // (the chain SET, then the obligation SET): a fault between them
+        // orphaned the chain — present, but unreachable through its
+        // obligation and uncleanable. The creation now rides the atomic
+        // create-or-get Lua (one script, both keys in the same hash tag;
+        // Redis executes it as a single unit), so the old between-writes
+        // seam no longer exists: a fault before any write leaves neither
+        // key, and a lost reply after the write leaves both, mutually
+        // consistent.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, 'rollback-test');
+        $decorated = new RollbackLostReplyChainStore($store);
+
+        // The fault before any write: neither the chain record nor the
+        // obligation mapping may exist.
+        $chainId = 'chain-seam-before';
+        $obligationId = hash('sha256', 'txn-seam-before');
+        $decorated->createThrowsBefore = true;
+        try {
+            $decorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected pre-write fault must surface');
+        } catch (\RuntimeException) {
+            // the injected connection loss
+        }
+        self::assertNull($store->read($chainId), 'a fault before any write creates no chain record');
+        self::assertNull($store->obligationChainId($obligationId), 'a fault before any write creates no obligation mapping');
+        self::assertArrayNotHasKey('{kiwi:rollback-test}:chain:'.$chainId, $fake->strings, 'the raw Redis state holds no chain key');
+        self::assertArrayNotHasKey('{kiwi:rollback-test}:chain-obligation:'.$obligationId, $fake->strings, 'the raw Redis state holds no obligation key');
+
+        // The retry after the pre-write fault converges on the intact
+        // pair: the mapping points at the chain and the chain record
+        // carries its obligation.
+        $decorated->createThrowsBefore = false;
+        $decorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+        self::assertSame($chainId, $store->obligationChainId($obligationId), 'the retried creation installs the obligation mapping');
+        self::assertSame($obligationId, $store->read($chainId)['obligationId'], 'the retried creation writes the chain record bound to the obligation');
+
+        // The lost reply after the atomic create: both halves exist and
+        // map to each other — never an orphaned chain.
+        $lostChainId = 'chain-seam-after';
+        $lostObligationId = hash('sha256', 'txn-seam-after');
+        $decorated->createThrowsAfter = true;
+        try {
+            $decorated->createWithObligation($lostChainId, $lostObligationId, $this->nonce(), 'login', 'txn-seam-after', 'sha18', 1, 300);
+            self::fail('the injected lost reply must surface');
+        } catch (\RuntimeException) {
+            // the injected lost reply
+        }
+        self::assertSame($lostChainId, $fake->strings['{kiwi:rollback-test}:chain-obligation:'.$lostObligationId] ?? null, 'the raw obligation mapping exists after the lost reply');
+        $lostRecord = json_decode((string) ($fake->strings['{kiwi:rollback-test}:chain:'.$lostChainId] ?? ''), true);
+        self::assertSame($lostObligationId, $lostRecord['obligationId'] ?? null, 'the raw chain record exists after the lost reply and carries its obligation');
+        self::assertSame($lostChainId, $store->obligationChainId($lostObligationId), 'the pair is mutually consistent after the lost reply');
+
+        // The Array mirror observes the identical pair consistency
+        // (single-process atomicity: no interruption seam exists).
+        $array = new ArrayChainedChallengeStateStore();
+        $arrayDecorated = new RollbackLostReplyChainStore($array);
+        $arrayDecorated->createThrowsBefore = true;
+        try {
+            $arrayDecorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected pre-write fault must surface on the Array mirror');
+        } catch (\RuntimeException) {
+            // the injected connection loss
+        }
+        self::assertNull($array->read($chainId), 'the Array fault before any write creates no chain record');
+        self::assertNull($array->obligationChainId($obligationId), 'the Array fault before any write creates no obligation mapping');
+        $arrayDecorated->createThrowsBefore = false;
+        $arrayDecorated->createThrowsAfter = true;
+        try {
+            $arrayDecorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected lost reply must surface on the Array mirror');
+        } catch (\RuntimeException) {
+            // the injected lost reply
+        }
+        self::assertSame($chainId, $array->obligationChainId($obligationId), 'the Array pair is mutually consistent after the lost reply');
+        self::assertSame($obligationId, $array->read($chainId)['obligationId'], 'the Array chain record carries its obligation after the lost reply');
+    }
 }
 
 /**
@@ -385,12 +552,20 @@ final class ThrowingMintStorage implements StorageInterface
 /**
  * A transactional chain-state decorator that runs the real issuance
  * transition and then throws (a lost reply), and can additionally make
- * the recovery read fail (the indeterminate outcome).
+ * the recovery read fail (the indeterminate outcome). The chain+obligation
+ * creation can be faulted before any write or after the atomic create
+ * (the lost reply), the old two-write seam's fault positions.
  */
 final class RollbackLostReplyChainStore implements TransactionalChainedChallengeStateStore
 {
     /** Whether the recovery read throws (the indeterminate outcome). */
     public bool $readThrows = false;
+
+    /** Whether the chain+obligation creation throws before any write. */
+    public bool $createThrowsBefore = false;
+
+    /** Whether the chain+obligation creation throws after the atomic write (the lost reply). */
+    public bool $createThrowsAfter = false;
 
     public function __construct(
         private readonly TransactionalChainedChallengeStateStore $inner,
@@ -405,7 +580,13 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
 
     public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
     {
+        if ($this->createThrowsBefore) {
+            throw new \RuntimeException('simulated connection loss before the chain creation');
+        }
         $this->inner->createWithObligation($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $ttlSecs);
+        if ($this->createThrowsAfter) {
+            throw new \RuntimeException('simulated lost chain-creation reply');
+        }
     }
 
     public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
@@ -492,24 +673,9 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
 }
 
 /**
- * A minimal in-memory stand-in for Predis\Client covering exactly the
- * outstanding-challenge scripts this test exercises: the atomic issue
- * (per-source cap + live-membership cap -> INCR + EXPIRE the source
- * counter and `ZADD` the nonce at its absolute expiry). Also covered:
- * the best-effort solve and the aborted-before-handoff rollback (decr
- * floored at 0 plus a ZREM of the nonce). The counters and the live
- * membership are observable for the slot assertions.
- */
-/**
  * A risk state store whose feedback observation write throws — the
  * post-stage-2-commit risk feedback failure injection.
  */
-/**
- * A storage whose store() write throws a generic backend failure — the
- * mint can fail before the controller's $challenge variable is assigned.
- */
-
-
 final class ThrowingFeedbackRiskStore implements \KiwiCaptcha\Risk\Storage\RiskStateStoreInterface
 {
     private readonly \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore $inner;
@@ -543,104 +709,5 @@ final class ThrowingFeedbackRiskStore implements \KiwiCaptcha\Risk\Storage\RiskS
     public function correctOutcome(string $decisionId, bool $legitimate): bool
     {
         return false;
-    }
-}
-
-final class RollbackFakeRedis extends \Predis\Client
-{
-    /** @var array<string, int> plain incr counters */
-    public array $counters = [];
-
-    /** @var array<string, array<string, float>> live-outstanding membership: key => nonce => score */
-    public array $zsets = [];
-
-    /** @var array<string, string> plain strings (the nonce sidecars) */
-    public array $strings = [];
-
-    public function __construct()
-    {
-        // Deliberately skip the parent constructor: no connection setup.
-    }
-
-    private function timeMs(): float
-    {
-        return (float) (time() * 1000);
-    }
-
-    public function __call($commandID, $arguments)
-    {
-        if (strtoupper((string) $commandID) === 'GET') {
-            return $this->strings[(string) $arguments[0]] ?? null;
-        }
-        if (strtoupper((string) $commandID) !== 'EVAL') {
-            throw new \LogicException('unexpected command '.$commandID);
-        }
-        $script = (string) $arguments[0];
-        $numKeys = (int) $arguments[1];
-        $keys = \array_slice($arguments, 2, $numKeys);
-        $rest = \array_slice($arguments, 2 + $numKeys);
-
-        if (str_contains($script, 'Outstanding challenge issuance')) {
-            // OutstandingChallenges::issue: keys[1] the per-source
-            // membership ZSET (member = <source>:<nonce>, score = absolute
-            // expiry), keys[2] the global LIVE-outstanding ZSET, keys[3]
-            // the nonce sidecar; argv[1] source cap, argv[2] global cap,
-            // argv[3] TTL seconds, argv[4] absolute expiry (the score),
-            // argv[5] the minted nonce, argv[6] the source pseudonym.
-            $sourceZset = (string) $keys[0];
-            $global = (string) $keys[1];
-            $sidecar = (string) $keys[2];
-            $pseudonym = (string) $rest[5];
-            $liveUntil = (int) floor($this->timeMs() / 1000) + (int) $rest[3];
-            if ($this->sourceCount($sourceZset) >= (int) $rest[0]) {
-                return 0;
-            }
-            if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
-                return -1;
-            }
-            $this->zsets[$sourceZset][(string) $rest[4]] = (float) $liveUntil;
-            $this->zsets[$global][(string) $rest[4]] = (float) $liveUntil;
-            $this->strings[$sidecar] = $pseudonym;
-            $this->mirrorSourceCount($sourceZset);
-
-            return 1;
-        }
-
-        if (str_contains($script, 'Outstanding challenge release')) {
-            // OutstandingChallenges::solved / ::abortedBeforeHandoff:
-            // keys[1] the global live ZSET, keys[2] the nonce sidecar,
-            // keys[3] the original source's membership ZSET; argv[1] the
-            // released nonce, argv[2] the caller-resolved source. One-shot,
-            // nonce-authoritative.
-            $global = (string) $keys[0];
-            $sidecar = (string) $keys[1];
-            $sourceZset = (string) $keys[2];
-            $nonce = (string) $rest[0];
-            $expectedSource = (string) $rest[1];
-            $removed = 0;
-            if (isset($this->zsets[$global][$nonce])) {
-                unset($this->zsets[$global][$nonce]);
-                $removed = 1;
-                if (isset($this->strings[$sidecar]) && (string) $this->strings[$sidecar] === $expectedSource) {
-                    unset($this->zsets[$sourceZset][$nonce]);
-                    unset($this->strings[$sidecar]);
-                    $this->mirrorSourceCount($sourceZset);
-                }
-            }
-
-            return $removed;
-        }
-
-        throw new \LogicException('unexpected script');
-    }
-
-    private function sourceCount(string $sourceZset): int
-    {
-        return \count($this->zsets[$sourceZset] ?? []);
-    }
-
-    private function mirrorSourceCount(string $sourceZset): void
-    {
-        $this->counters[$sourceZset] = $this->sourceCount($sourceZset);
     }
 }

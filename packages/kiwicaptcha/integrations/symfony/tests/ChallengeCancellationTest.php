@@ -135,8 +135,8 @@ final class ChallengeCancellationTest extends TestCase
         $scorer = new RiskScorer();
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -828,5 +828,60 @@ final class ChallengeCancellationTest extends TestCase
 
         $outstanding->cancelled($nonce);
         self::assertSame(0, $client->counters[$sourceKey], 'the decrement is floored at 0');
+    }
+
+    public function testTheRiskDisabledWiringThrottlesCancellationsBeyondTheWindow(): void
+    {
+        // No anti-stockpiling layer (risk disabled, outstanding null):
+        // the endpoint's own dedicated cancellation limiter applies the
+        // same bounded per-source sliding-window shape, so a flood from
+        // one source is throttled beyond the window instead of driving
+        // an unbounded nonce-lookup stream.
+        $storage = new ArrayStorage();
+        $limiter = new \BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter(
+            3,
+            60,
+            pepper: 'cancel-throttle-test',
+        );
+        $controller = new ChallengeController(
+            new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage),
+            null,
+            false,
+            null,
+            null,
+            null,
+            null, // no OutstandingChallenges: the risk layer is off
+            [],
+            false,
+            $storage,
+            cancellationLimiter: $limiter,
+        );
+        $nonce = $this->issue($controller);
+
+        $statuses = [];
+        for ($i = 0; $i < 5; $i++) {
+            $statuses[] = $this->cancel($controller, $nonce)->getStatusCode();
+        }
+        self::assertSame([200, 200, 200, 429, 429], $statuses, 'the first three cancellations of the window are admitted (idempotent success), the rest are throttled');
+
+        // The refusal vocabulary is the cancellation-specific code.
+        $throttled = $this->cancel($controller, $nonce);
+        self::assertSame(429, $throttled->getStatusCode());
+        self::assertSame('CANCELLATION_RATE_LIMITED', (json_decode((string) $throttled->getContent(), true)['error']['code'] ?? null));
+
+        // A different source is a different window: it is not affected.
+        self::assertSame(200, $this->cancel($controller, $nonce, '203.0.113.9')->getStatusCode());
+    }
+
+    public function testTheRiskDisabledWiringWithoutALimiterStaysUnthrottledForDirectConstruction(): void
+    {
+        // Legacy/direct construction without the dedicated limiter keeps
+        // the documented behavior: bounded by the body ceiling, the
+        // nonce shape and the origin checks.
+        $controller = $this->controller(null);
+        $nonce = $this->issue($controller);
+        for ($i = 0; $i < 6; $i++) {
+            self::assertSame(200, $this->cancel($controller, $nonce)->getStatusCode());
+        }
     }
 }

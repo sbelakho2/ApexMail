@@ -85,6 +85,11 @@
 //! 42 DOM_URL_CANON   (no operands)
 //! 43 DOM_TEXT_MUTATE value-length byte (1..32) + value bytes + 1 raw dst cell byte
 //! 44 DOM_SELECT_DEP  3 raw descendant-index bytes
+//! 45 CSS_GEOM    id-length byte (4..16) + id bytes + raw style seed + raw dst cell
+//! 46 MUT_ORDER   id-length byte (4..16) + id bytes + 2 raw churn bytes + raw dst cell
+//! 47 EV_PHASE_FULL  id-length byte (4..16) + id bytes + raw dst cell
+//! 48 `RANGE_ORDER`   id-length byte (4..16) + id bytes + 2 raw offset bytes + raw dst cell
+//! 49 INT_OBS    id-length byte (4..16) + id bytes + raw geometry seed + raw dst cell
 //! ```
 //!
 //! String literals are printable ASCII (0x20..0x7E); ids use the
@@ -127,11 +132,22 @@
 //! node into it, read the observed byte back, checksum or rotate
 //! over it) and real-DOM probes whose ids reference the constructed
 //! node. An armed challenge always exercises real browser DOM and
-//! layout work. The dimension remains experimental: the trace
-//! values are reproducible by a pure implementation of the public
-//! interpreter semantics, with no environment proof yet; the
-//! guaranteed probe structure is the first step toward
-//! environment-dependent semantics.
+//! layout work when a browser runs it. The evidence class is
+//! rung-scoped and uniformly non-attesting: every version's trace is
+//! reproducible by a pure implementation of the public semantics plus
+//! the published envelopes. Versions 1-5 need only the interpreter
+//! semantics (the forgeability oracle pins that on purpose). Version 6
+//! additionally needs the five operand-derived acceptance envelopes —
+//! which are deterministic functions of the operands that ship with the
+//! program, published in this module. A full-knowledge forger who reads
+//! the source reimplements those five functions and emits passing
+//! traces without any browser (the white-box forger,
+//! `fixtures::white_box_envelope_forgery_solver`, measures a 100
+//! percent pass rate). Version 6 therefore costs an attacker one
+//! reading of the source — the same class as versions 1-5 — and is
+//! supplementary evidence, NOT a browser boundary. The naive oracle's
+//! rejection on version 6 is real only for forgers who never
+//! implemented the envelopes.
 //!
 //! The execution digest binds the program, the challenge context and
 //! the trace:
@@ -176,8 +192,13 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// walk (DOM_DEPTH); version 5 adds the causal object-graph grammar
 /// (the clone and reparent spine over the nested tree, the observed
 /// URL-canon digest and the text-mutation serialization readback),
-/// see the design record docs/execution-v5-design.md.
-pub const MAX_EXECUTION_VERSION: u8 = 5;
+/// see the design record docs/execution-v5-design.md; version 6 adds
+/// the five real-platform probes whose entries the verifier checks
+/// against operand-derived envelopes (computed style over real layout,
+/// mutation delivery order, full event phases, Range line boxes and
+/// Selection state, intersection thresholds), see
+/// docs/execution-v6-design.md.
+pub const MAX_EXECUTION_VERSION: u8 = 6;
 
 /// The deterministic op-count bounds of every issued program.
 pub const MIN_OPS: u8 = 8;
@@ -265,13 +286,52 @@ pub const OP_DOM_EVENT_PHASE: u8 = 41;
 /// The version-5 URL canon: the SHA-256 of the canonicalized sandboxed
 /// document URL, the one browser-observed entry of the rung.
 pub const OP_DOM_URL_CANON: u8 = 42;
+
+/// The SHA-256 hex of the canonical sandboxed document URL the widget
+/// execution sandbox always has: `about:srcdoc`. The version-5
+/// URL-canon probe reports this value, and the trace walker pins it
+/// (exact equality, not a shape check): the environment evidence is a
+/// constant, so any other digest is fabricated.
+pub const SRCDOC_URL_DIGEST: &str =
+    "4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2";
 /// The version-5 text mutate: sets the current node's textContent to
 /// the value operand.
 pub const OP_DOM_TEXT_MUTATE: u8 = 43;
 /// The version-5 select-depth: descends by the three child-index
 /// bytes; the entry is the number of descents completed.
 pub const OP_DOM_SELECT_DEP: u8 = 44;
-pub const OP_COUNT: u8 = 45;
+
+/// The version-6 real-platform probes. Each carries the probed
+/// constructed id (the construction proof), a randomized seed or churn
+/// operand and a u8 cell for its quantized observation. The probes run
+/// on self-removed anonymous nodes, so the deterministic document
+/// model of the simulation is unchanged and every entry is validated
+/// against its operand-derived envelope (see `verify_executed_trace`
+/// and docs/execution-v6-design.md).
+pub const OP_CSS_GEOM: u8 = 45;
+pub const OP_MUT_ORDER: u8 = 46;
+pub const OP_EV_PHASE_FULL: u8 = 47;
+pub const OP_RANGE_ORDER: u8 = 48;
+pub const OP_INT_OBS: u8 = 49;
+
+/// The probe word vocabulary of OP_CSS_GEOM: the seed picks the word
+/// whose wrapped line boxes the layout engine measures. Mirrors the
+/// interpreter asset and the PHP constant byte for byte.
+pub const CSS_WORDS: [&[u8]; 3] = [b"kiwicaptcha", b"execution", b"boundary"];
+
+/// The span vocabulary of OP_RANGE_ORDER: three consecutive words
+/// (from the drawn index) form the constructed text graph the Range
+/// crosses. Mirrors the interpreter asset and the PHP constant.
+pub const RANGE_WORDS: [&[u8]; 4] = [b"alpha", b"beta", b"gamma", b"delta"];
+
+/// The number of elements already present in the srcdoc body before the
+/// program's own nodes: the harness template always carries exactly one
+/// `<script>` element (the interpreter bootstrap), so the browser's
+/// sibling index of a program-built node is its append rank plus this
+/// constant. Shared by the verify walker and the browser-equivalent
+/// synthesizer so the two can never disagree about the template shape.
+pub const SRCDOC_PREEXISTING_BODY_ELEMENTS: usize = 1;
+pub const OP_COUNT: u8 = 50;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -320,7 +380,20 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "durlc",
     "dmutate",
     "dsdep",
+    "dcsgeom",
+    "dmutord",
+    "devphf",
+    "drange",
+    "dintobs",
 ];
+
+/// The trace-entry name of an opcode with a deterministic fallback: a
+/// hand-constructed op outside the opcode register names `op?` instead
+/// of panicking. The blob decoder bounds opcodes by grammar version,
+/// so submitted evidence never carries one.
+fn trace_name(opcode: u8) -> &'static str {
+    TRACE_NAMES.get(opcode as usize).copied().unwrap_or("op?")
+}
 
 /// A parsed op: the opcode plus its canonical operands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,7 +487,7 @@ pub fn generate(
     action: &str,
     version: u8,
 ) -> Result<String, GenerateError> {
-    if execution_key.len() < 16 {
+    if execution_key.len() < crate::keys::MIN_EXECUTION_KEY_BYTES {
         return Err(GenerateError::KeyTooShort);
     }
     if !is_identifier(action, 32) {
@@ -461,6 +534,7 @@ pub fn generate(
         3 => 15 + (cursor.next_byte() % 10),
         4 => 18 + (cursor.next_byte() % 7),
         5 => 21 + (cursor.next_byte() % 4),
+        6 => 20 + (cursor.next_byte() % 4),
         _ => 8 + (cursor.next_byte() % 17),
     };
     program.push(op_count);
@@ -552,7 +626,7 @@ pub fn generate(
         // The mandatory depth probe of the deepest nested child.
         ops.push((OP_DOM_DEPTH, depth_operand.clone()));
     }
-    if version >= 5 {
+    if version == 5 {
         // The version-5 causal spine, emitted in the fixed order:
         // DOM_CLONE, DOM_REPARENT, U8_READ of the reparent cell,
         // DOM_URL_CANON, DOM_TEXT_MUTATE, DOM_SERIALIZE_REAL. The
@@ -592,12 +666,55 @@ pub fn generate(
         ops.push((OP_DOM_TEXT_MUTATE, text_operands));
         ops.push((OP_DOM_SERIALIZE_REAL, Vec::new()));
     }
+    if version >= 6 {
+        // The version-6 real-platform block, emitted in the fixed
+        // order: OP_CSS_GEOM, OP_MUT_ORDER, OP_EV_PHASE_FULL,
+        // OP_RANGE_ORDER, OP_INT_OBS. Each probe targets a constructed node (the real
+        // construction proof), draws its randomized seed and churn
+        // bytes from the stream and writes its quantized observation
+        // into a cell drawn modulo the live u8 length, so the verifier
+        // replays every observation exactly like the version-5 cells.
+        // The browser probes run on self-removed anonymous nodes, so
+        // the deterministic document model is unchanged and the
+        // entries validate against their operand-derived envelopes
+        // (see `verify_executed_trace`).
+        let mut css_operands = id_operand.clone();
+        css_operands.push(cursor.next_byte());
+        css_operands.push(cursor.next_byte() % u8_len as u8);
+        ops.push((OP_CSS_GEOM, css_operands));
+        let mut mut_operands = sibling_operand.clone();
+        mut_operands.push(cursor.next_byte());
+        mut_operands.push(cursor.next_byte());
+        mut_operands.push(cursor.next_byte() % u8_len as u8);
+        ops.push((OP_MUT_ORDER, mut_operands));
+        // The probe ids stay on the two appended body children (the
+        // constructed id and the sibling id): the dchild created nodes
+        // never enter the appended-id set, so a probe naming one could
+        // only ever read 'none'.
+        let mut ev_operands = id_operand.clone();
+        ev_operands.push(cursor.next_byte() % u8_len as u8);
+        ops.push((OP_EV_PHASE_FULL, ev_operands));
+        let mut range_operands = sibling_operand.clone();
+        range_operands.push(cursor.next_byte());
+        range_operands.push(cursor.next_byte());
+        range_operands.push(cursor.next_byte() % u8_len as u8);
+        ops.push((OP_RANGE_ORDER, range_operands));
+        let mut int_operands = sibling_operand.clone();
+        int_operands.push(cursor.next_byte());
+        int_operands.push(cursor.next_byte() % u8_len as u8);
+        ops.push((OP_INT_OBS, int_operands));
+    }
     let mut extra_probes = 1 + (cursor.next_byte() % 3);
-    if version >= 5 {
+    if version == 5 {
         // The version-5 emission cap: the stamped count is 21..24, so
         // at most op_count - 21 extra probes fit (a stamped count of
         // 21 carries the fixed skeleton only).
         extra_probes = extra_probes.min(op_count - 21);
+    }
+    if version >= 6 {
+        // The version-6 emission cap: the fixed skeleton is 20 ops, so
+        // at most op_count - 20 extra probes fit.
+        extra_probes = extra_probes.min(op_count - 20);
     }
     let probe_pool = match version {
         3 => 7,
@@ -605,7 +722,32 @@ pub fn generate(
         _ => 5,
     };
     for _ in 0..extra_probes {
-        let probe = if version >= 5 {
+        let probe = if version >= 6 {
+            // The version-6 extra-slot pool extends to the read-only
+            // real probes of the earlier rungs plus the five
+            // real-platform probes (all self-contained and idempotent
+            // over the drawn operands). Query real and the topology
+            // mutators stay out of the extra slots exactly as the
+            // child op maps away in version 4.
+            [
+                OP_DOM_GEOMETRY,
+                OP_DOM_POINT,
+                OP_DOM_EVENT_REAL,
+                OP_DOM_SERIALIZE_REAL,
+                OP_DOM_OBSERVE,
+                OP_DOM_SIBLING_INDEX,
+                OP_DOM_DEPTH,
+                OP_DOM_ATTR_REFLECT,
+                OP_DOM_EVENT_PHASE,
+                OP_DOM_URL_CANON,
+                OP_DOM_SELECT_DEP,
+                OP_CSS_GEOM,
+                OP_MUT_ORDER,
+                OP_EV_PHASE_FULL,
+                OP_RANGE_ORDER,
+                OP_INT_OBS,
+            ][(cursor.next_byte() % 16) as usize]
+        } else if version == 5 {
             // The version-5 extra-slot pool extends to the read-only
             // real probes of the rung: geometry, point, event real,
             // serialize real, observe, sibling, depth, reflect, phase,
@@ -655,6 +797,42 @@ pub fn generate(
             OP_DOM_ATTR_REFLECT => cursor.take(1),
             OP_DOM_EVENT_PHASE => vec![cursor.next_byte() % u8_len as u8],
             OP_DOM_SELECT_DEP => cursor.take(3),
+            // The version-6 platform probes reuse the skeleton's
+            // appended-id mapping (the first node for the style and
+            // event probes, the sibling for the churn, range and
+            // intersection probes) plus their raw seed/churn bytes and
+            // the cell drawn modulo the live u8 length.
+            OP_CSS_GEOM => {
+                let mut o = id_operand.clone();
+                o.push(cursor.next_byte());
+                o.push(cursor.next_byte() % u8_len as u8);
+                o
+            }
+            OP_MUT_ORDER => {
+                let mut o = sibling_operand.clone();
+                o.push(cursor.next_byte());
+                o.push(cursor.next_byte());
+                o.push(cursor.next_byte() % u8_len as u8);
+                o
+            }
+            OP_EV_PHASE_FULL => {
+                let mut o = id_operand.clone();
+                o.push(cursor.next_byte() % u8_len as u8);
+                o
+            }
+            OP_RANGE_ORDER => {
+                let mut o = sibling_operand.clone();
+                o.push(cursor.next_byte());
+                o.push(cursor.next_byte());
+                o.push(cursor.next_byte() % u8_len as u8);
+                o
+            }
+            OP_INT_OBS => {
+                let mut o = sibling_operand.clone();
+                o.push(cursor.next_byte());
+                o.push(cursor.next_byte() % u8_len as u8);
+                o
+            }
             _ => Vec::new(),
         };
         ops.push((probe, probe_operands));
@@ -666,10 +844,17 @@ pub fn generate(
         let opcode = cursor.next_byte() % 28;
         ops.push((opcode, draw_operands(&mut cursor, opcode)));
     }
-    // The count byte is drawn before the extra probes, so the op list
-    // can overshoot it on the smallest counts; the emission is capped
-    // at the stamped count, the exact number every decoder reads, so
-    // each minted blob ends at EOF and stays inside the grammar.
+    // The fill loop adds one op per iteration and checks the bound
+    // before each push, so the list lands on exactly the stamped count.
+    // There is no truncation: correctness rests on the fill arithmetic,
+    // and this assertion pins it so a future skeleton change that starts
+    // above the count fails loudly instead of minting a blob whose
+    // count byte disagrees with its body.
+    debug_assert_eq!(
+        ops.len() as u8,
+        op_count,
+        "the emitted op list must equal the stamped count byte exactly"
+    );
     for (opcode, operands) in ops.iter() {
         program.push(*opcode);
         program.extend_from_slice(operands);
@@ -890,13 +1075,16 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         let opcode = cursor.take_strict(1)?[0];
         // Older-version programs never carry newer opcodes (the
         // version-2 observe opcode 33, the version-3 sibling-index
-        // opcode 34): an old interpreter must be able to reject a
-        // newer grammar by the declared version byte alone.
+        // opcode 34, the version-5 object-graph opcodes 37-44, the
+        // version-6 real-platform opcodes 45-49): an old interpreter
+        // must be able to reject a newer grammar by the declared
+        // version byte alone.
         let max_opcode = match op_version {
             1 => 33,
             2 => 34,
             3 => 35,
             4 => 37,
+            5 => 45,
             _ => OP_COUNT,
         };
         if opcode >= max_opcode {
@@ -1080,6 +1268,44 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             map.insert("b1".into(), Operand::Int(b1 as u64));
             map.insert("b2".into(), Operand::Int(b2 as u64));
         }
+        // The version-6 real-platform probes: the probed id plus their
+        // raw seed/churn bytes and the u8 cell (raw % 64, exactly like
+        // the v5 cell reads; the generator draws the cell modulo the
+        // live array length, so the modulus is always the identity on
+        // issued programs).
+        OP_CSS_GEOM | OP_INT_OBS => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            let seed = cursor.take_strict(1)?[0];
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("id".into(), Operand::Bytes(id));
+            map.insert("seed".into(), Operand::Int(seed as u64));
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
+        OP_MUT_ORDER | OP_RANGE_ORDER => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            let b0 = cursor.take_strict(1)?[0];
+            let b1 = cursor.take_strict(1)?[0];
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("id".into(), Operand::Bytes(id));
+            map.insert("b0".into(), Operand::Int(b0 as u64));
+            map.insert("b1".into(), Operand::Int(b1 as u64));
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
+        OP_EV_PHASE_FULL => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("id".into(), Operand::Bytes(id));
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
         OP_DOM_QUERY => {
             let id = read_len_bytes(cursor, 16)?;
             if id.len() < 4 {
@@ -1132,7 +1358,7 @@ pub fn canonical_trace(program: &Program) -> String {
 
     for op in &program.ops {
         let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
-        entries.push(format!("{}({})", TRACE_NAMES[op.opcode as usize], result));
+        entries.push(format!("{}({})", trace_name(op.opcode), result));
     }
     entries.join(";")
 }
@@ -1389,12 +1615,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let out = hasher.finalize();
-    let mut s = String::with_capacity(64);
-    for b in out {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+    hex::encode(hasher.finalize())
 }
 
 fn operand_bytes(op: &Op, key: &str) -> Vec<u8> {
@@ -1437,7 +1658,11 @@ fn simulate_op(
         }
         OP_SHR => u32(operand_int(op, "a") >> (operand_int(op, "b") & 31)).to_string(),
         OP_U8_CREATE => {
-            *u8arr = vec![0u8; operand_int(op, "len") as usize];
+            // The decoder normalizes the wire length to 8..=64; a
+            // hand-built operand can carry any value, so the allocation
+            // is clamped to a bounded size.
+            let len = (operand_int(op, "len") as usize).min(0x1000);
+            *u8arr = vec![0u8; len];
             checksum(u8arr).to_string()
         }
         OP_U8_WRITE => {
@@ -1474,10 +1699,14 @@ fn simulate_op(
         }
         OP_STR_SLICE => {
             let s = operand_bytes(op, "s");
-            let start = operand_int(op, "start") as usize;
+            // A hand-built operand can carry any start or count, so the
+            // window is clamped into the string: the addition
+            // saturates, the end never passes the length, and the end
+            // never falls before the start (a non-inverted range).
+            let start = (operand_int(op, "start") as usize).min(s.len());
             let count = operand_int(op, "count") as usize;
-            let start = start.min(s.len());
-            let end = (start + count).min(s.len());
+            let end = start.saturating_add(count).min(s.len());
+            let end = end.max(start);
             B64.encode(&s[start..end])
         }
         OP_DOM_CREATE => {
@@ -1736,7 +1965,10 @@ fn simulate_op(
             let Some(g) = ctx else {
                 return "0".into();
             };
-            let slot = operand_int(op, "s") as usize;
+            // The decoder normalizes the slot byte modulo 4; a
+            // hand-built operand is masked to the same four-slot
+            // register instead of indexing out of bounds.
+            let slot = (operand_int(op, "s") & 3) as usize;
             let mut entry = g.frags[slot].len() as u64;
             if let Some(node) = cur.as_mut() {
                 if g.nodes.contains_key(&node.id) {
@@ -1954,6 +2186,18 @@ fn simulate_op(
             }
             completed.to_string()
         }
+        // The version-6 real-platform probes are browser-observed: the
+        // pure sim emits the placeholder and touches no model state
+        // (the browser probes run on self-removed anonymous nodes), and
+        // the submitted-trace walker validates every entry against its
+        // operand-derived envelope, replaying the reported observation
+        // into the u8 cell (see `verify_executed_trace` and
+        // docs/execution-v6-design.md).
+        OP_CSS_GEOM => "dcsgeom".into(),
+        OP_MUT_ORDER => "dmutord".into(),
+        OP_EV_PHASE_FULL => "devphf".into(),
+        OP_RANGE_ORDER => "drange".into(),
+        OP_INT_OBS => "dintobs".into(),
         _ => "0".into(),
     }
 }
@@ -2015,14 +2259,13 @@ pub mod fixtures {
     /// measurement.
     pub const OBSERVED_HEIGHT: u8 = 10;
 
-    /// The fabricated canonical-URL digest of the version-5 URL-canon
-    /// probe. The real entry is the SHA-256 of the canonicalized
-    /// sandboxed document URL, environment evidence the verifier
-    /// shape-validates and replays, never predicts. The synthesizer
-    /// uses this fixed hex reference value exactly like the fixed
-    /// observed height above, a fabricated reference value.
-    pub const FABRICATED_URL_DIGEST: &str =
-        "e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7";
+    /// The canonical-URL digest reference of the version-5 URL-canon
+    /// probe, [`SRCDOC_URL_DIGEST`]. The browser entry is the SHA-256 of
+    /// the canonicalized sandboxed document URL, which for the srcdoc
+    /// iframe is always `about:srcdoc`; the verifier pins the walker to
+    /// that exact constant, and the synthesizer uses the same fixed
+    /// reference value.
+    pub const FABRICATED_URL_DIGEST: &str = SRCDOC_URL_DIGEST;
 
     /// The browser-equivalent executed trace of a program: the canonical
     /// trace with the layout-probe placeholders replaced by valid
@@ -2064,6 +2307,29 @@ pub mod fixtures {
         program: &Program,
         observed_height: u8,
     ) -> String {
+        build_trace(program, observed_height, false)
+    }
+
+    /// The white-box envelope forger: the same state machine as
+    /// [`executed_trace_for_with_observed_height`], but the five
+    /// version-6 probe entries are synthesized inside the published
+    /// operand-derived envelopes instead of the pure-sim placeholders.
+    /// Every reported observation is written through into the u8 state
+    /// exactly as the verifier replays it, so later checksum/read
+    /// entries stay coherent.
+    ///
+    /// This is the full-knowledge adversary's forge: one reading of the
+    /// open-source verifier yields the five envelope functions, and
+    /// every acceptance band is a deterministic function of the operands
+    /// that ship with the program. The naive oracle above is rejected on
+    /// version 6 only because it emits placeholders — that rejection
+    /// rate is not a full-knowledge number. Version 6 is supplementary
+    /// evidence that costs one source reading, NOT a browser boundary.
+    pub fn white_box_envelope_forgery_solver(program: &Program, observed_height: u8) -> String {
+        build_trace(program, observed_height, true)
+    }
+
+    fn build_trace(program: &Program, observed_height: u8, white_box: bool) -> String {
         assert!(
             (1..=255).contains(&observed_height),
             "the fabricated observed height must stay within 1..255"
@@ -2105,7 +2371,15 @@ pub mod fixtures {
                 // ancestors up to (excluding) the body.
                 let mut depth = 0usize;
                 let mut cursor = tree_parent.get(&operand_bytes(op, "id")).cloned();
+                // The same bounded step count as the verifier walk, so
+                // a hand-crafted self-referential parent map cannot
+                // spin this synthesizer either.
+                let mut guard = 0usize;
                 while let Some(pid) = cursor {
+                    if guard >= 4096 {
+                        break;
+                    }
+                    guard += 1;
                     depth += 1;
                     cursor = tree_parent.get(&pid).cloned();
                 }
@@ -2120,7 +2394,7 @@ pub mod fixtures {
                     append_rank
                         .get(&operand_bytes(op, "id"))
                         .copied()
-                        .map(|rank| rank + 1)
+                        .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS)
                         .unwrap_or(usize::MAX)
                 ));
             } else if op.opcode == OP_DOM_OBSERVE {
@@ -2143,9 +2417,69 @@ pub mod fixtures {
                 // predicts), so the synthesizer fabricates the fixed
                 // reference digest above.
                 entries.push(format!("durlc({FABRICATED_URL_DIGEST})"));
+            } else if white_box && op.opcode == OP_CSS_GEOM {
+                // White-box: the computed-geometry envelope is a pure
+                // function of the drawn seed. Emit the exact font size
+                // and the interval floor as the height — no layout ran.
+                let (fs_lo, _fs_hi, h_lo, _h_hi) =
+                    css_geom_envelope(operand_int(op, "seed") as u32);
+                entries.push(format!("dcsgeom({fs_lo},{h_lo})"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = h_lo as u8;
+                }
+            } else if white_box && op.opcode == OP_MUT_ORDER {
+                // White-box: the mutation record-type string is fully
+                // determined by the churn operands.
+                let (expected, records) =
+                    mut_order_envelope(operand_int(op, "b0") as u32, operand_int(op, "b1") as u32);
+                entries.push(format!("dmutord({expected})"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = records as u8;
+                }
+            } else if white_box && op.opcode == OP_EV_PHASE_FULL {
+                // White-box: the full-phase body is the published
+                // constant "1234:3" for every program.
+                entries.push("devphf(1234:3)".into());
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = 4;
+                }
+            } else if white_box && op.opcode == OP_RANGE_ORDER {
+                // White-box: the range string length is exact and the
+                // fragment count band admits the floor.
+                let (t_exact, rects_lo, _rects_hi) =
+                    range_order_envelope(operand_int(op, "b0") as u32, operand_int(op, "b1") as u32);
+                entries.push(format!("drange({t_exact},{rects_lo},1)"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = rects_lo as u8;
+                }
+            } else if white_box && op.opcode == OP_INT_OBS {
+                // White-box: the intersection band is seed-derived; the
+                // isIntersecting flag is chosen against the drawn
+                // threshold inside the walker's two-percent slack.
+                let seed = operand_int(op, "seed") as u32;
+                let (q_lo, q_hi, t0_pct) = int_obs_envelope(seed);
+                let m = 5 + (seed % 36) as i64;
+                let q = (40 - m).clamp(0, 20) * 5;
+                let q = q.clamp(q_lo, q_hi);
+                let is_int = if q >= t0_pct + 2 {
+                    1
+                } else if q <= t0_pct - 2 {
+                    0
+                } else {
+                    i64::from(q >= t0_pct)
+                };
+                entries.push(format!("dintobs(1,{q},{is_int})"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = q as u8;
+                }
             } else {
                 let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
-                entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
+                entries.push(format!("{}({result})", trace_name(op.opcode)));
             }
         }
         entries.join(";")
@@ -2153,26 +2487,25 @@ pub mod fixtures {
 
     /// The mirror of the PHP BrowserlessForgerySolver class: a pure
     /// shadow solver that forges verifier-accepted executed traces for
-    /// every live grammar version without a browser, through the
-    /// generator maximum [`MAX_EXECUTION_VERSION`] (the version-5
-    /// causal object-graph grammar included: the clone and reparent
-    /// spine, the fragment slots, the observed URL-canon digest and
-    /// the text-mutation readback). The observe choice is the explicit
-    /// parameter, any value 1..=255 works, and every other trace entry
-    /// reuses the shared state machine above, so the solver carries no
-    /// second copy of the VM.
+    /// the pure-semantics grammar versions 1..=5 without a browser
+    /// (the causal object-graph grammar included: the clone and
+    /// reparent spine, the fragment slots, the observed URL-canon
+    /// digest and the text-mutation readback). The observe choice is
+    /// the explicit parameter, any value 1..=255 works, and every
+    /// other trace entry reuses the shared state machine above, so
+    /// the solver carries no second copy of the VM.
     ///
     /// The oracle is the forgeability regression benchmark, preserved
-    /// on purpose: the tests sweep 100 generated programs of each live
-    /// version through the generator maximum and assert every forged
-    /// trace verifies and digests. The trace is supplementary
-    /// evidence, reproducible by a pure implementation of the public
-    /// semantics. A future object-graph grammar beyond the live
-    /// maximum tests real Web Platform semantics (classList, selectors,
-    /// traversal, fragments, clone and reparent, event ordering).
-    /// Extending this solver to that grammar must fail until those
-    /// semantics are implemented, so the future gate is real
-    /// semantics, never a shadow-model fix.
+    /// on purpose: the tests sweep 100 generated programs of each
+    /// pure-semantics version and assert every forged trace verifies
+    /// and digests, then sweep the version-6 rung and assert this naive
+    /// solver (which emits pure-sim placeholders) is rejected. That
+    /// rejection is NOT a full-knowledge number: the white-box forger
+    /// ([`white_box_envelope_forgery_solver`]) reimplements the five
+    /// published envelopes and passes every version-6 program without a
+    /// browser. Versions 1-5 and version 6 alike cost an attacker one
+    /// reading of the source; the whole ladder is supplementary
+    /// evidence, never a browser boundary.
     pub fn browserless_forgery_solver(program: &Program, observed_height: u8) -> String {
         assert!(
             (1..=255).contains(&observed_height),
@@ -2180,6 +2513,80 @@ pub mod fixtures {
         );
         executed_trace_for_with_observed_height(program, observed_height)
     }
+}
+
+/// The OP_CSS_GEOM acceptance envelope, derived from the style seed
+/// exactly as the interpreter derives the inline declaration: the
+/// computed font size must equal the drawn px value (lo == hi), and
+/// the laid-out height must fall inside the wrapped-line-box interval
+/// the drawn word and border produce. The interval bounds are the
+/// cross-engine qualification envelope (monospace advance 0.45..0.80
+/// em, normal line-height 1.0..2.0 em across the matrix engines), so a
+/// host without layout (height 0) always falls below the floor.
+fn css_geom_envelope(seed: u32) -> (i64, i64, i64, i64) {
+    let fs = 10 + ((seed >> 5) % 5) as i64;
+    let brd = 1 + ((seed >> 3) % 3) as i64;
+    let count = CSS_WORDS.len() as u32;
+    // The probe text is the seed word plus the next word joined by a
+    // space (the break opportunity), so the wrapped line count spans
+    // the interval below.
+    let text_len = CSS_WORDS[(seed % count) as usize].len() as i64
+        + 1
+        + CSS_WORDS[((seed + 1) % count) as usize].len() as i64;
+    // Exact integer ceiling (4/5 em advance over the 64px probe
+    // width), so the Rust and PHP envelopes agree on every operand
+    // without any float rounding.
+    let lines_max = (((text_len * fs * 4) + 319) / 320 + 1).max(1);
+    (fs, fs, fs + 2 * brd, lines_max * 2 * fs + 2 * brd + 2)
+}
+
+/// The OP_MUT_ORDER acceptance envelope: the exact record-type code
+/// sequence the churn operands draw (one attributes record, then
+/// 2..3 childList records, then the optional characterData record,
+/// then the post-churn promise marker 7) and the record count the
+/// cell replay carries.
+fn mut_order_envelope(b0: u32, b1: u32) -> (String, u64) {
+    let kids = 1 + (b0 % 2);
+    let mut expected = String::from("1");
+    for _ in 0..(kids + 1) {
+        expected.push('2');
+    }
+    if b1 & 1 == 1 {
+        expected.push('3');
+    }
+    expected.push('7');
+    let records = (kids + 2 + (b1 & 1)) as u64;
+    (expected, records)
+}
+
+/// The OP_RANGE_ORDER acceptance envelope: the exact range string
+/// length over the drawn three-word text graph (the tail of the first
+/// word, the whole second word, the drawn prefix of the third) and the
+/// line-box fragment interval. The interval spans the matrix
+/// measurement: engines that keep one rect per element fragment
+/// (Chromium, WebKit) measure three and more, Firefox merges same-line
+/// fragments into one rect (the measured floor is one, the ceiling
+/// 16).
+fn range_order_envelope(ra: u32, rb: u32) -> (i64, i64, i64) {
+    let w0 = RANGE_WORDS[(ra % 4) as usize].len() as i64;
+    let w1 = RANGE_WORDS[((ra + 1) % 4) as usize].len() as i64;
+    let w2 = RANGE_WORDS[((ra + 2) % 4) as usize].len() as i64;
+    let a = (ra % 5) as i64;
+    let e = (rb % (w2 as u32 + 1)) as i64;
+    (w0 - a + w1 + e, 1, 16)
+}
+
+/// The OP_INT_OBS acceptance envelope: the target offset the seed
+/// draws (5..40 px) against the 40px clipped root box and the 20px
+/// target height give the exact quantized ratio (steps of five
+/// percent, +/-2 percent engine slack) and the drawn threshold in
+/// percent for the isIntersecting band check.
+fn int_obs_envelope(seed: u32) -> (i64, i64, i64) {
+    let m = 5 + (seed % 36) as i64;
+    let ih = (40 - m).clamp(0, 20);
+    let q_exp = ih * 5;
+    let t0_pct = [0i64, 25, 50, 75][(seed % 4) as usize];
+    ((q_exp - 2).max(0), (q_exp + 2).min(100), t0_pct)
 }
 
 /// Validate a `SUBMITTED` execution trace against a program: the
@@ -2202,6 +2609,13 @@ pub mod fixtures {
 pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
     let _ = nonce; // the trace grammar does not depend on the nonce; the digest binding does
     let program = decode(program_b64)?;
+    verify_executed_trace_decoded(&program, trace)
+}
+
+/// The trace walk over an already decoded program — the decoded-program
+/// core of [`verify_executed_trace`], so a caller that holds the
+/// program decodes once and verifies without a second blob parse.
+pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> Option<String> {
     if trace.is_empty() {
         return None;
     }
@@ -2251,7 +2665,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
             }
         }
         let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
-        let name = TRACE_NAMES[op.opcode as usize];
+        let name = trace_name(op.opcode);
         let name_open = format!("{name}(");
         if pos + name_open.len() > bytes.len()
             || &bytes[pos..pos + name_open.len()] != name_open.as_bytes()
@@ -2267,7 +2681,10 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 let mut parts = body.splitn(2, ',');
                 let top: i64 = parts.next()?.parse().ok()?;
                 let height: i64 = parts.next()?.parse().ok()?;
-                if height < 1 || top < prev_top {
+                // The layout offsets are construction-order positions:
+                // each is non-negative and monotonic (never below the
+                // previous entry's offset).
+                if height < 1 || top < 0 || top < prev_top {
                     return None;
                 }
                 prev_top = top;
@@ -2294,7 +2711,15 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 // parentElement walk over the program-built tree.
                 let mut depth = 0usize;
                 let mut cursor = tree_parent.get(&operand_bytes(op, "id")).cloned();
+                // The cycle guard: a hand-crafted child record can make
+                // the parent map self-referential, so the walk stops at
+                // a bounded step count instead of spinning forever.
+                let mut guard = 0usize;
                 while let Some(pid) = cursor {
+                    if guard >= 4096 {
+                        return None;
+                    }
+                    guard += 1;
                     depth += 1;
                     cursor = tree_parent.get(&pid).cloned();
                 }
@@ -2316,7 +2741,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 let expected = append_rank
                     .get(&operand_bytes(op, "id"))
                     .copied()
-                    .map(|rank| rank + 1);
+                    .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS);
                 let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
                 let end = rest.find(')')?;
                 let value: usize = rest[..end].parse().ok()?;
@@ -2359,14 +2784,143 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 // byte, so no u8 write follows the obs replay rule.
                 let end = pos + 64;
                 if end + 1 > bytes.len()
-                    || !bytes[pos..end]
-                        .iter()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                    || &bytes[pos..end] != SRCDOC_URL_DIGEST.as_bytes()
                     || bytes[end] != b')'
                 {
                     return None;
                 }
                 pos = end + 1;
+            }
+            OP_CSS_GEOM => {
+                // The computed-geometry envelope: the computed font size
+                // must equal the drawn declaration exactly (every real
+                // engine resolves the inline font-size used value), and
+                // the laid-out height must land inside the operand-
+                // derived box-model interval (wrapped line boxes of the
+                // drawn probe word). A host without layout reports 0
+                // and falls below the interval floor.
+                if !doc_ids.contains(&operand_bytes(op, "id")) {
+                    return None;
+                }
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let mut parts = rest[..end].splitn(2, ',');
+                let fs: i64 = parts.next()?.parse().ok()?;
+                let height: i64 = parts.next()?.parse().ok()?;
+                let (fs_lo, fs_hi, h_lo, h_hi) = css_geom_envelope(operand_int(op, "seed") as u32);
+                if fs < fs_lo || fs > fs_hi || height < h_lo || height > h_hi {
+                    return None;
+                }
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = height as u8;
+                }
+                pos += end + 1;
+            }
+            OP_MUT_ORDER => {
+                // The mutation delivery-order envelope: the exact
+                // record-type sequence (attributes, then the childList
+                // records, then the characterData churn, then the
+                // post-churn promise marker 7) the churn operands draw.
+                // A host that delivers records out of order, late (a
+                // task-queued observer) or not at all cannot produce it.
+                if !doc_ids.contains(&operand_bytes(op, "id")) {
+                    return None;
+                }
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let (expected, records) =
+                    mut_order_envelope(operand_int(op, "b0") as u32, operand_int(op, "b1") as u32);
+                if rest[..end] != expected {
+                    return None;
+                }
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = records as u8;
+                }
+                pos += end + 1;
+            }
+            OP_EV_PHASE_FULL => {
+                // The full-phase envelope: capture 1, target-phase
+                // registration order 2 then 3, bubble 4, and the bubble
+                // listener's dataset side effect read back as "3".
+                if !doc_ids.contains(&operand_bytes(op, "id")) {
+                    return None;
+                }
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let mut parts = rest[..end].splitn(2, ':');
+                let seq = parts.next().unwrap_or("");
+                let ds = parts.next().unwrap_or("");
+                if seq != "1234" || ds != "3" {
+                    return None;
+                }
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = 4;
+                }
+                pos += end + 1;
+            }
+            OP_RANGE_ORDER => {
+                // The Range/Selection envelope: the range string length
+                // is derived exactly from the drawn text graph, the
+                // line-box fragment count must land inside the
+                // qualification interval (three span fragments at the
+                // drawn wrap width), and the Selection must hold the
+                // added range.
+                if !doc_ids.contains(&operand_bytes(op, "id")) {
+                    return None;
+                }
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let mut parts = rest[..end].splitn(3, ',');
+                let t: i64 = parts.next()?.parse().ok()?;
+                let rects: i64 = parts.next()?.parse().ok()?;
+                let sel_count: i64 = parts.next()?.parse().ok()?;
+                let (t_exact, rects_lo, rects_hi) = range_order_envelope(
+                    operand_int(op, "b0") as u32,
+                    operand_int(op, "b1") as u32,
+                );
+                if t != t_exact || rects < rects_lo || rects > rects_hi || sel_count != 1 {
+                    return None;
+                }
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = rects as u8;
+                }
+                pos += end + 1;
+            }
+            OP_INT_OBS => {
+                // The intersection envelope: the observer must have
+                // delivered its initial entry, the quantized ratio must
+                // land inside the geometry-derived interval (the target
+                // offset against the drawn root box), and isIntersecting
+                // must agree with the ratio against the drawn threshold
+                // (a +/-2 percent band absorbs engine rounding).
+                if !doc_ids.contains(&operand_bytes(op, "id")) {
+                    return None;
+                }
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let mut parts = rest[..end].splitn(3, ',');
+                let fired: i64 = parts.next()?.parse().ok()?;
+                let q: i64 = parts.next()?.parse().ok()?;
+                let is_int: i64 = parts.next()?.parse().ok()?;
+                let (q_lo, q_hi, t0_pct) = int_obs_envelope(operand_int(op, "seed") as u32);
+                if fired != 1 || q < q_lo || q > q_hi {
+                    return None;
+                }
+                if q >= t0_pct + 2 && is_int != 1 {
+                    return None;
+                }
+                if q <= t0_pct - 2 && is_int != 0 {
+                    return None;
+                }
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = q as u8;
+                }
+                pos += end + 1;
             }
             _ => {
                 let sim_entry = format!("{sim})");
@@ -2397,12 +2951,26 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
 /// client actually executed, so the verifier can bind the
 /// browser-observed entries. `None` when the program is malformed.
 pub fn expected_digest_over_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
+    let program = decode(program_b64)?;
+    expected_digest_over_trace_decoded(program_b64, &program, nonce, trace)
+}
+
+/// The digest computation over an already decoded program — the
+/// decoded-program core of [`expected_digest_over_trace`], so a caller
+/// that holds the parsed program computes the digest without a second
+/// blob parse. The HMAC key stays the program blob's decoded bytes (the
+/// content-derived digest key); `None` when `program_b64` is not the
+/// canonical base64 of its own bytes.
+pub(crate) fn expected_digest_over_trace_decoded(
+    program_b64: &str,
+    program: &Program,
+    nonce: &str,
+    trace: &str,
+) -> Option<String> {
     let bytes = B64.decode(program_b64).ok()?;
     if B64.encode(&bytes) != program_b64 {
         return None;
     }
-    let program = decode(program_b64)?;
-
     let mut msg = Vec::new();
     msg.extend_from_slice(LABEL.as_bytes());
     msg.push(b'|');
@@ -2422,7 +2990,7 @@ pub fn expected_digest_over_trace(program_b64: &str, nonce: &str, trace: &str) -
 /// Errors of the program generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GenerateError {
-    #[error("execution key must be at least 16 bytes")]
+    #[error("execution key must be at least 32 bytes (the same floor PHP enforces)")]
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
@@ -2443,7 +3011,7 @@ mod tests {
     // feature-gated test-fixtures module (see `fixtures`); the self
     // dev-dependency in Cargo.toml enables `test-fixtures` for every
     // test build, so the unit tests reach it here.
-    use super::fixtures::{browserless_forgery_solver, executed_trace_for};
+    use super::fixtures::{browserless_forgery_solver, executed_trace_for, white_box_envelope_forgery_solver};
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
@@ -2523,6 +3091,18 @@ mod tests {
             generate(b"short", NONCE, "login", "login-action", 1),
             Err(GenerateError::KeyTooShort)
         );
+        // The floor is 32 bytes, exactly PHP's
+        // ExecutionChallengeGenerator::validateKey contract: 31 bytes is
+        // rejected, 32 bytes accepted.
+        let short = b"0123456789abcdef0123456789abcde"; // 31
+        let floor = b"0123456789abcdef0123456789abcdef"; // 32
+        assert_eq!(short.len(), 31, "precondition: one byte below the floor");
+        assert_eq!(floor.len(), 32, "precondition: exactly at the floor");
+        assert_eq!(
+            generate(short, NONCE, "login", "login-action", 1),
+            Err(GenerateError::KeyTooShort)
+        );
+        assert!(generate(floor, NONCE, "login", "login-action", 1).is_ok());
     }
 
     #[test]
@@ -2624,7 +3204,7 @@ mod tests {
         // filler.
         let mut seen_union = std::collections::HashSet::new();
         for i in 0..240u32 {
-            let version = (3 + (i % 3)) as u8;
+            let version = (3 + (i % 4)) as u8;
             let nonce = B64.encode(sha2::Sha256::digest(
                 format!("opcode-coverage-{i}").as_bytes(),
             ));
@@ -2668,6 +3248,18 @@ mod tests {
             !seen_v5.contains(&OP_DOM_FRAGMENT_APPEND),
             "the terminal fragment append is never minted into a version-5 program"
         );
+        for v6_op in [
+            OP_CSS_GEOM,
+            OP_MUT_ORDER,
+            OP_EV_PHASE_FULL,
+            OP_RANGE_ORDER,
+            OP_INT_OBS,
+        ] {
+            assert!(
+                seen_union.contains(&v6_op),
+                "the version-6 corpus stamps the real-platform opcode {v6_op}"
+            );
+        }
     }
 
     #[test]
@@ -2944,6 +3536,134 @@ mod tests {
             verify_executed_trace(&p, &nonce, truncated).is_none(),
             "a trace without the probe entries must be rejected"
         );
+    }
+
+    // ── layout-probe invariants over hand-constructed programs ────────
+
+    fn op(opcode: u8, operands: &[(&str, Operand)]) -> Op {
+        Op {
+            opcode,
+            operands: operands
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        }
+    }
+
+    fn probe_program(with_append: bool) -> Program {
+        let create = op(
+            OP_DOM_CREATE,
+            &[
+                ("tag", Operand::Int(0)),
+                ("id", Operand::Bytes(b"probe-id-1".to_vec())),
+            ],
+        );
+        let geometry = op(
+            OP_DOM_GEOMETRY,
+            &[("id", Operand::Bytes(b"probe-id-1".to_vec()))],
+        );
+        let point = op(
+            OP_DOM_POINT,
+            &[("x", Operand::Int(1)), ("y", Operand::Int(2))],
+        );
+        let mut ops = vec![create];
+        if with_append {
+            ops.push(op(OP_DOM_APPEND, &[]));
+        }
+        ops.push(geometry);
+        ops.push(point);
+        Program {
+            format: FORMAT_VERSION,
+            scope: "login".into(),
+            action: "login-action".into(),
+            op_version: 1,
+            ops,
+        }
+    }
+
+    #[test]
+    fn the_point_predicate_rejects_a_construction_lie() {
+        // The `POINT` entry names the whole-program construction
+        // predicate: a program that appends claims `point(div)`, a
+        // no-append program claims `point(none)`. A trace that lies in
+        // either direction is rejected.
+        let with_append = probe_program(true);
+        let honest_append = executed_trace_for(&with_append);
+        assert!(honest_append.contains("point(div)"));
+        assert!(
+            verify_executed_trace_decoded(&with_append, &honest_append).is_some(),
+            "the honest trace of an appending program verifies"
+        );
+        let lie_none = honest_append.replace("point(div)", "point(none)");
+        assert!(
+            verify_executed_trace_decoded(&with_append, &lie_none).is_none(),
+            "an appending program cannot claim point(none)"
+        );
+
+        let no_append = probe_program(false);
+        let honest_none = executed_trace_for(&no_append);
+        assert!(honest_none.contains("point(none)"));
+        assert!(
+            verify_executed_trace_decoded(&no_append, &honest_none).is_some(),
+            "the honest trace of a no-append program verifies"
+        );
+        let lie_div = honest_none.replace("point(none)", "point(div)");
+        assert!(
+            verify_executed_trace_decoded(&no_append, &lie_div).is_none(),
+            "a no-append program cannot claim point(div)"
+        );
+    }
+
+    #[test]
+    fn a_negative_geometry_offset_is_rejected() {
+        // Layout offsets are construction-order positions: the first
+        // entry must already be non-negative (the walk seeds its
+        // monotonic floor at -1 and a `top` of -1 must fail the
+        // non-negativity bound, not just the ordering).
+        let program = probe_program(false);
+        let trace = executed_trace_for(&program);
+        assert!(
+            verify_executed_trace_decoded(&program, &trace).is_some(),
+            "the honest trace verifies"
+        );
+        let negative = trace.replace("geom(0,", "geom(-1,");
+        assert_ne!(negative, trace, "the mutated trace must differ");
+        assert!(
+            verify_executed_trace_decoded(&program, &negative).is_none(),
+            "a geometry entry with a negative top must be rejected"
+        );
+    }
+
+    #[test]
+    fn an_out_of_register_opcode_never_panics_the_trace_paths() {
+        // A hand-constructed op outside the opcode register names `op?`
+        // deterministically: the canonical trace renders it, the walk
+        // completes over the self-consistent entry (arithmetic ops only
+        // — the canonical trace emits the layout probes' placeholders,
+        // which the submitted-trace walk never accepts), and the blob
+        // decoder keeps the shape out of submitted evidence.
+        let program = Program {
+            format: FORMAT_VERSION,
+            scope: "login".into(),
+            action: "login-action".into(),
+            op_version: 1,
+            ops: vec![
+                op(u8::MAX, &[("a", Operand::Int(1))]),
+                op(OP_ADD, &[("a", Operand::Int(2)), ("b", Operand::Int(3))]),
+            ],
+        };
+        let trace = canonical_trace(&program);
+        assert!(
+            trace.starts_with("op?("),
+            "the out-of-register op names the fallback: {trace}"
+        );
+        assert!(
+            verify_executed_trace_decoded(&program, &trace).is_some(),
+            "the walk completes over the self-consistent fallback entry"
+        );
+        // The synthesizer renders the same fallback without panicking.
+        let synthesized = executed_trace_for(&program);
+        assert!(synthesized.starts_with("op?("));
     }
 
     #[test]
@@ -3296,6 +4016,11 @@ mod tests {
                 "DOM_URL_CANON" => OP_DOM_URL_CANON,
                 "DOM_TEXT_MUTATE" => OP_DOM_TEXT_MUTATE,
                 "DOM_SELECT_DEP" => OP_DOM_SELECT_DEP,
+                "CSS_GEOM" => OP_CSS_GEOM,
+                "MUT_ORDER" => OP_MUT_ORDER,
+                "EV_PHASE_FULL" => OP_EV_PHASE_FULL,
+                "RANGE_ORDER" => OP_RANGE_ORDER,
+                "INT_OBS" => OP_INT_OBS,
                 other => panic!("manifest opcode {other:?} has no module constant"),
             };
             assert_eq!(
@@ -3324,21 +4049,21 @@ mod tests {
     }
 
     #[test]
-    fn browserless_shadow_solver_forges_every_live_version_trace() {
+    fn browserless_shadow_solver_forges_every_pure_semantics_version_trace() {
         // The adversarial regression oracle: a pure shadow solver must
-        // forge verifier-accepted traces for every live grammar, versions
-        // 1 through MAX_EXECUTION_VERSION (the causal object-graph rung
+        // forge verifier-accepted traces for every pure-semantics
+        // grammar, versions 1 through 5 (the causal object-graph rung
         // included: the clone and reparent spine, the fragment slots,
         // the observed URL-canon digest and the text-mutation readback),
-        // at several chosen observed heights. The trace is supplementary
-        // evidence, reproducible by a pure implementation of the public
-        // semantics; a grammar beyond the live maximum must make this
-        // solver fail until those semantics are implemented. The mirror
-        // test lives in the PHP suite as
-        // testBrowserlessShadowSolverForgesEveryLiveVersionTrace.
+        // at several chosen observed heights. The trace of those rungs
+        // is supplementary evidence, reproducible by a pure
+        // implementation of the public semantics. The mirror test lives
+        // in the PHP suite as
+        // testBrowserlessShadowSolverForgesEveryPureSemanticsVersionTrace.
         let heights = [1u8, 10, 17, 255];
+        let solver_max = 5u8;
         let mut solved = 0u64;
-        for version in 1..=MAX_EXECUTION_VERSION {
+        for version in 1..=solver_max {
             for i in 0..100u32 {
                 let nonce = B64.encode(sha2::Sha256::digest(
                     format!("browserless-solver-v{version}-{i}").as_bytes(),
@@ -3392,8 +4117,89 @@ mod tests {
         }
         assert_eq!(
             solved,
-            100 * heights.len() as u64 * MAX_EXECUTION_VERSION as u64,
-            "the oracle solves 100 programs of every live version at every observed height"
+            100 * heights.len() as u64 * solver_max as u64,
+            "the oracle solves 100 programs of every pure-semantics version at every observed height"
+        );
+    }
+
+    #[test]
+    fn browserless_shadow_solver_fails_on_the_real_platform_rung() {
+        // The version-6 envelope gate, the mirror of the PHP
+        // testBrowserlessShadowSolverFailsOnTheRealPlatformRung: 100
+        // deterministic v6 programs, each forged at every observed
+        // height, must be rejected without exception. The solver has no
+        // real layout engine, no real observer delivery and no real
+        // event path, so its entries violate the operand-derived
+        // envelopes.
+        let heights = [1u8, 10, 17, 255];
+        let mut attempted = 0u64;
+        let mut rejected = 0u64;
+        for i in 0..100u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(
+                format!("browserless-solver-v6-{i}").as_bytes(),
+            ));
+            let p = generate(KEY, &nonce, "login", "login-action", 6).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            assert_eq!(
+                program.op_version, 6,
+                "the corpus stays on the real-platform rung"
+            );
+            for &height in &heights {
+                let trace = browserless_forgery_solver(&program, height);
+                attempted += 1;
+                if verify_executed_trace(&p, &nonce, &trace).is_none() {
+                    rejected += 1;
+                }
+            }
+        }
+        assert_eq!(
+            attempted, 400,
+            "the sweep attempted every program at every height"
+        );
+        assert_eq!(
+            attempted, rejected,
+            "the browserless oracle must fail on every version-6 program (a 100 percent rejection rate)"
+        );
+    }
+
+    #[test]
+    fn white_box_envelope_forger_passes_every_version6_program() {
+        // The honest full-knowledge measurement, the mirror of the PHP
+        // WhiteBoxExecutionForgeryTest: a forger who reimplements the
+        // five published envelopes (they are deterministic functions of
+        // the operands that ship with the program) emits a passing trace
+        // for every version-6 program without ever opening a browser.
+        // The pass rate is 100 percent — that is the true number to
+        // publish. Version 6 costs one reading of the source, the same
+        // class as versions 1-5; it is supplementary evidence, NOT a
+        // browser boundary.
+        let mut attempted = 0u64;
+        let mut passed = 0u64;
+        for i in 0..100u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(
+                format!("whitebox-forger-v6-{i}").as_bytes(),
+            ));
+            let p = generate(KEY, &nonce, "login", "login-action", 6).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            assert_eq!(
+                program.op_version, 6,
+                "the corpus stays on the real-platform rung"
+            );
+            let trace = white_box_envelope_forgery_solver(&program, 17);
+            attempted += 1;
+            if verify_executed_trace(&p, &nonce, &trace).is_some() {
+                assert!(
+                    expected_digest_over_trace(&p, &nonce, &trace).is_some(),
+                    "a forged trace that verifies must also digest"
+                );
+                passed += 1;
+            }
+        }
+        assert_eq!(attempted, 100, "the sweep attempted every program");
+        assert_eq!(
+            passed, attempted,
+            "WHITE-BOX PASS RATE: the full-knowledge forger must pass every version-6 program \
+             without a browser (pass rate 1.0, rejection rate 0.0)"
         );
     }
 }

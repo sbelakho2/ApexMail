@@ -29,9 +29,12 @@ final class TelemetryTest extends TestCase
         self::assertTrue(Telemetry::score(['wd' => false, 'me' => 20, 'ke' => 0], 301_000));
     }
 
-    public function testZeroInteractionLongSolveRejected(): void
+    public function testZeroInteractionLongSolveIsNotRejected(): void
     {
-        self::assertTrue(Telemetry::score(['wd' => false, 'me' => 0, 'ke' => 0], 31_000));
+        // The widget auto-solves with widget-local listeners: a slow
+        // device or an Argon2id profile legitimately produces no events.
+        self::assertFalse(Telemetry::score(['wd' => false, 'me' => 0, 'ke' => 0], 31_000));
+        self::assertFalse(Telemetry::score(['wd' => false, 'me' => 0, 'ke' => 0], 299_000));
     }
 
     public function testZeroInteractionShortSolvePasses(): void
@@ -94,7 +97,7 @@ final class TelemetryTest extends TestCase
     public function testMissingFieldsDefaultToZero(): void
     {
         // Rust: as_u64() on a missing key yields 0.
-        self::assertTrue(Telemetry::score([], 31_000), 'missing me/ke must default to 0');
+        self::assertFalse(Telemetry::score([], 31_000), 'a zero-interaction long solve must not be rejected');
         self::assertFalse(Telemetry::score([], 5_000));
     }
 
@@ -104,6 +107,23 @@ final class TelemetryTest extends TestCase
         // ignoring them, never casting.
         $mixed = [100.0, 200.0, 300.0];
         self::assertFalse(Telemetry::score(['et' => $mixed], 5_000));
+    }
+
+    public function testNegativeTimestampsAreSkippedExactlyLikeRustsUnsignedParse(): void
+    {
+        // Rust reads each timestamp with as_u64(): a negative value is
+        // not a u64, so the pair contributes no diff. An all-negative
+        // strictly increasing series therefore has NO diffs and must not
+        // reject; PHP mirrored the permissive behaviour before.
+        $events = [];
+        for ($i = 0; $i < 30; $i++) {
+            $events[] = -300 + $i * 8;
+        }
+        self::assertFalse(Telemetry::score(['et' => $events, 'wd' => false], 5000));
+
+        // A direct negative duration is clamped to 0 like an unsigned u64
+        // input, never treated as a >300 s solve.
+        self::assertFalse(Telemetry::score(['wd' => false], -1));
     }
 
     public function testDecreasingTimestampsAreSkipped(): void

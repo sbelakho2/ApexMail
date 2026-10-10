@@ -4,7 +4,7 @@
 -- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     24
 --   max Redis calls:      24 (HGETALL)
---   max collection cardinality: 12 flat fields per bucket hash (6 fields
+--   max collection cardinality: 16 flat fields per bucket hash (8 fields
 --                           as flat HGETALL pairs) — no attacker-sized
 --                           collections.
 --

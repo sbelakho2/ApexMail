@@ -11,6 +11,8 @@ use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -241,6 +243,120 @@ final class ChallengeFlowTest extends TestCase
         $t2 = \KiwiCaptcha\SolutionToken::create($ch2['nonce'], $c2, 5000, [])->encode();
         $wrongScope = $verifier2->verify($t2, self::SECRET, 'signup', '198.51.100.7');
         self::assertSame(\KiwiCaptcha\VerifyError::WrongScope, $wrongScope->error);
+    }
+
+    public function testEffectiveEpochIssuanceFollowsACentralBump(): void
+    {
+        // A central min_policy_epoch ahead of the configured
+        // risk.policy_version: issuance stamps the effective epoch
+        // max(configured, central) instead of the stale configured value,
+        // so a new challenge verifies immediately after the bump.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8,
+            ttlSecs: 120,
+            policyVersion: 1,
+        ), $storage);
+        $redis = new FakePredisClient();
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        // The verifier represents every node following the central state.
+        $verifier = new Verifier($storage, null, null, false, null, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 300);
+        $controller = new ChallengeController($issuer, epochMonitor: $monitor, policyVersion: 1);
+
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        $challenge = json_decode((string) $response->getContent(), true);
+        $this->waitOutMinDuration((float) $challenge['minDurationMs']);
+
+        // The signed canonical carries the effective epoch 2, not the
+        // configured 1: decode the policy_version segment of the payload.
+        $canonical = base64_decode(explode('.', (string) $challenge['challenge'])[0], true);
+        self::assertIsString($canonical);
+        $segments = explode('|', $canonical);
+        // v4 canonical: version|nonce|scope|binding|issued|expires|...
+        // algorithm|m|t|p|bits|salt|min_duration|region|policy_version|...
+        self::assertSame('2', $segments[15], 'the issued record carries the effective epoch, not the configured floor');
+
+        // Solve in pure PHP (8 bits) and verify with the effective epoch.
+        $counter = 0;
+        $saltBytes = base64_decode($challenge['salt'], true);
+        do {
+            $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        --$counter;
+        $token = \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [])->encode();
+
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('a challenge issued during the bump must verify immediately, got %s', $outcome->code()));
+    }
+
+    public function testMixedFleetRedeemsThroughTheDeclaredRolloutWindow(): void
+    {
+        // The rollout-window contract: with the expected epoch rotated
+        // to 2 (the central min_policy_epoch bump the monitor follows)
+        // and the declared window floor 1 wired the way the extension
+        // wires risk.policy_rollout_min_epoch, a challenge issued under
+        // epoch 1 (the pre-bump node) redeems on the epoch-2 node with
+        // zero spurious rejections; with no window declared the same
+        // record is rejected WrongPolicyVersion (strict equality).
+        [$storage, $token] = $this->issueAndSolveAtEpoch1();
+
+        $redis = new FakePredisClient();
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $verifier = new Verifier($storage, expectedPolicyVersion: 1, policyVersionFloor: 1);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 300);
+        $monitor->refresh(); // follows the central bump: expected epoch 2, the declared floor survives
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('an epoch-1 record must redeem on the epoch-2 node during the declared window, got %s', $outcome->code()));
+
+        // Without the declared window the same shape of record is
+        // rejected strict: the window is the only widening of the
+        // epoch contract.
+        [$storage2, $token2] = $this->issueAndSolveAtEpoch1();
+        $strict = new Verifier($storage2, expectedPolicyVersion: 2);
+        $outcome2 = $strict->verify($token2, self::SECRET, 'login', '198.51.100.7');
+        self::assertSame(\KiwiCaptcha\VerifyError::WrongPolicyVersion, $outcome2->error, 'outside a declared window a wrong epoch is still rejected');
+    }
+
+    /**
+     * Issue and solve a challenge through a node still at its configured
+     * epoch 1 (no monitor: the pre-bump node), the record a mixed N/N+1
+     * fleet must drain.
+     *
+     * @return array{0: ArrayStorage, 1: string} the storage holding the record and the solution token
+     */
+    private function issueAndSolveAtEpoch1(): array
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8,
+            ttlSecs: 120,
+            policyVersion: 1,
+        ), $storage);
+        $controller = new ChallengeController($issuer, policyVersion: 1);
+
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        $challenge = json_decode((string) $response->getContent(), true);
+        $this->waitOutMinDuration((float) $challenge['minDurationMs']);
+
+        $counter = 0;
+        $saltBytes = base64_decode($challenge['salt'], true);
+        do {
+            $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        --$counter;
+
+        return [$storage, \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [])->encode()];
     }
 
     public function testArgon2ChallengeIssuesAndVerifiesLocally(): void
@@ -975,8 +1091,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
         ]);
         $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
@@ -1003,6 +1119,77 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(429, $response->getStatusCode());
         self::assertSame('RISK_DENIED', json_decode((string) $response->getContent(), true)['error']['code']);
         self::assertSame([], $client->calls, 'the process-local cap must refuse BEFORE any Redis round trip (the rate limiter never ran)');
+    }
+
+    public function testASourceRateLimited429ReEmitsTheCarriedSessionCookie(): void
+    {
+        // The rate-limited client already holds a continuity session; the
+        // 429 records the sourceRateLimitHit evidence against that
+        // session, so it must also re-emit it. Dropping the cookie makes
+        // every retry mint a fresh session and loses the session
+        // reputation that partly drives the limit.
+        $cookie = new ContinuityCookie();
+        $session = $cookie->mint();
+        self::assertNotNull($session);
+        $limiter = new IssuanceRateLimiter(1, 60, null, null, 'pepper', $this->requirePredis(), 500, 'cookie-429-ns');
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), new ArrayStorage());
+        $controller = new ChallengeController($issuer, $limiter, false, null, $cookie);
+
+        $makeRequest = static function () use ($cookie, $session): \Symfony\Component\HttpFoundation\Request {
+            $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+            $request->cookies->set($cookie->cookie(Request::create('/'), $session)->getName(), $session);
+
+            return $request;
+        };
+
+        $first = $controller->challenge($makeRequest());
+        self::assertSame(200, $first->getStatusCode(), 'the first request is inside the per-source budget');
+        $second = $controller->challenge($makeRequest());
+        self::assertSame(429, $second->getStatusCode(), 'the second request exhausts the per-source budget');
+
+        $emitted = null;
+        foreach ($second->headers->getCookies() as $emittedCookie) {
+            if ($emittedCookie->getValue() === $session) {
+                $emitted = $emittedCookie;
+                break;
+            }
+        }
+        self::assertNotNull($emitted, 'the rate-limited response must re-emit the carried session cookie');
+        self::assertSame($cookie->cookie(Request::create('/'), $session)->getName(), $emitted->getName());
+    }
+
+    public function testAChallengeIssuedFeedbackOutageStillHandsOutTheChallenge(): void
+    {
+        // The challenge is minted and admitted; the challengeIssued
+        // issue-debt feedback then hits a risk-store outage. That
+        // feedback is evidence only — the challenge must still be handed
+        // out (200), never discarded by the pre-commit rollback and never
+        // surfaced as a raw 500.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
+
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), new ArrayStorage());
+        $limiter = new IssuanceRateLimiter(100, 60, null, null, 'pepper', new FakePredisClient(), 500, 'test-ns');
+        $controller = new ChallengeController($issuer, $limiter, false, $gateway);
+
+        // The pre-issue assessment observes once; the request's second
+        // observation is the challengeIssued feedback and its outage must
+        // be swallowed.
+        $store->throwAtObservation = 2;
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'a challengeIssued feedback outage must not discard a minted challenge');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertNotSame('', (string) ($body['nonce'] ?? ''), 'the hand-out still carries a real challenge');
+        self::assertCount(1, $store->observations, 'only the pre-issue assessment landed; the feedback outage was swallowed');
     }
 
     public function testRedisRateLimiterRunsWhenTheProcessCapHasBudget(): void
@@ -1363,8 +1550,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(429, $response->getStatusCode());
         self::assertSame('SCOPE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
 
-        $expectedKey = '{kiwi:reserved}:issuance:'.ScopeIssuanceCap::UNKNOWN_QUOTA_ID.':'.intdiv(1_800_000_000, 60);
-        self::assertSame(2, $client->counters[$expectedKey] ?? null, 'both invented scopes hit the SAME reserved quota window');
+        $expectedKey = '{kiwi:reserved}:issuance:'.ScopeIssuanceCap::UNKNOWN_QUOTA_ID.':sw';
+        self::assertCount(1, $client->zsets[$expectedKey] ?? [], 'both invented scopes hit the SAME reserved quota window (the refused attempt added no member)');
         foreach ($client->calls as $call) {
             foreach ((array) $call[1] as $arg) {
                 if (\is_string($arg) && str_contains($arg, ':issuance:')) {
@@ -1582,7 +1769,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             if (str_contains($firstKey, ':issuance:')) {
                 $sawScopeCap = true;
                 self::assertStringContainsString('{kiwi:order-test}:issuance:', $firstKey);
-                self::assertStringNotContainsString('login', $firstKey, 'the scope cap key carries hex(hmac_sha256(scope, K_scope)), never the raw scope');
+                self::assertStringNotContainsString('login', $firstKey, 'the scope cap key carries the canonical server-owned scope id (UNKNOWN_QUOTA_ID for an unmapped scope), never the raw scope');
             }
         }
         self::assertTrue($sawScopeCap, 'the per-scope issuance cap must have run');

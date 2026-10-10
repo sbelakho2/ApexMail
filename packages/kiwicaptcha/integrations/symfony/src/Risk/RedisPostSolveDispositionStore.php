@@ -64,6 +64,26 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * acceptance. The same decode runs on the in-memory store, so Array and
  * Redis observe one machine.
  *
+ * The Lua predicate is the exhaustive semantic mirror of that PHP
+ * decoder. It is a full semantic check, not a key-and-type check. The
+ * exact kind <-> chain_id <-> chain_expires_at matrix, the one
+ * chain-id grammar and the v1 legacy / v2 chain-expiry rules are
+ * enforced at every mutation and replay boundary. The differential
+ * corpus test feeds every valid and invalid disposition shape to both
+ * and requires identical acceptance.
+ *
+ * Every present record must carry a Redis key lifetime. That covers the
+ * disposition itself and every chain the obligation guard consults. A
+ * lifetime-stripped disposition is corrupt state: it is never
+ * takeover-able, finalizable or replayable, and the read throws
+ * {@see MalformedPostSolveDispositionException}. The chain side of the
+ * guard runs through the ONE live-chain authority,
+ * {@see ChainV2LuaPredicate}'s `readLiveChainForObligation`. That
+ * helper applies the key lifetime, the strict decode, the v2 schema,
+ * the expected obligation id and the signed expiry. The post-solve
+ * acceptance can therefore never recognize a chain the chain store's
+ * own live-read would refuse.
+ *
  * Replica durability: with `waitReplicas > 0` every fresh mutating
  * transition is followed by a verified Redis WAIT on the same
  * connection. This covers the claim's record creation, the
@@ -108,21 +128,25 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
     /** The short fixed computation lease — a contention bound, never the record TTL. */
     private const LEASE_SECS = 15;
 
-    /** The chain id shape (base64url of 16 random bytes — the ticket service's alphabet). */
-    private const CHAIN_ID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
-
     /**
      * Single-Lua claim: one atomic transition per nonce.
      *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>.
- *   keys[2] = the nonce -> decision mapping key
- *             ({kiwi:<ns>}:decision:<nonce>); when there is none, the
- *             record key itself is declared in its place. A real
- *             same-slot key, never an empty placeholder (an empty
- *             string has its own hash slot and would break the EVAL
- *             on Cluster). The ARGV[4] flag gates it.
+     *   keys[2] = the nonce -> decision mapping key
+     *             ({kiwi:<ns>}:decision:<nonce>); when there is none, the
+     *             record key itself is declared in its place. A real
+     *             same-slot key, never an empty placeholder (an empty
+     *             string has its own hash slot and would break the EVAL
+     *             on Cluster). The ARGV[4] flag gates it.
      *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record
      *             TTL, argv[4] = 1 when KEYS[2] is a live decision
      *             mapping, else 0 (the placeholder must not be read).
+     *             argv[9] = the expected obligation id ('' when the
+     *             transaction guard is off).
+     *             argv[10] = 1 when the obligation resolves in the
+     *             chain store's legacy namespace (migrating_v2), else
+     *             0. A stored Pass is then refused as
+     *             'obligation-changed', since this script cannot read
+     *             that key across hash slots.
      * Returns a JSON object {status, record}: status is
      * 'claimed' | 'pending' | 'taken_over' | 'complete' | 'corrupt'. The
      * record field carries the record the caller needs for that outcome:
@@ -140,9 +164,13 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      * before any mutation. It is never healed into valid state by a
      * takeover and never answered as a valid disposition. The complete
      * record's disposition shape is validated by the store's strict
-     * decoder on the read-only response.
+     * decoder on the read-only response. Every present record this
+     * script reads — the disposition itself and the chain consulted by
+     * the obligation guard — must carry a Redis key lifetime: a
+     * PERSISTed key is corrupt state with zero writes, never a live
+     * record.
      */
-    private const CLAIM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const CLAIM_LUA = PostSolveDispositionLuaPredicate::LUA . PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
 -- The existing state answers FIRST — complete/busy/takeover NEVER touch
 -- the nonce -> decision mapping; ONLY the missing path consumes it
@@ -161,16 +189,22 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 -- (same hash tag; the placeholder record key when the guard is off) and
 -- KEYS[4] the chain record the snapshot observed (placeholder when the
 -- snapshot saw no chain). ARGV[5] = this nonce, ARGV[6] = the snapshot
--- chain id ('' when none).
+-- chain id ('' when none), ARGV[9] = the expected obligation id ('' when
+-- the guard is off). Every present record — the disposition itself and
+-- every chain consulted by the guard — must carry a Redis key lifetime:
+-- a PERSISTed key is corrupt state and fails closed with zero writes.
 local now = tonumber(redis.call('TIME')[1])
-local existing = redis.call('GET', KEYS[1])
-if not existing then
+local existing = readLivePersistedKey(KEYS[1])
+if existing == 'corrupt' then
+  return cjson.encode({ status = 'corrupt' })
+end
+if existing == false then
   local decisionId = cjson.null
   if tonumber(ARGV[4]) == 1 then
     local d = redis.call('GETDEL', KEYS[2])
     if d then
-      local ok, decoded = pcall(cjson.decode, d)
-      if ok and type(decoded) == 'table' and type(decoded['decision_id']) == 'string' and decoded['decision_id'] ~= '' then
+      local decoded = decodeUniqueObject(d)
+      if type(decoded) == 'table' and type(decoded['decision_id']) == 'string' and decoded['decision_id'] ~= '' then
         decisionId = decoded['decision_id']
       end
     end
@@ -185,7 +219,10 @@ if not existing then
   redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', tonumber(ARGV[3]))
   return cjson.encode({ status = 'claimed', record = rec })
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil or not validPostSolveRecord(rec) then
+  return cjson.encode({ status = 'corrupt' })
+end
 -- Strict existing-record validation (fail closed, never healed): an
 -- unknown schema or state, or a pending record without a well-shaped
 -- owner/lease/deferred disposition/decision handle, is corrupt and
@@ -199,8 +236,15 @@ if rec['state'] == 'complete' then
   if ARGV[7] == '1' then
     local disp = rec['disposition']
     if type(disp) == 'table' and disp['kind'] == 'pass' then
+      if ARGV[10] == '1' then
+        -- The transaction's obligation lives in the legacy namespace,
+        -- which this primary-namespace script cannot read across hash
+        -- slots. Refuse the stored Pass instead of accepting it while
+        -- the transaction is not clear.
+        return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+      end
       local mapped = redis.call('GET', KEYS[3])
-      if mapped == nil then
+      if not mapped then
         if ARGV[6] ~= '' then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
@@ -220,12 +264,8 @@ if rec['state'] == 'complete' then
             return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
           end
         end
-        local chained = redis.call('GET', KEYS[4])
-        if not chained then
-          return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
-        end
-        local ok, crec = pcall(cjson.decode, chained)
-        if not (ok and isValidChainRecord(crec)) then
+        local crec = readLiveChainForObligation(KEYS[4], ARGV[9], now)
+        if crec == 'absent' or crec == 'expired' or crec == 'corrupt' then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
         if crec['state'] == 'denied' then
@@ -280,7 +320,7 @@ LUA;
      *   keys[1] = the record key
      *   argv[1] = owner token, argv[2] = disposition json
      */
-    private const FINALIZE_GUARDED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const FINALIZE_GUARDED_LUA = PostSolveDispositionLuaPredicate::LUA . PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition guarded finalize: pending(owner) -> complete,
 -- with the transaction acceptance guard verified atomically with the
 -- write (the CAS ordering across the chain machine and the disposition
@@ -290,17 +330,27 @@ LUA;
 -- ARGV[1] = owner, ARGV[2] = the disposition wire JSON, ARGV[3] = the
 -- candidate kind, ARGV[4] = the snapshot chain id ('' when none),
 -- ARGV[5] = this nonce, ARGV[6] = guard flag ('1' when chaining is
--- wired). A Pass candidate is refused when the transaction now maps to
--- a terminal denied/step_up_required chain, or to an open nonterminal
--- chain whose current stage-2 nonce is not this nonce, or when the
--- obligation moved since the snapshot. Deny/StepUp/ChainRequired
--- candidates are terminal or contract responses and finalize on the
--- record checks alone.
-local existing = redis.call('GET', KEYS[1])
-if not existing then
+-- wired), ARGV[7] = the pre-resolved mapped chain id ('' when none),
+-- ARGV[8] = the expected obligation id ('' when the guard is off). A
+-- Pass candidate is refused when the transaction now maps to a terminal
+-- denied/step_up_required chain, or to an open nonterminal chain whose
+-- current stage-2 nonce is not this nonce, or when the obligation moved
+-- since the snapshot. Every consulted chain (and the record itself) must
+-- carry a Redis key lifetime: a PERSISTed key is corrupt state and fails
+-- closed with zero writes. Deny/StepUp/ChainRequired candidates are
+-- terminal or contract responses and finalize on the record checks
+-- alone.
+local existing = readLivePersistedKey(KEYS[1])
+if existing == 'corrupt' then
+  return 'corrupt'
+end
+if existing == false then
   return 'missing'
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil or not validPostSolveRecord(rec) then
+  return 'corrupt'
+end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
   return 'corrupt'
 end
@@ -312,7 +362,7 @@ if rec['owner'] ~= ARGV[1] then
 end
 if ARGV[6] == '1' and ARGV[3] == 'pass' then
   local mapped = redis.call('GET', KEYS[2])
-  if mapped == nil then
+  if not mapped then
     if ARGV[4] ~= '' then
       return 'obligation-changed'
     end
@@ -332,12 +382,8 @@ if ARGV[6] == '1' and ARGV[3] == 'pass' then
         return 'obligation-changed'
       end
     end
-    local chained = redis.call('GET', KEYS[3])
-    if not chained then
-      return 'obligation-changed'
-    end
-    local ok, crec = pcall(cjson.decode, chained)
-    if not (ok and isValidChainRecord(crec)) then
+    local crec = readLiveChainForObligation(KEYS[3], ARGV[8], tonumber(redis.call('TIME')[1]))
+    if crec == 'absent' or crec == 'expired' or crec == 'corrupt' then
       return 'obligation-changed'
     end
     if crec['state'] == 'denied' then
@@ -359,13 +405,21 @@ redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'finalized'
 LUA;
 
-    private const FINALIZE_LUA = <<<'LUA'
--- Post-solve disposition finalize: pending(owner) -> complete.
-local existing = redis.call('GET', KEYS[1])
-if not existing then
+    private const FINALIZE_LUA = PostSolveDispositionLuaPredicate::LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
+-- Post-solve disposition finalize: pending(owner) -> complete, on a
+-- record that carries a Redis key lifetime (a PERSISTed record is
+-- corrupt, never finalized).
+local existing = readLivePersistedKey(KEYS[1])
+if existing == 'corrupt' then
   return false
 end
-local rec = cjson.decode(existing)
+if existing == false then
+  return false
+end
+local rec = decodeUniqueObject(existing)
+if rec == nil or not validPostSolveRecord(rec) then
+  return false
+end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
   return false
 end
@@ -381,6 +435,22 @@ rec['lease_until'] = cjson.null
 rec['disposition'] = cjson.decode(ARGV[2])
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
+LUA;
+
+    /**
+     * The atomic live read used by read(): the record must exist and
+     * carry a Redis key lifetime. Absent -> false, present without a
+     * lifetime -> 'corrupt', live -> the raw JSON. The record's own
+     * lifetime is the same present-key corruption boundary the chain
+     * store enforces.
+     */
+    private const READ_LIVE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+-- Post-solve disposition live read: existence + key lifetime in one script.
+local existing = readLivePersistedKey(KEYS[1])
+if existing == 'corrupt' then
+  return 'corrupt'
+end
+return existing
 LUA;
 
     /**
@@ -419,6 +489,14 @@ LUA;
      *                                             RedisStorage.
      * @param int                   $waitTimeoutMs WAIT timeout in ms (default
      *                                             100).
+     * @param ?RedisChainedChallengeStateStore $chainStore the chain store the
+     *                                             guard consults for the
+     *                                             obligation provenance
+     *                                             (migrating_v2 legacy
+     *                                             fallback). Null when
+     *                                             chaining is not wired or
+     *                                             the store is the array
+     *                                             mirror.
      */
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
@@ -426,9 +504,26 @@ LUA;
         private readonly int $ttlSecs = 0,
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        private readonly ?RedisChainedChallengeStateStore $chainStore = null,
     ) {
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
         $this->lua = new RedisSecurityCommandExecutor($redis);
+    }
+
+    /**
+     * Whether the transaction's obligation resolves in the chain store's
+     * legacy namespace. The primary-namespace guard script cannot read
+     * that key: it lives in another hash slot. The caller refuses the
+     * Pass candidate instead, so a pre-cutover obligation stays visible.
+     */
+    private function hasLegacyObligation(string $obligationId): bool
+    {
+        if ($this->chainStore === null) {
+            return false;
+        }
+        $lookup = $this->chainStore->obligationLookup($obligationId);
+
+        return $lookup !== null && $lookup['namespace'] === 'legacy';
     }
 
     public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
@@ -454,6 +549,13 @@ LUA;
         // snapshot chain id is the legitimate no-chain snapshot (the
         // guard must still see an obligation that opened after it).
         $guardEnabled = $obligationId !== null;
+        // Migration guard: on the migrating_v2 key version an obligation
+        // written before the cutover lives in the legacy namespace. The
+        // chain store resolves the provenance here, before the script,
+        // and the script refuses a stored Pass when the obligation is
+        // legacy. The primary script must not read that key itself: it
+        // lives in another hash slot.
+        $legacyObligation = $guardEnabled && $this->hasLegacyObligation($obligationId);
         $obligationKey = $guardEnabled ? sprintf('{kiwi:%s}:chain-obligation:%s', $this->namespace, $obligationId) : $recordKey;
         // When the snapshot saw no chain, pre-resolve the current mapped
         // chain id (a plain read, re-verified inside the script against
@@ -463,7 +565,12 @@ LUA;
         $resolvedChainId = '';
         if ($guardEnabled && ($snapshotChainId ?? '') === '') {
             $mapped = $this->redis->get($obligationKey);
-            if (\is_string($mapped) && $mapped !== '') {
+            if ($mapped === '') {
+                // A present empty mapping is damaged state, never "no open
+                // obligation": fail closed before any transition.
+                throw new MalformedPostSolveDispositionException('the obligation mapping is an empty value');
+            }
+            if (\is_string($mapped)) {
                 $resolvedChainId = $mapped;
             }
         }
@@ -486,6 +593,8 @@ LUA;
             $guardEnabled ? ($snapshotChainId ?? '') : '',
             $guardEnabled ? '1' : '0',
             $guardEnabled ? $resolvedChainId : '',
+            $guardEnabled ? $obligationId : '',
+            $legacyObligation ? '1' : '0',
         ]);
 
         try {
@@ -623,8 +732,14 @@ LUA;
 
     public function read(string $nonce): ?PostSolveDispositionRecord
     {
-        $raw = $this->redis->get($this->key($nonce));
-        if (!\is_string($raw) || $raw === '') {
+        // The atomic live read: existence and key lifetime in one script.
+        // A present record whose Redis lifetime was stripped is corrupt
+        // state, never authorization-bearing state.
+        $raw = $this->lua->executeRead(self::READ_LIVE_LUA, $this->key($nonce), []);
+        if ($raw === 'corrupt') {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record carries no Redis key lifetime');
+        }
+        if ($raw === false || $raw === null || !\is_string($raw) || $raw === '') {
             return null;
         }
         $record = self::recordFromDecoded(self::decodeRecord($raw));
@@ -689,6 +804,17 @@ LUA;
     {
         $recordKey = $this->key($nonce);
         $guardEnabled = $obligationId !== null;
+        // Migration guard: a Pass candidate is refused before the script
+        // runs when the transaction's obligation resolves in the legacy
+        // namespace. The primary script cannot read that key across hash
+        // slots, so a pre-cutover obligation would otherwise be
+        // invisible and let the stale Pass commit.
+        if ($guardEnabled
+            && $disposition->kind === PostSolveDispositionKind::Pass
+            && $this->hasLegacyObligation($obligationId)
+        ) {
+            return PostSolveFinalizeOutcome::ObligationChanged;
+        }
         $obligationKey = $guardEnabled ? sprintf('{kiwi:%s}:chain-obligation:%s', $this->namespace, $obligationId) : $recordKey;
         // Same pre-resolution as the claim: a snapshot without a chain
         // needs the mapped chain record read at the current id, re-
@@ -696,7 +822,12 @@ LUA;
         $resolvedChainId = '';
         if ($guardEnabled && ($snapshotChainId ?? '') === '') {
             $mapped = $this->redis->get($obligationKey);
-            if (\is_string($mapped) && $mapped !== '') {
+            if ($mapped === '') {
+                // A present empty mapping is damaged state, never "no open
+                // obligation": fail closed before any transition.
+                throw new MalformedPostSolveDispositionException('the obligation mapping is an empty value');
+            }
+            if (\is_string($mapped)) {
                 $resolvedChainId = $mapped;
             }
         }
@@ -710,6 +841,7 @@ LUA;
             $nonce,
             $guardEnabled ? '1' : '0',
             $guardEnabled ? $resolvedChainId : '',
+            $guardEnabled ? $obligationId : '',
         ]);
         if (!\is_string($outcome)) {
             throw new MalformedPostSolveDispositionException('post-solve disposition guarded finalize returned an unreadable response');
@@ -746,13 +878,9 @@ LUA;
      */
     private static function decodeRecord(string $raw): array
     {
-        try {
-            $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record is not valid JSON', 0, $e);
-        }
-        if (!\is_array($rec)) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record must be a JSON object');
+        $rec = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw, 8192);
+        if ($rec === null) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record is not a clean JSON object (malformed, oversized or carrying a semantic duplicate key)');
         }
 
         return self::validateDecoded($rec);
@@ -786,6 +914,13 @@ LUA;
      */
     private static function validateDecoded(array $rec): array
     {
+        // The exact record key set: a foreign or renamed field is
+        // corruption, exactly like the chain/ChallengeRecord schemas.
+        $allowedRecordKeys = ['v', 'state', 'owner', 'lease_until', 'disposition', 'decision_id'];
+        $unknown = array_diff(array_keys($rec), $allowedRecordKeys);
+        if ($unknown !== []) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record carries unsupported keys: '.implode(',', $unknown));
+        }
         $version = $rec['v'] ?? null;
         if ($version !== 1 && $version !== 2) {
             throw new MalformedPostSolveDispositionException('post-solve disposition record schema version must be 1 or 2');
@@ -814,6 +949,16 @@ LUA;
             if (!\is_array($disposition)) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record disposition is required in the complete state');
             }
+            // The exact nested disposition key set, the same rule as the
+            // record itself. quarantined is additive and optional: a
+            // v1/v2 record without it is the shape of the earlier store
+            // generation (quarantine false); a record carrying it must
+            // use the exact Pass-kind rule below.
+            $allowedDispositionKeys = ['kind', 'decision_id', 'chain_id', 'chain_expires_at', 'quarantined'];
+            $unknownNested = array_diff(array_keys($disposition), $allowedDispositionKeys);
+            if ($unknownNested !== []) {
+                throw new MalformedPostSolveDispositionException('post-solve disposition carries unsupported keys: '.implode(',', $unknownNested));
+            }
             $kind = $disposition['kind'] ?? null;
             if (!\is_string($kind) || PostSolveDispositionKind::tryFrom($kind) === null) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record kind must be a valid disposition kind');
@@ -823,7 +968,7 @@ LUA;
                 throw new MalformedPostSolveDispositionException('post-solve disposition record decision_id must be a non-empty string or null');
             }
             $chainId = $disposition['chain_id'] ?? null;
-            if ($chainId !== null && (!\is_string($chainId) || preg_match(self::CHAIN_ID_PATTERN, $chainId) !== 1)) {
+            if ($chainId !== null && (!\is_string($chainId) || preg_match(ChainId::PATTERN, $chainId) !== 1)) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_id must match the chain id shape or be null');
             }
             if ($kind === PostSolveDispositionKind::ChainRequired->value && ($chainId === null || $chainId === '')) {
@@ -850,6 +995,21 @@ LUA;
                 }
             } elseif ($chainExpiresAt !== null) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_expires_at must be null outside the ChainRequired kind');
+            }
+            // The quarantine disposition rides the Pass kind only (the
+            // severity-monotonic precedence: quarantine never overrides
+            // deny, step-up or a chain demand) and must be exactly the
+            // boolean true when present. It is written only when true,
+            // so the v1/v2 record shapes stay byte-identical for every
+            // non-quarantined decision.
+            $quarantined = $disposition['quarantined'] ?? null;
+            if ($quarantined !== null) {
+                if ($quarantined !== true) {
+                    throw new MalformedPostSolveDispositionException('post-solve disposition record quarantined must be boolean true when present');
+                }
+                if ($kind !== PostSolveDispositionKind::Pass->value) {
+                    throw new MalformedPostSolveDispositionException('post-solve disposition record quarantined must be null outside the Pass kind');
+                }
             }
         }
         $recordDecisionId = $rec['decision_id'] ?? null;
@@ -884,6 +1044,7 @@ LUA;
                 $disposition['decision_id'] ?? null,
                 $disposition['chain_id'] ?? null,
                 $disposition['chain_expires_at'] ?? null,
+                $disposition['quarantined'] ?? false,
             ),
             $decisionId,
         );
@@ -891,18 +1052,25 @@ LUA;
 
     /**
      * The persisted disposition shape — kind / decision_id / chain_id /
-     * chain_expires_at only. Raw risk vectors, fingerprints and
-     * descriptors are never stored.
+     * chain_expires_at only, plus the additive quarantined flag written
+     * only when true (a non-quarantined record keeps the exact earlier
+     * byte shape). Raw risk vectors, fingerprints and descriptors are
+     * never stored.
      *
-     * @return array{kind: string, decision_id: ?string, chain_id: ?string, chain_expires_at: ?int}
+     * @return array{kind: string, decision_id: ?string, chain_id: ?string, chain_expires_at: ?int, quarantined?: true}
      */
     private static function wire(PostSolveDisposition $disposition): array
     {
-        return [
+        $wire = [
             'kind' => $disposition->kind->value,
             'decision_id' => $disposition->decisionId,
             'chain_id' => $disposition->chainId,
             'chain_expires_at' => $disposition->chainExpiresAt,
         ];
+        if ($disposition->quarantined) {
+            $wire['quarantined'] = true;
+        }
+
+        return $wire;
     }
 }

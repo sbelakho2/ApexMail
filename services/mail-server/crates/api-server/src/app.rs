@@ -1009,14 +1009,20 @@ fn browser_csp_header() -> HeaderValue {
 
 /// The auth pages that carry the KiwiCaptcha widget: (surface, path,
 /// scope). The scope must exist in the issuance allowlist in
-/// `routes::kiwicaptcha.rs` and in the `verify_kiwi_token` call of the
-/// matching form POST handler — the three must stay in lockstep or the
-/// challenge a page mints can never satisfy its own form.
+/// `routes::kiwicaptcha.rs` and in the `verify_kiwi_token` /
+/// `verify_kiwi_form_token` call of the matching form POST handler — the
+/// three must stay in lockstep or the challenge a page mints can never
+/// satisfy its own form.
+///
+/// Query-variant scopes (`/login?mfa=1&email=…` → `mfa-verify`,
+/// `/verify-email?status=error` → `resend-verification`) are resolved by
+/// [`kiwi_render_scope`]; the table entry here is the page's BASE scope.
 const KIWI_AUTH_PAGES: &[(&str, &str, &str)] = &[
     ("web", "/login", "login"),
     ("web", "/signup", "signup"),
     ("web", "/forgot-password", "forgot-password"),
     ("web", "/reset-password", "reset-password"),
+    ("web", "/verify-email", "resend-verification"),
     ("control-plane", "/login", "cp-login"),
 ];
 
@@ -1025,6 +1031,65 @@ fn kiwi_auth_scope_for(surface: &str, path: &str) -> Option<&'static str> {
         .iter()
         .find(|(s, p, _)| *s == surface && *p == path)
         .map(|(_, _, scope)| *scope)
+}
+
+/// The (percent-decoded) value of one query parameter, mirroring the
+/// render pipeline's parser (`ui_foundation::axum_router`): an empty value
+/// never counts, and when a key repeats the LAST non-empty value wins.
+/// The widget decision must use the exact same semantics as the router or
+/// a page variant could render the password form with the MFA scope (or
+/// vice versa) and lock the user out.
+fn kiwi_query_param(uri: &Uri, key: &str) -> Option<String> {
+    let query = uri.query()?;
+    let mut found: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+        if k == key && !v.is_empty() {
+            found = Some(v.into_owned());
+        }
+    }
+    found
+}
+
+/// The widget scope for a GET render of a KiwiCaptcha-bearing page,
+/// resolving the query variants:
+///
+/// - `/login?mfa=1&email=…` (console) and the CP twin render the MFA
+///   challenge form — step two of the same login — so their widget mints a
+///   NEW `mfa-verify` challenge. The 6-digit second factor is guessable
+///   within the per-USER lockout by a distributed attacker pacing under it
+///   across many accounts, so the challenge form pays its own proof-of-work
+///   instead of riding the password step's consumed one. The same URI
+///   WITHOUT an email renders the ordinary password form (the router falls
+///   back to it) and must keep the password-step scope.
+/// - `/verify-email?status=error` hosts the resend-verification form and
+///   carries the `resend-verification` widget; the success/pending/token-
+///   ready variants carry no form to attach the hidden token input to.
+/// - Every other page keeps its base table scope.
+fn kiwi_render_scope(surface: &str, uri: &Uri) -> Option<&'static str> {
+    let scope = kiwi_auth_scope_for(surface, uri.path())?;
+    match scope {
+        "login" | "cp-login" => {
+            let mfa_challenge = kiwi_query_param(uri, "mfa")
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+            if mfa_challenge && kiwi_query_param(uri, "email").is_some() {
+                Some("mfa-verify")
+            } else {
+                Some(scope)
+            }
+        }
+        "resend-verification" => {
+            kiwi_resend_scope_for_status(kiwi_query_param(uri, "status").as_deref())
+        }
+        other => Some(other),
+    }
+}
+
+/// The widget scope for the states of `/verify-email`: only the error
+/// variant renders the resend form (the page is served by its own handler,
+/// `browser_verify_email_page`, so this decision is also called directly
+/// from there).
+fn kiwi_resend_scope_for_status(status: Option<&str>) -> Option<&'static str> {
+    (status == Some("error")).then_some("resend-verification")
 }
 
 /// CSP for the auth pages: identical to the zero-JS browser policy except
@@ -1062,40 +1127,62 @@ fn auth_html_response(html: String, nonce: &str) -> Response {
     response
 }
 
-/// Insert the KiwiCaptcha widget into an auth page's form: the widget's
+/// Insert the KiwiCaptcha widget into an auth page's forms: the widget's
 /// hidden `kiwi__token` input must live INSIDE the `<form>` element so it
 /// posts with the credentials. Injection happens after the render pass,
 /// which is why the leptos views themselves remain script-free.
+///
+/// EVERY form on the page receives its own widget instance (each with its
+/// own challenge + token input): the MFA challenge page renders the
+/// authenticator form and the recovery-code form as siblings, and BOTH
+/// post to the gated `/web/auth/mfa/verify` handler, so a single-form
+/// injection would leave the recovery form unsolvable.
+///
+/// Only the FIRST widget emits the page's shared inline assets (style +
+/// nonce'd script blocks); later widgets render with `emit_assets: false`
+/// and are initialized by the first copy's DOM scan / shared module
+/// registry (the upstream renderer's documented multi-widget contract).
 fn inject_kiwi_widget(mut html: String, scope: &str, nonce: &str) -> String {
-    let widget = kiwicaptcha::kiwi_widget_html("/api/kcaptcha/challenge", scope, Some(nonce));
-    if let Some(form_end) = html.find("</form>") {
-        html.insert_str(form_end, &widget);
+    const ENDPOINT: &str = "/api/kcaptcha/challenge";
+    let first_widget = kiwicaptcha::kiwi_widget_html(ENDPOINT, scope, Some(nonce));
+    let later_widget =
+        kiwicaptcha::widget::kiwi_widget_html_with(&kiwicaptcha::widget::KiwiWidgetOptions {
+            endpoint: ENDPOINT,
+            scope,
+            csp_nonce: Some(nonce),
+            emit_assets: false,
+            ..Default::default()
+        });
+    let mut cursor = 0;
+    let mut first = true;
+    while let Some(rel) = html[cursor..].find("</form>") {
+        let at = cursor + rel;
+        let widget = if first { &first_widget } else { &later_widget };
+        html.insert_str(at, widget);
+        cursor = at + widget.len() + "</form>".len();
+        first = false;
     }
     html
 }
 
 /// Widget placement decision for a GET render: the scope when the page
-/// carries the widget, `None` otherwise. The MFA step-two variant of
-/// `/login` (query `mfa=1`) is deliberately excluded — the password proof
-/// (and therefore the CAPTCHA) was already consumed at step one.
+/// carries the widget, `None` otherwise.
 ///
 /// The widget renders ONLY when the captcha is actually enforced
 /// (`kiwi_enabled`): with enforcement off the widget's challenge fetch gets
 /// the endpoint's honest 503 and the page shows a "Challenge failed /
 /// Verification failed" error on a perfectly healthy login form (dogfood
 /// 2026-10-06). A widget that verifies nothing must not render.
+///
+/// Scope resolution (including the `mfa=1` and `status=error` variants)
+/// lives in [`kiwi_render_scope`]; the MFA step-two variant used to be
+/// excluded because step one consumed a captcha — it now carries its own
+/// `mfa-verify` challenge (see that function's rationale).
 fn kiwi_widget_for_render(surface: &str, uri: &Uri, kiwi_enabled: bool) -> Option<&'static str> {
     if !kiwi_enabled {
         return None;
     }
-    let scope = kiwi_auth_scope_for(surface, uri.path())?;
-    if uri
-        .query()
-        .is_some_and(|q| q.split('&').any(|kv| kv == "mfa=1"))
-    {
-        return None;
-    }
-    Some(scope)
+    kiwi_render_scope(surface, uri)
 }
 
 #[allow(dead_code)]
@@ -1483,7 +1570,26 @@ async fn render_browser_verify_email(
         return redirect;
     }
 
-    let html = ui_router::render_route_with_query(
+    // This page is served by its OWN handler (not the generic render path),
+    // so it owes the same render-pipeline inputs every other browser GET
+    // gets: the double-submit CSRF token (the `status=error` variant hosts
+    // the resend-verification POST form — without an embedded `_csrf` the
+    // affordance was rendered but every submission was refused "session
+    // expired"), and the PRG flash cookie decode (the handlers redirect back
+    // here with the captcha/rate-limit refusal, which must actually render).
+    let flash = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(|cookies| {
+            routes::web::decode_flash_from_cookie_header(cookies, &state.config.csrf_secret)
+        })
+        .unwrap_or_default();
+    let form_csrf = routes::web::form_csrf_for_render(headers, &state.config);
+    let rendered_status = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "status")
+        .map(|(_, value)| value.into_owned());
+
+    let html = ui_router::render_route_with_form_fields_and_csrf(
         surface,
         "/verify-email",
         if query.is_empty() {
@@ -1491,12 +1597,36 @@ async fn render_browser_verify_email(
         } else {
             Some(query.as_str())
         },
+        Some(state.config.csrf_secret.as_str()),
+        &flash,
         None,
+        None,
+        Some(form_csrf.token.as_str()),
     );
 
     match html {
-        Some(html) => {
-            let mut response = browser_html_response(html);
+        Some((html, _embedded_token)) => {
+            // The resend form's visibility is the widget's placement rule:
+            // only the `status=error` variant hosts a form to gate.
+            let scope = if state.config.kiwi_enabled {
+                kiwi_resend_scope_for_status(rendered_status.as_deref())
+            } else {
+                None
+            };
+            let mut response = match scope {
+                Some(scope) => {
+                    let nonce = uuid::Uuid::new_v4().simple().to_string();
+                    auth_html_response(inject_kiwi_widget(html, scope, &nonce), &nonce)
+                }
+                None => browser_html_response(html),
+            };
+            append_render_cookies(
+                &mut response,
+                &form_csrf,
+                !flash.is_empty(),
+                false,
+                &state.config,
+            );
             // F65: strict referrer policy on the verification surface —
             // the page URL (pre-redirect) must never be re-disclosed.
             response
@@ -3451,22 +3581,86 @@ mod tests {
             body.contains("data-kiwi-widget"),
             "login page must carry the KiwiCaptcha widget"
         );
-        // Outside the widget, no other executable blocks exist: the only
-        // executable tags are the widget's own two nonce'd scripts. (A raw
+        assert_eq!(
+            body.matches("class=\"kiwi-container\"").count(),
+            1,
+            "the single-form login page carries exactly one widget instance"
+        );
+        // Outside the widget, no other executable blocks exist: the shared
+        // inline asset set (wasm solver, driver, risk/execution module,
+        // telemetry module) are the only nonce'd script tags. (A raw
         // "<script" substring count would also hit literal "<script"
-        // strings inside the driver's JS payload — inert string data.)
+        // strings inside the JS payloads — inert string data.)
         assert_eq!(
             body.matches("<script nonce=").count(),
-            2,
-            "exactly the widget's two nonce'd script tags, nothing else"
+            4,
+            "exactly the widget's shared nonce'd script blocks, nothing else"
         );
 
-        // Every NON-auth browser page still pins script-src 'none' with
-        // zero script bytes.
+        // K2 wave: the MFA step-two variants (console AND control plane) now
+        // carry the widget too, bound to the new `mfa-verify` scope. The
+        // console challenge page renders TWO gated forms (authenticator +
+        // recovery-code), so it carries two widget instances — but the
+        // shared asset block is emitted only by the FIRST (the driver
+        // initializes later widgets off the first copy's registry).
+        for (host, uri) in [
+            ("app.apexmail.ee", "/login?mfa=1&email=ops%40apexmail.ee"),
+            ("admin.apexmail.ee", "/login?mfa=1&email=ops%40apexmail.ee"),
+        ] {
+            let page = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(HOST, host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.status(), StatusCode::OK, "{host}{uri}");
+            let csp = page
+                .headers()
+                .get("Content-Security-Policy")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                csp.contains("script-src 'nonce-"),
+                "{host}{uri} CSP was: {csp}"
+            );
+            let body = response_body_string(page).await;
+            assert!(
+                body.contains("data-kiwi-scope=\"mfa-verify\""),
+                "{host}{uri} must carry the mfa-verify widget"
+            );
+            assert_eq!(
+                body.matches("class=\"kiwi-container\"").count(),
+                2,
+                "{host}{uri} renders two gated forms, each needs its widget"
+            );
+            assert_eq!(
+                body.matches("name=\"kiwi__token\"").count(),
+                2,
+                "{host}{uri} must carry one hidden token input per form"
+            );
+            assert_eq!(
+                body.matches("<script nonce=").count(),
+                4,
+                "{host}{uri} must emit the shared asset block exactly once"
+            );
+        }
+
+        // K2 wave: `/verify-email?status=error` hosts the resend form; it
+        // carries the `resend-verification` widget AND the double-submit
+        // `_csrf` input the form needs to be submittable at all (the page is
+        // served by its own handler, which previously skipped the render
+        // pipeline's CSRF injection).
         let page = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/verify-email")
+                    .uri("/verify-email?status=error&email=user%40example.com")
                     .header(HOST, "app.apexmail.ee")
                     .body(Body::empty())
                     .unwrap(),
@@ -3479,12 +3673,47 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(csp.contains("script-src 'none'"), "CSP was: {csp}");
+        assert!(csp.contains("script-src 'nonce-"), "CSP was: {csp}");
+        assert!(csp.contains("form-action 'self'"), "CSP was: {csp}");
         let body = response_body_string(page).await;
         assert!(
-            !body.contains("<script"),
-            "rendered page must contain no scripts"
+            body.contains("action=\"/web/auth/resend-verification\""),
+            "the error variant must render the resend form"
         );
+        assert!(
+            body.contains("data-kiwi-scope=\"resend-verification\""),
+            "the resend form must carry the resend-verification widget"
+        );
+        assert!(
+            body.contains("name=\"_csrf\"") && !body.contains("name=\"_csrf\" value=\"\""),
+            "the resend form must carry a non-empty CSRF token"
+        );
+
+        // Every NON-auth browser page still pins script-src 'none' with
+        // zero script bytes. The verify-email SUCCESS variant carries no
+        // resend form, so it must stay script-free even with the captcha on.
+        for uri in ["/verify-email", "/verify-email?status=success"] {
+            let page = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(HOST, "app.apexmail.ee")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let csp = page
+                .headers()
+                .get("Content-Security-Policy")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(csp.contains("script-src 'none'"), "{uri} CSP was: {csp}");
+            let body = response_body_string(page).await;
+            assert!(!body.contains("<script"), "{uri} must contain no scripts");
+        }
     }
 
     #[tokio::test]
@@ -4795,7 +5024,7 @@ mod tests {
     }
 
     #[test]
-    fn kiwi_widget_injection_places_the_token_input_inside_the_form() {
+    fn kiwi_widget_injection_places_the_token_input_inside_every_form() {
         let html = inject_kiwi_widget(
             "<html><body><form action=\"/web/auth/login\"><input name=\"email\"/></form></body></html>".to_string(),
             "login",
@@ -4811,6 +5040,44 @@ mod tests {
         assert!(token_pos < form_end);
         assert!(html.contains("nonce=\"nonce123\""));
         assert!(html.contains("data-kiwi-scope=\"login\""));
+
+        // Multi-form pages (the MFA challenge renders the authenticator form
+        // and the recovery-code form as siblings) get a widget inside EACH
+        // form: both post to the gated handler, so both need a token input.
+        let two_forms = inject_kiwi_widget(
+            "<html><body><form action=\"/web/auth/mfa/verify\"><input name=\"code\"/></form>\
+             <form action=\"/web/auth/mfa/verify\"><input name=\"recovery_code\"/></form></body></html>"
+                .to_string(),
+            "mfa-verify",
+            "nonce456",
+        );
+        assert_eq!(
+            two_forms.matches("name=\"kiwi__token\"").count(),
+            2,
+            "every form must carry its own hidden token input"
+        );
+        assert_eq!(
+            two_forms.matches("class=\"kiwi-container\"").count(),
+            2,
+            "every form must carry its own widget instance"
+        );
+        assert_eq!(
+            two_forms.matches("data-kiwi-scope=\"mfa-verify\"").count(),
+            2,
+            "every widget binds the mfa-verify scope (the driver's source "
+        );
+        // The shared inline asset block is emitted exactly ONCE (the first
+        // widget); the later widget is assets-free by the upstream
+        // multi-widget contract.
+        assert_eq!(
+            two_forms.matches("<script nonce=").count(),
+            4,
+            "the shared asset block must not be duplicated per form"
+        );
+        // Each token input still precedes its form's close tag.
+        let first_close = two_forms.find("</form>").expect("first close");
+        let first_token = two_forms.find("name=\"kiwi__token\"").expect("first token");
+        assert!(first_token < first_close);
     }
 
     #[test]
@@ -4821,11 +5088,59 @@ mod tests {
             Some("cp-login")
         );
         assert_eq!(kiwi_auth_scope_for("web", "/signup"), Some("signup"));
+        assert_eq!(
+            kiwi_auth_scope_for("web", "/verify-email"),
+            Some("resend-verification")
+        );
         assert_eq!(kiwi_auth_scope_for("web", "/dashboard"), None);
         assert_eq!(kiwi_auth_scope_for("marketing", "/login"), None);
 
+        // The MFA step renders the challenge form only WITH an email (the
+        // router falls back to the password form otherwise): the challenge
+        // variant carries the mfa-verify widget, the fallback keeps the
+        // password-step scope. `mfa=true` is the router's other spelling of
+        // the same switch.
         let mfa = Uri::from_static("/login?mfa=1&email=a%40b.c");
-        assert_eq!(kiwi_widget_for_render("web", &mfa, true), None);
+        assert_eq!(
+            kiwi_widget_for_render("web", &mfa, true),
+            Some("mfa-verify")
+        );
+        let mfa_true = Uri::from_static("/login?mfa=true&email=a%40b.c");
+        assert_eq!(
+            kiwi_widget_for_render("web", &mfa_true, true),
+            Some("mfa-verify")
+        );
+        let mfa_no_email = Uri::from_static("/login?mfa=1");
+        assert_eq!(
+            kiwi_widget_for_render("web", &mfa_no_email, true),
+            Some("login"),
+            "mfa=1 without an email renders the password form"
+        );
+        let cp_mfa = Uri::from_static("/login?mfa=1&email=ops%40apexmail.ee");
+        assert_eq!(
+            kiwi_widget_for_render("control-plane", &cp_mfa, true),
+            Some("mfa-verify")
+        );
+
+        // /verify-email: the widget rides exactly the variant that hosts the
+        // resend form.
+        let resend = Uri::from_static("/verify-email?status=error&email=a%40b.c");
+        assert_eq!(
+            kiwi_widget_for_render("web", &resend, true),
+            Some("resend-verification")
+        );
+        for no_widget in [
+            "/verify-email",
+            "/verify-email?status=success",
+            "/verify-email?token=t&email=a%40b.c",
+        ] {
+            assert_eq!(
+                kiwi_widget_for_render("web", &Uri::from_static(no_widget), true),
+                None,
+                "{no_widget} hosts no resend form"
+            );
+        }
+
         let plain = Uri::from_static("/login");
         assert_eq!(kiwi_widget_for_render("web", &plain, true), Some("login"));
         // Enforcement off ⇒ no widget anywhere: it would verify nothing and
@@ -4833,6 +5148,8 @@ mod tests {
         // on a healthy login form (dogfood 2026-10-06).
         assert_eq!(kiwi_widget_for_render("web", &plain, false), None);
         assert_eq!(kiwi_widget_for_render("control-plane", &plain, false), None);
+        assert_eq!(kiwi_widget_for_render("web", &mfa, false), None);
+        assert_eq!(kiwi_widget_for_render("web", &resend, false), None);
     }
 
     #[tokio::test]

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
@@ -97,11 +99,41 @@ final class PinnedPrimaryWiringTest extends TestCase
         self::assertSame(
             'prod-eu',
             $guardArgs[1],
-            'the pin key namespace is the sanitized deployment namespace, like every other bundle key',
+            'the guard receives the RAW namespace: it is the single derivation boundary for its pin key, so the container-wired and directly-constructed guards derive the identical pin key',
         );
         self::assertSame(5, $guardArgs[2], 'the default reverify window is 5 seconds');
         self::assertSame('storage', $guardArgs[3], 'the storage authority pins its own key suffix');
         self::assertNull($guardArgs[4] ?? null, 'no expected identity by default');
+        self::assertSame(
+            RedisNamespace::VERSION_LEGACY,
+            $guardArgs[5] ?? null,
+            'the guard receives the configured namespace key version (legacy by default)',
+        );
+
+        // One derivation boundary: a directly-constructed guard and the
+        // container-wired guard built from the same raw namespace and key
+        // version name the identical pin key. A second derivation inside
+        // the guard (the container passing an already-derived value) would
+        // silently produce a different pin key here.
+        $direct = new PinnedPrimaryAuthorityGuard(new FakePredisClient(), 'prod-eu', 5, 'storage');
+        self::assertSame(
+            $direct->pinKey(),
+            '{kiwi:prod-eu}:authority:pin:storage',
+            'the direct guard derives the legacy pin key from the raw namespace',
+        );
+        $containerWired = new PinnedPrimaryAuthorityGuard(
+            new FakePredisClient(),
+            (string) $guardArgs[1],
+            (int) $guardArgs[2],
+            (string) $guardArgs[3],
+            $guardArgs[4],
+            (int) $guardArgs[5],
+        );
+        self::assertSame(
+            $direct->pinKey(),
+            $containerWired->pinKey(),
+            'the direct and container-wired guards derive one pin key for the same raw namespace (no double derivation)',
+        );
 
         $decorator = $container->getDefinition('kiwi_captcha.redis.authority_guarded');
         self::assertSame(AuthorityGuardedPredisClient::class, $decorator->getClass(), 'the client is wrapped with the per-command guard wrapper');

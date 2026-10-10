@@ -19,7 +19,7 @@ use PHPUnit\Framework\TestCase;
  * Secret-compartment fuzzing: two deployments with different secret
  * keys sharing one storage (the shared-Redis-prefix shape) must each
  * verify only their own tokens. The fuzz corpus mixes hex and non-hex
- * secrets across the accepted lengths (16 bytes and up), including
+ * secrets across the accepted lengths (32 bytes and up), including
  * unicode and delimiter-bearing material.
  *
  * The properties under test: zero cross-secret acceptance, disjoint
@@ -87,17 +87,18 @@ final class TenantIsolationSecretFuzzTest extends TestCase
     {
         mt_srand(self::SEED);
         $secrets = [];
-        foreach ([16, 17, 24, 32, 40, 64] as $length) {
+        foreach ([32, 33, 40, 64] as $length) {
             $secrets[] = $this->randomSecret(self::HEX_ALPHABET, $length);
             $secrets[] = $this->randomSecret(self::WIDE_ALPHABET, $length);
         }
         $secrets[] = '0123456789abcdef0123456789abcdef';
-        $secrets[] = '秘密鍵1234567890abcdef';
-        $secrets[] = 'tenant-a|0123456789abcdef';
-        $secrets[] = 'tenant-a;0123456789abcdef';
-        $secrets[] = "binary\x00key\x00\xff0123456789ab";
+        $secrets[] = '秘密鍵1234567890abcdef0123456789abcdef';
+        $secrets[] = 'tenant-a|0123456789abcdef0123456789abcdef';
+        $secrets[] = 'tenant-a;0123456789abcdef0123456789abcdef';
+        $secrets[] = "binary\x00key\x00\xff0123456789abcdef0123456789ab";
         $secrets[] = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
         $secrets[] = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        $secrets[] = 'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ';
 
         return $secrets;
     }

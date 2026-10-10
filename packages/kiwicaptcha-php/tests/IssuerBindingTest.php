@@ -91,31 +91,37 @@ final class IssuerBindingTest extends TestCase
     {
         $keys = ChallengeRecord::WIRE_KEYS;
 
-        self::assertCount(27, $keys);
+        self::assertCount(29, $keys);
         self::assertSame('issuer', $keys[20], 'issuer is appended after request_binding');
         self::assertSame('kid', $keys[21], 'kid follows the issuer');
         self::assertSame('hostname', $keys[22], 'hostname follows the kid');
         self::assertSame('decoy_field', $keys[23], 'the optional decoy_field is the penultimate wire key (omitted when null)');
         self::assertSame('execution_program', $keys[24], 'the optional execution_program wire key (omitted when null)');
         self::assertSame('execution_version', $keys[25], 'the optional execution_version wire key (omitted when null)');
-        self::assertSame('execution_commitment', $keys[26], 'the optional execution_commitment is the final wire key (omitted when null)');
+        self::assertSame('execution_commitment', $keys[26], 'the optional execution_commitment wire key (omitted when null)');
+        self::assertSame('rsw_modulus_sha256', $keys[27], 'the optional authenticated rsw trapdoor identity wire key (omitted when null)');
+        self::assertSame('server_mac', $keys[28], 'the record-metadata MAC is the final wire key (omitted when null)');
         // An unarmed record omits the decoy and execution keys entirely
-        // (the skip_serializing_if mirror), so its toArray() key set is
-        // the always-present 23 keys.
+        // (the skip_serializing_if mirror); an issued record always
+        // carries the server_mac, so its toArray() key set is the
+        // always-present 23 keys plus the MAC.
         self::assertSame(
-            \array_values(\array_diff($keys, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment'])),
+            \array_values(\array_diff($keys, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment', 'rsw_modulus_sha256'])),
             \array_keys($this->issue('prod')[1]->toArray()),
         );
     }
 
     public function testIssuerIsThePenultimateFieldOfTheSignedCanonicalPayload(): void
     {
-        // Canonical v2 payload: `...|min_duration_ms|region|policy_version|
-        // request_binding|issuer|kid`; kid (default 1) is the final
-        // segment, appended after the issuer.
+        // Revision-4 canonical payload:
+        // `v4|protocol_version|...|min_duration_ms|region|policy_version|
+        // request_binding|issuer|kid|m=1`; kid (default 1) is the final
+        // base segment, appended after the issuer, and protocol_version
+        // sits second. The signed m= marker follows the kid.
         [, $record] = $this->issue('staging');
 
         $canonical = Issuer::canonicalPayload(
+            2,
             $record->nonce,
             $record->scope,
             $record->bindingTag,
@@ -133,10 +139,11 @@ final class IssuerBindingTest extends TestCase
             $record->requestBinding,
             $record->issuer,
             $record->kid ?? 1,
+            serverMacCommitted: true,
         );
-        self::assertStringEndsWith('|staging|1', $canonical, 'the canonical must end with the issuer segment then the kid');
-        self::assertSame('staging', explode('|', $canonical)[16], 'issuer is the 17th canonical field');
-        self::assertSame('1', explode('|', $canonical)[17], 'kid is the 18th (final) canonical field');
+        self::assertStringEndsWith('|staging|1|m=1', $canonical, 'the canonical must end with the issuer segment, the kid and the m= marker');
+        self::assertSame('staging', explode('|', $canonical)[17], 'issuer is the 18th canonical field');
+        self::assertSame('1', explode('|', $canonical)[18], 'kid is the 19th (final base) canonical field');
 
         $signature = substr($record->challenge, strrpos($record->challenge, '.') + 1);
         self::assertSame(

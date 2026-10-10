@@ -96,11 +96,74 @@ final class RiskIdentityFactoryTest extends TestCase
     public function testSessionAndPrincipalHaveNoEpoch(): void
     {
         $f = $this->factory();
-        self::assertSame($f->sessionId('cookie-bytes'), $f->sessionId('cookie-bytes'));
+        $cookieA = '5ae1a4b8c0d1e2f30011223344556677';
+        $cookieB = '00112233445566778899aabbccddeeff';
+        self::assertSame($f->sessionId($cookieA), $f->sessionId($cookieA));
         self::assertSame($f->principalId('user-42'), $f->principalId('user-42'));
-        self::assertNotSame($f->sessionId('a'), $f->sessionId('b'));
+        self::assertNotSame($f->sessionId($cookieA), $f->sessionId($cookieB));
         self::assertNotSame($f->principalId('a'), $f->principalId('b'));
-        self::assertNotSame($f->sessionId('x'), $f->principalId('x'));
+        self::assertNotSame($f->sessionId($cookieA), $f->principalId($cookieA));
+    }
+
+    public function testSessionCookieMustBe32LowercaseHex(): void
+    {
+        $f = $this->factory();
+        foreach ([
+            'rawbytes',
+            '5ae1a4b8c0d1e2f3001122334455667',
+            '5ae1a4b8c0d1e2f300112233445566770',
+            '5AE1A4B8C0D1E2F30011223344556677',
+            '5ae1a4b8c0d1e2f3001122334455667z',
+            "5ae1a4b8c0d1e2f30011223344556677\n",
+        ] as $value) {
+            try {
+                $f->sessionId($value);
+                self::fail(sprintf('the session value %s must be refused', var_export($value, true)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertNotSame('', $e->getMessage());
+            }
+        }
+    }
+
+    public function testSessionPseudonymBindsTheDecodedBytesAndMatchesTheSharedVector(): void
+    {
+        $vectors = $this->fixtures()['identity_vectors'];
+        $f = new RiskIdentityFactory(RiskKeys::fromMaster($vectors['master_key']));
+        $cookieHex = $vectors['session']['cookie_hex'];
+        self::assertSame($vectors['session']['cookie_raw_hex'], $cookieHex, 'the fixture states both representations of the same 16 bytes');
+        self::assertSame($vectors['session']['expected_session_id'], $f->sessionId($cookieHex));
+
+        // The representation split this vector guards: HMAC over the ASCII
+        // hex bytes is a different pseudonym, so an implementation that
+        // skips hex2bin() cannot pass.
+        $asAscii = $f->pseudonym(hash_hkdf('sha256', $vectors['master_key'], 32, RiskKeys::INFO_SESSION, RiskKeys::SALT), 'sess', 0, $cookieHex);
+        self::assertNotSame($vectors['session']['expected_session_id'], $asAscii);
+
+        self::assertSame($vectors['principal']['expected_id'], $f->principalId($vectors['principal']['material_utf8']));
+        self::assertSame(
+            $vectors['source']['expected_id'],
+            $f->sourceId($vectors['source']['ip'], (int) $vectors['source']['epoch'] * 900)
+        );
+        self::assertSame(
+            $vectors['subnet']['expected_id'],
+            $f->subnetId($vectors['subnet']['ip'], (int) $vectors['subnet']['epoch'] * 900)
+        );
+
+        // The IPv6 source is masked to its /64: two hosts in one /64
+        // share the source pseudonym, a different /64 does not.
+        $v6 = $vectors['source_ipv6'];
+        $v6Epoch = (int) $v6['epoch'] * 900;
+        self::assertSame($v6['expected_id'], $f->sourceId($v6['ip'], $v6Epoch));
+        self::assertSame(
+            $f->sourceId($v6['ip'], $v6Epoch),
+            $f->sourceId($v6['sibling_ip'], $v6Epoch),
+            'a /64 sibling must share the source pseudonym'
+        );
+        self::assertSame(
+            $v6['expected_other_id'],
+            $f->sourceId($v6['other_ip'], $v6Epoch),
+            'a different /64 must derive a different source pseudonym'
+        );
     }
 
     public function testPseudonymsAre16BytesHex(): void
@@ -109,7 +172,7 @@ final class RiskIdentityFactoryTest extends TestCase
         foreach ([
             $f->sourceId('203.0.113.27', 123456),
             $f->subnetId('203.0.113.27', 123456),
-            $f->sessionId('s'),
+            $f->sessionId('5ae1a4b8c0d1e2f30011223344556677'),
             $f->principalId('p'),
         ] as $id) {
             self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $id);
@@ -153,5 +216,28 @@ final class RiskIdentityFactoryTest extends TestCase
         self::assertNotSame($f->subnetIdForEpoch($ctx, $epoch), $f->subnetIdForEpoch($ctx, $epoch - 1));
         self::assertNotSame($f->subnetIdForEpoch($ctx, $epoch), $f->subnetIdForEpoch($ctx, $epoch + 1));
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $f->subnetIdForEpoch($ctx, $epoch));
+    }
+
+    public function testZeroEpochWindowIsRefusedAtConstruction(): void
+    {
+        $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        foreach ([[0, 900], [900, 0], [-1, 900], [900, -1]] as [$source, $subnet]) {
+            try {
+                new RiskIdentityFactory($keys, sourceEpochSecs: $source, subnetEpochSecs: $subnet);
+                self::fail(sprintf('the epoch windows %d/%d must be refused', $source, $subnet));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('Epoch windows', $e->getMessage());
+            }
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function fixtures(): array
+    {
+        $path = getenv('RISK_FIXTURES_PATH');
+        if (!is_string($path) || $path === '') {
+            $path = dirname(__DIR__).'/../../protocol/risk-v1/fixtures.json';
+        }
+        return json_decode((string) file_get_contents($path), true, 8, JSON_THROW_ON_ERROR);
     }
 }

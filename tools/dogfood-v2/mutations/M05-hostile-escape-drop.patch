@@ -1,0 +1,25 @@
+diff --git a/services/mail-server/crates/ui-foundation/src/shell.rs b/services/mail-server/crates/ui-foundation/src/shell.rs
+index c1a13c8b..009300ed 100644
+--- a/services/mail-server/crates/ui-foundation/src/shell.rs
++++ b/services/mail-server/crates/ui-foundation/src/shell.rs
+@@ -2,18 +2,8 @@ use crate::icons::{render_icon, IconRenderOptions};
+ 
+ /// Escape HTML special characters to prevent XSS in rendered shell output.
+ pub fn html_escape(s: &str) -> String {
+-    let mut escaped = String::with_capacity(s.len());
+-    for c in s.chars() {
+-        match c {
+-            '&' => escaped.push_str("&amp;"),
+-            '<' => escaped.push_str("&lt;"),
+-            '>' => escaped.push_str("&gt;"),
+-            '"' => escaped.push_str("&quot;"),
+-            '\'' => escaped.push_str("&#x27;"),
+-            _ => escaped.push(c),
+-        }
+-    }
+-    escaped
++    // MUTANT M05: escaping dropped
++    s.to_string()
+ }
+ 
+ pub struct ShellSpec {

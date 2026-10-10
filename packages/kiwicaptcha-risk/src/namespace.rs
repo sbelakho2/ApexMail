@@ -82,15 +82,23 @@ pub fn deployment_namespace(raw: &str, version: NamespaceVersion) -> String {
 /// per byte, exactly like PHP's `preg_replace` without the `/u`
 /// modifier).
 ///
+/// The refusal covers the derived value, not only the raw spelling: a
+/// raw whose disallowed bytes fold to `_` (for example `n/` plus 32
+/// lowercase hex chars) sanitizes to the same digest-shaped string and
+/// would silently share the whole keyspace of the digest deployment
+/// whose namespace is that string.
+///
 /// # Panics
 ///
-/// Panics when the raw namespace is empty.
+/// Panics when the raw namespace is empty or its sanitized output is
+/// digest-shaped.
 pub fn legacy_namespace(raw: &str) -> String {
     assert!(
         !raw.is_empty(),
         "the deployment namespace cannot be empty: derive() needs the raw configured discriminator"
     );
-    raw.bytes()
+    let derived: String = raw
+        .bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') {
                 b as char
@@ -98,7 +106,24 @@ pub fn legacy_namespace(raw: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    assert!(
+        !is_digest_namespace_shape(&derived),
+        "the legacy derivation refuses a namespace that derives to the digest shape (n_ plus 32 lowercase hex chars): it would share the digest deployment's keyspace"
+    );
+    derived
+}
+
+/// True for the digest namespace shape: `n_` plus 32 lowercase hex
+/// characters, the exact output shape of [`digest_namespace`].
+fn is_digest_namespace_shape(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() == 34
+        && bytes[0] == b'n'
+        && bytes[1] == b'_'
+        && bytes[2..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
 /// The digest namespace: `n_` plus the first 128 bits of the SHA-256 of

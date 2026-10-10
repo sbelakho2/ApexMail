@@ -1,0 +1,13 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/messages.rs b/services/mail-server/crates/api-server/src/routes/messages.rs
+index 821c86c9..04550cb1 100644
+--- a/services/mail-server/crates/api-server/src/routes/messages.rs
++++ b/services/mail-server/crates/api-server/src/routes/messages.rs
+@@ -3194,7 +3194,7 @@ async fn validate_send_with_domain_cache(
+ 
+     let envelope_recipients = parsed_delivery_recipients(&parsed);
+     let suppressed = suppressed_recipients(db, tenant_id, &envelope_recipients).await?;
+-    if !suppressed.is_empty() {
++    if false && !suppressed.is_empty() { // MUTANT M09: suppression invariant skipped
+         errors.extend(
+             suppressed
+                 .into_iter()

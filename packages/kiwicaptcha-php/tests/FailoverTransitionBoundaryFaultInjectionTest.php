@@ -326,7 +326,7 @@ final class FailoverTransitionBoundaryFaultInjectionTest extends TestCase
         $identity = 'op-'.hash('sha256', 'fence-set-boundary');
         $storage = new RedisStorage($client);
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $barriered = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
         $client->throwOnSet = true;

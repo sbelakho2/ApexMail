@@ -75,8 +75,8 @@ final class RiskIntegrationTest extends TestCase
         $scorer = new RiskScorer();
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
                 2 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
@@ -114,7 +114,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $cookies[0]->getValue());
         self::assertTrue($cookies[0]->isHttpOnly());
         self::assertSame('strict', $cookies[0]->getSameSite());
-        self::assertFalse($cookies[0]->isSecure(), 'secure=null must follow the (http) request scheme');
+        self::assertTrue($cookies[0]->isSecure(), 'the __Host- prefix forces Secure regardless of the (http) request scheme');
 
         // The engine saw the pre-issue assessment and the post-issue signal.
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
@@ -375,7 +375,9 @@ final class RiskIntegrationTest extends TestCase
 
         // Escalation-only: a floor already at 20 never weakens or repeats,
         // but an argon action still maps to a real argon profile (a sha-only
-        // deployment can still issue argon work via the risk ladder).
+        // deployment can still issue argon work via the risk ladder). The
+        // adaptive Argon profile comes entirely from the adaptive envelope:
+        // dormant core argon knobs never leak into it.
         $maxed = new RiskProfileResolver(PoWAlgorithm::Sha256, 20);
         self::assertNull($maxed->profileFor(RiskAction::Sha20));
         self::assertSame(PoWAlgorithm::Argon2id, $maxed->profileFor(RiskAction::Argon64)?->algorithm);
@@ -404,7 +406,7 @@ final class RiskIntegrationTest extends TestCase
      */
     public function testMaximumAdaptiveEscalationKeepsMemoryAtTheEnvelope(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 2, 4]);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 2, 4]);
         $max = $resolver->profileFor(RiskAction::Argon64);
         self::assertNotNull($max);
         self::assertSame(16384, $max->mKib, 'the server verification memory must stay at the envelope under maximum escalation');
@@ -415,7 +417,7 @@ final class RiskIntegrationTest extends TestCase
 
         // A custom envelope is honored across ALL rungs — the ceiling is the
         // configured envelope, never the action.
-        $custom = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 32768, [2, 6, 10]);
+        $custom = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 32768, argonTargetBits: [2, 6, 10]);
         foreach ([RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64] as $action) {
             $profile = $custom->profileFor($action);
             self::assertSame(32768, $profile?->mKib, sprintf('%s must stay on the custom envelope', $action->value));
@@ -424,13 +426,13 @@ final class RiskIntegrationTest extends TestCase
 
         // The ladder needs exactly 3 rungs.
         try {
-            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4]);
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 4]);
             self::fail('a 2-entry ladder must be refused');
         } catch (\InvalidArgumentException) {
             self::assertTrue(true);
         }
         try {
-            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4, 8, 12]);
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 4, 8, 12]);
             self::fail('a 4-entry ladder must be refused');
         } catch (\InvalidArgumentException) {
             self::assertTrue(true);
@@ -459,9 +461,15 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1800, $http->getExpiresTime() - time(), 'spec: 15-30 minute expiry');
         self::assertTrue($http->isHttpOnly());
         self::assertTrue($http->isHttpOnly());
-        self::assertFalse($http->isSecure(), 'secure=null follows the http request');
+        self::assertTrue($http->isSecure(), 'the __Host- prefix forces Secure on the http request too');
         $https = JsonRequest::create('https://example.com/challenge', 'POST');
-        self::assertTrue($cookie->cookie($https, $minted)->isSecure(), 'secure=null follows the https request');
+        self::assertTrue($cookie->cookie($https, $minted)->isSecure(), 'the https request is Secure as well');
+
+        // A custom (non-prefixed) name keeps the scheme-derived flag:
+        // plain http mints non-Secure, https mints Secure.
+        $custom = new ContinuityCookie('kiwi-session');
+        self::assertFalse($custom->cookie($request, $minted)->isSecure(), 'a non-prefixed name follows the http request');
+        self::assertTrue($custom->cookie($https, $minted)->isSecure(), 'a non-prefixed name follows the https request');
     }
 
     public function testConfigTreeRiskDefaults(): void
@@ -478,6 +486,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1, $risk['policy_version'], 'policy_version is the CHALLENGE security-policy epoch — default 1, independent of the risk-v1 contract version ('.RiskPolicy::CONTRACT_VERSION.')');
         self::assertSame(8000, $risk['saturations']['src_fast']);
         self::assertSame(70000, $risk['saturations']['global']);
+        self::assertSame(10000, $risk['saturations']['principal'], 'the principal channel is exposed like the other ten');
         self::assertSame(190, $risk['weights']['source_fast']);
         self::assertSame([1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'], $risk['global_floors']);
         // Spec section 31 defaults.
@@ -782,8 +791,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -813,8 +822,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -844,8 +853,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
                 // The synthetic unknown-scope entry the extension reserves.
@@ -894,8 +903,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 300, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'deny'],
             ],
@@ -925,8 +934,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'sha20'],
             ],
@@ -946,13 +955,64 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame([], $store->observations, 'the degraded decision must never observe the store');
         self::assertSame(RiskReason::CapacityPressure, $decision->reasons[0]);
 
-        // Without a wired policy the helper must fail loudly, never guess.
+        // The engine's policy is the one authority: a gateway without
+        // the optional policy argument answers from the engine's own
+        // table, identically to the wired one.
         $bare = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        $bareDecision = $bare->degradedDecisionForScope(1);
+        self::assertSame(RiskAction::Sha20, $bareDecision->action, 'the unwired gateway answers from the engine policy');
+
+        // A divergent gateway-level policy object refuses construction
+        // in every mode (not only minimum): the degraded surface must
+        // never decide from a table the engine never consults.
+        $divergent = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
         try {
-            $bare->degradedDecisionForScope(1);
-            self::fail('degradedDecisionForScope without a wired policy must throw LogicException');
-        } catch (\LogicException) {
-            self::assertTrue(true);
+            new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $divergent);
+            self::fail('a divergent gateway policy must refuse construction in every mode');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('must be the engine policy', $e->getMessage());
+        }
+    }
+
+    public function testScopeIdMapDeviationsRefuseConstruction(): void
+    {
+        // The scope id map is validated in full: u32 ids, no duplicate
+        // mapping (two scopes sharing one id would silently couple
+        // their risk state), and every id names a row in the engine
+        // policy.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1, 'signup' => 1]);
+            self::fail('two scopes sharing one id must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('must be unique', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 7]);
+            self::fail('an id naming no policy row must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('names no policy scope row', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 0]);
+            self::fail('a non-u32 id must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('u32', $e->getMessage());
         }
     }
 
@@ -990,8 +1050,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1037,8 +1097,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1086,8 +1146,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1137,8 +1197,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1187,8 +1247,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -1229,8 +1289,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -1281,8 +1341,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -1325,8 +1385,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -1363,8 +1423,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -1439,8 +1499,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1480,8 +1540,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1533,8 +1593,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1589,8 +1649,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1658,8 +1718,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1747,8 +1807,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1830,8 +1890,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1884,8 +1944,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -1966,8 +2026,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2006,8 +2066,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2050,8 +2110,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2126,8 +2186,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2176,8 +2236,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2211,8 +2271,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2271,12 +2331,13 @@ final class RiskIntegrationTest extends TestCase
     {
         $stack = $this->stack(new FakeRiskStateStore());
         $gateway = $stack['gateway'];
+        $sessionHex = '5ae1a4b8c0d1e2f30011223344556677';
 
-        $receipt = $gateway->sourceRateLimitHit(1, '198.51.100.7', 'sess-1');
+        $receipt = $gateway->sourceRateLimitHit(1, '198.51.100.7', $sessionHex);
         self::assertInstanceOf(EventReceipt::class, $receipt);
-        $receipt = $gateway->globalCapacityHit(1, 'sess-1');
+        $receipt = $gateway->globalCapacityHit(1, $sessionHex);
         self::assertInstanceOf(EventReceipt::class, $receipt);
-        $receipt = $gateway->riskDenied(1, '198.51.100.7', 'sess-1');
+        $receipt = $gateway->riskDenied(1, '198.51.100.7', $sessionHex);
         self::assertInstanceOf(EventReceipt::class, $receipt);
 
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
@@ -2291,14 +2352,14 @@ final class RiskIntegrationTest extends TestCase
         // canonical Lua mutates only the global state for event 16).
         $identityFactory = new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET));
         self::assertSame(1, $stack['store']->observations[1]->scope);
-        self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[1]->sessionId, 'the session signal is still carried');
+        self::assertSame($identityFactory->sessionId($sessionHex), $stack['store']->observations[1]->sessionId, 'the session signal is still carried');
         $neutralSource = $identityFactory->sourceId('0.0.0.0', time());
         self::assertSame($neutralSource, $stack['store']->observations[1]->sourceId, 'GlobalCapacityHit must not be attributed to a visitor source');
 
         // The attributed signals carry the real source pseudonym + session.
         $visitorSource = $identityFactory->sourceId('198.51.100.7', time());
         self::assertSame($visitorSource, $stack['store']->observations[0]->sourceId);
-        self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[0]->sessionId);
+        self::assertSame($identityFactory->sessionId($sessionHex), $stack['store']->observations[0]->sessionId);
         self::assertSame($visitorSource, $stack['store']->observations[2]->sourceId);
 
         // Invalid client IP: nothing to attribute the source signals to.
@@ -2307,8 +2368,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2340,8 +2401,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -2405,8 +2466,8 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -2534,5 +2595,121 @@ final class RiskIntegrationTest extends TestCase
         --$counter;
 
         return \KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
+    }
+
+
+    public function testMinimumModeWithoutASyntheticScopeIdIsAConstructionError(): void
+    {
+        // 'minimum' mode promises every unknown scope the shared
+        // sha20-floored synthetic policy; the promise is only real when
+        // the id names that policy row, so the gateway refuses to be
+        // built without one (a derived id would name no row at all and
+        // could collide with a configured scope).
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', null);
+            self::fail('minimum mode without unknownScopeId must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('unknownScopeId is required', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 1);
+            self::fail('an unknownScopeId colliding with a configured scope id must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('collides', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 0);
+            self::fail('a non-u32 unknownScopeId must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('u32', $e->getMessage());
+        }
+        // A legal id naming no engine policy row refuses construction:
+        // the engine would answer unknown scopes with its allow
+        // fallback, silently dropping the promised sha20 floor.
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+            self::fail('an unknownScopeId naming no engine policy row must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('names no policy scope row', $e->getMessage());
+        }
+    }
+
+    public function testMinimumModeRefusesASyntheticRowFlooredBelowThePromise(): void
+    {
+        // The row exists under the supplied id but its floors sit below
+        // the sha20 the mode promises (and the base risk whitelists the
+        // scope): every divergence refuses construction, so the
+        // gateway's contract and the engine's policy cannot disagree.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $weak = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                42 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $weak, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+            self::fail('a synthetic row floored below sha20 must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('below sha20', $e->getMessage());
+        }
+
+        $whitelisted = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                42 => ['base_risk' => 0, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20'],
+            ],
+        ]);
+        $engine2 = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $whitelisted, $keys);
+        try {
+            new RiskGateway($engine2, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+            self::fail('a whitelisted synthetic row must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('base_risk below 100', $e->getMessage());
+        }
+
+        $strong = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                42 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20'],
+            ],
+        ]);
+        $engine3 = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $strong, $keys);
+        try {
+            new RiskGateway($engine3, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42, principalResolver: null, requestStack: null, decisionRedis: null, decisionKeyPrefix: '{kiwi:kiwi}:decision:', decisionTtlSecs: 300, policy: RiskPolicy::fromConfig([
+                'version' => RiskPolicy::CONTRACT_VERSION,
+                'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+                'weights' => [],
+                'scopes' => [42 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']],
+            ]));
+            self::fail('a gateway policy object diverging from the engine policy must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('must be the engine policy', $e->getMessage());
+        }
+        // The engine's own object is accepted.
+        $gateway = new RiskGateway($engine3, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42, policy: $strong);
+        self::assertSame(42, $gateway->scopeId('anything_unconfigured'));
     }
 }

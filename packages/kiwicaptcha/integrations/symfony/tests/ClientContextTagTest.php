@@ -20,7 +20,7 @@ final class ClientContextTagTest extends TestCase
 {
     private const DEPLOYMENT = 'prod';
     private const SESSION = 'abababababababababababababababab';
-    private const DESCRIPTOR = 'vp=1,t=0,l=en,z=1';
+    private const DESCRIPTOR = 't=0,l=en,z=1';
 
     public function testTagIsBoundedBase36(): void
     {
@@ -57,8 +57,8 @@ final class ClientContextTagTest extends TestCase
 
     public function testTagFollowsTheCoarseCapabilityDescriptor(): void
     {
-        $a = ClientContextTag::derive(self::DEPLOYMENT, self::SESSION, 'vp=1,t=0,l=en,z=1');
-        $b = ClientContextTag::derive(self::DEPLOYMENT, self::SESSION, 'vp=3,t=1,l=zh,z=2');
+        $a = ClientContextTag::derive(self::DEPLOYMENT, self::SESSION, 't=0,l=en,z=1');
+        $b = ClientContextTag::derive(self::DEPLOYMENT, self::SESSION, 't=1,l=zh,z=2');
         self::assertNotSame($a, $b, 'changed coarse capabilities must produce a different tag');
     }
 

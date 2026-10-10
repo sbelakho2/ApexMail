@@ -16,11 +16,14 @@ use PHPUnit\Framework\TestCase;
  * when the signing keys are configured, the security Redis answers a
  * (cached, debounced) ping, and the central security-policy state
  * ({kiwi:<ns>}:security-policy) is compatible. Compatible means
- * min_protocol_version <= 4 (this binary's max protocol: the
- * execution-capable v4 canonical), min_execution_version <= the
+ * min_protocol_version <= 5 (this binary's max protocol: the
+ * identity-bearing rsw v5 canonical) and min_execution_version <= the
  * generator max (this binary's max execution-program version; an
- * absent execution floor imposes nothing) and min_policy_epoch <= the
- * configured risk.policy_version. When risk.execution_challenge is on
+ * absent execution floor imposes nothing). A central min_policy_epoch
+ * above the configured risk.policy_version is only a logged warning:
+ * issuance and verification follow the effective epoch
+ * max(configured, central) and the node stays ready. When
+ * risk.execution_challenge is on
  * the required execution tier must additionally be satisfiable
  * against the effective fleet tier, or the probe answers 503 with the
  * security_policy_incompatible:execution_required_R_effective_E
@@ -65,6 +68,40 @@ final class KiwiHealthControllerTest extends TestCase
     private function guard(FakePredisClient $client, int $reverifySecs = 60): PinnedPrimaryAuthorityGuard
     {
         return new PinnedPrimaryAuthorityGuard($client, 'health-test', $reverifySecs, 'storage');
+    }
+
+    /**
+     * A fresh controller per call sharing the simulated APCu segment
+     * and the clock with the other "requests": the PHP-FPM shape (one
+     * instance per request, one shared segment), the seam the
+     * cross-process tests drive.
+     */
+    private function request(FakePredisClient $client, ?\Closure $apcu, ?callable $nowMs, ?\Psr\Log\LoggerInterface $logger = null): KiwiHealthController
+    {
+        return new KiwiHealthController(self::SECRET, $client, 'health-test', 1, $nowMs, 0, null, 16384, [], null, false, 1, 1, logger: $logger, apcu: $apcu);
+    }
+
+    /**
+     * The simulated APCu segment: two controllers wired with the same
+     * closure share state exactly like two PHP-FPM workers sharing one
+     * APCu segment (the extension is not loaded in the test lanes, so
+     * cross-process behavior is proven through this seam). Every store
+     * records its TTL so tests can pin the per-key windows.
+     *
+     * @param array<string, mixed> $segment key => value store
+     * @param array<string, int>   $ttls    the TTL each store carried
+     */
+    private function apcuSeam(array &$segment, array &$ttls): \Closure
+    {
+        return static function (string $op, string $key, mixed $value = null, int $ttl = 0) use (&$segment, &$ttls): mixed {
+            if ($op === 'fetch') {
+                return \array_key_exists($key, $segment) ? $segment[$key] : null;
+            }
+            $segment[$key] = $value;
+            $ttls[$key] = $ttl;
+
+            return null;
+        };
     }
 
     private function requirePredis(): FakePredisClient
@@ -136,18 +173,18 @@ final class KiwiHealthControllerTest extends TestCase
         $this->setPolicy($client, 3, 1);
         $controller = $this->controller($client, policyVersion: 1);
 
-        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 3 <= the binary max (4, the execution-capable v4 canonical) and min_policy_epoch 1 <= the configured epoch 1');
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 3 <= the binary max (5, the identity-bearing v5 canonical) and min_policy_epoch 1 <= the configured epoch 1');
     }
 
     public function testReadyOkWithTheExecutionCapableFloorFour(): void
     {
-        // The binary's max protocol is now 4, so a central
-        // floor of 4 (the execution-capable canonical) is compatible.
+        // The binary's max protocol is now 5, so a central
+        // floor of 5 (the identity-bearing canonical) is compatible.
         $client = $this->requirePredis();
-        $this->setPolicy($client, 4, 1);
+        $this->setPolicy($client, 5, 1);
         $controller = $this->controller($client, policyVersion: 1);
 
-        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 4 <= the binary max (4) — the v4-capable binary stays in the pool');
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 5 <= the binary max (5) — the v5-capable binary stays in the pool');
     }
 
     public function testReadyOkWithEpochExactlyAtTheConfiguredVersion(): void
@@ -159,26 +196,138 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertSame(200, $controller->ready()->getStatusCode(), 'min_policy_epoch equal to the configured policy_version is compatible');
     }
 
-    public function testNotReadyWhenCentralPolicyDemandsProtocol5(): void
+    public function testNotReadyWhenCentralPolicyDemandsProtocol6(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 5, 1);
+        $this->setPolicy($client, 6, 1);
         $controller = $this->controller($client);
 
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 5 exceeds this binary\'s max (4) — it must leave the pool (mixed-version rolling deployment)');
-        self::assertStringContainsString('min_protocol_version', (string) $response->getContent());
+        self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 6 exceeds this binary\'s max (5) — it must leave the pool (mixed-version rolling deployment)');
+        self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent());
     }
 
-    public function testNotReadyWhenCentralPolicyDemandsANewerEpoch(): void
+    public function testReadyWithACentralPolicyEpochAheadOfTheConfiguredValue(): void
     {
+        // A central min_policy_epoch above the configured
+        // risk.policy_version no longer takes the node out of the pool:
+        // issuance stamps the effective epoch max(configured, central),
+        // so the node follows the bump. Readiness stays ready, and the
+        // lag is logged as a non-fatal warning.
         $client = $this->requirePredis();
-        $this->setPolicy($client, 2, 2);
+        $this->setPolicy($client, 5, 2);
         $controller = $this->controller($client, policyVersion: 1);
 
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'min_policy_epoch 2 > the configured risk.policy_version 1 — the policy was revoked while this binary still issues under it');
-        self::assertStringContainsString('min_policy_epoch', (string) $response->getContent());
+        self::assertSame(200, $response->getStatusCode(), 'a central epoch ahead of the configured value must not fail readiness: issuance stamps the effective epoch');
+        self::assertStringNotContainsString('min_policy_epoch', (string) $response->getContent(), 'the lag is a log warning, never a public reason');
+    }
+
+    public function testEpochLagIsLoggedAsANonFatalWarning(): void
+    {
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 5, 3);
+        $logs = [];
+        $logger = new class($logs) extends \Psr\Log\NullLogger {
+            /** @param list<array{message: string, context: array<string,mixed>}> $logs */
+            public function __construct(private array &$logs)
+            {
+            }
+
+            public function warning(string|\Stringable $message, array $context = []): void
+            {
+                $this->logs[] = ['message' => (string) $message, 'context' => $context];
+            }
+        };
+        $controller = new KiwiHealthController(
+            self::SECRET,
+            $client,
+            'health-test',
+            1,
+            null,
+            0,
+            null,
+            16384,
+            [],
+            null,
+            false,
+            1,
+            1,
+            \BelConsulting\KiwiCaptchaBundle\RedisNamespace::VERSION_LEGACY,
+            true,
+            $logger,
+        );
+
+        self::assertSame(200, $controller->ready()->getStatusCode());
+        self::assertNotSame([], $logs, 'the epoch lag is logged');
+        $detail = (string) ($logs[0]['context']['detail'] ?? '');
+        self::assertStringContainsString('security policy epoch lag', $detail);
+        self::assertStringContainsString('min_policy_epoch is 3', $detail);
+        self::assertStringContainsString('risk.policy_version is 1', $detail);
+    }
+
+    public function testEpochLagLogsOncePerChangeAcrossProcesses(): void
+    {
+        // "Under PHP-FPM": one fresh controller per request sharing one
+        // simulated APCu segment — an unchanged lag logs exactly once
+        // in total (the marker dedupes across workers), a changed lag
+        // detail logs again.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 5, 3);
+        $segment = [];
+        $ttls = [];
+        $apcu = $this->apcuSeam($segment, $ttls);
+        $now = [0.0];
+        $clock = static function () use (&$now): float {
+            return $now[0];
+        };
+        $logs = [];
+        $logger = new class($logs) extends \Psr\Log\NullLogger {
+            /** @param list<array{message: string, context: array<string,mixed>}> $logs */
+            public function __construct(private array &$logs)
+            {
+            }
+
+            public function warning(string|\Stringable $message, array $context = []): void
+            {
+                $this->logs[] = ['message' => (string) $message, 'context' => $context];
+            }
+        };
+
+        $request1 = $this->request($client, $apcu, $clock, $logger);
+        self::assertSame(200, $request1->ready()->getStatusCode());
+        self::assertCount(1, $logs, 'the lag is logged on first observation');
+
+        // Request 2 re-evaluates (past the 1 s readiness cache) with
+        // the same lag: the APCu marker suppresses the second warning.
+        $now[0] += 1100;
+        $request2 = $this->request($client, $apcu, $clock, $logger);
+        self::assertSame(200, $request2->ready()->getStatusCode());
+        self::assertCount(1, $logs, 'an unchanged lag logs once per change, not once per request');
+
+        // The lag detail changes (the central epoch bumps): logs again.
+        $this->setPolicy($client, 5, 4);
+        $now[0] += 1100;
+        $request3 = $this->request($client, $apcu, $clock, $logger);
+        self::assertSame(200, $request3->ready()->getStatusCode());
+        self::assertCount(2, $logs, 'a changed lag detail logs again');
+        self::assertStringContainsString('min_policy_epoch is 4', (string) ($logs[1]['context']['detail'] ?? ''));
+    }
+
+    public function testReadinessCacheKeyIsNamespacedPerDeployment(): void
+    {
+        // Two apps on one APCu segment must never share a readiness
+        // answer: the key digest binds the derived identity (namespace)
+        // and the secret, and never embeds either raw.
+        $a = KiwiHealthController::readinessCacheKey('/srv/app-a', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+        $b = KiwiHealthController::readinessCacheKey('/srv/app-b', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+        $c = KiwiHealthController::readinessCacheKey('/srv/app-a', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+
+        self::assertNotSame($a, $b, 'different namespaces derive different keys');
+        self::assertNotSame($a, $c, 'different secrets derive different keys');
+        self::assertStringNotContainsString('/srv/app-a', $a, 'the raw namespace is never embedded');
+        self::assertStringNotContainsString('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', $a, 'the raw secret is never embedded');
+        self::assertStringStartsWith('kiwicaptcha.health.readiness.', $a);
     }
 
     public function testReadyOkWithTheExecutionFloorAtTheBinaryMax(): void
@@ -208,7 +357,7 @@ final class KiwiHealthControllerTest extends TestCase
 
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version above the binary max must leave the pool (mixed-version rolling deployment)');
-        self::assertSame('security_policy_incompatible:min_execution_version_'.(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION + 1), json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
+        self::assertSame('security_policy_incompatible', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
     }
 
     public function testNotReadyWhenCentralPolicyCarriesACorruptExecutionFloor(): void
@@ -224,7 +373,7 @@ final class KiwiHealthControllerTest extends TestCase
 
             $response = $controller->ready();
             self::assertSame(503, $response->getStatusCode(), 'a corrupt min_execution_version ('.$raw.') must fail readiness');
-            self::assertSame('security_policy_state_corrupt:min_execution_version', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the corrupt execution field');
+            self::assertSame('security_policy_incompatible', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the corrupt execution field');
         }
     }
 
@@ -259,12 +408,20 @@ final class KiwiHealthControllerTest extends TestCase
         // and the generator max, and a required tier above it refuses
         // readiness. Rows: gate, cap, floor, required, expected code.
         $rows = [
-            [true, 2, null, 2, 503, 'security_policy_incompatible:execution_required_2_effective_1'],
-            [true, 2, 1, 2, 503, 'security_policy_incompatible:execution_required_2_effective_1'],
+            [true, 2, null, 2, 503, 'security_policy_incompatible'],
+            [true, 2, 1, 2, 503, 'security_policy_incompatible'],
             [true, 2, 2, 2, 200, null],
-            [true, 3, 2, 3, 503, 'security_policy_incompatible:execution_required_3_effective_2'],
+            [true, 3, 2, 3, 503, 'security_policy_incompatible'],
             [true, 3, 3, 3, 200, null],
             [false, 3, 1, 3, 200, null],
+            // The current generator maximum: cap 5 with floor 5
+            // satisfies required 5; a floor one below the required
+            // tier refuses; and a node cap below the (higher) floor
+            // still satisfies a required tier at the cap, because the
+            // effective fleet tier is the minimum of all three.
+            [true, 5, 5, 5, 200, null],
+            [true, 5, 4, 5, 503, 'security_policy_incompatible'],
+            [true, 4, 5, 4, 200, null],
         ];
         foreach ($rows as [$gate, $cap, $floor, $required, $expectedCode, $expectedReason]) {
             $client = $this->requirePredis();
@@ -307,7 +464,7 @@ final class KiwiHealthControllerTest extends TestCase
         // required tier 1 stays ready.
         $requiredTwo = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null, 16384, [], null, true, 2, 2);
         self::assertSame(503, $requiredTwo->ready()->getStatusCode());
-        self::assertSame('security_policy_incompatible:execution_required_2_effective_1', json_decode((string) $requiredTwo->ready()->getContent(), true)['reason']);
+        self::assertSame('security_policy_incompatible', json_decode((string) $requiredTwo->ready()->getContent(), true)['reason']);
 
         $requiredOne = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null, 16384, [], null, true, 2, 1);
         self::assertSame(200, $requiredOne->ready()->getStatusCode());
@@ -329,7 +486,7 @@ final class KiwiHealthControllerTest extends TestCase
         $unsatisfiable = $this->controller($unfloored, executionGate: true, executionVersionCap: 4, executionRequiredVersion: 4);
         $response = $unsatisfiable->ready();
         self::assertSame(503, $response->getStatusCode(), 'cap 4 required 4 with no confirmed floor is not ready');
-        self::assertSame('security_policy_incompatible:execution_required_4_effective_1', json_decode((string) $response->getContent(), true)['reason']);
+        self::assertSame('security_policy_incompatible', json_decode((string) $response->getContent(), true)['reason']);
     }
 
     public function testNotReadyWhenSecurityRedisIsUnreachable(): void
@@ -346,10 +503,10 @@ final class KiwiHealthControllerTest extends TestCase
     public function testLiveStaysOkWhileReadyFails(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 5, 1);
+        $this->setPolicy($client, 6, 1);
         $controller = $this->controller($client);
 
-        self::assertSame(503, $controller->ready()->getStatusCode(), 'ready fails: central protocol 5');
+        self::assertSame(503, $controller->ready()->getStatusCode(), 'ready fails: central protocol 6');
         self::assertSame(200, $controller->live()->getStatusCode(), 'live must stay 200 while ready fails (the process is up, the pool just must not route to it)');
     }
 
@@ -408,6 +565,46 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertSame(200, $controller->ready()->getStatusCode());
         self::assertGreaterThan($afterFirst, \count($client->calls));
         self::assertGreaterThan($probesBefore, $afterFirst);
+    }
+
+    public function testTheProbeDebounceStateSurvivesAcrossProcessesWithTheSixtySecondTtl(): void
+    {
+        // "Under PHP-FPM": one fresh controller per request sharing one
+        // simulated APCu segment. One failed PING keeps readiness; two
+        // consecutive failures flip it — the consecutive-failure
+        // counter crosses the process boundary, which only a debounce
+        // state outliving the 1 s readiness-result cache can deliver.
+        $client = $this->requirePredis();
+        $segment = [];
+        $ttls = [];
+        $apcu = $this->apcuSeam($segment, $ttls);
+        $now = [0.0];
+        $clock = static function () use (&$now): float {
+            return $now[0];
+        };
+
+        // Request 1 (process A): the probe is healthy.
+        $a = $this->request($client, $apcu, $clock);
+        self::assertSame(200, $a->ready()->getStatusCode());
+
+        // Request 2 (process B): the Redis starts timing out — the
+        // first failure is debounced and readiness holds.
+        $client->pingFails = true;
+        $now[0] += 1100;
+        $b = $this->request($client, $apcu, $clock);
+        self::assertSame(200, $b->ready()->getStatusCode(), 'one failed PING keeps readiness: the debounce state crossed the process boundary');
+
+        // Request 3 (process C): the second consecutive failure flips.
+        $now[0] += 1100;
+        $c = $this->request($client, $apcu, $clock);
+        self::assertSame(503, $c->ready()->getStatusCode(), 'two consecutive failures flip readiness, again across processes');
+
+        // The TTL split: the readiness result keeps the 1 s window
+        // while the debounce state outlives it (60 s), so a per-second
+        // cache rotation never resets the consecutive-failure counter.
+        $cacheKey = KiwiHealthController::readinessCacheKey('health-test', self::SECRET);
+        self::assertSame(1, $ttls[$cacheKey], 'the readiness-result cache keeps the 1 s window');
+        self::assertSame(60, $ttls[$cacheKey.'.state'], 'the probe-debounce state carries a 60 s TTL');
     }
 
 // ── memory-budget readiness invariant ─────────────────────────────────────
@@ -492,8 +689,8 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a pod whose authority pin is uninitialized must not be ready');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame('ha_authority_uninitialized', $body['reason'], 'the machine-readable reason names the uninitialized authority');
-        self::assertSame('storage', $body['authority'], 'the failing authority label is reported');
+        self::assertSame('authority_not_eligible', $body['reason'], 'the failing authority leg reports only the generic reason');
+        self::assertArrayNotHasKey('authority', $body, 'the failing authority label is logged, never exposed on the unauthenticated route');
     }
 
     public function testReadyPassesAnInitializedPinnedAuthority(): void
@@ -523,8 +720,8 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a changed authority must fail readiness immediately');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame('ha_authority_changed', $body['reason'], 'the machine-readable reason names the changed authority');
-        self::assertSame('storage', $body['authority']);
+        self::assertSame('authority_not_eligible', $body['reason']);
+        self::assertArrayNotHasKey('authority', $body);
     }
 
     public function testReadyRecoversAfterAnAuthorizedReinitialize(): void
@@ -575,11 +772,11 @@ final class KiwiHealthControllerTest extends TestCase
         // ha_authority none (the default): the leg passes silently and
         // the existing readiness legs decide.
         $client = $this->requirePredis();
-        $this->setPolicy($client, 5, 1);
+        $this->setPolicy($client, 6, 1);
         $controller = $this->controller($client);
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'the other legs still decide');
-        self::assertStringContainsString('min_protocol_version', (string) $response->getContent(), 'the failing leg is the central policy, not the authority leg');
+        self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent(), 'the failing leg is the central policy, not the authority leg');
     }
 
     public function testReadyRefusesAnUnreachablePinnedAuthority(): void
@@ -595,6 +792,6 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'an unverifiable pinned authority must not be ready');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame('ha_authority_unreachable', $body['reason']);
+        self::assertSame('authority_not_eligible', $body['reason']);
     }
 }

@@ -78,6 +78,36 @@ impl CidrEntry {
         let prefix: u8 = prefix_raw
             .parse()
             .map_err(|_| NetworkError::Parse(format!("invalid CIDR prefix: {prefix_raw}")))?;
+        // Canonical spelling only: u8::parse accepts "+24" and "024",
+        // while the PHP classifier's integer validation rejects them, so
+        // the same config file would load differently in the two cores.
+        if prefix_raw != prefix.to_string() {
+            return Err(NetworkError::Parse(format!(
+                "invalid CIDR prefix: {prefix_raw}"
+            )));
+        }
+        // A v6 spelling that canonicalizes to IPv4 (the mapped
+        // ::ffff:a.b.c.d form or the deprecated compatible ::a.b.c.d
+        // form, exactly the fold `canonical_ip` applies during the walk)
+        // is stored as a v4 entry with the prefix shifted by 96. Without
+        // this, an entry like ::ffff:192.0.2.0/120 was inserted into the
+        // v6 trie and could never match 192.0.2.x while a genuine v6
+        // address under the same /32 was flagged; a prefix below /96
+        // cannot address a v4 network and is refused.
+        let mut network = network;
+        let mut prefix = prefix;
+        if matches!(network, IpAddr::V6(_)) && canonical_ip(network)[0] == 0x04 {
+            if prefix < 96 {
+                return Err(NetworkError::Parse(format!(
+                    "mapped IPv4 CIDR prefix {prefix} is below /96: {s}"
+                )));
+            }
+            network = match network {
+                IpAddr::V6(v6) => IpAddr::V4(v6.to_ipv4().expect("canonical fold implies v4")),
+                IpAddr::V4(_) => unreachable!(),
+            };
+            prefix -= 96;
+        }
         let max_bits = match network {
             IpAddr::V4(_) => 32u8,
             IpAddr::V6(_) => 128u8,
@@ -250,6 +280,45 @@ mod tests {
 
     fn entry(cidr: &str) -> CidrEntry {
         CidrEntry::parse(cidr).unwrap()
+    }
+
+    #[test]
+    fn mapped_and_compatible_ipv4_cidrs_fold_to_v4_entries() {
+        let mapped = CidrEntry::parse("::ffff:192.0.2.0/120").unwrap();
+        assert_eq!(mapped.network, "192.0.2.0".parse::<IpAddr>().unwrap());
+        assert_eq!(mapped.prefix, 24);
+        let compatible = CidrEntry::parse("::192.0.2.0/120").unwrap();
+        assert_eq!(compatible.network, "192.0.2.0".parse::<IpAddr>().unwrap());
+        assert_eq!(compatible.prefix, 24);
+        // A prefix below /96 cannot address a v4 network.
+        assert!(CidrEntry::parse("::ffff:192.0.2.0/95").is_err());
+        // :: and ::1 are not IPv4-compatible and stay IPv6 entries.
+        assert!(matches!(
+            CidrEntry::parse("::/0").unwrap().network,
+            IpAddr::V6(_)
+        ));
+        assert!(matches!(
+            CidrEntry::parse("::1/128").unwrap().network,
+            IpAddr::V6(_)
+        ));
+
+        // The folded entry matches the IPv4 address through the walk and
+        // no longer flags unrelated v6 space.
+        let classifier = CidrNetworkClassifier::from_entries(vec![(
+            mapped,
+            NetworkFlags {
+                reserved: true,
+                ..Default::default()
+            },
+        )]);
+        assert!(
+            classifier.classify("192.0.2.7".parse().unwrap()).reserved,
+            "the mapped CIDR must match the IPv4 address it canonicalizes to"
+        );
+        assert!(
+            !classifier.classify("2001:db8::1".parse().unwrap()).reserved,
+            "the mapped CIDR must not flag unrelated v6 addresses"
+        );
     }
 
     #[test]
@@ -435,7 +504,7 @@ mod tests {
     #[test]
     fn file_parsing() {
         let path =
-            std::env::temp_dir().join(format!("kiwi-risk-classifier-{}.txt", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+            std::env::temp_dir().join(format!("kiwi-risk-classifier-{}.txt", std::process::id()));
         std::fs::write(&path, "# comment\n\n203.0.113.0/24, hosting, proxy\n198.51.100.0/24,tor\n192.0.2.0/24,blocked\n").unwrap();
         let classifier = CidrNetworkClassifier::from_file(path.to_str().unwrap()).unwrap();
         let flags = classifier.classify("203.0.113.7".parse().unwrap());
@@ -476,7 +545,7 @@ mod tests {
 
     #[test]
     fn file_parsing_errors() {
-        let path = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        let path = std::env::temp_dir().join(format!(
             "kiwi-risk-classifier-bad-{}.txt",
             std::process::id()
         ));

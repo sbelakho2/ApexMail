@@ -86,9 +86,21 @@ defense-in-depth only. The enforcement key is documented in
 The widget collects **no device-capability or screen-size signals** unless
 the operator enables `risk.client_context` AND the app renders the opt-in
 attribute on the widget container (`data-kiwi-risk-context="coarse"`).
-Without the attribute the widget never sends the field. The tag is deliberately coarse: viewport class, pointer class, language
-family, timezone class. It carries no canvas/audio/font-list/GPU signals
-and no stable identifiers; a missing capability contributes nothing.
+Without the attribute the widget never sends the field. The tag is
+deliberately coarse and built from stable components only: pointer class,
+language family, timezone class. The viewport is deliberately excluded —
+a phone rotation, window resize or split-screen layout would otherwise
+flip the tag and add the session-inconsistency weight to a legitimate
+user. It carries no canvas/audio/font-list/GPU signals and no stable
+identifiers; a missing capability contributes nothing.
+
+Pseudonym rotation: only the risk source and subnet pseudonyms rotate
+with their epochs (default 900 s). Session pseudonyms are stable for the
+lifetime of the session cookie or the record TTL, and principal
+pseudonyms for the principal TTL (default 24 h); neither rotates per
+request. The source pseudonym is keyed by the IPv6 /64 (the full IPv4
+address for v4), so a host cannot rotate through its own prefix for a
+fresh identity.
 
 `privacy_mode: strict` refuses the opt-in entirely: `risk.client_context:
 true` fails at container compile time, and the runtime never renders the

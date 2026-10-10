@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\ChallengeRuntimeStateKind;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -26,6 +27,17 @@ use PHPUnit\Framework\TestCase;
  */
 final class RedisStorageTest extends TestCase
 {
+
+    /**
+     * The wire nonce of a logical fixture label. The record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes.
+     * That is the strict serde twin. Logical labels map to it here and
+     * the storage keys stay readable at the call sites.
+     */
+    private static function wn(string $logical): string
+    {
+        return \KiwiCaptcha\Tests\Support\WireFixture::nonce($logical);
+    }
     private function requirePredis(): FakePredisClient
     {
         if (!\class_exists(\Predis\Client::class)) {
@@ -38,7 +50,7 @@ final class RedisStorageTest extends TestCase
     private function makeRecord(string $nonce = 'redis-nonce-1'): ChallengeRecord
     {
         return new ChallengeRecord(
-            nonce: $nonce,
+            nonce: self::wn($nonce),
             scope: 'login',
             bindingTag: 'abc123',
             issuedAt: 1_800_000_000,
@@ -48,8 +60,8 @@ final class RedisStorageTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: 123_456_789,
@@ -63,10 +75,10 @@ final class RedisStorageTest extends TestCase
 
         $storage->store($this->makeRecord());
 
-        $record = $storage->find('redis-nonce-1');
+        $record = $storage->find(self::wn('redis-nonce-1'));
 
         self::assertNotNull($record);
-        self::assertSame('redis-nonce-1', $record->nonce);
+        self::assertSame(self::wn('redis-nonce-1'), $record->nonce);
         self::assertSame('login', $record->scope);
         self::assertSame(PoWAlgorithm::Sha256, $record->algorithm);
         self::assertSame(123_456_789, $record->issuedAtNs);
@@ -81,7 +93,7 @@ final class RedisStorageTest extends TestCase
             nonce: $record->nonce,
             scope: $record->scope,
             bindingTag: $record->ipHash(),
-            issuedAt: $record->issuedAt,
+            issuedAt: time(),
             expiresAt: time() + 60,
             algorithm: $record->algorithm,
             mKib: $record->mKib,
@@ -97,8 +109,8 @@ final class RedisStorageTest extends TestCase
 
         $storage->store($record);
 
-        self::assertSame('kiwicaptcha:redis-nonce-1', array_key_first($client->store));
-        self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:redis-nonce-1']);
+        self::assertSame('kiwicaptcha:'.self::wn('redis-nonce-1'), array_key_first($client->store));
+        self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:'.self::wn('redis-nonce-1')]);
         $setCalls = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'SET'));
         self::assertSame('EX', $setCalls[0][1][2] ?? null, 'store must set the key expiration');
         // The TTL must be fused into the SET command (SET key val
@@ -122,7 +134,7 @@ final class RedisStorageTest extends TestCase
             nonce: $record->nonce,
             scope: $record->scope,
             bindingTag: $record->ipHash(),
-            issuedAt: $record->issuedAt,
+            issuedAt: time(),
             expiresAt: time() + 60,
             algorithm: $record->algorithm,
             mKib: $record->mKib,
@@ -138,7 +150,7 @@ final class RedisStorageTest extends TestCase
 
         $storage->store($record);
 
-        self::assertSame(90, $client->expirations['kiwicaptcha:redis-nonce-1'], 'TTL must be expires_at - now + ttlMarginSecs');
+        self::assertSame(90, $client->expirations['kiwicaptcha:'.self::wn('redis-nonce-1')], 'TTL must be expires_at - now + ttlMarginSecs');
     }
 
     public function testStoreIssuesWaitAndVerifiesThresholdWhenConfigured(): void
@@ -376,18 +388,18 @@ final class RedisStorageTest extends TestCase
         // happened — the returned invocation is not the one that
         // mutated.
         $connection = new LostEvalReplyRetryConnection();
-        $connection->store['kiwicaptcha:pending-nonce'] = '{"state":"pending"}';
+        $connection->store['kiwicaptcha:'.self::wn('pending-nonce')] = '{"state":"pending"}';
         $client = new \Predis\Client($connection);
 
         // waitReplicas = 0 constructs (no barrier can be skipped) and
         // deleteIfPending runs the real evalScript path.
         $storage = new RedisStorage($client);
-        $result = $storage->deleteIfPending('pending-nonce');
+        $result = $storage->deleteIfPending(self::wn('pending-nonce'));
 
         self::assertSame(2, $connection->evalInvocations, 'the lost reply must be retried exactly once');
         self::assertSame('missing', $result->state, 'the retried invocation sees the key already gone');
         self::assertNull(
-            $connection->store['kiwicaptcha:pending-nonce'] ?? null,
+            $connection->store['kiwicaptcha:'.self::wn('pending-nonce')] ?? null,
             'the FIRST invocation already performed the terminal DEL before the reply was lost',
         );
 
@@ -411,7 +423,7 @@ final class RedisStorageTest extends TestCase
 
         $storage->store($this->makeRecord());
 
-        $raw = $client->store['kiwicaptcha:redis-nonce-1'];
+        $raw = $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')];
         self::assertNotSame('a:', substr((string) $raw, 0, 2), 'records must NOT be PHP-serialized');
 
         $data = json_decode((string) $raw, true, flags: JSON_THROW_ON_ERROR);
@@ -438,7 +450,7 @@ final class RedisStorageTest extends TestCase
             'issuer', 'kid', 'hostname', 'state', 'consumed_result',
             'operation_identity',
         ], array_keys($data));
-        self::assertSame('redis-nonce-1', $data['nonce']);
+        self::assertSame(self::wn('redis-nonce-1'), $data['nonce']);
         self::assertSame('sha256', $data['algorithm']);
         self::assertSame(0, $data['attempts_used']);
         self::assertSame(123_456_789, $data['issued_at_ns']);
@@ -467,12 +479,12 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $data = $this->makeRecord('rust-rec')->toArray();
         unset($data['attempts_used']);
-        $client->store['kiwicaptcha:rust-rec'] = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $client->store['kiwicaptcha:'.self::wn('rust-rec')] = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
-        $record = (new RedisStorage($client))->find('rust-rec');
+        $record = (new RedisStorage($client))->find(self::wn('rust-rec'));
 
         self::assertNotNull($record);
-        self::assertSame('rust-rec', $record->nonce);
+        self::assertSame(self::wn('rust-rec'), $record->nonce);
     }
 
     public function testRedisStorageImplementsAtomicStorageInterface(): void
@@ -491,19 +503,19 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $first = $storage->consume('redis-nonce-1');
+        $first = $storage->consume(self::wn('redis-nonce-1'));
         self::assertNotNull($first);
-        self::assertSame('redis-nonce-1', $first->record->nonce);
+        self::assertSame(self::wn('redis-nonce-1'), $first->record->nonce);
         self::assertTrue($first->consumedNow, 'the first consume wins the transition');
         self::assertFalse($first->consumedBefore);
         self::assertNull($first->consumedResult);
 
-        $second = $storage->consume('redis-nonce-1');
+        $second = $storage->consume(self::wn('redis-nonce-1'));
         self::assertNotNull($second, 'the consumed record is KEPT until its TTL — replay protection is the marker, not absence');
         self::assertFalse($second->consumedNow);
         self::assertTrue($second->consumedBefore, 'a retry observes the consumed marker');
         self::assertNull($second->consumedResult, 'no result committed yet');
-        self::assertNotNull($storage->find('redis-nonce-1'), 'the record is still stored (pending->consumed, not deleted)');
+        self::assertNotNull($storage->find(self::wn('redis-nonce-1')), 'the record is still stored (pending->consumed, not deleted)');
     }
 
     public function testConsumeFlippedTheStoredStateToConsumed(): void
@@ -512,9 +524,9 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame('consumed', $data['state'], 'the transition must persist state=consumed in the stored JSON');
         self::assertArrayHasKey('consumed_result', $data, 'the runtime consumed_result key must be present');
     }
@@ -525,7 +537,7 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
         $evals = $client->evals;
         self::assertNotEmpty($evals, 'consume must go through the Lua script for Predis (EVALSHA after the SCRIPT LOAD warm-up)');
@@ -541,7 +553,7 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consume('redis-nonce-1');
+        $consumed = $storage->consume(self::wn('redis-nonce-1'));
 
         self::assertNotNull($consumed);
         self::assertSame(1, $storage->envelopeDecodeCount(), 'consume() must json_decode the stored envelope exactly once');
@@ -553,7 +565,7 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', 'order-42');
+        $consumed = $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), 'order-42');
 
         self::assertNotNull($consumed);
         self::assertSame('order-42', $consumed->operationIdentity, 'the identity rides back on the single parse');
@@ -565,13 +577,142 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
         $before = $storage->envelopeDecodeCount();
 
-        $state = $storage->consumedState('redis-nonce-1');
+        $state = $storage->consumedState(self::wn('redis-nonce-1'));
 
         self::assertNotNull($state);
         self::assertSame($before + 1, $storage->envelopeDecodeCount(), 'consumedState() must json_decode the stored envelope exactly once');
+    }
+
+    public function testSemanticDuplicateRuntimeFieldsAreUnusableNeverConsumed(): void
+    {
+        // The strict decoder refuses any stored document with two members
+        // decoding to the same semantic name (escaped aliases included)
+        // before json_decode's collapsed object is trusted: the runtime
+        // state is unusable/missing, never Consumed, on every read path.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $base = $this->makeRecord('dup-state')->toArray();
+        $raw = (string) json_encode([
+            ...$base,
+            'state' => 'consumed',
+            'consumed_result' => ['valid' => true, 'binding' => null],
+            'operation_identity' => 'op-1',
+        ], JSON_THROW_ON_ERROR);
+
+        $rows = [
+            'duplicate state' => str_replace('"state":"consumed"', '"state":"consumed","st\\u0061te":"pending"', $raw),
+            'duplicate consumed_result' => str_replace('"consumed_result":', '"consumed_result":', str_replace('"consumed_result":{', '"consumed\\u005fresult":null,"consumed_result":{', $raw)),
+            'duplicate operation_identity' => str_replace('"operation_identity":"op-1"', '"operation_identity":"op-1","op\\u0065ration_identity":"op-2"', $raw),
+            'duplicate resume_owner' => str_replace('"state":"consumed"', '"state":"consumed","resume\\u005fowner":"a","resume_owner":"b"', $raw),
+            'duplicate resume_until' => str_replace('"state":"consumed"', '"state":"consumed","resume\\u005funtil":1,"resume_until":2', $raw),
+        ];
+        foreach ($rows as $label => $tampered) {
+            self::assertNotSame($raw, $tampered, $label.': the tamper applies');
+            $client->store['kiwicaptcha:'.self::wn('dup-state')] = $tampered;
+            self::assertSame(
+                ChallengeRuntimeStateKind::Missing,
+                $storage->runtimeState(self::wn('dup-state'))->kind,
+                $label.': an ambiguous envelope is unusable, never consumed',
+            );
+            self::assertNull($storage->consumedState(self::wn('dup-state')), $label.': the strict consumed read refuses it too');
+        }
+
+        // The clean control (same values, no alias) still classifies.
+        $client->store['kiwicaptcha:'.self::wn('dup-state')] = $raw;
+        self::assertSame(ChallengeRuntimeStateKind::Consumed, $storage->runtimeState(self::wn('dup-state'))->kind);
+        self::assertNotNull($storage->consumedState(self::wn('dup-state')));
+    }
+
+    public function testAbsentOrNonStringRuntimeStateFailsClosedAsMissing(): void
+    {
+        // Under the current envelope contract every stored record carries
+        // a string runtime state. An absent marker or a wrong-typed one is
+        // corrupt state: it fails closed as Missing in both languages,
+        // never as Pending.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $base = $this->makeRecord('state-shape')->toArray();
+
+        $client->store['kiwicaptcha:'.self::wn('state-shape')] = json_encode($base, JSON_THROW_ON_ERROR);
+        self::assertSame(
+            ChallengeRuntimeStateKind::Missing,
+            $storage->runtimeState(self::wn('state-shape'))->kind,
+            'an absent state marker is corrupt state, never pending',
+        );
+        self::assertNull($storage->consumedState(self::wn('state-shape')));
+
+        foreach ([1, true, ['pending'], ['state' => 'pending'], null] as $state) {
+            $client->store['kiwicaptcha:'.self::wn('state-shape')] = json_encode(
+                [...$base, 'state' => $state],
+                JSON_THROW_ON_ERROR,
+            );
+            self::assertSame(
+                ChallengeRuntimeStateKind::Missing,
+                $storage->runtimeState(self::wn('state-shape'))->kind,
+                'a non-string state marker is corrupt state, never pending',
+            );
+            self::assertNull($storage->consumedState(self::wn('state-shape')));
+        }
+
+        $client->store['kiwicaptcha:'.self::wn('state-shape')] = json_encode(
+            [...$base, 'state' => 'pending', 'consumed_result' => null, 'operation_identity' => null],
+            JSON_THROW_ON_ERROR,
+        );
+        self::assertSame(ChallengeRuntimeStateKind::Pending, $storage->runtimeState(self::wn('state-shape'))->kind);
+    }
+
+    public function testTheRacePathNeverNormalizesAMalformedConsumedResult(): void
+    {
+        // The consume racing another winner returns the consumed-before
+        // envelope to doConsume(). A malformed committed result must
+        // surface as absent (indeterminate), never normalized into an
+        // authorization-bearing success: only a real boolean valid and a
+        // string/null binding pass the strict authority.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $malformed = [
+            '"valid":"1"' => '{"valid":"1","binding":null}',
+            '"valid":1.9' => '{"valid":1.9,"binding":null}',
+            '"valid":2' => '{"valid":2,"binding":null}',
+            '"valid":true with unknown key' => '{"valid":true,"binding":null,"extra":1}',
+            '"valid":true with malformed binding' => '{"valid":true,"binding":{"a":1}}',
+            '"valid":true with array result' => '[true,null]',
+            '"valid":null' => '{"valid":null,"binding":null}',
+        ];
+        foreach ($malformed as $label => $resultJson) {
+            $nonce = 'race-result-'.md5($label);
+            $record = $this->makeRecord($nonce);
+            $client->store['kiwicaptcha:'.$nonce] = json_encode([
+                ...$record->toArray(),
+                'state' => 'consumed',
+                'consumed_result' => json_decode($resultJson, true),
+                'operation_identity' => null,
+            ], JSON_THROW_ON_ERROR);
+
+            $consumed = $storage->consumeWithOperationIdentity($nonce, bin2hex(random_bytes(8)));
+            self::assertNotNull($consumed, $label.': the consumed state is reported');
+            self::assertTrue($consumed->consumedBefore, $label.': the race path was taken');
+            self::assertNull($consumed->consumedResult, $label.': a malformed result is absent, never normalized');
+        }
+
+        // The legacy integer 0/1 form is a supported shape and stays
+        // readable (the same rule Rust applies at its boundary).
+        $nonce = 'race-result-legacy-int';
+        $record = $this->makeRecord($nonce);
+        $client->store['kiwicaptcha:'.$nonce] = json_encode([
+            ...$record->toArray(),
+            'state' => 'consumed',
+            'consumed_result' => ['valid' => 1, 'binding' => null],
+            'operation_identity' => null,
+        ], JSON_THROW_ON_ERROR);
+        $consumed = $storage->consumeWithOperationIdentity($nonce, bin2hex(random_bytes(8)));
+        self::assertNotNull($consumed);
+        self::assertNotNull($consumed->consumedResult, 'the legacy integer valid form is a supported shape');
+        self::assertTrue($consumed->consumedResult->valid);
+        self::assertNull($consumed->consumedResult->binding);
     }
 
     public function testRuntimeStateDecodesTheConsumedEnvelopeExactlyOnce(): void
@@ -579,10 +720,10 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
         $before = $storage->envelopeDecodeCount();
 
-        $runtime = $storage->runtimeState('redis-nonce-1');
+        $runtime = $storage->runtimeState(self::wn('redis-nonce-1'));
 
         self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Consumed, $runtime->kind);
         self::assertNotNull($runtime->consumed);
@@ -597,13 +738,13 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        self::assertFalse($storage->commitResult('redis-nonce-1', true, 'txn-1'), 'commit on a PENDING record must fail');
-        $storage->consume('redis-nonce-1');
+        self::assertFalse($storage->commitResult(self::wn('redis-nonce-1'), true, 'txn-1'), 'commit on a PENDING record must fail');
+        $storage->consume(self::wn('redis-nonce-1'));
 
-        self::assertTrue($storage->commitResult('redis-nonce-1', true, 'txn-1'));
-        self::assertFalse($storage->commitResult('redis-nonce-1', true, 'txn-1'), 'a second commit must be rejected');
+        self::assertTrue($storage->commitResult(self::wn('redis-nonce-1'), true, 'txn-1'));
+        self::assertFalse($storage->commitResult(self::wn('redis-nonce-1'), true, 'txn-1'), 'a second commit must be rejected');
 
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(['valid' => true, 'binding' => 'txn-1'], $data['consumed_result']);
     }
 
@@ -612,11 +753,11 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
-        self::assertTrue($storage->commitResult('redis-nonce-1', false, null));
+        self::assertTrue($storage->commitResult(self::wn('redis-nonce-1'), false, null));
 
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(['valid' => false, 'binding' => null], $data['consumed_result']);
     }
 
@@ -634,7 +775,7 @@ final class RedisStorageTest extends TestCase
 
         $client->waitAck = 0;
         try {
-            $storage->consume('redis-nonce-1');
+            $storage->consume(self::wn('redis-nonce-1'));
             self::fail('consume must fail closed when the transition is not durably replicated');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
             // expected
@@ -643,7 +784,7 @@ final class RedisStorageTest extends TestCase
         self::assertCount(2, $waits, 'store + consume must each issue WAIT');
 
         $client->waitAck = 1;
-        $consumed = $storage->consume('redis-nonce-1');
+        $consumed = $storage->consume(self::wn('redis-nonce-1'));
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedBefore, 'the first (failed-barrier) consume still transitioned the record');
     }
@@ -664,17 +805,17 @@ final class RedisStorageTest extends TestCase
         $storage->store($this->makeRecord()); // +1 WAIT (issuance)
         self::assertSame(1, $waits());
 
-        $consumed = $storage->consume('redis-nonce-1');
+        $consumed = $storage->consume(self::wn('redis-nonce-1'));
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow, 'the first consume wins the fresh transition');
         self::assertSame(2, $waits(), 'a fresh pending→consumed transition must issue exactly one WAIT');
 
-        $replay = $storage->consume('redis-nonce-1');
+        $replay = $storage->consume(self::wn('redis-nonce-1'));
         self::assertNotNull($replay);
         self::assertTrue($replay->consumedBefore);
         self::assertSame(2, $waits(), 'an already-consumed replay performs no write and must issue NO WAIT');
 
-        self::assertNull($storage->consume('never-stored'));
+        self::assertNull($storage->consume(self::wn('never-stored')));
         self::assertSame(2, $waits(), 'a missing record performs no write and must issue NO WAIT');
     }
 
@@ -689,12 +830,12 @@ final class RedisStorageTest extends TestCase
         $identity = 'op-'.hash('sha256', 'gated');
 
         $storage->store($this->makeRecord()); // +1 WAIT (issuance)
-        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', $identity);
+        $consumed = $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), $identity);
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow);
         self::assertSame(2, $waits(), 'a fresh identity-bearing transition must issue exactly one WAIT');
 
-        $replay = $storage->consumeWithOperationIdentity('redis-nonce-1', $identity);
+        $replay = $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), $identity);
         self::assertNotNull($replay);
         self::assertTrue($replay->consumedBefore);
         self::assertSame(2, $waits(), 'an identity-bearing replay performs no write and must issue NO WAIT');
@@ -706,7 +847,7 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consume('redis-nonce-1');
+        $consumed = $storage->consume(self::wn('redis-nonce-1'));
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow);
 
@@ -723,17 +864,17 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
         $client->waitAck = 1;
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
         $client->waitAck = 0;
         try {
-            $storage->commitResult('redis-nonce-1', true, 'txn-1');
+            $storage->commitResult(self::wn('redis-nonce-1'), true, 'txn-1');
             self::fail('commitResult must fail closed when the commit is not durably replicated');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
             // expected
         }
         $client->waitAck = 1;
-        self::assertFalse($storage->commitResult('redis-nonce-1', true, 'txn-1'), 'the failed-barrier commit DID land on the primary — a retry cannot re-commit');
+        self::assertFalse($storage->commitResult(self::wn('redis-nonce-1'), true, 'txn-1'), 'the failed-barrier commit DID land on the primary — a retry cannot re-commit');
     }
 
     public function testCommitResultUsesLuaForPredis(): void
@@ -741,9 +882,9 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
-        $storage->commitResult('redis-nonce-1', false, null);
+        $storage->commitResult(self::wn('redis-nonce-1'), false, null);
 
         $evals = $client->evals;
         self::assertNotEmpty($evals);
@@ -758,10 +899,10 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
-        $storage->commitResult('redis-nonce-1', true, null);
+        $storage->consume(self::wn('redis-nonce-1'));
+        $storage->commitResult(self::wn('redis-nonce-1'), true, null);
 
-        $retry = $storage->consume('redis-nonce-1');
+        $retry = $storage->consume(self::wn('redis-nonce-1'));
 
         self::assertNotNull($retry);
         self::assertTrue($retry->consumedBefore);
@@ -774,8 +915,8 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
 
-        self::assertNull($storage->consume('never-stored'));
-        self::assertFalse($storage->commitResult('never-stored', true, null), 'commit on a missing record must fail');
+        self::assertNull($storage->consume(self::wn('never-stored')));
+        self::assertFalse($storage->commitResult(self::wn('never-stored'), true, null), 'commit on a missing record must fail');
     }
 
     public function testFindDoesNotConsume(): void
@@ -784,8 +925,8 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        self::assertNotNull($storage->find('redis-nonce-1'));
-        self::assertNotNull($storage->find('redis-nonce-1'));
+        self::assertNotNull($storage->find(self::wn('redis-nonce-1')));
+        self::assertNotNull($storage->find(self::wn('redis-nonce-1')));
     }
 
     public function testDeleteRemovesRecord(): void
@@ -794,20 +935,20 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $storage->delete('redis-nonce-1');
+        $storage->delete(self::wn('redis-nonce-1'));
 
-        self::assertNull($storage->find('redis-nonce-1'));
+        self::assertNull($storage->find(self::wn('redis-nonce-1')));
     }
 
     public function testCorruptedValueIsHandledGracefully(): void
     {
         $client = $this->requirePredis();
-        $client->store['kiwicaptcha:corrupt'] = '{not valid json!!';
+        $client->store['kiwicaptcha:'.self::wn('corrupt')] = '{not valid json!!';
         $storage = new RedisStorage($client);
 
-        self::assertNull($storage->find('corrupt'));
-        self::assertNull($storage->consume('corrupt'));
-        self::assertNull($storage->find('corrupt'));
+        self::assertNull($storage->find(self::wn('corrupt')));
+        self::assertNull($storage->consume(self::wn('corrupt')));
+        self::assertNull($storage->find(self::wn('corrupt')));
     }
 
     public function testLegacySerializedValueIsHandledGracefully(): void
@@ -817,10 +958,10 @@ final class RedisStorageTest extends TestCase
         // null (the challenge is treated as missing) rather than crashing
         // the verify path.
         $client = $this->requirePredis();
-        $client->store['kiwicaptcha:legacy'] = serialize(['nonce' => 'legacy']);
+        $client->store['kiwicaptcha:'.self::wn('legacy')] = serialize(['nonce' => 'legacy']);
         $storage = new RedisStorage($client);
 
-        self::assertNull($storage->find('legacy'));
+        self::assertNull($storage->find(self::wn('legacy')));
     }
 
     public function testRealRedisStoreFindConsumeWithWaitBarrierFailsClosed(): void
@@ -940,56 +1081,57 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
-        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        $owner = $storage->claimResumeDerivation(self::wn('redis-nonce-1'));
         self::assertIsString($owner, 'a consumed, resultless record is claimable');
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim owner is embedded in the record envelope');
-        self::assertGreaterThan(time(), $data['resume_until'] ?? 0, 'the claim must carry a future expiry');
-        self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
-        self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a second claim while the first is held must be refused');
+        $nowUs = (int) (microtime(true) * 1_000_000);
+        self::assertGreaterThan($nowUs, $data['resume_until'] ?? 0, 'the claim must carry a future expiry (epoch microseconds)');
+        self::assertLessThanOrEqual($nowUs + 60_000_000, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease (epoch microseconds)');
+        self::assertNull($storage->claimResumeDerivation(self::wn('redis-nonce-1')), 'a second claim while the first is held must be refused');
 
-        self::assertFalse($storage->releaseResumeDerivation('redis-nonce-1', str_repeat('b', 32)), 'a stale owner can never release the claim');
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertFalse($storage->releaseResumeDerivation(self::wn('redis-nonce-1'), str_repeat('b', 32)), 'a stale owner can never release the claim');
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the refused release leaves the claim with its true owner');
-        self::assertTrue($storage->releaseResumeDerivation('redis-nonce-1', $owner), 'the true owner releases the claim');
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertTrue($storage->releaseResumeDerivation(self::wn('redis-nonce-1'), $owner), 'the true owner releases the claim');
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertArrayNotHasKey('resume_owner', $data, 'the release cleared the claim from the envelope');
         self::assertArrayNotHasKey('resume_until', $data, 'the release cleared the claim expiry from the envelope');
 
         // Claim again, then commit through the claim: the result lands
         // and the claim is cleared in the same transition.
-        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        $owner = $storage->claimResumeDerivation(self::wn('redis-nonce-1'));
         self::assertIsString($owner);
-        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', str_repeat('b', 32)), 'a stale owner can never commit');
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertFalse($storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', str_repeat('b', 32)), 'a stale owner can never commit');
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertNull($data['consumed_result'], 'the refused claim-bearing commit writes nothing');
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the true owner still holds the claim after the refused commit');
 
-        self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'the true owner commits through the claim');
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertTrue($storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', $owner), 'the true owner commits through the claim');
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(['valid' => true, 'binding' => 'txn-1'], $data['consumed_result'], 'the claim-bearing commit stores the result');
         self::assertArrayNotHasKey('resume_owner', $data, 'the successful commit cleared the claim in the same transition');
         self::assertArrayNotHasKey('resume_until', $data, 'the successful commit cleared the claim expiry in the same transition');
-        self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a committed record is no longer claimable');
+        self::assertNull($storage->claimResumeDerivation(self::wn('redis-nonce-1')), 'a committed record is no longer claimable');
 
-        $claimEvals = array_values(array_filter($client->evals, fn ($e) => str_starts_with($e['script'], '-- kiwicaptcha resume-derivation claim') && !str_contains($e['script'], 'release')));
+        $claimEvals = array_values(array_filter($client->evals, fn ($e) => str_contains($e['script'], '-- kiwicaptcha resume-derivation claim') && !str_contains($e['script'], 'release')));
         self::assertCount(4, $claimEvals, 'the four claim attempts (two refusals included) must each go through the claim Lua');
         foreach ($claimEvals as $claimEval) {
             self::assertCount(1, $claimEval['keys'], 'every claim EVAL must declare exactly one key (the record)');
-            self::assertSame(['kiwicaptcha:redis-nonce-1'], $claimEval['keys'], 'the single key is the record key');
+            self::assertSame(['kiwicaptcha:'.self::wn('redis-nonce-1')], $claimEval['keys'], 'the single key is the record key');
         }
         $releaseEvals = array_values(array_filter($client->evals, fn ($e) => str_contains($e['script'], 'release (compare-and-delete)')));
         self::assertCount(2, $releaseEvals, 'both release attempts must go through the compare-and-delete Lua');
         foreach ($releaseEvals as $releaseEval) {
             self::assertCount(1, $releaseEval['keys'], 'every release EVAL must declare exactly one key (the record)');
         }
-        $commitEvals = array_values(array_filter($client->evals, fn ($e) => str_starts_with($e['script'], '-- kiwicaptcha commit result')));
+        $commitEvals = array_values(array_filter($client->evals, fn ($e) => str_contains($e['script'], '-- kiwicaptcha commit result')));
         self::assertNotEmpty($commitEvals);
         foreach ($commitEvals as $commitEval) {
             self::assertCount(1, $commitEval['keys'], 'every commit EVAL (claim-bearing included) must declare exactly one key');
-            self::assertSame(['kiwicaptcha:redis-nonce-1'], $commitEval['keys']);
+            self::assertSame(['kiwicaptcha:'.self::wn('redis-nonce-1')], $commitEval['keys']);
         }
         self::assertArrayNotHasKey('kiwicaptcha:resume-claim:redis-nonce-1', $client->store, 'no second claim key may ever exist — the claim is embedded in the record envelope');
     }
@@ -1005,18 +1147,18 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
 
-        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        $owner = $storage->claimResumeDerivation(self::wn('redis-nonce-1'));
         self::assertIsString($owner);
 
-        $raw = (string) $client->store['kiwicaptcha:redis-nonce-1'];
+        $raw = (string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')];
         self::assertStringContainsString('"resume_owner":"'.$owner.'"', $raw, 'the claimed envelope carries the owner');
         self::assertStringContainsString('"resume_until":', $raw, 'the claimed envelope carries the expiry');
 
-        $consumed = $storage->consumedState('redis-nonce-1');
+        $consumed = $storage->consumedState(self::wn('redis-nonce-1'));
         self::assertNotNull($consumed, 'a claimed record is still a readable consumed record');
-        self::assertSame('redis-nonce-1', $consumed->record->nonce);
+        self::assertSame(self::wn('redis-nonce-1'), $consumed->record->nonce);
         self::assertSame('login', $consumed->record->scope);
         self::assertSame('abc123', $consumed->record->ipHash());
         self::assertSame(PoWAlgorithm::Sha256, $consumed->record->algorithm);
@@ -1025,14 +1167,14 @@ final class RedisStorageTest extends TestCase
         self::assertNull($consumed->consumedResult, 'the claimed record is still resultless');
 
         // The same tolerance on the find() decode path.
-        $found = $storage->find('redis-nonce-1');
+        $found = $storage->find(self::wn('redis-nonce-1'));
         self::assertNotNull($found);
-        self::assertSame('redis-nonce-1', $found->nonce);
+        self::assertSame(self::wn('redis-nonce-1'), $found->nonce);
         self::assertSame(2, $found->protocolVersion);
 
         // The slot-of-record-key invariant: the record key is the only
         // key in the store for this record (no second claim key).
-        self::assertSame(['kiwicaptcha:redis-nonce-1'], array_keys($client->store));
+        self::assertSame(['kiwicaptcha:'.self::wn('redis-nonce-1')], array_keys($client->store));
     }
 
     public function testResumeClaimRefusesPendingCommittedMissingAndCancelledRecords(): void
@@ -1044,19 +1186,19 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
 
-        self::assertNull($storage->claimResumeDerivation('never-stored'), 'a missing record is not claimable');
+        self::assertNull($storage->claimResumeDerivation(self::wn('never-stored')), 'a missing record is not claimable');
 
         $storage->store($this->makeRecord('pending-nonce'));
-        self::assertNull($storage->claimResumeDerivation('pending-nonce'), 'a pending record is not claimable');
+        self::assertNull($storage->claimResumeDerivation(self::wn('pending-nonce')), 'a pending record is not claimable');
 
         $storage->store($this->makeRecord('committed-nonce'));
-        $storage->consume('committed-nonce');
-        self::assertTrue($storage->commitResult('committed-nonce', true, null));
-        self::assertNull($storage->claimResumeDerivation('committed-nonce'), 'a committed record is not claimable');
+        $storage->consume(self::wn('committed-nonce'));
+        self::assertTrue($storage->commitResult(self::wn('committed-nonce'), true, null));
+        self::assertNull($storage->claimResumeDerivation(self::wn('committed-nonce')), 'a committed record is not claimable');
 
         $storage->store($this->makeRecord('cancelled-nonce'));
-        $storage->cancel('cancelled-nonce');
-        self::assertNull($storage->claimResumeDerivation('cancelled-nonce'), 'a cancelled record is not claimable');
+        $storage->cancel(self::wn('cancelled-nonce'));
+        self::assertNull($storage->claimResumeDerivation(self::wn('cancelled-nonce')), 'a cancelled record is not claimable');
     }
 
     public function testResumeClaimBearingCommitIssuesWaitOnlyOnSuccess(): void
@@ -1071,20 +1213,20 @@ final class RedisStorageTest extends TestCase
         $waits = fn (): int => \count(array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
 
         $storage->store($this->makeRecord()); // +1 WAIT (issuance)
-        $storage->consume('redis-nonce-1'); // +1 WAIT (transition)
+        $storage->consume(self::wn('redis-nonce-1')); // +1 WAIT (transition)
         self::assertSame(2, $waits());
 
-        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        $owner = $storage->claimResumeDerivation(self::wn('redis-nonce-1'));
         self::assertIsString($owner);
         self::assertSame(2, $waits(), 'the claim performs no write that needs a replica wait');
 
-        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', str_repeat('b', 32)));
+        self::assertFalse($storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', str_repeat('b', 32)));
         self::assertSame(2, $waits(), 'a refused claim-bearing commit writes nothing and must issue NO WAIT');
 
-        self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner));
+        self::assertTrue($storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', $owner));
         self::assertSame(3, $waits(), 'a fresh claim-bearing commit must issue exactly one WAIT');
 
-        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'a second commit is refused (already committed) and writes nothing');
+        self::assertFalse($storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', $owner), 'a second commit is refused (already committed) and writes nothing');
         self::assertSame(3, $waits(), 'a refused replay commit must issue NO WAIT');
     }
 
@@ -1098,7 +1240,7 @@ final class RedisStorageTest extends TestCase
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('TTL');
-        $storage->claimResumeDerivation('redis-nonce-1', 0);
+        $storage->claimResumeDerivation(self::wn('redis-nonce-1'), 0);
     }
 
     public function testResumeOwnerShapeIsValidatedAtTheStorageBoundary(): void
@@ -1112,8 +1254,8 @@ final class RedisStorageTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume('redis-nonce-1');
-        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        $storage->consume(self::wn('redis-nonce-1'));
+        $owner = $storage->claimResumeDerivation(self::wn('redis-nonce-1'));
         self::assertIsString($owner);
 
         $badShapes = [
@@ -1124,22 +1266,22 @@ final class RedisStorageTest extends TestCase
         ];
         foreach ($badShapes as $shape) {
             try {
-                $storage->releaseResumeDerivation('redis-nonce-1', $shape);
+                $storage->releaseResumeDerivation(self::wn('redis-nonce-1'), $shape);
                 self::fail('a malformed release owner must be rejected: '.$shape);
             } catch (\InvalidArgumentException) {
                 self::assertTrue(true);
             }
             try {
-                $storage->commitResultResume('redis-nonce-1', true, 'txn-1', $shape);
+                $storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', $shape);
                 self::fail('a malformed commit owner must be rejected: '.$shape);
             } catch (\InvalidArgumentException) {
                 self::assertTrue(true);
             }
         }
 
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim survives the malformed-owner refusals untouched');
-        self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'the true owner still commits through the intact claim');
+        self::assertTrue($storage->commitResultResume(self::wn('redis-nonce-1'), true, 'txn-1', $owner), 'the true owner still commits through the intact claim');
     }
 
     public function testRealRedisConsumedStateReplayRoundTrip(): void
@@ -1201,9 +1343,9 @@ final class RedisStorageTest extends TestCase
         // 10 MB payload into a record structure.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
-        $client->store['kiwicaptcha:big'] = '{"nonce":"'.str_repeat('a', 10 * 1024 * 1024).'"}';
+        $client->store['kiwicaptcha:'.self::wn('big')] = '{"nonce":"'.str_repeat('a', 10 * 1024 * 1024).'"}';
 
-        self::assertNull($storage->find('big'), 'an oversized stored body must parse to null, never throw');
+        self::assertNull($storage->find(self::wn('big')), 'an oversized stored body must parse to null, never throw');
     }
 
     public function testHundredThousandLevelNestingFailsCleanly(): void
@@ -1213,9 +1355,9 @@ final class RedisStorageTest extends TestCase
         // the stack and never surface an untyped exception.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
-        $client->store['kiwicaptcha:deep'] = str_repeat('[', 100_000).str_repeat(']', 100_000);
+        $client->store['kiwicaptcha:'.self::wn('deep')] = str_repeat('[', 100_000).str_repeat(']', 100_000);
 
-        self::assertNull($storage->find('deep'), 'a pathologically nested body must parse to null, never crash');
+        self::assertNull($storage->find(self::wn('deep')), 'a pathologically nested body must parse to null, never crash');
     }
 
     public function testBindingArgumentIsCappedBeforeEvalArgv(): void
@@ -1284,16 +1426,16 @@ final class RedisStorageTest extends TestCase
         $storage->store($this->makeRecord());
         $identity = 'op-'.hash('sha256', 'backend|uuid|response');
 
-        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', $identity);
+        $consumed = $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), $identity);
 
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow, 'the identity-bearing consume wins the transition');
         self::assertSame($identity, $consumed->operationIdentity, 'the winner exposes the identity it recorded');
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame('consumed', $data['state'], 'the transition must persist state=consumed in the stored JSON');
         self::assertSame($identity, $data['operation_identity'], 'the identity must be spliced into the stored JSON with the state flip');
 
-        $state = $storage->consumedState('redis-nonce-1');
+        $state = $storage->consumedState(self::wn('redis-nonce-1'));
         self::assertNotNull($state);
         self::assertSame($identity, $state->operationIdentity, 'the consumed-state read exposes the recorded identity');
     }
@@ -1311,12 +1453,12 @@ final class RedisStorageTest extends TestCase
         $storage->store($this->makeRecord());
 
         try {
-            $storage->consumeWithOperationIdentity('redis-nonce-1', str_repeat('x', 129));
+            $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), str_repeat('x', 129));
             self::fail('an over-long identity must be rejected');
         } catch (\InvalidArgumentException) {
             // expected: the 1..128-byte bound fires before any transition
         }
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame('pending', $data['state'], 'a rejected identity must leave the record untouched and retryable');
         self::assertNull($data['operation_identity'], 'a rejected identity must never be stored');
     }
@@ -1334,18 +1476,18 @@ final class RedisStorageTest extends TestCase
         $storage->store($this->makeRecord());
 
         try {
-            $storage->consumeWithOperationIdentity('redis-nonce-1', 'deadbeef%deadbeef');
+            $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), 'deadbeef%deadbeef');
             self::fail('an identity containing the gsub replacement-template escape must be rejected');
         } catch (\InvalidArgumentException) {
             // expected
         }
         try {
-            $storage->consumeWithOperationIdentity('redis-nonce-1', 'deadbeef deadbeef');
+            $storage->consumeWithOperationIdentity(self::wn('redis-nonce-1'), 'deadbeef deadbeef');
             self::fail('an identity containing a space must be rejected');
         } catch (\InvalidArgumentException) {
             // expected
         }
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame('pending', $data['state'], 'a rejected identity must leave the record untouched');
         self::assertNull($data['operation_identity'], 'a rejected identity must never be stored');
     }
@@ -1359,12 +1501,12 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consume('redis-nonce-1');
+        $consumed = $storage->consume(self::wn('redis-nonce-1'));
 
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow);
         self::assertNull($consumed->operationIdentity);
-        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        $data = json_decode((string) $client->store['kiwicaptcha:'.self::wn('redis-nonce-1')], true, flags: JSON_THROW_ON_ERROR);
         self::assertNull($data['operation_identity'], 'a plain consume records no identity');
     }
 
@@ -1408,13 +1550,13 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
 
         // missing
-        self::assertSame('missing', $storage->deleteIfPending('absent-nonce')->state);
+        self::assertSame('missing', $storage->deleteIfPending(self::wn('absent-nonce'))->state);
 
         // pending -> deleted-pending, key gone
         $storage->store($this->makeRecord('pending-nonce'));
-        $result = $storage->deleteIfPending('pending-nonce');
+        $result = $storage->deleteIfPending(self::wn('pending-nonce'));
         self::assertSame('deleted-pending', $result->state);
-        self::assertNull($client->store['kiwicaptcha:pending-nonce'] ?? null, 'the pending record is deleted atomically');
+        self::assertNull($client->store['kiwicaptcha:'.self::wn('pending-nonce')] ?? null, 'the pending record is deleted atomically');
 
         // corrupt -> never mutated, reported as corrupt: a record whose
         // runtime state is neither pending, consumed nor cancelled is
@@ -1423,21 +1565,21 @@ final class RedisStorageTest extends TestCase
             ...$this->makeRecord('corrupt-nonce')->toArray(),
             'state' => 'quantum',
         ], JSON_THROW_ON_ERROR);
-        $client->store['kiwicaptcha:corrupt-nonce'] = $corruptJson;
-        $result = $storage->deleteIfPending('corrupt-nonce');
+        $client->store['kiwicaptcha:'.self::wn('corrupt-nonce')] = $corruptJson;
+        $result = $storage->deleteIfPending(self::wn('corrupt-nonce'));
         self::assertSame('corrupt', $result->state);
         self::assertTrue($result->isCorrupt());
-        self::assertSame($corruptJson, $client->store['kiwicaptcha:corrupt-nonce'] ?? null, 'a record with an unknown runtime state is never mutated');
+        self::assertSame($corruptJson, $client->store['kiwicaptcha:'.self::wn('corrupt-nonce')] ?? null, 'a record with an unknown runtime state is never mutated');
 
         // consumed -> kept, state returned intact
         $storage->store($this->makeRecord('consumed-nonce'));
         $identity = 'op-'.hash('sha256', 'race');
-        $consumed = $storage->consumeWithOperationIdentity('consumed-nonce', $identity);
+        $consumed = $storage->consumeWithOperationIdentity(self::wn('consumed-nonce'), $identity);
         self::assertTrue($consumed?->consumedNow);
-        $storage->commitResult('consumed-nonce', true, 'txn');
-        $result = $storage->deleteIfPending('consumed-nonce');
+        $storage->commitResult(self::wn('consumed-nonce'), true, 'txn');
+        $result = $storage->deleteIfPending(self::wn('consumed-nonce'));
         self::assertSame('consumed', $result->state);
-        self::assertNotNull($client->store['kiwicaptcha:consumed-nonce'] ?? null, 'a consumed record is never deleted');
+        self::assertNotNull($client->store['kiwicaptcha:'.self::wn('consumed-nonce')] ?? null, 'a consumed record is never deleted');
         self::assertNotNull($result->consumed);
         self::assertTrue($result->consumed->consumedBefore);
         self::assertTrue($result->consumed->consumedResult?->valid ?? false);
@@ -1458,16 +1600,16 @@ final class RedisStorageTest extends TestCase
         $client->waitAck = 2;
         $waits = fn (): int => \count(array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
 
-        self::assertSame('missing', $storage->deleteIfPending('absent-nonce')->state);
+        self::assertSame('missing', $storage->deleteIfPending(self::wn('absent-nonce'))->state);
         self::assertSame(0, $waits(), 'WAIT must NOT be issued for missing (no mutation occurred)');
 
         $storage->store($this->makeRecord('consumed-nonce')); // +1 WAIT (issuance)
-        $storage->consume('consumed-nonce'); // +1 WAIT (the pending->consumed transition)
-        self::assertSame('consumed', $storage->deleteIfPending('consumed-nonce')->state);
+        $storage->consume(self::wn('consumed-nonce')); // +1 WAIT (the pending->consumed transition)
+        self::assertSame('consumed', $storage->deleteIfPending(self::wn('consumed-nonce'))->state);
         self::assertSame(2, $waits(), 'WAIT must NOT be issued for consumed (no mutation occurred)');
 
         $storage->store($this->makeRecord('pending-nonce')); // +1 WAIT (issuance)
-        self::assertSame('deleted-pending', $storage->deleteIfPending('pending-nonce')->state);
+        self::assertSame('deleted-pending', $storage->deleteIfPending(self::wn('pending-nonce'))->state);
         $waitsList = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
         self::assertCount(4, $waitsList, 'two stores + one consume + the deleted-pending transition must each issue the WAIT barrier');
         self::assertSame([2, 100], $waitsList[3][1], 'WAIT must carry the configured numreplicas and timeout');
@@ -1479,7 +1621,7 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        self::assertSame('deleted-pending', $storage->deleteIfPending('redis-nonce-1')->state);
+        self::assertSame('deleted-pending', $storage->deleteIfPending(self::wn('redis-nonce-1'))->state);
 
         $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
         self::assertSame([], $waits, 'WAIT must not be issued when waitReplicas is 0');
@@ -1499,7 +1641,7 @@ final class RedisStorageTest extends TestCase
 
         $client->waitAck = 0;
         try {
-            $storage->deleteIfPending('redis-nonce-1');
+            $storage->deleteIfPending(self::wn('redis-nonce-1'));
             self::fail('deleteIfPending must fail closed when the delete is not durably replicated');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException $e) {
             self::assertStringContainsString('0 of 1', $e->getMessage());
@@ -1510,10 +1652,70 @@ final class RedisStorageTest extends TestCase
         // barrier (the fail-closed exception is the durable signal, not
         // a rollback): the record is gone from the primary's view, so a
         // retry observes missing and cannot re-delete.
-        self::assertNull($client->store['kiwicaptcha:redis-nonce-1'] ?? null);
+        self::assertNull($client->store['kiwicaptcha:'.self::wn('redis-nonce-1')] ?? null);
 
         $client->waitAck = 1;
-        self::assertSame('missing', $storage->deleteIfPending('redis-nonce-1')->state, 'the failed-barrier delete still removed the record on the primary');
+        self::assertSame('missing', $storage->deleteIfPending(self::wn('redis-nonce-1'))->state, 'the failed-barrier delete still removed the record on the primary');
+    }
+
+    public function testDeleteRunsTheVerifiedWaitBarrierWhenItRemovedAKey(): void
+    {
+        // The plain delete is durability-critical the same way the
+        // delete-if-pending transition's is: a burned challenge that only
+        // vanished from the primary could reappear as pending from a
+        // promoted stale replica. A DEL that removed a key issues the
+        // fence + verified WAIT barrier; a DEL of an absent key performs
+        // no mutation and issues none.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 2, waitTimeoutMs: 100);
+        $client->waitAck = 2;
+        $waits = fn (): array => array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+
+        $storage->delete(self::wn('absent-nonce'));
+        self::assertSame([], $waits(), 'a DEL of an absent key must not issue the WAIT barrier');
+
+        $storage->store($this->makeRecord('pending-nonce')); // +1 WAIT (issuance)
+        $storage->delete(self::wn('pending-nonce'));
+        $waitCalls = $waits();
+        self::assertCount(2, $waitCalls, 'the issuance and the removal DEL each issue the WAIT barrier');
+        self::assertSame([2, 100], $waitCalls[1][1], 'the deletion WAIT carries the configured numreplicas and timeout');
+
+        // A violated barrier on the deletion surfaces the same
+        // fail-closed ReplicaWaitException as the other transitions.
+        $storage->store($this->makeRecord('pending-nonce')); // +1 WAIT (issuance)
+        $client->waitAck = 0;
+        try {
+            $storage->delete(self::wn('pending-nonce'));
+            self::fail('delete must fail closed when the deletion is not durably replicated');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException $e) {
+            self::assertStringContainsString('0 of 2', $e->getMessage());
+            self::assertStringContainsString('record deletion', $e->getMessage());
+        }
+        self::assertNull($client->store['kiwicaptcha:'.self::wn('pending-nonce')] ?? null, 'the failed-barrier DEL still removed the record on the primary');
+    }
+
+    public function testAPersistentKeyIsRefusedByTheMutatingTransitionsAndLeftByteIntact(): void
+    {
+        // A key with no expiry (a raw SET, the real PTTL -1) is a
+        // persistent foreign key: the consume, cancel and commit
+        // transitions refuse it without touching the bytes — rewriting
+        // it with a synthesized TTL would silently attach a lifetime to
+        // data its owner never gave one.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, 'kiwi:');
+        $envelope = json_encode(
+            $this->makeRecord('persistent-nonce')->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null],
+            JSON_UNESCAPED_SLASHES,
+        );
+        $client->set('kiwi:persistent-nonce', $envelope);
+
+        self::assertNull($storage->consume(self::wn('persistent-nonce')), 'the consume transition refuses a persistent key');
+        self::assertNull($storage->consumeWithOperationIdentity(self::wn('persistent-nonce'), 'order-42'), 'the identity consume refuses a persistent key');
+        self::assertNull($storage->cancel(self::wn('persistent-nonce')), 'the cancel transition refuses a persistent key');
+        self::assertFalse($storage->commitResult(self::wn('persistent-nonce'), true, null), 'the result commit refuses a persistent key');
+        self::assertNull($storage->claimResumeDerivation(self::wn('persistent-nonce')), 'the resume claim refuses a persistent key');
+
+        self::assertSame($envelope, $client->store['kiwi:persistent-nonce'], 'the refused transitions leave the persistent key byte-intact');
     }
 
     public function testRuntimeStateConsumedDecodesFromTheSingleSnapshot(): void
@@ -1527,10 +1729,10 @@ final class RedisStorageTest extends TestCase
         // keeps the Consumed state intact.
         $inner = new \KiwiCaptcha\Storage\ArrayStorage();
         $record = new \KiwiCaptcha\ChallengeRecord(
-            nonce: 'n'.str_repeat('1', 43), scope: 'login', bindingTag: 'ip:127.0.0.1',
+            nonce: self::wn('single-snapshot'), scope: 'login', bindingTag: 'ip:127.0.0.1',
             issuedAt: 1_700_000_000, expiresAt: 1_700_000_120, algorithm: PoWAlgorithm::Sha256,
-            mKib: 0, t: 0, p: 0, targetBits: 8, salt: base64_encode(random_bytes(16)),
-            prefix: 'pre', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
+            mKib: 0, t: 0, p: 0, targetBits: 8, salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: 'ch|'.\KiwiCaptcha\Tests\Support\WireFixture::SALT.'|', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
             region: null, requestBinding: null, issuer: 'kiwi', kid: 1, hostname: null,
         );
         // The storage clock pinned inside the record's lifetime: the
@@ -1587,10 +1789,10 @@ final class RedisStorageTest extends TestCase
         // expires_at with Redis TTL parity now).
         $storage = new \KiwiCaptcha\Storage\ArrayStorage(now: static fn (): int => 1_700_000_060);
         $record = new \KiwiCaptcha\ChallengeRecord(
-            nonce: 'n'.str_repeat('1', 43), scope: 'login', bindingTag: 'ip:127.0.0.1',
+            nonce: self::wn('single-snapshot'), scope: 'login', bindingTag: 'ip:127.0.0.1',
             issuedAt: 1_700_000_000, expiresAt: 1_700_000_120, algorithm: \KiwiCaptcha\PoWAlgorithm::Sha256,
-            mKib: 0, t: 0, p: 0, targetBits: 8, salt: base64_encode(random_bytes(16)),
-            prefix: 'pre', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
+            mKib: 0, t: 0, p: 0, targetBits: 8, salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: 'ch|'.\KiwiCaptcha\Tests\Support\WireFixture::SALT.'|', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
             region: null, requestBinding: null, issuer: 'kiwi', kid: 1, hostname: null,
         );
         $storage->store($record);

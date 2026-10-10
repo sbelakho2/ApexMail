@@ -101,9 +101,6 @@ async function simulateAutofill(page, selector, value) {
 async function serveFormPage(page, endpoint) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
-  // The lazy risk module (widget-risk.js) is embedded on every production
-  // inline page (the bundle's form_div_layout.html.twig embeds it after
-  // the driver); the fixture page mirrors that exact inline-tier shape.
   const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
@@ -373,7 +370,7 @@ test.describe('KiwiCaptcha engine form-assistance evidence', () => {
         ariaHidden: el.getAttribute('aria-hidden'),
       };
     }, name);
-    expect(surface.autocomplete, 'the offscreen variant carries the password-hint token').toBe('new-password');
+    expect(surface.autocomplete, 'the offscreen variant must never invite the password manager').toBe('off');
     expect(surface.position).toBe('absolute');
     expect(surface.left).toBe('-9999px');
     expect(surface.tabindex).toBe('-1');

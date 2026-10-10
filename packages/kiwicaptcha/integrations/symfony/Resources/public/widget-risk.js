@@ -1,5 +1,18 @@
 (function () {
   var encoder = new TextEncoder();
+  var decoder = new TextDecoder();
+  function kiwiRiskConfigValue(W, container, name) {
+    // The eager core exposes the one configuration reader (widget element
+    // wins over the container); fall back to the same order when the
+    // module somehow runs without it.
+    var bridge = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
+    if (bridge && bridge.core && typeof bridge.core.configValue === "function") {
+      return bridge.core.configValue(W, container, name);
+    }
+    var value = W && W.getAttribute ? W.getAttribute(name) : null;
+    if ((value === null || value === "") && container && container !== W && container.getAttribute) value = container.getAttribute(name);
+    return value;
+  }
   // Solver protocol/ABI generation label, identical to the eager core's
   // literal (the spec asserts the copies agree) and verified by the worker
   // in its ready/done handshake; a stale cached worker is refused. This
@@ -8,7 +21,9 @@
   var KIWI_SOLVER_PROTOCOL_ID = "2026-09-r1";
   // Bounded search cap, identical to the eager core's constant; the
   // worker enforces it there, the solve message carries it here.
-  var MAX_SHA_HASHES = 5000000;
+  // The same search cap as the eager core: a 20-bit challenge exhausts at
+  // e^-20 instead of the ~0.85% a 5M cap left at the top rung.
+  var MAX_SHA_HASHES = 20000000;
   function b64decode(str) {
     str = str.replace(/-/g, "+").replace(/_/g, "/");
     while (str.length % 4) str += "=";
@@ -18,15 +33,20 @@
   // ── The lazy risk tier ──────────────────────────────────────────────
   // Loaded ONLY when an armed response or configuration needs it: an
   // argon2id/rsw widget (adaptive solve tier), a server decoy field /
-  // strategy hint, or an execution_program. Files mode injects this
+  // strategy hint, an execution_program, or a SHA-256 solve on a page
+  // without the wasm glue (the files-tier worker dispatch). Files mode
+  // injects this
   // module as a same-origin SRI-pinned script (native SRI fails closed);
   // inline mode embeds it. The module registers on the internal core
   // bridge and stays stateless: widget state is passed in per call.
   // Failure semantics: decoy/honeypot evidence is probabilistic, never a
   // gate (an unloadable module degrades to the absent default with a
-  // console.warn); solve tiers fail closed into the controlled
+  // console.warn); the argon2id/rsw/execution solve tiers fail closed
+  // into the controlled
   // kiwi:worker-unavailable / kiwi:execution-unavailable states — never
-  // a silent success, never a weaker-profile fallback. The coarse
+  // a silent success, never a weaker-profile fallback; a SHA-256 solve
+  // whose worker tier is missing degrades to the driver's in-page
+  // pure-JS solver (the driver owns that fallback decision). The coarse
   // client-context descriptor moved into the eager core; this module
   // still reads it and bridge.core.boundBytes for decoy evidence.
   var kiwiExecutionRunCounter = 0;
@@ -36,15 +56,22 @@
   // closed). The iframe is removed after the run.
   function kiwiRunExecution(program, nonce, container, W) {
     return new Promise(function (resolve, reject) {
-      var executionSrc = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
-        || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
-      var executionIntegrity = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
-        || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
+      // The one configuration reader: the widget element wins over the
+      // container, exactly like every other data-kiwi-* attribute.
+      var executionSrc = kiwiRiskConfigValue(W, container, "data-kiwi-execution-src");
+      var executionIntegrity = kiwiRiskConfigValue(W, container, "data-kiwi-execution-integrity");
       if (!executionSrc || !executionIntegrity) {
         reject("execution-asset-unconfigured");
         return;
       }
       var iframe = document.createElement("iframe");
+      // sandbox="allow-scripts allow-same-origin": a same-origin document
+      // can remove its own sandbox attribute, so this is a confinement
+      // boundary for the DISPOSABLE frame, not a security boundary
+      // against the interpreter itself — the interpreter asset is the
+      // SRI-pinned, content-addressed first-party code and the actual
+      // trust anchor. (The frame is created per armed challenge, removed
+      // after the run and never reused.)
       iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
       iframe.setAttribute("aria-hidden", "true");
       iframe.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden;";
@@ -127,47 +154,113 @@
     });
   }
 
-  // ── The same-origin Argon2id/rsw solve tier ─────────────────────────
+  // ── The same-origin worker solve tier ──────────────────────────────
   // The memory-hard and sequential time-lock solvers ALWAYS run off the
   // main thread; a missing/failed worker enters the controlled
   // kiwi:worker-unavailable state — no main-thread Argon2 hash and no
-  // weaker-profile retry, ever. All postMessage traffic here is
+  // weaker-profile retry, ever. A SHA-256 solve also routes through
+  // this tier when the page carries no wasm glue (files mode): the
+  // worker solves it off the main thread, and the driver degrades a
+  // missing/failed worker to the in-page pure-JS solver there (SHA-256
+  // is main-thread-safe; the argon2id/rsw states stay fail-closed).
+  // All postMessage traffic here is
   // worker-internal; forged page traffic is ignored (the spec asserts
   // forged payloads never mint a token). Inline mode builds the Blob
   // worker from the glue's embedded workerSource (zero requests);
-  // files mode constructs a SAME-ORIGIN Worker from the fetched,
+  // files mode constructs a same-ORIGIN Worker from the fetched,
   // preflight-verified versioned asset (no Blob URL, so worker-src
   // 'self' suffices, never blob:); the legacy explicit data-kiwi-worker-
   // src URL keeps its direct-construction path. The worker never probes
   // an unversioned runtime: the driver always supplies the runtime URL
-  // through the { type: "glue" } handshake below.
-  var kiwiActiveBlobUrl = null; // shared so reset/unavailable paths can revoke
-  function kiwiRevokeActiveBlobUrl() {
-    if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
-  }
+  // through the { type: "glue" } handshake below. The Blob URL of an
+  // inline-mode worker is owned strictly by its own solve: the per-solve
+  // teardown() revokes it on every terminal path, so two concurrent
+  // solves never touch each other's URL (a page-global revoke here
+  // would kill the FIRST widget's still-pending worker script fetch
+  // when the SECOND widget created its worker).
   // ── Files-mode lazy asset loading (runtime + worker) ────────────────
   // In files mode the runtime glue and worker assets are fetched ONLY
-  // when a memory-hard challenge arrives; both fetches are bounded (two
+  // when a challenge needs the worker tier (argon2id/rsw — or a
+  // SHA-256 solve on a page without the wasm glue); both fetches are
+  // bounded (two
   // retries), deduplicated per URL across the page, and preflight-
   // verified against the page-issued sha256 digests BEFORE the bytes are
   // used. The verification FAILS CLOSED: when a digest is demanded but
   // the page cannot compute it (no crypto.subtle.digest) the fetch is
   // refused with integrity-unverifiable — an unverifiable asset never
   // runs, and a mismatch never reaches the browser APIs.
-  var kiwiRuntimeGlueCache = {};
-  var kiwiWorkerAssetCache = {};
-  function kiwiVerifyIntegrity(src, integrity) {
-    if (!integrity) return Promise.resolve({ ok: true });
-    var expected = integrity.indexOf("sha256-") === 0 ? integrity.slice(7) : null;
-    if (!expected) return Promise.resolve({ ok: false, reason: "integrity-malformed" });
+  // Null-prototype caches: keys are asset URLs (page-influenced).
+  var kiwiRuntimeGlueCache = Object.create(null);
+  var kiwiWorkerAssetCache = Object.create(null);
+  // The supported SRI digest algorithms: the crypto.subtle digest name
+  // and the exact base64 length of each algorithm's output. A multi-hash
+  // integrity attribute verifies against the first supported token.
+  var KIWI_SRI_ALGOS = {
+    "sha256-": { algo: "SHA-256", len: 44 },
+    "sha384-": { algo: "SHA-384", len: 64 },
+    "sha512-": { algo: "SHA-512", len: 88 },
+  };
+  var kiwiIntegrityWarned = false;
+  function kiwiWarnIntegrityOff() {
+    if (kiwiIntegrityWarned) return;
+    kiwiIntegrityWarned = true;
+    console.warn("KiwiCaptcha: asset URL carries no integrity digest; loading it unverified");
+  }
+  // Byte-exact preflight: the digest is computed over the EXACT fetched
+  // bytes (never a re-encoded text form), and when the URL is
+  // content-addressed (….<64-hex-sha256>.js) the embedded name must equal
+  // the digest too — the same immutable URL the browser APIs then load is
+  // therefore pinned to the verified bytes.
+  function kiwiSha256B64ToHex(b64) {
+    try {
+      var bin = atob(b64);
+      var hex = "";
+      for (var i = 0; i < bin.length; i++) hex += ("0" + bin.charCodeAt(i).toString(16)).slice(-2);
+      return hex;
+    } catch (e) { return null; }
+  }
+  function kiwiVerifyIntegrityBytes(bytes, integrity, url) {
+    if (!integrity) {
+      var resolved = null;
+      if (typeof url === "string" && url !== "") {
+        try { resolved = new URL(url, window.location.href); } catch (e) {}
+      }
+      if (!resolved || resolved.origin !== window.location.origin) {
+        return Promise.resolve({ ok: false, reason: "integrity-unconfigured" });
+      }
+      kiwiWarnIntegrityOff();
+      return Promise.resolve({ ok: true });
+    }
+    var algo = null, expected = null;
+    var tokens = String(integrity).split(/\s+/);
+    for (var i = 0; i < tokens.length && !algo; i++) {
+      for (var prefix in KIWI_SRI_ALGOS) {
+        if (tokens[i].indexOf(prefix) === 0) {
+          algo = KIWI_SRI_ALGOS[prefix];
+          expected = tokens[i].slice(prefix.length);
+          break;
+        }
+      }
+    }
+    if (!algo || expected.length !== algo.len || !/^[A-Za-z0-9+/]+={0,2}$/.test(expected)) {
+      return Promise.resolve({ ok: false, reason: "integrity-malformed" });
+    }
     if (!window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) {
       return Promise.resolve({ ok: false, reason: "integrity-unverifiable" });
     }
-    return crypto.subtle.digest("SHA-256", encoder.encode(src)).then(function (buf) {
-      var bytes = new Uint8Array(buf);
+    var buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return crypto.subtle.digest(algo.algo, buf).then(function (dig) {
+      var out = new Uint8Array(dig);
       var bin = "";
-      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      return btoa(bin) === expected ? { ok: true } : { ok: false, reason: "integrity-mismatch" };
+      for (var i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+      if (btoa(bin) !== expected) return { ok: false, reason: "integrity-mismatch" };
+      if (algo.algo === "SHA-256" && typeof url === "string" && url !== "") {
+        var m = url.match(/\.([0-9a-f]{64})\.(?:js|css)(?:[?#]|$)/);
+        if (m && m[1] !== kiwiSha256B64ToHex(expected)) {
+          return { ok: false, reason: "integrity-url-mismatch" };
+        }
+      }
+      return { ok: true };
     }).catch(function () { return { ok: false, reason: "integrity-unverifiable" }; });
   }
   function kiwiFetchRuntimeGlue(url, integrity) {
@@ -176,15 +269,24 @@
       var attempt = 0;
       var lastReason = "runtime-unavailable";
       function tryFetch() {
-        fetch(url, { cache: "force-cache", credentials: "same-origin" })
-          .then(function (r) { if (!r.ok) { lastReason = "runtime-fetch-" + r.status; throw new Error("KiwiCaptcha runtime fetch failed"); } return r.text(); })
-          .then(function (src) {
+        // A runtime URL WITHOUT a digest must never follow a redirect:
+        // the requested URL's origin is not the origin of the served
+        // bytes (a same-origin URL can 302 cross-origin). With a digest
+        // the bytes stay SRI-pinned, so redirects are harmless.
+        fetch(url, { cache: "force-cache", credentials: "same-origin", redirect: integrity ? "follow" : "error" })
+          .then(function (r) {
+            if (!r.ok) { lastReason = "runtime-fetch-" + r.status; throw new Error("KiwiCaptcha runtime fetch failed"); }
+            var finalUrl = r.url || url;
+            return r.arrayBuffer().then(function (buf) { return { bytes: new Uint8Array(buf), finalUrl: finalUrl }; });
+          })
+          .then(function (res) {
+            var src = decoder.decode(res.bytes);
             if (src.indexOf("var KIWI_WASM_B64") === -1 || src.indexOf("__kiwiCaptchaWasm") === -1) {
               lastReason = "runtime-malformed";
               throw new Error("KiwiCaptcha runtime asset malformed");
             }
-            return kiwiVerifyIntegrity(src, integrity).then(function (res) {
-              if (!res.ok) { lastReason = res.reason; throw new Error("KiwiCaptcha runtime integrity failure"); }
+            return kiwiVerifyIntegrityBytes(res.bytes, integrity, res.finalUrl).then(function (vres) {
+              if (!vres.ok) { lastReason = vres.reason; throw new Error("KiwiCaptcha runtime integrity failure"); }
               return src;
             });
           })
@@ -197,6 +299,9 @@
       tryFetch();
     });
     kiwiRuntimeGlueCache[url] = promise;
+    // A terminal failure must never be cached for the page lifetime: an
+    // explicit Retry after a transient network error has to fetch again.
+    promise.then(function (res) { if (res && res.error) delete kiwiRuntimeGlueCache[url]; });
     return promise;
   }
   function kiwiFetchWorkerAsset(url, integrity) {
@@ -205,15 +310,23 @@
       var attempt = 0;
       var lastReason = "worker-unavailable";
       function tryFetch() {
-        fetch(url, { cache: "force-cache", credentials: "same-origin" })
-          .then(function (r) { if (!r.ok) { lastReason = "worker-fetch-" + r.status; throw new Error("KiwiCaptcha worker asset fetch failed"); } return r.text(); })
-          .then(function (src) {
+        // Same transport contract as the runtime glue: a digest-less
+        // worker asset never follows a redirect; with a digest the
+        // fetched bytes are SRI-pinned.
+        fetch(url, { cache: "force-cache", credentials: "same-origin", redirect: integrity ? "follow" : "error" })
+          .then(function (r) {
+            if (!r.ok) { lastReason = "worker-fetch-" + r.status; throw new Error("KiwiCaptcha worker asset fetch failed"); }
+            var finalUrl = r.url || url;
+            return r.arrayBuffer().then(function (buf) { return { bytes: new Uint8Array(buf), finalUrl: finalUrl }; });
+          })
+          .then(function (res) {
+            var src = decoder.decode(res.bytes);
             if (src.indexOf("KiwiCaptcha worker solver") === -1) {
               lastReason = "worker-malformed";
               throw new Error("KiwiCaptcha worker asset malformed");
             }
-            return kiwiVerifyIntegrity(src, integrity).then(function (res) {
-              if (!res.ok) { lastReason = res.reason; throw new Error("KiwiCaptcha worker integrity failure"); }
+            return kiwiVerifyIntegrityBytes(res.bytes, integrity, res.finalUrl).then(function (vres) {
+              if (!vres.ok) { lastReason = vres.reason; throw new Error("KiwiCaptcha worker integrity failure"); }
               return src;
             });
           })
@@ -226,19 +339,63 @@
       tryFetch();
     });
     kiwiWorkerAssetCache[url] = promise;
+    // Failed fetches are evicted (see the runtime cache): Retry can
+    // succeed after a transient error without a page reload.
+    promise.then(function (res) { if (res && res.error) delete kiwiWorkerAssetCache[url]; });
     return promise;
   }
-  function solveWithWorker(data, onProgress, container, deadline) {
-    var terminateHandle = function () {};
-    var workerSrc = container.getAttribute("data-kiwi-worker-src");
-    var workerIntegrity = container.getAttribute("data-kiwi-worker-integrity");
-    var runtimeSrc = container.getAttribute("data-kiwi-runtime-src");
-    var runtimeIntegrity = container.getAttribute("data-kiwi-runtime-integrity");
+  function solveWithWorker(data, onProgress, container, deadline, W) {
+    var worker = null;
+    var blobUrl = null;
+    // Blob-URL cleanup: the URL is revoked exactly once on every terminal
+    // path (done, failed, mismatch, worker error, deadline, termination);
+    // terminate() kills the worker, revoking only releases the URL.
+    function teardown() {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        blobUrl = null;
+      }
+    }
+    // A cancelled generation terminates the worker outright — revoking
+    // the blob URL alone would not stop it. The handle is ONE stable
+    // closure over the mutable `worker` slot: the caller holds it from
+    // the first synchronous tick, so a call before the async
+    // construction settles is a safe no-op and a later one terminates
+    // whichever worker currently occupies the slot.
+    var terminateHandle = function () {
+      if (worker) { try { worker.terminate(); } catch (e) {} }
+      teardown();
+    };
+    // The normalized algorithm of the solve message: argon2id/rsw pass
+    // through, and a SHA-256 challenge (the default when the field is
+    // absent) rides as "sha256" so the worker dispatches its wasm-first
+    // solveSha rather than the memory-hard solver. The message shape is
+    // unchanged: every solve carries the full field set, and only an
+    // rsw solve adds the nonce and modulus.
+    var algorithm = data.algorithm === "argon2id" ? "argon2id" : (data.algorithm === "rsw" ? "rsw" : "sha256");
+    // The one configuration reader: the widget element wins over the
+    // container here too (this worker path used to read the container
+    // only, contradicting kiwiConfigValue).
+    var workerSrc = kiwiRiskConfigValue(W, container, "data-kiwi-worker-src");
+    var workerIntegrity = kiwiRiskConfigValue(W, container, "data-kiwi-worker-integrity");
+    var runtimeSrc = kiwiRiskConfigValue(W, container, "data-kiwi-runtime-src");
+    var runtimeIntegrity = kiwiRiskConfigValue(W, container, "data-kiwi-runtime-integrity");
+    // An unverified runtime is trusted only on the page's own origin: a
+    // runtime URL without a digest that resolves cross-origin (or does
+    // not parse) is treated as unconfigured, so it is never fetched and
+    // never embedded — the existing refusal/degraded path runs instead.
+    if (runtimeSrc && !runtimeIntegrity) {
+      var resolvedRuntime = null;
+      try { resolvedRuntime = new URL(runtimeSrc, window.location.href); } catch (e) {}
+      if (!resolvedRuntime || resolvedRuntime.origin !== window.location.origin) runtimeSrc = null;
+    }
     // Files-mode worker asset: a versioned worker URL WITH its integrity
     // digest is the theme-emitted lazy worker asset (fetched and
     // preflight-verified below). A worker URL WITHOUT the integrity
-    // attribute keeps the legacy explicit static-worker path.
+    // attribute keeps the legacy explicit static-worker path — surfaced
+    // once per page as the unverified state it is.
     var lazyWorkerAsset = !!(workerSrc && workerIntegrity);
+    if (workerSrc && !workerIntegrity) kiwiWarnIntegrityOff();
     // The glue source: the inline script element (inline mode), the
     // compat loader's fetched glue (/api.js), or the lazy runtime fetch
     // of files mode.
@@ -284,17 +441,18 @@
       var resolvedGlue = glueResult ? glueResult.src : null;
       return new Promise(function(resolve) {
         if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
-        var worker = null;
-        var blobUrl = null;
         try {
           if (workerSrc) {
-            // Files mode: a SAME-ORIGIN Worker constructed from the
+            // Files mode: a same-ORIGIN Worker constructed from the
             // content-addressed URL of the fetched + preflight-verified
-            // asset. The Worker constructor loads the same immutable URL
-            // through the browser's worker-script fetcher — it can only
-            // ever serve the exact verified bytes (the hash is in the
-            // URL), so the running worker IS the verified source; no
-            // Blob is created, so files mode needs worker-src 'self'.
+            // asset. The preflight hashes the EXACT fetched bytes and
+            // (when integrity is present) requires the URL's embedded
+            // sha256 to equal that digest, so the immutable URL the
+            // browser's worker-script fetcher loads is pinned to the
+            // verified bytes. That is a main-thread preflight, not an
+            // in-worker re-verification; no Blob is created, so files
+            // mode needs worker-src 'self' (or the content-addressed
+            // source).
             worker = new Worker(workerSrc);
           } else {
             // Inline mode: the glue's embedded workerSource plus the
@@ -307,32 +465,14 @@
           }
         } catch (e) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
         if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
-        kiwiRevokeActiveBlobUrl();
-        kiwiActiveBlobUrl = blobUrl;
-        // A cancelled generation terminates the worker outright — revoking
-        // the blob URL alone would not stop it.
-        terminateHandle = function () {
-          try { worker.terminate(); } catch (e) {}
-          teardown();
-        };
         window.__kiwiWorkerUsed = true;
         var workerStart = performance.now();
         // The progress denominator: an rsw solve reports squarings done,
         // every other solve reports hashes against 2^target_bits.
-        var expectedUnits = (data.algorithm || "sha256") === "rsw"
+        var expectedUnits = algorithm === "rsw"
           ? (data.t || 1)
           : Math.pow(2, data.targetBits);
         var settled = false;
-        // Blob-URL cleanup: the URL is revoked exactly once on every
-        // terminal path (done, failed, mismatch, worker error, deadline);
-        // terminate() kills the worker, revoking only releases the URL.
-        function teardown() {
-          if (blobUrl) {
-            URL.revokeObjectURL(blobUrl);
-            if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
-            blobUrl = null;
-          }
-        }
         // The solve deadline (challenge expiry − margin): a solve that
         // would outlive the challenge is wasted work, so the worker is
         // terminated at the deadline; the driver then re-acquires.
@@ -353,10 +493,17 @@
         // not a versioned progress/done/failed message is ignored.
         worker.onmessage = function(ev) {
           var msg = ev.data;
-          if (!msg || typeof msg !== "object" || msg.v !== 1) return;
+          // Arrays and non-objects are ignored: a schema-confused frame
+          // never settles or steers the solve.
+          if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.v !== 1) return;
+          // One settle per solve: after the first terminal frame (done,
+          // failed, mismatch, deadline) every later message — a
+          // duplicate done, a stale progress or a foreign reply — is
+          // ignored.
+          if (settled) return;
           if (msg.type === "ready") {
             // Startup handshake: a stale cached worker must report the
-            // SAME solver protocol id; otherwise it is refused and never
+            // same solver protocol id; otherwise it is refused and never
             // contributes a solution.
             if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
               if (!settled) {
@@ -367,21 +514,31 @@
             return;
           }
           if (msg.type === "progress") {
+            if (msg.reqId !== solveReqId) return;
             if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
             onProgress(Math.min(95, (msg.counter * 100) / expectedUnits));
           } else if (msg.type === "done") {
+            // Correlation is mandatory for a done: an uncorrelated (or
+            // foreign) done must never settle this solve.
+            if (msg.reqId !== solveReqId) return;
             if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
               if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
               return;
             }
-            var isRsw = (data.algorithm || "sha256") === "rsw";
+            var isRsw = algorithm === "rsw";
             // An rsw solve reports the final proof value, never a counter.
             if (isRsw) {
               if (typeof msg.proof !== "string" || !/^[0-9a-f]{512}$/.test(msg.proof)) {
                 if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
                 return;
               }
-            } else if (typeof msg.counter !== "number" || !isFinite(msg.counter)) {
+            } else if (typeof msg.counter !== "number" || !Number.isFinite(msg.counter)
+              || !Number.isInteger(msg.counter) || msg.counter < 0 || msg.counter >= MAX_SHA_HASHES) {
+              // A settle-shaped done must also be a real solution shape:
+              // the counter is an integer inside the solver's own search
+              // range [0, MAX_SHA_HASHES). Nonsense counters are ignored
+              // (the server would refuse them anyway), so a false client
+              // success is never painted from a malformed frame.
               return;
             }
             settled = true;
@@ -392,6 +549,9 @@
               ? { proof: msg.proof, duration: Math.round(performance.now() - workerStart) }
               : { counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
           } else if (msg.type === "failed") {
+            // Pre-solve handshake failures carry no reqId; a solve-scoped
+            // failure must be correlated to this request.
+            if (msg.reqId !== undefined && msg.reqId !== solveReqId) return;
             if (typeof msg.reason !== "string") return;
             // protocol-mismatch (the wasm/worker generations differ) is
             // surfaced as the controlled solver-mismatch state, same UX as
@@ -422,7 +582,23 @@
         };
         var prefixBytes = encoder.encode(data.prefix);
         var saltBytes = b64decode(data.salt);
-        var isRsw = (data.algorithm || "sha256") === "rsw";
+        var isRsw = algorithm === "rsw";
+        // The solve request id: the worker echoes it on every solve-scoped
+        // reply and the listener accepts correlated replies only, so a
+        // page script posting a crafted solve+done pair into the worker
+        // can never settle this solve (the reply it provokes carries the
+        // other request's id, or none at all). The id comes from the
+        // correlation CSPRNG (128 random bits) and NEVER from the
+        // presentation fallback: a defense against false settlement must
+        // not silently become predictable. Missing crypto fails the
+        // worker path closed into the controlled unavailable state (the
+        // driver then solves in-page).
+        var reqWords = kiwiCorrelationWords();
+        if (reqWords === null) {
+          if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ unavailable: true, reason: "no-csprng" }); }
+          return;
+        }
+        var solveReqId = "q" + reqWords[0].toString(36) + reqWords[1].toString(36) + reqWords[2].toString(36) + reqWords[3].toString(36);
         try {
           // Hand the runtime URL to the worker BEFORE the solve: it
           // importScripts the URL, verifies the wasm protocol version and
@@ -437,7 +613,8 @@
           var solveMsg = {
             v: 1,
             type: "solve",
-            algorithm: isRsw ? "rsw" : "argon2id",
+            reqId: solveReqId,
+            algorithm: algorithm,
             prefix: data.prefix,
             prefixLen: prefixBytes.length,
             salt: data.salt,
@@ -484,6 +661,18 @@
       return buf[0] >>> 0;
     }
     return Math.floor(Math.random() * 4294967296) >>> 0;
+  }
+  // The correlation CSPRNG: the solve request id gates which worker
+  // replies may settle a solve, so it must NEVER degrade to the
+  // presentation fallback. Unlike kiwiCspUint32 it has no non-crypto
+  // path: missing getRandomValues returns null and the caller fails the
+  // worker path closed into the controlled unavailable state. 128 random
+  // bits make a guessed/colliding request id infeasible.
+  function kiwiCorrelationWords() {
+    if (!window.crypto || typeof window.crypto.getRandomValues !== "function") return null;
+    var buf = new Uint32Array(4);
+    window.crypto.getRandomValues(buf);
+    return buf;
   }
   function kiwiDecoyVariantFor(data) {
     var hint = data && typeof data.strategy === "number" ? data.strategy : null;
@@ -540,9 +729,14 @@
       input.setAttribute("autocomplete", "off");
     } else if (variant === 2 || variant === 4) {
       input.setAttribute("hidden", "");
+      // Inline display:none beats a site stylesheet that would otherwise
+      // render hidden-attribute inputs (input { display: block }).
+      input.style.display = "none";
       input.setAttribute("autocomplete", "off");
     } else {
-      input.setAttribute("autocomplete", "new-password");
+      // Never new-password: that invites password-manager and browser
+      // autofill to populate the decoy on legitimate users.
+      input.setAttribute("autocomplete", "off");
       input.setAttribute("aria-label", "off-screen field");
       input.style.position = "absolute";
       input.style.left = "-9999px";
@@ -630,8 +824,7 @@
       renderDecoy: kiwiRenderDecoy,
       flushDecoy: kiwiFlushDecoy,
       runExecution: kiwiRunExecution,
-      solveWorker: solveWithWorker,
-      revokeWorkerUrl: kiwiRevokeActiveBlobUrl
+      solveWorker: solveWithWorker
     });
   }
 })();

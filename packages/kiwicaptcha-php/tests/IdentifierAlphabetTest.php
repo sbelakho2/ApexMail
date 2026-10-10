@@ -191,8 +191,8 @@ final class IdentifierAlphabetTest extends TestCase
             't' => 1,
             'p' => 1,
             'target_bits' => 8,
-            'salt' => 'c2FsdA==',
-            'prefix' => 'prefix',
+            'salt' => 'c2FsdHNhbHRzYWx0c2FsdA==',
+            'prefix' => 'challenge|c2FsdHNhbHRzYWx0c2FsdA==|',
             'challenge' => 'challenge',
             'min_duration_ms' => 0,
             'issued_at_ns' => 1_800_000_000_000_000,
@@ -250,43 +250,41 @@ final class IdentifierAlphabetTest extends TestCase
         }
     }
 
-    public function testFromArrayTreatsScopeAsOpaqueSerdeString(): void
+    public function testFromArrayEnforcesTheScopeAlphabet(): void
     {
-        // The differential fuzz corpus pins scope as an opaque string:
-        // 'login|admin' and unicode scopes must still parse (exactly like
-        // the Rust serde `String` field), so the 659-accepted split
-        // holds.
-        $record = ChallengeRecord::fromArray(self::mutate('scope', 'login|admin'));
-        self::assertSame('login|admin', $record->scope);
-
-        $record = ChallengeRecord::fromArray(self::mutate('scope', "log\u{00FC}n"));
-        self::assertSame("log\u{00FC}n", $record->scope);
+        // The decode boundary is the strict serde twin: the Rust
+        // reconstruction applies validate_record (which includes the
+        // scope identifier alphabet) before any typed record surfaces,
+        // so a non-conforming scope is refused at parse on both sides —
+        // the old opaque-scope split was a parser differential.
+        foreach (['login|admin', "log\u{00FC}n", 'log in', ''] as $scope) {
+            try {
+                ChallengeRecord::fromArray(self::mutate('scope', $scope));
+                self::fail(sprintf('scope %s must be refused at the parse boundary', var_export($scope, true)));
+            } catch (MalformedRecordException) {
+                self::assertTrue(true);
+            }
+        }
     }
 
     public function testVerifierRejectsNonConformingScopeRecords(): void
     {
-        // The verifier's validate_record enforces the scope alphabet; a
-        // parsed-but-non-conforming scope fails closed as MalformedRecord
-        // before any crypto work. The record carries a structurally valid
-        // 32-byte nonce and 16-byte salt so the scope alphabet check is
-        // the only validation failure.
+        // A non-conforming scope fails closed at the parse boundary
+        // (the strict serde twin), before any crypto work and before
+        // any verifier can see it. The record carries a structurally
+        // valid 32-byte nonce and 16-byte salt so the scope alphabet
+        // check is the only validation failure.
         foreach (['login|admin', "log\u{00FC}n", 'log in'] as $scope) {
             $data = self::mutate('scope', $scope);
             $data['nonce'] = 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=';
             $data['salt'] = 'MTIzNDU2Nzg5MGFiY2RlZg==';
             $data['prefix'] = 'challenge|MTIzNDU2Nzg5MGFiY2RlZg==|';
-            $record = ChallengeRecord::fromArray($data);
-            $storage = new ArrayStorage();
-            $storage->store($record);
-
-            $verifier = new Verifier($storage, now: static fn (): int => 1_800_000_000);
-            $outcome = $verifier->verify(
-                \KiwiCaptcha\SolutionToken::create($record->nonce, 0, 5000, [])->encode(),
-                Vectors::SECRET,
-            );
-
-            self::assertSame(VerifyError::MalformedRecord, $outcome->error, "scope '$scope' must be rejected by the verifier");
-            self::assertNull($storage->find($record->nonce));
+            try {
+                ChallengeRecord::fromArray($data);
+                self::fail("scope '$scope' must be refused at the parse boundary");
+            } catch (MalformedRecordException) {
+                self::assertTrue(true);
+            }
         }
     }
 

@@ -147,16 +147,13 @@ final class RealRedisChainStateMachineModelTest extends TestCase
         return new RedisChainDriver($this->client, self::NAMESPACE);
     }
 
-    public function testArrayAndRedisCreateOrGetBothHealACorruptButLiveRecord(): void
+    public function testArrayAndRedisCreateOrGetBothRefuseToHealACorruptButLiveRecord(): void
     {
-        // The documented create-or-get contract says a mapping that points
-        // at a missing or corrupt chain record is compare-deleted and the
-        // chain created fresh ("the atomic retry"). The Redis Lua
-        // predicate detects the corrupt record (isValidChainRecord) and
-        // repairs it; the in-memory store now mirrors that behavior: the
-        // pointed-at record is validated with the strict v2 decode and a
-        // corrupt record is healed the same way (compare-delete + create
-        // fresh), so both sides converge on the fresh chain.
+        // Corrupt state is never healed, on either store: the pointed-at
+        // record is validated with the strict v2 decode, the create-or-get
+        // fails closed with zero writes, and the obligation mapping keeps
+        // pointing at the corrupt chain. Only a genuinely missing or
+        // signed-expired record repairs the mapping.
         $store = new RedisChainedChallengeStateStore($this->client, self::NAMESPACE);
         $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15);
         $expiry = time() + 300;
@@ -168,19 +165,29 @@ final class RealRedisChainStateMachineModelTest extends TestCase
         self::assertIsString($corrupt);
         $record = json_decode($corrupt, true, 8, JSON_THROW_ON_ERROR);
         $record['state'] = 'unexpected-state';
-        $this->client->set($recordKey, (string) json_encode($record, JSON_THROW_ON_ERROR), 'EX', 300);
+        $tampered = (string) json_encode($record, JSON_THROW_ON_ERROR);
+        $this->client->set($recordKey, $tampered, 'EX', 300);
 
-        // Redis: the Lua predicate rejects the corrupt record and repairs
-        // the mapping with a fresh chain in the same script.
+        // Redis: the Lua predicate rejects the corrupt record and writes
+        // nothing: the mapping and the bytes are preserved.
         $freshChainId = 'chain-fresh-'.$requirement->chainId;
-        $repaired = $store->createOrGetObligation($obligationId, $freshChainId, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, $expiry, 300);
-        self::assertSame($freshChainId, $repaired, 'the Redis create-or-get REPAIRS the corrupt mapping with a fresh chain');
-        self::assertSame($freshChainId, $store->obligationChainId($obligationId), 'the obligation now points at the fresh chain');
+        try {
+            $store->createOrGetObligation($obligationId, $freshChainId, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, $expiry, 300);
+            self::fail('the Redis create-or-get must fail closed on a corrupt chain, never heal');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the obligation still points at the corrupt chain');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped.
+        }
+        self::assertSame($tampered, $this->client->get($recordKey), 'the corrupt bytes are preserved');
+        self::assertNull($store->read($freshChainId), 'no fresh Redis chain was created');
 
-        // Array: the same documented contract — the corrupt-but-live
-        // record must now be healed identically (parity, the fixed
-        // divergence): the strict v2 decode rejects the corrupt record
-        // and the mapping is compare-deleted + created fresh.
+        // Array: the identical contract, the identical fail-closed result.
         $array = new ArrayChainedChallengeStateStore();
         $arrayService = new ChainedChallengeTicketService($array, self::SECRET, 300, 15);
         $arrayRequirement = $arrayService->requireStage2(ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 1, \KiwiCaptcha\Risk\RiskAction::Argon32, $expiry);
@@ -191,14 +198,28 @@ final class RealRedisChainStateMachineModelTest extends TestCase
         (new \ReflectionObject($array))->getProperty('records')->setValue($array, $arrayRecords);
 
         $arrayFresh = 'array-chain-fresh';
-        $returned = $array->createOrGetObligation($arrayObligationId, $arrayFresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, $expiry, 300);
-        self::assertSame($arrayFresh, $returned, 'PARITY: the array create-or-get now REPAIRS the corrupt mapping with a fresh chain');
-        self::assertSame($arrayFresh, $array->obligationChainId($arrayObligationId), 'the array obligation now points at the fresh chain');
+        try {
+            $array->createOrGetObligation($arrayObligationId, $arrayFresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, $expiry, 300);
+            self::fail('PARITY: the array create-or-get must fail closed on a corrupt chain, never heal');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            $array->obligationChainId($arrayObligationId);
+            self::fail('the array obligation read must fail closed on the corrupt chain');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected: the corrupt state is never silently dropped
+        }
+        $arrayObligations = (new \ReflectionObject($array))->getProperty('obligations')->getValue($array);
+        self::assertSame($arrayRequirement->chainId, $arrayObligations[$arrayObligationId] ?? null, 'the array mapping still points at the corrupt chain');
+        self::assertNull($array->read($arrayFresh), 'no fresh Array chain was created');
 
-        // The fresh chain is strictly decodable and live (no fail-closed
-        // 503 at the read boundary).
-        $fresh = $array->read($arrayFresh);
-        self::assertIsArray($fresh);
-        self::assertSame('available', $fresh['state']);
+        // The corrupt record stays fail-closed at the read boundary.
+        try {
+            $array->read($arrayRequirement->chainId);
+            self::fail('the corrupt Array record must stay fail-closed');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
     }
 }

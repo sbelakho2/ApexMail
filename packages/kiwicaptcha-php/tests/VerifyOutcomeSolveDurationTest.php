@@ -160,7 +160,7 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
         [$storage, $record, $token] = $this->issueAndSolve($client, 'dur-replay-');
         $identity = 'op-'.hash('sha256', 'solve-duration-replay');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null));
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $record->nonce, true, null));
 
         // The retry arrives 30s after issuance: a re-computed span would
         // report 30000ms, but the solve happened long before this receipt —

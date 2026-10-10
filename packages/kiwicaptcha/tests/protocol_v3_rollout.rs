@@ -60,6 +60,7 @@ fn sha256_config() -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -88,6 +89,7 @@ fn verify_ctx<'a>(
     VerifyContext {
         record,
         secret_key: SECRET,
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,
@@ -100,6 +102,7 @@ fn verify_ctx<'a>(
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: None,
         execution_trace: None,
@@ -110,6 +113,7 @@ fn verify_ctx<'a>(
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     }
 }
 
@@ -324,6 +328,8 @@ fn acceptance_predicate_pins_the_set_boundaries() {
         execution_version: None,
         execution_commitment: None,
         kid: 1,
+        rsw_modulus_sha256: None,
+        server_mac: None,
     };
     for version in [0u8, 4u8] {
         record.protocol_version = version;

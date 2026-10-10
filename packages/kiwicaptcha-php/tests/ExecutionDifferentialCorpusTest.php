@@ -71,7 +71,7 @@ final class ExecutionDifferentialCorpusTest extends TestCase
             'name' => 'v5-valid',
             'version' => 5,
             'program' => 'AQVsb2dpbgxsb2dpbi1hY3Rpb24FGBCuB1JVL0ZoMlEVA3h5ZRhbcHReK0AkOTwwKmRPdFkvaE4jTld6WVcSEDIHWkdpZEZ5UxEIED5kPzI2QkFwYGpCUXkqVkESI7kFSWxlZlojLgVHeUV3aQjHIQdSVS9GaDJRAAoACW4GHwdSVS9GaDJRIgdaR2lkRnlTJAVHeUV3aSYEeHorTxQnB1pHaWRGeVMOCg4qKxoiMGhZRTBFSCMoJS9qdVQ0T1Aie2FjPllULAwgIB4YAAQwO2IhdS8Ddg==',
-            'trace' => 'dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)',
+            'trace' => 'dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)',
             'expected' => 'valid',
         ],
 
@@ -192,7 +192,7 @@ final class ExecutionDifferentialCorpusTest extends TestCase
     {
         $manifest = $this->manifest();
         $maxVersion = $manifest['max_execution_version'];
-        self::assertSame(5, $maxVersion, 'the manifest register ceiling at HEAD');
+        self::assertSame(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, $maxVersion, 'the manifest register ceiling at HEAD');
 
         $cases = self::CORPUS;
         self::assertCount(19, $cases, 'the embedded corpus is pinned to 19 cases');

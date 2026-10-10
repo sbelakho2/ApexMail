@@ -22,9 +22,6 @@ final class ChainedChallengeTicketService
     /** The ticket format version this service issues and accepts. */
     private const TICKET_VERSION = 1;
 
-    /** The chain id alphabet (base64url of 16 random bytes). */
-    private const CHAIN_ID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
-
     /** The wire bound shared with the controller's accepted pattern. */
     private const MAX_TICKET_BYTES = 256;
 
@@ -64,17 +61,14 @@ final class ChainedChallengeTicketService
         private readonly ?RequestBindingAuthorityInterface $bindingAuthority = null,
         private readonly ?\Closure $now = null,
     ) {
-        // The documented 16-byte chain-secret minimum, enforced on the
-        // resolved value at construction: the config tree checks literal
-        // values, but an %env(KIWI_RISK_SECRET)% placeholder is opaque at
-        // compile time and this service is the consumption seam. A short
-        // or empty secret makes every chain ticket forgeable, so the
-        // construction fails closed instead.
-        if (\strlen($hmacSecret) < 16) {
-            throw new \InvalidArgumentException(sprintf(
-                'the chain ticket HMAC secret (risk.chaining.hmac_secret, or its risk.master_secret / secret_key fallback) must be at least 16 bytes (32 random bytes recommended) — got %d byte(s).',
-                \strlen($hmacSecret),
-            ));
+        // The runtime half of the risk.chaining.hmac_secret floor: a
+        // literal secret is refused at container build by the config tree,
+        // but an env-resolved secret (and the master_secret/secret_key
+        // fallback) only exists at runtime, so the floor is enforced here.
+        if (\strlen($hmacSecret) < 32) {
+            throw new \InvalidArgumentException(
+                'risk.chaining.hmac_secret must be at least 32 bytes (the same floor as secret_key); the resolved chain ticket signing secret is too short'
+            );
         }
     }
 
@@ -115,12 +109,29 @@ final class ChainedChallengeTicketService
      */
     public function findOpenRequirement(string $scope, string $requestBinding, int $policyVersion): ?ChainRequirement
     {
-        $chainId = $this->store->obligationChainId($this->obligationIdFor($scope, $requestBinding, $policyVersion));
+        $obligationId = $this->obligationIdFor($scope, $requestBinding, $policyVersion);
+        $chainId = $this->store->obligationChainId($obligationId);
         if ($chainId === null) {
             return null;
         }
+        $requirement = $this->requirementFor($chainId);
+        if ($requirement === null) {
+            return null;
+        }
+        // The mapping is not itself authenticated: a corrupted mapping can
+        // point this transaction at another transaction's perfectly valid
+        // chain. The resolved record must BE this transaction's chain
+        // before a requirement is constructed from it; a mismatch is
+        // corrupt server state (the controller answers the retryable 503),
+        // never a stage-2 resumption of a foreign transaction.
+        if ($requirement->scope !== $scope
+            || ($requirement->requestBinding ?? '') !== $requestBinding
+            || $requirement->policyVersion !== $policyVersion
+        ) {
+            throw new MalformedChainedChallengeStateException('the obligation mapping resolves a chain that belongs to a different transaction');
+        }
 
-        return $this->requirementFor($chainId);
+        return $requirement;
     }
 
     /**
@@ -195,7 +206,7 @@ final class ChainedChallengeTicketService
     {
         $body = self::encode([self::TICKET_VERSION, $chainId, $expiresAt]);
 
-        return $body.'.'.self::sign($body);
+        return $body.'.'.$this->sign($body);
     }
 
     /**
@@ -262,12 +273,8 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * Verify a ticket's signature + expiry and return its signed payload,
-     * or null when the ticket is malformed, forged, expired or carries a
-     * structurally invalid payload. The signature comparison is
-     * constant-time (hash_equals over the raw-digest base64url encoding).
-     *
-     * @return array{version: int, chainId: string, expiresAt: int}|null
+     * Ask the store to confirm the replication barrier (a no-op when the
+     * store does not implement the barrier interface).
      */
     public function establishReplicationFence(string $what): void
     {
@@ -276,13 +283,21 @@ final class ChainedChallengeTicketService
         }
     }
 
+    /**
+     * Verify a ticket's signature + expiry and return its signed payload,
+     * or null when the ticket is malformed, forged, expired or carries a
+     * structurally invalid payload. The signature comparison is
+     * constant-time (hash_equals over the raw-digest base64url encoding).
+     *
+     * @return array{version: int, chainId: string, expiresAt: int}|null
+     */
     public function verify(string $ticket): ?array
     {
         $parts = explode('.', $ticket, 2);
         if (\count($parts) !== 2 || $parts[0] === '' || $parts[1] === '') {
             return null;
         }
-        if (!hash_equals(self::sign($parts[0]), $parts[1])) {
+        if (!hash_equals($this->sign($parts[0]), $parts[1])) {
             return null;
         }
         $payload = self::decode($parts[0]);
@@ -295,7 +310,7 @@ final class ChainedChallengeTicketService
         if (!\is_int($version) || $version !== self::TICKET_VERSION) {
             return null;
         }
-        if (!\is_string($chainId) || preg_match(self::CHAIN_ID_PATTERN, $chainId) !== 1) {
+        if (!\is_string($chainId) || preg_match(ChainId::PATTERN, $chainId) !== 1) {
             return null;
         }
         if (!\is_int($expiresAt)) {
@@ -385,6 +400,7 @@ final class ChainedChallengeTicketService
             'verified_same' => ChainIssuedResult::VerifiedSame,
             'conflict' => ChainIssuedResult::Conflict,
             'not_owner' => ChainIssuedResult::NotOwner,
+            'stale_requirement' => ChainIssuedResult::StaleRequirement,
             default => ChainIssuedResult::Missing,
         };
     }
@@ -685,6 +701,7 @@ final class ChainedChallengeTicketService
             owner: $record['owner'],
             leaseUntil: $record['leaseUntil'],
             expiresAt: $record['expiresAt'],
+            requirementGeneration: $record['requirementGeneration'] ?? 1,
         );
     }
 

@@ -60,7 +60,6 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
     private const LEASE_SECS = 15;
 
     /** The chain id shape (base64url of 16 random bytes — the ticket service's alphabet). */
-    private const CHAIN_ID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
 
     /**
      * @var array<string, array{v: int, ttl: int, created: int, state: 'pending'|'complete', owner: ?string, leaseUntil: ?int, disposition: ?PostSolveDisposition, decisionId: ?string}>
@@ -265,7 +264,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             return false;
         }
 
-        return $now > $existing['created'] + $existing['ttl'];
+        return $now >= $existing['created'] + $existing['ttl'];
     }
 
     /**
@@ -324,7 +323,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             if ($disposition->decisionId !== null && $disposition->decisionId === '') {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record decision_id must be a non-empty string or null');
             }
-            if ($disposition->chainId !== null && preg_match(self::CHAIN_ID_PATTERN, $disposition->chainId) !== 1) {
+            if ($disposition->chainId !== null && preg_match(ChainId::PATTERN, $disposition->chainId) !== 1) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_id must match the chain id shape or be null');
             }
             if ($disposition->kind === PostSolveDispositionKind::ChainRequired && ($disposition->chainId === null || $disposition->chainId === '')) {

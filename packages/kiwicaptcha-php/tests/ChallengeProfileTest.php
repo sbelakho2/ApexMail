@@ -170,9 +170,9 @@ final class ChallengeProfileTest extends TestCase
 
     public function testIssueWithProfileSha20SolvesAndVerifies(): void
     {
-        // 20 bits needs ~1M hashes; a counter above the solver cap (5M)
-        // makes the token malformed, so retry on a fresh challenge when an
-        // unlucky solve exceeds it (~0.7% per attempt).
+        // 20 bits needs ~1M hashes; a counter at or above the solver cap
+        // (20M) makes the token malformed, so retry on a fresh challenge
+        // when an unlucky solve exceeds it.
         $token = null;
         for ($attempt = 0; $attempt < 3; $attempt++) {
             [$issuer, $storage, $profile] = $this->issuerWith(ChallengeProfile::sha(20));
@@ -180,7 +180,7 @@ final class ChallengeProfileTest extends TestCase
             $record = $storage->find($challenge->nonce);
             self::assertSame(20, $record?->targetBits);
             $counter = $this->solveSha($challenge->prefix, $challenge->salt, $challenge->targetBits);
-            if ($counter <= SolutionToken::maxSolverCounter()) {
+            if ($counter < SolutionToken::maxSolverCounter()) {
                 $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
                 break;
             }

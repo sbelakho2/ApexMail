@@ -938,4 +938,44 @@ mod tests {
         );
         assert!(encode_to_svg(&"a".repeat(900), 4, 2).is_none());
     }
+
+    /// ISO/IEC 18004 mask patterns: `x` is the column (j), `y` is the row
+    /// (i). Masks 1/2/4 were previously transposed (non-interoperable).
+    #[test]
+    fn mask_patterns_use_iso_row_column_orientation() {
+        // Mask 1: i mod 2 = 0  →  y % 2 == 0
+        let m1 = mask_function(1);
+        assert!(m1(0, 0), "(0,0) row even");
+        assert!(!m1(0, 1), "(0,1) row odd");
+        assert!(m1(3, 2), "(3,2) row even");
+        assert!(!m1(2, 3), "(2,3) row odd");
+        // NOT the old transposed x % 2 == 0.
+        assert!(m1(1, 2), "mask 1 keys off the row, not the column");
+
+        // Mask 2: j mod 3 = 0  →  x % 3 == 0
+        let m2 = mask_function(2);
+        assert!(m2(0, 5), "column 0");
+        assert!(m2(3, 1), "column 3");
+        assert!(!m2(1, 0), "column 1");
+        assert!(!m2(2, 0), "column 2");
+        assert!(m2(6, 9), "column 6");
+        // NOT the old transposed y % 3 == 0.
+        assert!(!m2(5, 0), "mask 2 keys off the column, not the row");
+
+        // Mask 4: (⌊i/2⌋ + ⌊j/3⌋) mod 2 = 0  →  (y/2 + x/3) % 2 == 0
+        let m4 = mask_function(4);
+        assert!(m4(0, 0), "⌊0/2⌋+⌊0/3⌋ = 0");
+        assert!(!m4(3, 0), "⌊0/2⌋+⌊3/3⌋ = 1");
+        assert!(!m4(0, 2), "⌊2/2⌋+⌊0/3⌋ = 1");
+        assert!(m4(3, 2), "⌊2/2⌋+⌊3/3⌋ = 2");
+        // Discriminators against the old transposed (x/2 + y/3) formula:
+        // (2,0): old ⌊2/2⌋+⌊0/3⌋ = 1 → false; new ⌊0/2⌋+⌊2/3⌋ = 0 → true.
+        // (0,2): old ⌊0/2⌋+⌊2/3⌋ = 0 → true;  new ⌊2/2⌋+⌊0/3⌋ = 1 → false.
+        assert!(m4(2, 0), "mask 4 uses y/2 + x/3, not x/2 + y/3");
+        assert!(!m4(0, 2), "mask 4 uses y/2 + x/3, not x/2 + y/3");
+
+        // Masks 0 and 3 are symmetric in x/y and stay as specified.
+        assert_eq!(mask_function(0)(1, 2), mask_function(0)(2, 1));
+        assert_eq!(mask_function(3)(1, 2), mask_function(3)(2, 1));
+    }
 }

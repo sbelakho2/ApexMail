@@ -167,7 +167,7 @@ final class ProdArrayStorageGuardTest extends TestCase
                     // post_solve_check disabled (enforced at compile
                     // time).
                     'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
-                    'siteverify_secrets' => ['compat-secret-42' => 'login'],
+                    'siteverify_secrets' => ['compat-secret-42-0123456789abcdef' => 'login'],
                 ],
             ]],
             $container,
@@ -188,7 +188,7 @@ final class ProdArrayStorageGuardTest extends TestCase
                 'allow_best_effort_storage' => true,
                 'allow_nonredis_rate_limit_fallback' => true,
                 'allow_local_argon_admission_fallback' => true,
-                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
+                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]], 'siteverify_secrets' => ['compat-secret-42-0123456789abcdef' => 'login']],
             ]],
             $container,
         );

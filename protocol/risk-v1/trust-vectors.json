@@ -1,0 +1,19 @@
+{
+  "protocol": "risk-v1",
+  "kind": "context-bound-trust-vectors",
+  "bucket_id_version": 1,
+  "trust_saturation": 10000,
+  "dataset_path": "protocol/asn/sample-asn.tsv",
+  "vectors": [
+    { "note": "home bucket full trust", "ip": "198.51.100.42", "expected_bucket": "a64498", "raw_trust": 10000, "expected_credit": 1000, "expected_is_home": true },
+    { "note": "home bucket partial trust", "ip": "198.51.100.42", "expected_bucket": "a64498", "raw_trust": 2500, "expected_credit": 250, "expected_is_home": true },
+    { "note": "home bucket near-full trust floors", "ip": "198.51.100.42", "expected_bucket": "a64498", "raw_trust": 9999, "expected_credit": 999, "expected_is_home": true },
+    { "note": "home bucket single fixed-point unit floors to zero credit", "ip": "198.51.100.42", "expected_bucket": "a64498", "raw_trust": 1, "expected_credit": 0, "expected_is_home": true },
+    { "note": "zero-earned bucket is not home and earns nothing", "ip": "198.51.100.42", "expected_bucket": "a64498", "raw_trust": 0, "expected_credit": 0, "expected_is_home": false },
+    { "note": "absent foreign bucket earns nothing", "ip": "203.0.113.150", "expected_bucket": "u4/51968", "raw_trust": null, "expected_credit": 0, "expected_is_home": false },
+    { "note": "absent foreign v6 bucket earns nothing", "ip": "2600::1", "expected_bucket": "u6/26000000", "raw_trust": null, "expected_credit": 0, "expected_is_home": false },
+    { "note": "foreign bucket with residue earns only its own residue", "ip": "203.0.113.150", "expected_bucket": "u4/51968", "raw_trust": 1250, "expected_credit": 125, "expected_is_home": true },
+    { "note": "v6 home bucket partial trust", "ip": "2001:db8:2::1", "expected_bucket": "a64503", "raw_trust": 5000, "expected_credit": 500, "expected_is_home": true },
+    { "note": "over-saturation raw value is clamped to full credit", "ip": "2001:db8:2::1", "expected_bucket": "a64503", "raw_trust": 10001, "expected_credit": 1000, "expected_is_home": true }
+  ]
+}

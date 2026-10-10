@@ -40,7 +40,7 @@ use Symfony\Component\DependencyInjection\Reference;
  */
 final class SiteVerifyRecoveryInvariantTest extends TestCase
 {
-    private const SITEVERIFY_SECRET = 'compat-secret-42';
+    private const SITEVERIFY_SECRET = 'compat-secret-42-0123456789abcdef';
 
     private function load(array $config = []): ContainerBuilder
     {

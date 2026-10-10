@@ -112,6 +112,24 @@ final class RiskPropertyTest extends TestCase
     }
 
     /**
+     * A valid session-cookie representation: 32 lowercase hex chars (or
+     * null), deterministic under the seeded generator. The engine binds the
+     * decoded 16 bytes, so the property context must carry the cookie
+     * representation, not an arbitrary id.
+     */
+    private function randomSessionCookie(SeededVector $prng): ?string
+    {
+        if ($prng->next() % 4 === 0) {
+            return null;
+        }
+        $hex = '';
+        for ($i = 0; $i < 32; $i++) {
+            $hex .= dechex($prng->next() % 16);
+        }
+        return $hex;
+    }
+
+    /**
      * Vector-level property (documented, holds trivially): the SignalVector
      * is a pure function of server state — there are no client-visible
      * fields to perturb. Re-assert the scorer is a pure function of the
@@ -164,7 +182,7 @@ final class RiskPropertyTest extends TestCase
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $scope = 1 + $prng->next() % 3;
             $ip = $this->randomIp($prng);
-            $sessionId = $this->randomId($prng, 'sess');
+            $sessionId = $this->randomSessionCookie($prng);
             $principalId = $this->randomId($prng, 'prin');
             $key = $this->randomId($prng, 'idem');
             $flags = $classifier->classify($ip);

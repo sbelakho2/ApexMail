@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
@@ -46,6 +48,12 @@ use PHPUnit\Framework\TestCase;
 final class HaAuthorityAdversarialRealRedisTest extends TestCase
 {
     private const NS = 'ha-adversarial';
+
+    /** How long a SIGTERM'd Redis may take to exit before the forced kill. */
+    private const REDIS_GRACEFUL_EXIT_SECONDS = 5.0;
+
+    /** How long a forcibly killed Redis may take to be reaped before failing. */
+    private const REDIS_FORCED_EXIT_SECONDS = 5.0;
 
     /** @var array<int, resource> */
     private array $procs = [];
@@ -155,9 +163,16 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
         $this->client($port)->flushall();
     }
 
-    private function spawnRedisServer(array $args, string $name, int $port): void
+    /**
+     * Spawn redis-server, sending the process streams and the Redis
+     * logfile to the per-name log. When $captureFile is given, all
+     * three go to that fresh dedicated capture instead: a failed
+     * startup is then diagnosable and the caller can clean the file
+     * up on success.
+     */
+    private function spawnRedisServer(array $args, string $name, int $port, ?string $captureFile = null): void
     {
-        $log = $this->tmpDir.'/'.$name.'.log';
+        $log = $captureFile ?? $this->tmpDir.'/'.$name.'.log';
         $args = array_merge(['redis-server'], $args, ['--logfile', $log]);
         $proc = proc_open($args, [
             0 => ['pipe', 'r'],
@@ -165,11 +180,14 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
             2 => ['file', $log, 'a'],
         ], $pipes);
         if (!\is_resource($proc)) {
-            self::markTestSkipped('failed to start '.$name.' (see '.$log.')');
+            $capture = $this->captureContents($captureFile);
+            self::markTestSkipped('failed to start '.$name.' (see '.$log.')'.($capture !== null ? '; capture: '.$capture : ''));
         }
         fclose($pipes[0]);
         $this->procs[] = $proc;
-        $this->procIndexByPort[$port] = \count($this->procs) - 1;
+        // A terminated slot is unset, so PHP's next free index is not
+        // count()-1: register the key the append actually used.
+        $this->procIndexByPort[$port] = array_key_last($this->procs);
     }
 
     private function restartRedis(int $port, string $name): void
@@ -215,35 +233,147 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
 
     /**
      * Restart a redis-server on the same port from its own scratch
-     * directory: a graceful SIGTERM shutdown (the append-only file is
-     * fully flushed), then a fresh boot with a new run_id and the
-     * persisted state. The outgoing process is awaited to actually
-     * exit before the replacement spawns, so the port is never lost
-     * to a race (a master with attached replicas may take a moment
-     * to shut down).
+     * directory. The prior process is stopped through an explicit state
+     * machine (SIGTERM, confirmed exit, forced-kill escalation, reap)
+     * and its port is probed free before a fresh boot starts with a
+     * new run_id and the persisted state. The replacement never races
+     * the outgoing process for the bind (a master with attached
+     * replicas may take a moment to shut down).
      */
     private function restartRedisIsolated(int $port, string $name, string $dir): void
     {
-        $index = $this->procIndexByPort[$port] ?? null;
-        if ($index !== null && isset($this->procs[$index])) {
-            proc_terminate($this->procs[$index], 15);
-            $deadline = microtime(true) + 5;
-            while (microtime(true) < $deadline) {
-                $status = proc_get_status($this->procs[$index]);
-                if ($status !== false && !$status['running']) {
-                    break;
-                }
-                usleep(100_000);
-            }
-        }
+        $this->terminateRedisIsolated($port, $name);
+        $this->assertPortFree($port, $name);
+        $capture = $this->tmpDir.'/'.$name.'.stderr.log';
+        @unlink($capture);
         $this->spawnRedisServer([
             '--port', (string) $port,
             '--dir', $dir,
             '--appendonly', 'yes',
             '--save', '',
             '--appendfsync', 'always',
-        ], $name, $port);
-        $this->waitForPong($port, 10);
+        ], $name, $port, $capture);
+        $this->waitForPong($port, 10, 'after restarting '.$name.' on port '.$port, $capture);
+        @unlink($capture);
+    }
+
+    /**
+     * Terminate the tracked redis-server on the port and only return
+     * once it is definitely gone. The state machine sends SIGTERM,
+     * then polls until neither proc_get_status reports it running nor
+     * its PID exists. It escalates to a forced kill after the graceful
+     * deadline and reaps that too. A process that survives the forced
+     * kill fails the test with a clear "old Redis failed to exit"
+     * error instead of a replacement being spawned over the occupied
+     * port.
+     */
+    private function terminateRedisIsolated(int $port, string $name): void
+    {
+        $index = $this->procIndexByPort[$port] ?? null;
+        if ($index === null || !isset($this->procs[$index])) {
+            return;
+        }
+        $proc = $this->procs[$index];
+        $status = proc_get_status($proc);
+        $pid = $status !== false ? (int) $status['pid'] : 0;
+        if ($status === false || $status['running']) {
+            proc_terminate($proc, 15);
+        }
+        $gracefulDeadline = microtime(true) + self::REDIS_GRACEFUL_EXIT_SECONDS;
+        while (!$this->redisProcessGone($proc, $pid)) {
+            if (microtime(true) >= $gracefulDeadline) {
+                proc_terminate($proc, 9);
+                $forcedDeadline = microtime(true) + self::REDIS_FORCED_EXIT_SECONDS;
+                while (!$this->redisProcessGone($proc, $pid)) {
+                    if (microtime(true) >= $forcedDeadline) {
+                        self::fail(
+                            'old Redis ('.$name.', pid '.$pid.') failed to exit after SIGTERM + SIGKILL; '
+                            .'refusing to spawn a replacement on the still-occupied port '.$port
+                        );
+                    }
+                    usleep(100_000);
+                }
+            }
+            usleep(50_000);
+        }
+        proc_close($proc);
+        unset($this->procs[$index]);
+    }
+
+    /**
+     * A process is gone only when proc_get_status no longer reports it
+     * running and its PID no longer exists (a zombie or a reused PID
+     * would still answer the existence probe).
+     */
+    private function redisProcessGone($proc, int $pid): bool
+    {
+        $status = proc_get_status($proc);
+        if ($status !== false && $status['running']) {
+            return false;
+        }
+
+        return $pid <= 0 || !$this->pidExists($pid);
+    }
+
+    private function pidExists(int $pid): bool
+    {
+        if ($pid <= 0) {
+            return false;
+        }
+        if (\function_exists('posix_kill')) {
+            return @posix_kill($pid, 0);
+        }
+        $probe = @shell_exec('kill -0 '.(int) $pid.' 2>/dev/null && echo alive');
+
+        return \is_string($probe) && trim($probe) === 'alive';
+    }
+
+    /**
+     * Prove the port can still be bound before a replacement spawns:
+     * if anything (a lingering Redis or a squatter) holds it, fail
+     * with a clear message instead of racing the boot.
+     */
+    private function assertPortFree(int $port, string $name): void
+    {
+        $probe = @stream_socket_server('tcp://127.0.0.1:'.$port, $errno, $errstr);
+        if ($probe === false) {
+            self::fail('port '.$port.' is still occupied after terminating '.$name.' ('.$errstr.'); refusing to spawn a replacement over it');
+        }
+        fclose($probe);
+    }
+
+    private function captureContents(?string $captureFile): ?string
+    {
+        if ($captureFile === null || !\is_file($captureFile)) {
+            return null;
+        }
+        $contents = (string) @file_get_contents($captureFile);
+        if ($contents === '') {
+            return '(the spawned server wrote nothing)';
+        }
+        if (\strlen($contents) > 4000) {
+            $contents = '...'.substr($contents, -4000);
+        }
+
+        return $contents;
+    }
+
+    /**
+     * PID of the redis-server currently tracked for a port, for the
+     * stale-process assertions of the restart regression test.
+     */
+    private function trackedRedisPid(int $port): int
+    {
+        $index = $this->procIndexByPort[$port] ?? null;
+        if ($index === null || !isset($this->procs[$index])) {
+            self::fail('no tracked redis-server on port '.$port.' (tracked ports: '.implode(',', array_keys($this->procIndexByPort)).'; proc slots: '.\count($this->procs).')');
+        }
+        $status = proc_get_status($this->procs[$index]);
+        if ($status === false) {
+            self::fail('cannot read the tracked redis-server status on port '.$port);
+        }
+
+        return (int) $status['pid'];
     }
 
     /**
@@ -269,7 +399,7 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
         self::fail('the replica never acknowledged a write (WAIT never returned 1)');
     }
 
-    private function waitForPong(int $port, int $timeoutSecs): void
+    private function waitForPong(int $port, int $timeoutSecs, string $context = '', ?string $captureFile = null): void
     {
         $deadline = microtime(true) + $timeoutSecs;
         while (microtime(true) < $deadline) {
@@ -278,7 +408,15 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
             }
             usleep(150_000);
         }
-        self::fail('timed out waiting for redis-server on port '.$port.' to answer PONG');
+        $message = 'timed out waiting for redis-server on port '.$port.' to answer PONG';
+        if ($context !== '') {
+            $message .= ' ('.$context.')';
+        }
+        $capture = $this->captureContents($captureFile);
+        if ($capture !== null) {
+            $message .= '; spawned-server output:'."\n".$capture;
+        }
+        self::fail($message);
     }
 
     private function client(int $port): \Predis\Client
@@ -293,7 +431,7 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
 
     private function pinKey(string $suffix): string
     {
-        return '{kiwi:'.self::NS.'}:authority:pin:'.$suffix;
+        return '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:'.$suffix;
     }
 
     private function identityOf(\Predis\Client $client): array
@@ -763,6 +901,46 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
 
         // The pinned authority is still serving.
         $guard->assertServeEligible($raw);
+    }
+
+    /**
+     * Regression gate for the restart state machine: two consecutive
+     * restartRedisIsolated calls must each confirm the prior process is
+     * gone (not only signalled) before the replacement spawns. The
+     * replacement answers a ping with a fresh run_id, the append-only
+     * state survives, and no stale process is left behind.
+     */
+    public function testRestartRedisIsolatedTwiceLeavesNoStaleProcessAndTheReplacementAnswers(): void
+    {
+        $this->envRedisOrSkip();
+        $this->binaryOrSkip();
+        $this->setupTmpDir();
+        $dir = $this->tmpDir.'/restart';
+        if (!mkdir($dir, 0o700, true) && !is_dir($dir)) {
+            self::markTestSkipped('cannot create the restart-loop scratch directory');
+        }
+        $port = $this->freePort();
+        $this->bootRedisIsolated($port, 'restart-loop-1', $dir);
+        $firstPid = $this->trackedRedisPid($port);
+        $firstClient = $this->client($port);
+        $firstClient->set('restart-survivor', '1');
+        $firstRunId = $this->runIdOf($firstClient);
+
+        $this->restartRedisIsolated($port, 'restart-loop-2', $dir);
+        $secondPid = $this->trackedRedisPid($port);
+        self::assertNotSame($firstPid, $secondPid, 'the first replacement is a new process');
+        self::assertFalse($this->pidExists($firstPid), 'the prior Redis process is gone after the first restart');
+        $secondClient = $this->client($port);
+        self::assertNotSame($firstRunId, $this->runIdOf($secondClient), 'the first replacement answers and regenerates its run_id');
+        self::assertSame('1', (string) $secondClient->get('restart-survivor'), 'the append-only state survives the first restart');
+
+        $this->restartRedisIsolated($port, 'restart-loop-3', $dir);
+        $thirdPid = $this->trackedRedisPid($port);
+        self::assertNotSame($secondPid, $thirdPid, 'the second replacement is a new process');
+        self::assertFalse($this->pidExists($secondPid), 'the prior Redis process is gone after the second restart');
+        self::assertSame('PONG', strtoupper(trim((string) @shell_exec('redis-cli -p '.$port.' ping'))), 'the second replacement answers PONG directly');
+        self::assertNotSame($firstRunId, $this->runIdOf($this->client($port)), 'the second replacement serves its own run_id');
+        self::assertSame('1', (string) $this->client($port)->get('restart-survivor'), 'the append-only state survives both restarts');
     }
 
     /**

@@ -7,3 +7,4 @@ widget-locales.js
 widget-compat.js
 widget.css
 execution-interpreter.js
+widget-shims.js

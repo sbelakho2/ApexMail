@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "base_commit": "d9404e9095b5718d2b8e8302f0bdbd36c0783194",
+  "base_note": "d9404e90 is the nearest commit; the scratch copy is an rsync snapshot of the WORKING TREE (the state the deployed stack runs, including uncommitted product changes) taken at run start.",
+  "doc": "Seeded-defect patch set for `run.py --mutation-test`. Each patch applies with `git apply` to the scratch working-tree copy (never the live tree), is compiled by a targeted incremental `cargo build -p api-server`, and must be caught by the listed probes in the mutant run through failing checks that passed in the clean control run. Families: authz, hostile, state, resource, errors, pipeline, invariants.",
+  "mutations": [
+    {
+      "id": "M01-authz-tenant-scope-drop",
+      "family": "authz",
+      "patch": "M01-authz-tenant-scope-drop.patch",
+      "probes": [
+        "p.authz.cross_tenant_idor"
+      ],
+      "description": "GET /v1/contacts/:id stops filtering by tenant_id (cross-tenant IDOR read)"
+    },
+    {
+      "id": "M02-authz-scope-guard-noop",
+      "family": "authz",
+      "patch": "M02-authz-scope-guard-noop.patch",
+      "probes": [
+        "p.authz.role_matrix",
+        "p.auth.api_key_lifecycle"
+      ],
+      "description": "require_scopes() becomes a no-op: every tenant role/write scope is admitted"
+    },
+    {
+      "id": "M03-errors-false-success-on-refusal",
+      "family": "errors",
+      "patch": "M03-errors-false-success-on-refusal.patch",
+      "probes": [
+        "p.state.out_of_order"
+      ],
+      "description": "PATCH /v1/campaigns/:id drops the editable-status guard: editing a sent campaign returns 200"
+    },
+    {
+      "id": "M04-state-verify-token-replay",
+      "family": "state",
+      "patch": "M04-state-verify-token-replay.patch",
+      "probes": [
+        "p.auth.signup_verification"
+      ],
+      "description": "The email-verification token is no longer consumed: a replay succeeds (single-use broken)"
+    },
+    {
+      "id": "M05-hostile-escape-drop",
+      "family": "hostile",
+      "patch": "M05-hostile-escape-drop.patch",
+      "probes": [
+        "p.hostile.xss_stored",
+        "p.hostile.xss_reflected"
+      ],
+      "description": "ui-foundation::shell::html_escape becomes the identity: stored/served HTML escapes nothing"
+    },
+    {
+      "id": "M06-hostile-crlf-subject-drop",
+      "family": "hostile",
+      "patch": "M06-hostile-crlf-subject-drop.patch",
+      "probes": [
+        "p.hostile.crlf_injection"
+      ],
+      "description": "The CRLF guards on the mail subject AND custom header values are dropped (header injection admitted)"
+    },
+    {
+      "id": "M07-resource-login-rate-bound-drop",
+      "family": "resource",
+      "patch": "M07-resource-login-rate-bound-drop.patch",
+      "probes": [
+        "p.resource.login_rate_bound"
+      ],
+      "description": "The public auth rate limiter's per-minute bound becomes u64::MAX (no 429 ever)"
+    },
+    {
+      "id": "M08-pipeline-enqueue-drop",
+      "family": "pipeline",
+      "patch": "M08-pipeline-enqueue-drop.patch",
+      "probes": [
+        "p.mail.send_to_mailpit",
+        "p.pipeline.worker_liveness"
+      ],
+      "description": "The email_queue insert loop inserts nothing: accepted sends never reach the worker/Mailpit"
+    },
+    {
+      "id": "M09-invariants-suppression-gate-drop",
+      "family": "invariants",
+      "patch": "M09-invariants-suppression-gate-drop.patch",
+      "probes": [
+        "p.mail.suppression_consent"
+      ],
+      "description": "The suppression check is skipped: sends to suppressed recipients are accepted"
+    },
+    {
+      "id": "M10-errors-required-field-accepted",
+      "family": "errors",
+      "patch": "M10-errors-required-field-accepted.patch",
+      "probes": [
+        "p.errors.taxonomy"
+      ],
+      "description": "Contact email validation is skipped: an empty/invalid required field is accepted"
+    }
+  ]
+}

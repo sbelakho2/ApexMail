@@ -22,4 +22,11 @@ enum ChainIssuedResult: string
     case NotOwner = 'not_owner';
     /** The chain state is absent/expired. */
     case Missing = 'missing';
+    /**
+     * The reservation predates a requirement raise: the chain's
+     * requirement generation moved since the reservation, so the minted
+     * challenge (minted for the weaker requirement) must be discarded
+     * and re-minted against the current requirement.
+     */
+    case StaleRequirement = 'stale_requirement';
 }

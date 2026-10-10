@@ -71,10 +71,12 @@ final class ValidatorTest extends TestCase
 
     private Issuer $issuer;
     private Verifier $verifier;
+    private ArrayStorage $storage;
 
     protected function setUp(): void
     {
         $storage = new ArrayStorage();
+        $this->storage = $storage;
         $this->issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
         $this->verifier = new Verifier($storage);
     }
@@ -185,17 +187,81 @@ final class ValidatorTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 $scopeId => ['base_risk' => 100, 'minimum' => $minimum, 'post_solve_check' => $postSolveCheck, 'degraded' => $degraded],
             ],
         ]);
         $store = new FakeRiskStateStore();
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
-        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, $requestStack, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
+        // The default resolver carries the same Argon baseline the
+        // harness issues with (64 KiB, t=3, p=1): the strength authority
+        // compares the complete envelope, so the harness and the resolver
+        // must agree on the family's floor.
+        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, $requestStack, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
 
         return ['gateway' => $gateway, 'store' => $store];
+    }
+
+    public function testAStage2ChallengeWeakerThanTheChainRequirementCanNeverPass(): void
+    {
+        // The chain's recorded floor is Argon32 (opened by the stage-1
+        // reassessment); the harness installs a weaker stage-2 challenge
+        // (the production pipeline mints at the floor, so this is the
+        // raced/legacy shape). A neutral post-solve assessment must not
+        // let it through: the solved challenge's actual strength is
+        // checked against the chain's current requirement, and a mismatch
+        // resolves to the terminal step-up — never Pass, and the chain is
+        // never verified.
+        // The resolver's Argon baseline matches the harness's issued
+        // envelope (64 KiB, t=3, p=1) so the strength authority compares
+        // like with like.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+        self::assertSame('argon32', $stage2['chainService']->requirementFor($stage2['chainId'])?->requiredAction->value);
+
+        $weak = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
+        // Return the chain to available (pinned to the exact issued nonce)
+        // and install the weaker stage-2 challenge in its place.
+        self::assertTrue($stage2['chainService']->rearmIssued($stage2['chainId'], $stage2['stage2']->nonce));
+        self::assertSame(ChainReservationResult::Available, $stage2['chainService']->reserveStage2($stage2['chainId'], 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $stage2['chainService']->markIssued($stage2['chainId'], 'owner-a', $weak->nonce));
+
+        $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        usleep(($weak->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($weak->prefix, $weak->salt, $weak->targetBits, $weak->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        [$engine] = $this->dispositionEngine(
+            $this->verifier,
+            $neutral['gateway'],
+            $store,
+            chainTickets: $stage2['chainService'],
+            bindingAuthority: $this->bindingAuthority(),
+        );
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations, 'a stage-2 challenge weaker than the chain requirement can never Pass');
+        self::assertSame('kiwi.post_solve_step_up_required', $violations[0]->getCode());
+        self::assertSame(
+            'step_up_required',
+            $stage2['chainService']->requirementFor($stage2['chainId'])?->state,
+            'the weaker challenge never verifies the chain: it terminalizes as step-up',
+        );
+        self::assertSame(
+            PostSolveDispositionKind::StepUp,
+            $store->read($weak->nonce)?->disposition?->kind,
+            'the final disposition is the terminal step-up',
+        );
     }
 
     /**
@@ -468,6 +534,65 @@ final class ValidatorTest extends TestCase
         self::assertSame([RiskEventKind::MalformedToken], $events, 'an undecodable token must record the MalformedToken event, never a 500');
     }
 
+    public function testARiskOutageDuringPostSolveFeedbackStillPassesAValidVerification(): void
+    {
+        // The token is valid and consumed; the post-solve feedback
+        // (solveOutcome -> risk engine observe) hits a store outage. The
+        // feedback is evidence only: the verification must still pass,
+        // never surface as a 500 or as a retryable provider error.
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $risk['store']->throwing = true;
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway']);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(0, $violations, 'a risk-store outage on the post-solve feedback must never fail a valid token');
+        self::assertSame($challenge->nonce, $validator->verifiedJti());
+        self::assertSame([], $risk['store']->observations, 'the outage happened before any observation landed');
+    }
+
+    public function testARiskOutageDuringFailureFeedbackStillReportsTheViolation(): void
+    {
+        // Failure-path feedback is evidence only too: an outage must not
+        // replace the ordinary invalid-token violation with a 500.
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $risk['store']->throwing = true;
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveInsufficientWorkToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway']);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+    }
+
     public function testFailedSolveWithoutClientIpRecordsNoRiskFeedbackButStillViolates(): void
     {
         $storage = new ArrayStorage();
@@ -703,6 +828,49 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
         $events = array_map(static fn (RiskObservation $o): RiskEventKind => $o->event, $risk2['store']->observations);
         self::assertSame([RiskEventKind::MalformedToken], $events, 'exactly one malformed event — the branch returns before the failure path feeds again');
+    }
+
+    public function testDuplicateForwardingHeadersFailClosedAtTheValidatorBoundary(): void
+    {
+        // The solve/validation path reaches the resolver directly, without
+        // the challenge controller's duplicate-header scan. The resolver
+        // owns the singularity boundary, so a repeated occurrence of an
+        // identity-bearing forwarding header fails closed here exactly as
+        // it does at issuance.
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        foreach (['X-Forwarded-For', 'Forwarded'] as $headerName) {
+            $risk = $this->riskStack(1, 'allow', 'allow', false);
+            $request = Request::create('/', 'POST', [], [], [], [
+                'REMOTE_ADDR' => '203.0.113.10',
+                'HTTP_X_FORWARDED_FOR' => '198.51.100.7',
+            ]);
+            if ($headerName === 'Forwarded') {
+                $request->headers->remove('X-Forwarded-For');
+            }
+            $request->headers->set($headerName, ['198.51.100.7', '198.51.100.8']);
+
+            $stack = new RequestStack();
+            $stack->push($request);
+            $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['203.0.113.10'], true);
+            $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway'], clientIpResolver: $resolver);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+            $violations = $engine->validate($dto);
+            self::assertCount(1, $violations, sprintf('the duplicate %s header fails closed', $headerName));
+            self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+            $events = array_map(static fn (RiskObservation $o): RiskEventKind => $o->event, $risk['store']->observations);
+            self::assertSame([RiskEventKind::MalformedToken], $events, sprintf('the duplicate %s refusal feeds the malformed-traffic event', $headerName));
+        }
     }
 
     public function testValidSolveDecrementsTheOutstandingCounter(): void
@@ -1189,8 +1357,8 @@ final class ValidatorTest extends TestCase
     {
         // A chain-opening validation exercises the stage-2 lookup AND the
         // chain creation — both must thread the already-resolved canonical
-        // binding, never re-consult the authority (the pre-fix flow called
-        // it twice on this path).
+        // binding and never re-consult the authority, so the authority is
+        // consulted once on this path.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -2309,6 +2477,9 @@ final class ValidatorTest extends TestCase
             postSolveDispositionTtlMarginSecs: $ttlMargin,
             chainTtlSecs: $chainTtlSecs,
             metadataStore: $metadataStore,
+            // The verified-record authority behind the stage-2 strength
+            // gate: the same ArrayStorage the issuer wrote to.
+            storage: $this->storage,
         );
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
@@ -3618,8 +3789,19 @@ final class ValidatorTest extends TestCase
         $chainId = (string) $chainService->verify((string) $violations[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
         // Stage 2: the chain issues a real challenge (its nonce becomes
-        // the chain's stage2Nonce).
-        $stage2 = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
+        // the chain's stage2Nonce). The chain's requirement is Argon32,
+        // so the harness mints the stage-2 challenge at that strength —
+        // the production pipeline always mints at the requirement floor,
+        // and a weaker challenge can never be recovered or Passed.
+        $argonIssuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: \KiwiCaptcha\PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 3,
+            p: 1,
+            argon2TargetBits: 2,
+        ), $this->storage);
+        $stage2 = $argonIssuer->issue('login', '198.51.100.7', 'auth-txn-1');
         self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($chainId, 'owner-a', $stage2->nonce));
 
@@ -3628,7 +3810,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2StepUpDispositionMarksStepUpRequiredAndTheObligationSurvives(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3641,7 +3823,7 @@ final class ValidatorTest extends TestCase
         // sees the terminal step-up violation.
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -3662,7 +3844,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2DenyDispositionMarksDeniedAndTheObligationSurvives(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3675,7 +3857,7 @@ final class ValidatorTest extends TestCase
         // post-solve rejection.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -3696,7 +3878,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2PassDispositionMarksVerifiedAndDeletesTheObligation(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3710,7 +3892,7 @@ final class ValidatorTest extends TestCase
         // passes.
         $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -3793,7 +3975,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2TransitionFailureIsTemporaryUnavailableNeverPass(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3809,7 +3991,7 @@ final class ValidatorTest extends TestCase
         $failingService = new ChainedChallengeTicketService($failing, self::SECRET, 300, 15, $this->bindingAuthority());
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -4063,7 +4245,7 @@ final class ValidatorTest extends TestCase
         // stage-2 transition conflict (503) — and S's nonce disposition
         // is persisted AS THE terminal kind, so the replay of S
         // reproduces the same terminal result (never Pass, never 503).
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $rows = [
             'denied + no reassessment' => ['denied', 'none'],
             'denied + Allow' => ['denied', 'allow'],
@@ -4106,7 +4288,7 @@ final class ValidatorTest extends TestCase
 
             // The browser submits the exact stage-2 nonce S.
             usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-            $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+            $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
             $dto = new class {
                 public ?string $captcha = null;
             };
@@ -4159,7 +4341,7 @@ final class ValidatorTest extends TestCase
         // conflict (503) — and S's nonce disposition is persisted AS THE
         // terminal kind, so the replay of S reproduces the same terminal
         // denial.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -4197,7 +4379,7 @@ final class ValidatorTest extends TestCase
         $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
         $metaStore->store($nonceS, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -4230,7 +4412,7 @@ final class ValidatorTest extends TestCase
         // submission of S (with a fresh deny assessment — the opposite
         // terminal) still answers the terminal step-up — never the
         // conflicting stage-2 transition (503), never Pass.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -4266,7 +4448,7 @@ final class ValidatorTest extends TestCase
         // never the conflicting transition (503), never Pass.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -4299,7 +4481,7 @@ final class ValidatorTest extends TestCase
         // superseded by the requirement's terminal state on every replay:
         // the terminal Deny answers — never the stored Pass, never the
         // stage-2 transition conflict.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -4316,13 +4498,13 @@ final class ValidatorTest extends TestCase
         self::assertSame($nonceS, $chainService->requirementFor($chainId)?->stage2Nonce, 'the exact stage-2 nonce is preserved');
 
         // A stale pass is S's persisted nonce disposition (injected
-        // directly — the record the pre-fix path could leave behind).
+        // directly — the stale record a pass-only path can leave behind).
         $this->injectDispositionRecord($store, $nonceS, $this->completeDispositionRecord());
 
         // The submission (and replay) of S answers the terminal Deny —
         // never the stored Pass, never 503.
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
-        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce, 'argon2id');
         $dto = new class {
             public ?string $captcha = null;
         };

@@ -65,6 +65,15 @@ impl RiskAction {
         )
     }
 
+    /// The decision boundary between the last SHA band and the first
+    /// Argon band: the score where the default ladder leaves sha20
+    /// (450..=599) and enters argon16 (600..=749). The calibration error
+    /// is measured relative to this boundary (calibration.lua's
+    /// boundary_T, which is this same value), so the two cores must never
+    /// disagree about it; `boundary_is_the_sha20_argon16_edge` pins the
+    /// mapping.
+    pub const DECISION_BOUNDARY_SCORE: u16 = 600;
+
     /// Default score bands (configurable in policy; hard floors apply on
     /// top).
     pub fn action_for_score(score: u16) -> RiskAction {
@@ -104,6 +113,18 @@ impl std::str::FromStr for RiskAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_is_the_sha20_argon16_edge() {
+        // calibration.lua's boundary_T and the Rust calibration tests use
+        // this exact score; the ladder must agree at the edge.
+        assert_eq!(RiskAction::action_for_score(599), RiskAction::Sha20);
+        assert_eq!(
+            RiskAction::action_for_score(RiskAction::DECISION_BOUNDARY_SCORE),
+            RiskAction::Argon16
+        );
+        assert_eq!(RiskAction::DECISION_BOUNDARY_SCORE, 600);
+    }
 
     #[test]
     fn every_band_boundary() {

@@ -18,12 +18,12 @@ namespace KiwiCaptcha;
  * with exactly this name next to the token input and never auto-fills
  * it. A submission that carries a value in it is bot evidence. The name
  * is authenticated: it is signed into the canonical payload as the
- * final `|<decoy_field>` segment, see {@see Issuer::canonicalPayload()},
+ * tagged `|d={decoy_field}` segment, see {@see Issuer::canonicalPayload()},
  * so a client cannot strip or swap it without breaking the signature the
  * verifier re-checks.
  *
- * Wire compatibility: unarmed records are byte-identical to the
- * pre-decoy format — the `decoy_field` key is absent from `toArray()`
+ * Wire compatibility: an unarmed record carries no extension segment —
+ * the `decoy_field` key is absent from `toArray()`
  * (and therefore the JSON) when no decoy is armed, never a JSON `null`,
  * and old payloads (no key) deserialize with null. An armed record is
  * protocol v3 (the decoy-capable canonical) and requires a v3-capable

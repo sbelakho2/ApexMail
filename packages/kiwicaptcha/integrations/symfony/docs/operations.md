@@ -103,15 +103,15 @@ sub-second sequential delay is acceptable.
 ### Verification rollout
 
 A verifier must carry the same modulus and lambda as the issuer that
-minted the record. The pair never rides the stored record, so a
-redeployment that loses the lambda configuration rejects every rsw
-record with unsupported_rsw_params until it is restored. Deploy the
-new binaries everywhere before arming the algorithm, mirroring the
-protocol-floor rollouts: an old binary rejects the rsw algorithm as
-malformed, which is the same fail-closed shape as an unknown protocol
-version. kiwicaptcha:doctor reports the armed posture, so a deploy
-gate can confirm every node verifies the rung before traffic is
-routed to it.
+minted the record, or resolve it through the rotation keyring (see
+below). The pair never rides the stored record, so a redeployment
+that loses the lambda configuration rejects every rsw record with
+unsupported_rsw_params until it is restored. Deploy the new binaries
+everywhere before arming the algorithm, mirroring the protocol-floor
+rollouts: an old binary rejects the rsw algorithm as malformed, which
+is the same fail-closed shape as an unknown protocol version.
+kiwicaptcha:doctor reports the armed posture, so a deploy gate can
+confirm every node verifies the rung before traffic is routed to it.
 
 The configuration boundary refuses weak or inconsistent pairs at
 boot: a modulus with a small prime factor, a probable-prime modulus,
@@ -122,6 +122,73 @@ the identity of the deployed modulus, and spot-check a node with the
 keygen's --fingerprint mode when a rotation or redeployment is
 audited. The primes themselves stay off the servers: only the
 --diagnostic run of the generator ever prints them.
+
+### The modulus identity and its rollout (protocol v5)
+
+An rsw record can carry the authenticated modulus identity: the
+canonical-byte fingerprint, exactly the keygen's
+rsw_modulus_n_sha256 (the sha256 of the decoded 256-byte modulus).
+Identity-armed issuance signs it as the tagged `r=` canonical segment (followed by the trailing `m=1` marker whenever the record carries a server-state MAC) and
+stamps protocol v5. The verifier resolves the trapdoor by that
+authenticated identity, so an accepted proof is always under the
+exact signed modulus. The writer switch is `kiwi_captcha.rsw_identity`
+(default false) and follows the same two-phase rule as the v3/v4
+extensions. Emission additionally requires the confirmed central
+`min_protocol_version` floor to be >= 5. Every uncertainty fails safe
+to the legacy identityless protocol v2 shape with a once-per-process
+warning. Enable the switch only after every serving binary accepts
+protocol v5:
+
+```text
+# 1. Deploy the v5-reading binaries fleet-wide (the switch still off).
+# 2. Confirm no old binary remains, set the central floor on the
+#    security Redis (a HASH: SecurityEpochMonitor reads it with
+#    HGETALL, so HSET, never SET) and watch readiness drain every
+#    binary whose max protocol is below it.
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_protocol_version 5 \
+    min_policy_epoch <n>
+# 3. Enable the writer switch (kiwi_captcha.rsw_identity: true) and
+#    reload. New records are protocol v5 with the signed identity.
+```
+
+Identity-bearing records issued before the v5 grammar (protocol 2..4
+with the base64-text identity) stay verifiable through the clearly
+named legacy alias only while `kiwi_captcha.rsw_legacy_identity` is
+enabled (default false); the alias is never used for new issuance. The
+safe retirement point comes after the last legacy-capable writer is
+removed. Wait one maximum retained challenge lifetime (the configured
+TTL) plus the allowed clock skew and any retained-record margin, then
+set the option to false. A drained deployment refuses the temporary
+grammar fail-closed and rejects a legacy-alias keyring key at
+container build. The gate is a core issuance invariant,
+not a controller convention: direct `Issuer::issue()` callers pass an
+explicit capability ceiling and default to the capability-free
+identityless v2 shape, so no path can emit v5 before its readers are
+confirmed.
+
+### Rotating the rsw modulus
+
+`kiwi_captcha.rsw_verification_keys` is the rotation keyring: a map
+of the modulus identity to the historical `{modulus_n, lambda}` pair.
+The identity is the 64-lowercase-hex rsw_modulus_n_sha256, or its
+legacy alias in the migration window. Both the issuer's
+stored-response reconstruction and the verifier consult it, so
+outstanding challenges issued under A keep verifying after the active
+pair moves to B. An identity in neither the keyring nor the active
+pair fails closed with unsupported_rsw_params. Both core services
+receive the keyring. A keyring key that is not an identity form of
+its paired modulus is refused at container build.
+
+Bootstrap drain rule: identityless rsw challenges carry no identity.
+That covers records issued before the identity feature, or while the
+writer switch is off. No keyring entry can determine which historical
+modulus such a record belongs to. Before the first rotation after
+deploying this feature, let all outstanding identityless challenges
+drain for one maximum retained challenge lifetime (the configured
+TTL). Otherwise accept that they fail closed. Once the switch is on
+and the fleet floor is confirmed, every new record carries its
+identity and rotations are a keyring configuration action.
 
 ### Budget guidance
 
@@ -154,7 +221,7 @@ Two gate backends:
   Fencing keeps correctness on expiry: a dead lease can never be misused by its former owner.
   The concurrency cap itself can still be exceeded during the expiry window on such hosts, so size the bound and the margin accordingly and monitor hash times.
   Example: PHP `request_terminate_timeout = 30s` with the default 45 s lease (plus a safety margin).
-  Key: `kiwicaptcha:argon2:leases:<namespace>` (namespace defaults to `kernel.project_dir`; sanitized to `[A-Za-z0-9_.-]`).
+  Key: `kiwicaptcha:argon2:leases:<namespace>` (the namespace defaults to `kernel.project_dir` and is derived into the key segment through the versioned derivation; see `namespace_key_version`).
 - **In-process gate (per-process).** Without a Redis client the cap is enforced per PHP process (`src/Security/InProcessArgonGate.php`, token-set based).
   Honest caveat: php-fpm workers share no memory, so this bounds concurrency per worker, not per deployment.
   Multi-worker deployments without Redis should also limit worker counts and rely on the rate limit to bound the inflow.
@@ -236,11 +303,14 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
   The orchestrator only learns "process up" vs "process gone".
 - **`{prefix}/health/ready`**: 200 only when all of the following hold:
   - the issuer/verifier signing keys are configured (the bundle secret);
-  - the security Redis answers a `PING` (probe cached ~1 s in-process).
-    Transient probe timeouts never fail readiness on their own.
-    The first failure is debounced for one cache window; two consecutive failures flip readiness;
+  - the security Redis answers a `PING` (probe result cached ~1 s in
+    process-wide APCu). Transient probe timeouts never fail readiness on
+    their own. The first failure is debounced (the debounce state is
+    shared across the workers for 60 s); two consecutive failures flip
+    readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical), `min_execution_version <= 4` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical) and `min_execution_version <= 5` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing).
+    A central `min_policy_epoch` above the configured `risk.policy_version` is a warning only: the node follows the effective epoch `max(configured, central)` and stays ready — the lag is logged but never drains the node, so issuance and verification immediately honor a central bump.
     When absent, the binary's own configuration is authoritative.
   - the required execution tier is satisfiable, only when `risk.execution_challenge` is on. The effective fleet tier is the policy minimum of the node's `kiwi_captcha.execution_version` cap, the central `min_execution_version` floor (absent or 0 counts as version 1) and the generator's maximum execution version.
     A configured `kiwi_captcha.execution_required_version` above the effective tier refuses readiness (503 `security_policy_incompatible:execution_required_R_effective_E`), because every armed request would refuse every client until the confirmed floor reaches the required tier.
@@ -267,22 +337,89 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
 Argon queue fullness and transient timeouts never fail readiness.
 All responses carry `Cache-Control: no-store` + `Pragma: no-cache`.
 
+Edge restriction expectation: the health endpoints answer unauthenticated
+infrastructure state — the machine-readable readiness reason codes, the
+failing authority label, protocol floors and probe outcomes are deployment
+internals, not client-facing data. Restrict both routes at the edge (an
+`internal`-only location in nginx, a security-group/inbound rule, or the
+orchestrator's probe path) so they are reachable by the load balancer and
+the platform probes, never by the public internet. The endpoints carry no
+secrets and never mutate state, but an unrestricted `/health/ready` leaks
+the infrastructure posture (Redis reachability, policy floors, HA
+authority health) to anyone who asks.
+
 Operator contract (mixed-version deployments): set the policy hash on the security Redis to keep old binaries out of the pool during a rolling upgrade, and to protect rollbacks after a protocol/policy bump:
 
 ```bash
 # The fleet is moving to protocol v2 / policy epoch 2: old binaries
-# (max protocol 1, or policy_version 1) must not serve traffic.
+# (max protocol 1) must not serve traffic, and every node follows the
+# central epoch 2 regardless of its configured risk.policy_version.
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 2 min_policy_epoch 2
 ```
 
-A binary whose max protocol or configured `risk.policy_version` is below the hash exits readiness (503) and is drained by the load balancer before it can issue or verify challenges it cannot honor.
+A binary whose max protocol is below the hash exits readiness (503) and is drained by the load balancer before it can issue or verify challenges it cannot honor.
+A configured `risk.policy_version` below the central `min_policy_epoch` does NOT drain the node: issuance and verification follow the effective epoch `max(configured, central)` and the lag is only a logged warning; an explicit `risk.policy_version` bump is needed only for a coordinated policy cutover.
+A protocol or execution floor above the binary's maximum still fails readiness (503).
 Remove the key (or lower the fields) only after every node runs a compatible binary.
 When the key is absent, every binary's own configuration is authoritative (the default behavior).
 
+## Metrics exporter
+
+`risk.metrics.secret` (default null) arms `GET {prefix}/metrics`, a
+Prometheus text endpoint that carries its OWN authentication, entirely
+separate from every other credential of the bundle. Null leaves the
+route unregistered; a configured secret of at least 32 bytes is
+compared in constant time against the presented credential, accepted
+either as `Authorization: Bearer <secret>` (preferred: it never lands
+in access logs) or as the `secret` query parameter. A missing or wrong
+credential answers 401; an env-resolved empty secret answers 404.
+
+The exported families:
+
+- `kiwicaptcha_risk_decisions_total{scope,action,band}`: risk
+  decisions keyed by the canonical scope id, the action and the score
+  band (per-process engine snapshot).
+- `kiwicaptcha_risk_denied_limiter_total`,
+  `kiwicaptcha_risk_degraded_breaker_total` and
+  `kiwicaptcha_risk_degraded_store_total`: the fixed engine counters.
+- `kiwicaptcha_risk_store_observe_duration_ms_count` and `_sum`: the
+  state-store observation count and total milliseconds.
+- `kiwicaptcha_risk_global_level` and
+  `kiwicaptcha_risk_resources_argon_capacity`: the gauges.
+- `kiwicaptcha_outcome_reports_total{kind}`,
+  `kiwicaptcha_outcome_skips_total{reason}` and
+  `kiwicaptcha_exporter_scrapes_total`: the exporter's own counters
+  (the framework bridge's reports and skips).
+
+Aggregation scope: the engine snapshot is per-process (each scrape
+describes one worker). The exporter's own counters aggregate through
+APCu across the workers of one deployment when the extension is
+loaded; without it they degrade to per-process counters, and the
+`X-Kiwi-Metrics-Scope` header states which (`process` or `shared`) so
+a scrape is never silently misread.
+
+Redaction is the invariant of every line: metric labels are canonical
+scope ids, action names, score bands and outcome wire names only. Raw
+scope strings, IP addresses, usernames and pseudonym bytes never enter
+a series name or label, and a counter key outside the bounded shapes
+is dropped rather than emitted.
+
+```yaml
+kiwi_captcha:
+    risk:
+        metrics:
+            secret: '%env(KIWI_METRICS_SECRET)%'
+```
+
+```bash
+curl -H "Authorization: Bearer $KIWI_METRICS_SECRET" \
+    https://captcha.example.com/kiwi-captcha/metrics
+```
+
 ## Protocol v3 two-phase rollout
 
-Protocol v3 is the decoy-armed canonical: a v3 record carries the authenticated `|decoy_field` segment, and a parent-revision verifier rejects protocol 3 as malformed.
+Protocol v3 is the decoy-armed canonical: a v3 record carries the authenticated `|d=decoy_field` segment, and a parent-revision verifier rejects protocol 3 as malformed.
 The rollout must therefore be two-phase: reader capability first, writer emission second.
 The central `min_protocol_version` is a reader-capability floor: readiness keeps every binary whose max protocol is below it out of the pool.
 It is never a writer switch, so a new binary must not emit v3 while any serving verifier rejects it.
@@ -298,7 +435,7 @@ The procedure:
 # 1. Deploy the new binaries EVERYWHERE (accept v2 + v3, still emitting v2).
 #    Confirm no old binary remains; the readiness probe keeps any binary
 #    whose max protocol is below the floor out of the pool.
-# 2. Raise the central floor to 3 — only now may v3 be emitted.
+# 2. Raise the central floor to 3, only now may v3 be emitted.
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 3 min_policy_epoch 2
 # 3. Enable the writer switch on every node.
@@ -319,8 +456,8 @@ The doctor's protocol-v3 writer check keys on it:
 
 | high_abuse | `risk.decoy_v3_enabled` | `protocol_rollout.mode` | Doctor status |
 |---|---|---|---|
-| yes | false | normal (or absent) | **FAIL** — a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
-| yes | false | migration | **WARN** (exit 0) — the deliberate two-phase deferral |
+| yes | false | normal (or absent) | **FAIL**, a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
+| yes | false | migration | **WARN** (exit 0), the deliberate two-phase deferral |
 | yes | true | any | PASS once the central floor confirms v3 AND the v4 floor confirms the execution surface (high_abuse turns `risk.execution_challenge` on by default, so a floor of 3 alone fails with the protocol-v4 message; see "Protocol v4 execution rollout"); FAIL while either floor is absent or below its rung |
 | no | any | any | unchanged (protocol v2 emission passes; the armed-but-unconfirmed floor keeps its warn) |
 
@@ -339,7 +476,7 @@ The two-phase procedure above is preserved unchanged: raise the floor to 3, then
 
 ## Protocol v4 execution rollout
 
-Protocol v4 is the execution-capable canonical: an execution-armed record carries the authenticated `|execution_version|execution_commitment` segments (the hex SHA-256 of the stored program) inside the HMAC-signed canonical, and a parent-revision verifier rejects protocol 4 as malformed.
+Protocol v4 is the execution-capable canonical: an execution-armed record carries the tagged `|e=execution_version,execution_commitment` segment (the hex SHA-256 of the stored program) inside the HMAC-signed canonical, and a parent-revision verifier rejects protocol 4 as malformed.
 The armed/unarmed equivalence is exact and enforced on every acceptance surface: signed commitment absent ⇔ stored program absent, signed commitment present ⇔ stored program present, and SHA256(stored program) == the signed commitment (constant-time).
 Stripping, substituting or injecting a program always invalidates the challenge.
 
@@ -361,7 +498,7 @@ The v4 rollout procedure:
 #    still emitting at most v3). Confirm no older binary remains; the
 #    readiness probe keeps any binary whose max protocol is below the
 #    floor out of the pool.
-# 3. Raise the central floor to 4 — only now may v4 be emitted.
+# 3. Raise the central floor to 4, only now may v4 be emitted.
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 4 min_policy_epoch 2
 # 4. Enable the execution gate on every node.
@@ -398,6 +535,13 @@ measurement. Version 3 adds a second constructed node and the
 sibling-index traversal probe (opcode 34), a real DOM walk. Version 4
 adds the nested-tree ops: opcode 35 builds a child under the current
 node and the depth probe (opcode 36) walks the real ancestor chain.
+Version 5 is the causal object-graph grammar: fragment append, deep
+clone, reparent, attribute reflection, event-phase dispatch, text
+mutation, select-depth walking and URL canonicalization of the
+current node (see docs/execution-v5-design.md). The deployable
+maximum is the core generator's `MAX_EXECUTION_VERSION`; the Symfony
+configuration bounds derive from that constant, so the production
+integration can never cap below the grammar the register ships.
 Older binaries and stale open pages only know version 1, so the newer
 grammars must never reach them: a mixed fleet cannot tell the
 grammars apart by protocol_version alone, since every execution
@@ -607,7 +751,7 @@ The ingress caps exist so a single source can never saturate a worker's connecti
 Scale the captcha workers on the admission-side metrics, not on CPU.
 The deployment-wide issuance rate (the `{kiwi:<ns>}:issuance:<second>` counter the controller increments on every minted challenge, exposed via the resource-pressure provider / Redis) and the outstanding-challenge pressure are the honest demand signals.
 A hostile flood that is being denied (rate limiter, risk engine, emergency cap) must not trigger scale-up.
-Those requests never mint and never consume verification CPU on the workers.
+Those requests never mint. They never consume verification CPU on the workers.
 Example:
 
 ```yaml
@@ -617,7 +761,7 @@ kind: HorizontalPodAutoscaler
 metadata:
   name: kiwicaptcha
 spec:
-  maxReplicas: 12            # hard cost ceiling — NEVER unbounded
+  maxReplicas: 12            # hard cost ceiling, NEVER unbounded
   metrics:
     - type: External
       external:
@@ -710,18 +854,27 @@ before the solver models it. The test-only shadow solver
 decodes each program, replays the interpreter's own semantics, picks
 an arbitrary legal observed height (1 to 255), and emits a trace the
 verifier accepts. The oracle runs 100 generated programs per version
-at heights 1, 10, 17 and 255 and asserts every trace verifies and
-digests. Mirrors live in the PHP suite
+at heights 1, 10, 17 and 255. On versions 1-5 every forged trace
+verifies and digests; on version 6 the naive solver is rejected only
+because it emits pure-sim placeholders rather than the operand-derived
+envelope entries. Mirrors live in the PHP suite
 (BrowserlessExecutionForgeryTest) and the Rust execution module with
 identical acceptance assertions.
 
 The trace is supplementary evidence, reproducible by any
-implementation of the public semantics, never a browser attestation.
-Acceptance criterion: the oracle keeps accepting every trace the
-generator mints at any live version up to its
-`MAX_EXECUTION_VERSION`. A grammar extension beyond that maximum is
-accepted only when the solver reproduces the tested Web Platform
-behavior instead of the shadow model.
+implementation of the public semantics plus the published envelopes,
+never a browser attestation. A full-knowledge forger who reads the
+open-source verifier reimplements the five version-6 acceptance
+envelopes (they are deterministic functions of the operands that ship
+with the program) and passes every version-6 program without a browser
+(WhiteBoxExecutionForgeryTest / white_box_envelope_forgery_solver;
+measured pass rate 1.0). Version 6 costs an attacker one reading of
+the source, the same class as versions 1-5. Acceptance criterion: the
+naive oracle keeps accepting every version-1-5 trace the generator
+mints, and the white-box forger keeps measuring the honest
+full-knowledge pass rate on version 6. No rung is a browser boundary;
+the risk engine never weights execution evidence as proof of a real
+browser.
 
 ## Graceful shutdown sequence
 

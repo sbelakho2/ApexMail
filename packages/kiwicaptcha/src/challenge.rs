@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -29,7 +29,7 @@ pub fn security_random<const N: usize>() -> Result<[u8; N], getrandom::Error> {
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::keys::DerivedKeys;
+use crate::keys::{DerivedKeys, MIN_MASTER_BYTES};
 use crate::profile::{ChallengeProfile, ProfileError};
 use crate::token::IssuedChallenge;
 
@@ -131,9 +131,9 @@ pub enum BindingMode {
 ///   key via serde alias. Kept verifiable for the migration window (max TTL).
 /// - `protocol_version == 2` (current, unarmed): signed with the v2
 ///   full-parameter canonical input and a nonce-bound `binding_tag` —
-///   byte-identical to the pre-decoy record format.
+///   no extension segment (the base canonical).
 /// - `protocol_version == 3` (decoy-capable): the v2 canonical base plus
-///   the `|decoy_field` segment appended after `kid`. The decoy is
+///   the tagged `|d=decoy_field` segment appended after `kid`. The decoy is
 ///   mandatory on v3 — a v3 record without a decoy is rejected by
 ///   validation, so a stored version flip (a signed v2 record re-versioned
 ///   to 3) can never verify: the authenticated canonical shape itself
@@ -214,9 +214,10 @@ pub struct ChallengeRecord {
     pub attempts_used: u32,
     /// Protocol version: 1 = legacy v1 canonical signing + legacy `ip_hash`
     /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`
-    /// (the unarmed issuance format, byte-identical to the pre-decoy
-    /// records); 3 = the decoy-capable canonical — the v2 18-field base
-    /// plus the `|decoy_field` segment appended after `kid`, with the
+    /// (the unarmed issuance format: no extension segment); 3 = the
+    /// decoy-capable canonical — the 18-field base
+    /// (`protocol_version` plus the v2 parameter fields) with the tagged
+    /// `|d=decoy_field` segment appended after `kid`, the
     /// decoy mandatory on v3. New records are issued with 3 when a decoy
     /// is armed and 2 otherwise; 1 is the serde default so stored pre-v2
     /// records keep verifying during the migration window (max TTL). The
@@ -274,9 +275,9 @@ pub struct ChallengeRecord {
     /// challenge, drawn from the combinatorial grammar (see
     /// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`]). `None` = no decoy armed (the
     /// default, and the shape every pre-decoy record carries). The name is
-    /// an authenticated canonical field of protocol v3 — the final segment
-    /// `|<decoy_field>`, appended after the `kid` (the canonical signing
-    /// input, documented below) — so a stored/tampered record cannot
+    /// an authenticated canonical field of protocol v3 — the tagged
+    /// `d=<decoy_field>` segment, appended after the `kid` (the canonical
+    /// signing input, documented below) — so a stored/tampered record cannot
     /// change or drop it without breaking the signature.
     ///
     /// Wire compatibility: unarmed records are byte-identical to the
@@ -306,18 +307,28 @@ pub struct ChallengeRecord {
     /// The execution-dimension protocol version: the canonical numeric
     /// byte within the register 1..=MAX_EXECUTION_VERSION (u8 on the
     /// wire, rendered as decimal in the canonical input). Authenticated
-    /// as the `|execution_version` protocol v4 canonical segment. Present
+    /// as the first element of the tagged
+    /// `|e=execution_version,execution_commitment` protocol v4 canonical
+    /// segment. Present
     /// iff the record carries an execution program; the JSON key is
     /// absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_version: Option<u8>,
     /// The authenticated mirror of the stored execution program: hex
     /// SHA-256 of the program's base64 wire string (64 lowercase hex),
-    /// the final `|execution_commitment` protocol v4 canonical segment.
+    /// the second element of the tagged `|e=execution_version,
+    /// execution_commitment` protocol v4 canonical segment.
     /// Present iff the record carries an execution program; the JSON key
     /// is absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_commitment: Option<String>,
+    /// The authenticated rsw trapdoor identity: hex SHA-256 of the
+    /// modulus (base64) the record was issued under. PHP-authenticated
+    /// and consumed by the PHP verifier/reconstruction; carried here for
+    /// schema parity (present iff the record is an rsw record issued
+    /// after the binding existed; omitted when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsw_modulus_sha256: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
     /// The final v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
@@ -330,13 +341,24 @@ pub struct ChallengeRecord {
     /// keep verifying unchanged. Shared with the PHP core.
     #[serde(default = "default_kid")]
     pub kid: u32,
+    /// The record-metadata MAC (64 lowercase hex) authenticating the
+    /// server-side fields the challenge signature does not cover
+    /// (`issued_at_ns`, `hostname`), keyed with the server-state purpose
+    /// key (see [`record_meta_mac`]). Its presence commits the `m=1`
+    /// canonical marker, so stripping it breaks the signature and a
+    /// committed marker demands a valid MAC. `None` on records issued
+    /// before the marker: such a record verifies only floorless, without a
+    /// server-measured duration and without a hostname. The JSON key is
+    /// absent when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_mac: Option<String>,
 }
 
 /// The wire mirror of [`ChallengeRecord`]: exactly the serde attributes
-/// the interchange type carries, so unknown fields, aliases and defaults
-/// stay byte-compatible. It exists only to separate the permissive
-/// field-level decode from the structural contract enforced by
-/// [`ChallengeRecord`]'s `Deserialize`.
+/// the interchange type used to carry, so unknown fields, aliases and
+/// defaults stay byte-compatible. It exists only to separate the
+/// permissive field-level decode from the structural contract enforced
+/// by [`ChallengeRecord`]'s `Deserialize`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawChallengeRecord {
@@ -379,8 +401,12 @@ struct RawChallengeRecord {
     execution_version: Option<u8>,
     #[serde(default)]
     execution_commitment: Option<String>,
+    #[serde(default)]
+    rsw_modulus_sha256: Option<String>,
     #[serde(default = "default_kid")]
     kid: u32,
+    #[serde(default)]
+    server_mac: Option<String>,
 }
 
 impl From<RawChallengeRecord> for ChallengeRecord {
@@ -412,7 +438,9 @@ impl From<RawChallengeRecord> for ChallengeRecord {
             execution_program: raw.execution_program,
             execution_version: raw.execution_version,
             execution_commitment: raw.execution_commitment,
+            rsw_modulus_sha256: raw.rsw_modulus_sha256,
             kid: raw.kid,
+            server_mac: raw.server_mac,
         }
     }
 }
@@ -444,22 +472,15 @@ impl<'de> Deserialize<'de> for ChallengeRecord {
     }
 }
 
-/// The one structural authority: the verifier's record validator, shared
-/// by the deserialization boundary, the Redis storage decoder and the
-/// verifier itself.
-pub fn record_is_structurally_valid(record: &ChallengeRecord) -> bool {
-    crate::verify::validate_record(record).is_ok()
-}
-
-fn default_kid() -> u32 {
+pub(crate) fn default_kid() -> u32 {
     1
 }
 
-fn default_policy_version() -> u32 {
+pub(crate) fn default_policy_version() -> u32 {
     1
 }
 
-fn default_protocol_version() -> u8 {
+pub(crate) fn default_protocol_version() -> u8 {
     1
 }
 
@@ -539,7 +560,8 @@ pub struct ChallengeConfig {
     /// so the verifier can rotate secrets: it picks the signing secret by
     /// this id from its `secrets_by_kid` map. Default 1. Must be >= 1.
     pub kid: u32,
-    /// The ExecutionChallengeV1 keyed-PRF key (min 16 bytes), see
+    /// The ExecutionChallengeV1 keyed-PRF key (min 32 bytes, the same
+    /// floor PHP enforces), see
     /// [`crate::execution`]. `None` (the default) = execution challenges
     /// are never issued: issuance with the execution surface armed
     /// refuses (the generator errors), so a deployment cannot arm the
@@ -571,6 +593,16 @@ pub struct ChallengeConfig {
     /// The client performs T sequential modular squarings; the server
     /// verifies instantly through lambda.
     pub rsw_t: u32,
+    /// The tenant id every issued challenge is derived under: the
+    /// purpose keys come from the per-tenant root
+    /// (`"kiwi/v2/tenant/" + tenant`, see [`crate::keys::DerivedKeys`]),
+    /// so tenants of a shared master secret cannot forge each other's
+    /// challenges or binding tags. `None` (the default) derives under
+    /// the global purpose keys — byte-identical to the tenant-free
+    /// issuance. Validated like `region` (1..=64 bytes of the narrow
+    /// identifier alphabet); the cross-language reference vectors pin
+    /// tenant `t1` under master `0123456789abcdef0123456789abcdef`.
+    pub tenant: Option<String>,
 }
 
 impl fmt::Debug for ChallengeConfig {
@@ -603,6 +635,7 @@ impl fmt::Debug for ChallengeConfig {
                 &self.rsw_lambda.as_ref().map(|_| "<redacted>"),
             )
             .field("rsw_t", &self.rsw_t)
+            .field("tenant", &self.tenant)
             .finish()
     }
 }
@@ -622,10 +655,15 @@ impl ChallengeConfig {
         if !self.auto_tune {
             return self.target_bits.min(SOLVER_MAX_TARGET_BITS);
         }
-        // Both bounds are clamped to the solver ceiling; the upper bound is
-        // re-raised to at least the lower bound so the interpolation range
-        // never inverts under misconfiguration.
-        let min_bits = self.auto_tune_min_bits.min(SOLVER_MAX_TARGET_BITS);
+        // Both bounds are clamped to the solver ceiling; the lower bound
+        // is also raised to at least 1: auto_tune_min_bits = 0 would
+        // issue a zero-bit target (an already-solved challenge) under
+        // zero load, and the PHP core's issuance validation rejects a
+        // 0-bit target outright, so the two cores must not disagree at
+        // the edge (the upper bound is re-raised to at least the lower
+        // bound so the interpolation range never inverts under
+        // misconfiguration).
+        let min_bits = self.auto_tune_min_bits.clamp(1, SOLVER_MAX_TARGET_BITS);
         let max_bits = self
             .auto_tune_max_bits
             .min(SOLVER_MAX_TARGET_BITS)
@@ -664,19 +702,26 @@ impl ChallengeConfig {
     /// solution can occur at counter 0) and a fast bot can wait before
     /// submitting, so the floor only rejects solves that arrive faster than
     /// the theoretical minimum, as measured by the server clock:
-    /// - SHA-256: assumes up to 5e9 hashes/sec (beyond any browser; catches
-    ///   hardware-accelerated/precomputed solves) with an absolute 5 ms floor.
-    /// - Argon2id: assumes up to 5e5 hashes/sec (memory-hard; the wasm solver
-    ///   manages ~1e3-1e4/s), floor 50 ms.
+    /// - SHA-256: the assumed upper-bound hash rate is 5e9/sec (far beyond
+    ///   any browser solver; the bound exists to catch
+    ///   hardware-accelerated/precomputed solves). At every issuable target
+    ///   (at most 20 bits, about 1.05M expected hashes) the derived bound is
+    ///   sub-millisecond, so the effective SHA floor is the absolute 5 ms
+    ///   minimum.
+    /// - Argon2id: the assumed upper-bound rate is 5e5/sec (memory-hard; the
+    ///   wasm solver manages ~1e3-1e4/s), with an absolute 50 ms floor that
+    ///   likewise dominates at the issuable targets.
     pub fn min_duration_ms_for(&self, target_bits: u32) -> u64 {
         let expected_hashes = 1u64 << target_bits.min(32);
         match self.algorithm {
             PoWAlgorithm::Sha256 => {
-                let ms = (expected_hashes as f64 / 5e9 * 1000.0).ceil() as u64;
+                let ms =
+                    (expected_hashes as f64 / SHA256_SOLVER_HASHES_PER_SEC * 1000.0).ceil() as u64;
                 ms.max(5)
             }
             PoWAlgorithm::Argon2id => {
-                let ms = (expected_hashes as f64 / 5e5 * 1000.0).ceil() as u64;
+                let ms =
+                    (expected_hashes as f64 / ARGON2_SOLVER_HASHES_PER_SEC * 1000.0).ceil() as u64;
                 ms.max(50)
             }
             PoWAlgorithm::Rsw => self.rsw_min_duration_ms(),
@@ -689,11 +734,16 @@ impl ChallengeConfig {
 ///
 /// The `salt` prevents identical IPs from producing identical hashes across
 /// deployments that use different secret keys.
+///
+/// Expiry reminder: this v1 binding is a stable per-IP identifier — the
+/// same IP hashes to the same value across every v1 record of a
+/// deployment, unlike the v2 nonce-bound tag. It exists for the v1
+/// migration window only and must be retired with protocol v1.
 pub fn hash_ip(ip: &str, salt: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     hasher.update(ip.as_bytes());
-    hex::encode(&hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Compute the nonce-bound IP binding tag for a challenge.
@@ -701,19 +751,55 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 /// `tag` is the hex encoding of `HMAC-SHA256(K_ip_bind, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
 /// "\\0" || family || canonical_ip_bytes)` where `family` is a single byte
 /// `0x04` (IPv4) or `0x06` (IPv6), `canonical_ip_bytes` is the inet_pton
-/// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
-/// to 4-byte IPv4, and `K_ip_bind` is the `HKDF`-derived IP-binding purpose key
-/// (see [`crate::keys::DerivedKeys`]; never the master secret
-/// itself).
+/// byte sequence with IPv4-mapped (`::ffff:a.b.c.d`) and the deprecated
+/// IPv4-compatible (`::a.b.c.d`, excluding `::` and `::1`) IPv6 addresses
+/// normalized to the 4-byte IPv4 form, and `K_ip_bind` is the `HKDF`-derived
+/// IP-binding purpose key (see [`crate::keys::DerivedKeys`]; never the master
+/// secret itself).
 ///
 /// The tag is **nonce-bound**: the same IP produces a different tag for every
 /// challenge, so the record creates no stable IP-derived identifier. An
 /// unparsable IP string is rejected with [`SignError::InvalidIp`].
 pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignError> {
-    if secret.len() < 16 {
+    binding_tag_for_tenant(nonce, ip, secret, None)
+}
+
+/// The nonce-bound IP binding tag derived under the optional tenant
+/// root (see [`ChallengeConfig::tenant`]): identical to [`binding_tag`]
+/// for `None`, and derived under the per-tenant purpose keys for
+/// `Some(tenant_id)` so a shared master secret never crosses tenants.
+pub fn binding_tag_for_tenant(
+    nonce: &str,
+    ip: &str,
+    secret: &str,
+    tenant: Option<&str>,
+) -> Result<String, SignError> {
+    if secret.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
-    binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, None))
+    binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, tenant))
+}
+
+/// The IPv4 address an IPv6 spelling denotes when it is an IPv4-mapped
+/// (`::ffff:a.b.c.d`) or the deprecated IPv4-compatible (`::a.b.c.d`)
+/// form. The unspecified `::` and the loopback `::1` are deliberately NOT
+/// treated as IPv4 (they are IPv6 identities in every layer). This
+/// mirrors the risk identity layer's `canonical_ip` byte-for-byte, so the
+/// issuance binding tag, the siteverify remoteip path and the risk
+/// source/subnet identity always agree on exactly one canonical family
+/// per address.
+fn canonical_v4_of(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = v6.octets();
+    let mapped = octets[..10].iter().all(|b| *b == 0) && octets[10] == 0xff && octets[11] == 0xff;
+    let low = u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+    let compatible = octets[..12].iter().all(|b| *b == 0) && low != 0 && low != 1;
+    if mapped || compatible {
+        Some(Ipv4Addr::from([
+            octets[12], octets[13], octets[14], octets[15],
+        ]))
+    } else {
+        None
+    }
 }
 
 /// The nonce-bound IP binding tag computed with an already derived
@@ -729,8 +815,8 @@ pub(crate) fn binding_tag_with_keys(
     let addr: IpAddr = ip.parse().map_err(|_| SignError::InvalidIp)?;
     let (family, canonical_bytes) = match addr {
         IpAddr::V4(v4) => (0x04u8, v4.octets().to_vec()),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(mapped) => (0x04u8, mapped.octets().to_vec()),
+        IpAddr::V6(v6) => match canonical_v4_of(v6) {
+            Some(v4) => (0x04u8, v4.octets().to_vec()),
             None => (0x06u8, v6.octets().to_vec()),
         },
     };
@@ -742,7 +828,7 @@ pub(crate) fn binding_tag_with_keys(
     mac.update(&[0]);
     mac.update(&[family]);
     mac.update(&canonical_bytes);
-    Ok(hex::encode(&mac.finalize().into_bytes()))
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// The canonical current-time value for the `now_ns` parameter: epoch
@@ -755,7 +841,12 @@ pub fn now_epoch_micros() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "KiwiCaptcha: system clock read failed — issuance timestamps fall back to 0"
+            );
+            0
+        })
 }
 
 /// Whether `s` is a conforming identifier: non-empty and every
@@ -787,12 +878,51 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Protocol v2/v3/v4 canonical input: the full parameter
-/// set so no issuance parameter can be tampered with without breaking the
-/// signature:
-/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
-/// `region`, `request_binding` and `issuer` render as the empty segment when
-/// unset; `kid` is the final field, appended after the issuer.
+/// Protocol v2..v5 canonical input (canonical revision 4), the full
+/// parameter set plus the protocol version and every armed extension, so
+/// no issuance parameter, version flip or extension swap can be made
+/// without breaking the signature:
+/// `v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
+/// `region`, `request_binding` and `issuer` render as the empty segment
+/// when unset; `kid` is the final base field.
+///
+/// # Why revision 4 (the signed MAC capability)
+///
+/// Revision 2 signed `v2|...` for every protocol version and appended
+/// the decoy, execution pair and rsw identity as bare untagged
+/// positional segments. That was not injective: a v5 rsw record with
+/// identity `H` and no decoy signed the exact bytes of a v3 rsw record
+/// with decoy `H`, and a v4 execution pair `(V, C)` signed the bytes of
+/// a v5 record with decoy `V` and identity `C`. An attacker who can
+/// write challenge storage could therefore reshape a record (for
+/// example downgrade v5 to v3, stripping the rsw modulus-identity
+/// pinning) while keeping a valid signature. Revision 3 signs the
+/// protocol version as a segment and tags every extension (`d=` decoy,
+/// `e=` execution pair, `r=` rsw identity), so distinct capability
+/// shapes can never collide; [`protocol_extension_grammar_ok`]
+/// independently enforces which shape each version allows. Revision 4
+/// adds the `m=` marker: the signed canonical commits the record-metadata
+/// MAC capability, so stripping `server_mac` breaks the signature and a
+/// committed marker demands a valid MAC at verification.
+///
+/// # The record-metadata MAC marker (revision 4)
+///
+/// The `m=1` segment is appended as the final canonical segment whenever
+/// the record carries a `server_mac` (Some):
+///
+/// ```text
+/// v4|...|kid[|d=decoy_field][|e=execution_version,execution_commitment]
+///   [|r=modulus_sha256]|m=1
+/// ```
+///
+/// The tag order is fixed: `d=`, `e=`, `r=`, then `m=`. The marker is
+/// the stable commitment that the record carries a server-state MAC.
+/// Stripping the MAC from a signed `m=1` record leaves the committed
+/// marker without its tag: the verifier requires the MAC and refuses
+/// the record. Rewriting `issued_at_ns` or `hostname` keeps the segment,
+/// so the MAC check fails. A record signed without the marker stays
+/// floorless when the operator disables the timing floor; a present MAC
+/// still verifies there.
 ///
 /// # The decoy-field extension (protocol v3)
 ///
@@ -801,9 +931,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// final segment after the `kid`:
 ///
 /// ```text
-/// v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+/// v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
 ///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-///   issuer|kid|decoy_field
+///   issuer|kid|d=decoy_field
 /// ```
 ///
 /// - `decoy_field` is the literal armed decoy name (e.g.
@@ -813,24 +943,25 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   [`DECOY_GRAMMAR_SLOT3_FORM`]) plus the 16-hex `CSPRNG` suffix, so it
 ///   can never contain the `|` separator (the alphabet is `[a-z_0-9]`;
 ///   validation accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-/// - The segment is appended only when a decoy is armed, and an armed
-///   record is issued as `protocol_version == 3` (or 4 when the execution
-///   dimension is armed too). `None` renders
-///   nothing extra — the canonical string is byte-identical to the
-///   pre-extension format and the record stays `protocol_version == 2`,
-///   so unarmed records and cross-language records keep verifying
-///   unchanged across the upgrade.
+/// - The `d=` segment is appended only when a decoy is armed, and an
+///   armed record is issued as `protocol_version == 3` (or 4 when the
+///   execution dimension is armed too). `None` renders nothing extra and
+///   the record stays `protocol_version == 2`. The hard cutover is
+///   deliberate: any record signed by an earlier canonical revision does
+///   not verify after a rolling deploy.
 /// - The grammar is total: v2 => no decoy segment, v3 => decoy segment
 ///   present. Validation enforces both directions, so the protocol
 ///   capability is fully inferable from the authenticated canonical
 ///   shape — a stored version flip (a signed v2 record re-versioned to
-///   3) keeps the plain 18-field canonical and is rejected as
+///   3) keeps the plain base canonical and is rejected as
 ///   malformed, and a v2 record carrying `decoy_field` is rejected too
 ///   (an old verifier rejects version 3 as unknown — the capability
 ///   becomes inferable from `protocol_version`, which is the point).
-/// - PHP parity (exact recipe for the PHP core): build the same 18-field
-///   base string, then append `'|' . $decoyField` if and only if the record
-///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
+/// - PHP parity (exact recipe for the PHP core): build the same base
+///   string, then append `'|d=' . $decoyField` if and only if the record
+///   carries a non-null `decoy_field`; append the matching extension
+///   segments and the trailing `|m=1` when the record carries a
+///   `server_mac`; sign/HMAC-verify the result with the
 ///   `HKDF`-derived challenge key (`K_challenge`) exactly as before. The
 ///   stored record JSON carries the optional string key `decoy_field`
 ///   (absent when null — not a JSON `null` key); the client-facing
@@ -841,13 +972,14 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///
 /// When the issuer arms the ExecutionChallengeV1 dimension
 /// (`issue_challenge_with_execution`), the execution version and the
-/// program commitment are appended as two more final segments after the
+/// program commitment are appended as the tagged
+/// `|e=execution_version,execution_commitment` segment after the
 /// decoy segment (or after the `kid` when no decoy is armed):
 ///
 /// ```text
-/// v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+/// v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
 ///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-///   issuer|kid[|decoy_field]|execution_version|execution_commitment
+///   issuer|kid[|d=decoy_field]|e=execution_version,execution_commitment
 /// ```
 ///
 /// - `execution_version` is the canonical numeric byte carrying the
@@ -856,26 +988,94 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// - `execution_commitment` is the hex SHA-256 of the stored program's
 ///   base64 wire string: 64 lowercase hex characters, never
 ///   `|`-capable.
-/// - The segments are appended only when the record carries an execution
-///   program, and the protocol-vs-execution grammar is total: v2/v3 =>
-///   no execution, v4 => execution present. The signed commitment is
+/// - The `e=` segment is appended only when the record carries an
+///   execution program, and the protocol-vs-execution grammar is total:
+///   v2/v3 => no execution, v4 => execution present. The tag is what
+///   keeps an execution pair from ever colliding with a decoy+identity
+///   pair (a revision-2 collision). The signed commitment is
 ///   therefore the exact mirror of the stored program: a
 ///   stored/tampered record cannot strip, substitute or inject a program
 ///   without breaking the signature (the equivalence is additionally
 ///   enforced by the verifier's SHA256(stored program) == commitment
 ///   check).
-/// - Wire compatibility: unarmed and decoy-only records are byte-identical
-///   in both directions; execution-armed records are protocol v4 and
-///   require a v4-capable verifier (an old verifier rejects version 4 as
-///   unknown).
+/// - Execution-armed records are protocol v4 and require a v4-capable
+///   verifier. The rsw modulus identity is signed as `r=<sha256>` when
+///   present (protocol v5), so stripping, swapping or replaying it
+///   breaks the signature and it can never be mistaken for a decoy name
+///   (`d=`) or an execution pair (`e=`). The `m=1` marker follows the
+///   `r=` segment when the record carries a MAC.
 ///
 /// The canonical signing input of a record — public so cross-language
 /// tests and integrations can pin the byte-exact reconstruction against
 /// the client-visible challenge string (the PHP mirror exposes the same
 /// helper as `Issuer::canonicalPayload()`).
-pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
-    let base = format!(
-        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+/// The protocol-vs-extension grammar, the one explicit matrix every
+/// boundary applies (the stored-record decoder and the verifier's
+/// structural validation; the PHP core's `ChallengeRecord` exposes the
+/// identical table): v1 and v2 carry neither extension — the legacy v1
+/// canonical signs no extension segment, so a stored v1 record carrying
+/// either would hold unauthenticated semantics — v3 requires the decoy
+/// and carries no execution, v4 requires the execution triplet and
+/// may also carry the decoy (the canonical appends both segments), and
+/// v5 requires the authenticated rsw modulus identity (the identity
+/// segment is the final tagged extension, followed by the m= marker
+/// when the record carries a MAC; the decoy/execution segments stay
+/// governed by their own signed equivalence). The m= marker is not
+/// protocol-version-bound: it rides any v2..v5 record whose
+/// `server_mac` is Some, and the verifier parses it from the signed
+/// canonical to demand a valid MAC. Identity-bearing
+/// records at v2..=4 are the pre-v5 legacy shape, accepted for the
+/// bounded migration window.
+/// The one structural record contract at every deserialization
+/// boundary: the shared grammar matrix, the exact armed/unarmed
+/// execution-triplet equivalence (with the commitment hash compare),
+/// the identifier alphabets, the canonical nonce/salt shapes and the
+/// record lifetime bounds. [`crate::verify::validate_record`] is this
+/// check mapped onto the verifier's error vocabulary; the storage
+/// decoder applies it directly so a typed record can never surface
+/// from storage in a shape verification would reject as malformed.
+pub fn record_is_structurally_valid(record: &ChallengeRecord) -> bool {
+    crate::verify::validate_record(record).is_ok()
+}
+
+pub fn protocol_extension_grammar_ok(
+    protocol_version: u8,
+    decoy_present: bool,
+    execution_present: bool,
+    rsw_identity_present: bool,
+) -> bool {
+    match protocol_version {
+        // The legacy v1 signature covers no canonical segment at all,
+        // so the identity is refused there too.
+        1 => !decoy_present && !execution_present && !rsw_identity_present,
+        2 => !decoy_present && !execution_present,
+        3 => decoy_present && !execution_present,
+        4 => execution_present,
+        // The identity-bearing rsw grammar: the identity is mandatory
+        // (a signed identityless record with its stored version flipped
+        // to 5 would keep the plain canonical bytes — the identity
+        // requirement is what refuses it). The decoy and execution
+        // segments stay governed by their own signed equivalence, so an
+        // rsw + execution composition signs the identity as the final
+        // segment under the same version.
+        RSW_IDENTITY_PROTOCOL_VERSION => rsw_identity_present,
+        _ => false,
+    }
+}
+
+/// The canonical signing input with an explicit MAC-marker choice: the
+/// `m=1` segment is appended exactly when `server_mac_committed` is set.
+/// Issuance commits the marker before the MAC value exists; the verifier
+/// passes the marker parsed from the signed challenge (see
+/// [`signed_canonical_commits_record_meta`]), never the stored MAC
+/// presence.
+pub fn canonical_signing_input_v2_with_mac(
+    record: &ChallengeRecord,
+    server_mac_committed: bool,
+) -> String {
+    let mut canonical = format!(
+        "v4|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        record.protocol_version,
         record.nonce,
         record.scope,
         record.binding_tag,
@@ -894,84 +1094,277 @@ pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.issuer.as_deref().unwrap_or(""),
         record.kid
     );
-    let mut canonical = match record.decoy_field.as_deref() {
-        Some(decoy) => format!("{base}|{decoy}"),
-        None => base,
-    };
-    // The execution commitment segments are appended only when the
-    // record carries an execution program — and only as the exact pair.
-    // The issuer always sets both; the verifier's structural gate
-    // rejects a record carrying exactly one, so the canonical
-    // reconstruction is byte-exact in both languages.
+    // Every extension is tagged and ordered by capability: d= decoy,
+    // e= execution (version,commitment), r= rsw modulus identity, and
+    // m= the record-metadata MAC marker last. The tags make the encoding
+    // injective across capability shapes; the signed protocol_version
+    // makes a stored version flip fail. The committed m=1 marker rides
+    // the records that carry a server_mac, so stripping the MAC from
+    // such a record is refused.
+    if let Some(decoy) = record.decoy_field.as_deref() {
+        canonical.push_str("|d=");
+        canonical.push_str(decoy);
+    }
     if let Some(version) = record.execution_version {
-        canonical.push('|');
+        canonical.push_str("|e=");
         canonical.push_str(&version.to_string());
-        canonical.push('|');
+        canonical.push(',');
         canonical.push_str(record.execution_commitment.as_deref().unwrap_or(""));
     }
+    if let Some(identity) = record.rsw_modulus_sha256.as_deref() {
+        canonical.push_str("|r=");
+        canonical.push_str(identity);
+    }
+    if server_mac_committed {
+        canonical.push_str("|m=1");
+    }
     canonical
+}
+
+/// The canonical signing input of a record, with the marker committed
+/// exactly when the record carries a `server_mac` (Some). Public so
+/// cross-language tests and integrations can pin the byte-exact
+/// reconstruction; the verifier uses the parsed marker variant.
+pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
+    canonical_signing_input_v2_with_mac(record, record.server_mac.is_some())
+}
+
+/// True when the challenge's signed canonical carries the record-metadata
+/// MAC marker (`m=1`). The marker is parsed from the base64 canonical
+/// embedded in the challenge string, never inferred from the stored
+/// `server_mac` presence: a record whose signature covers `m=1` must
+/// carry a valid MAC, while a record signed without the marker accepts
+/// an absent MAC. A malformed challenge decodes to false.
+pub fn signed_canonical_commits_record_meta(challenge: &str) -> bool {
+    let Some((payload, _signature)) = challenge.rsplit_once('.') else {
+        return false;
+    };
+    let Ok(bytes) = B64.decode(payload) else {
+        return false;
+    };
+    let Ok(canonical) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    canonical.starts_with("v4|") && canonical.ends_with("|m=1")
 }
 
 /// The authenticated execution commitment of a stored program: hex
 /// SHA-256 of the program's base64 wire string, 64 lowercase hex
 /// characters. This is the value signed into the protocol v4 canonical
-/// (the final `|execution_commitment` segment), so the verifier's
+/// (the second element of the tagged `|e=execution_version,
+/// execution_commitment` segment), so the verifier's
 /// constant-time equivalence check
 /// `SHA256(stored program) == signed commitment` is byte-exact in both
 /// languages. Mirrors the PHP `Issuer::executionCommitment`.
 pub fn execution_commitment(program_b64: &str) -> String {
-    hex::encode(&Sha256::digest(program_b64.as_bytes()))
+    hex::encode(Sha256::digest(program_b64.as_bytes()))
 }
 
 /// Sign a canonical input with the secret key, returning a hex HMAC tag
 /// (protocol v1 legacy path — the master key is used directly; v2 records use
 /// the `HKDF`-derived challenge key via [`sign_canonical_v2`]).
 ///
-/// The secret key must be at least 16 bytes (the same minimum the PHP
-/// implementation enforces); 32 random bytes is the recommended size. Shorter
-/// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
+/// The secret key must be at least [`MIN_MASTER_BYTES`] bytes (the same
+/// minimum the PHP implementation enforces); shorter keys are rejected
+/// with [`SignError::KeyTooShort`] before any hashing.
 fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
-    Ok(hex::encode(&mac.finalize().into_bytes()))
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Sign a canonical input with the `HKDF`-derived challenge-signing purpose key
 /// (`K_challenge` — protocol v2). The master secret is never used
-/// directly as the signing key.
-pub(crate) fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
-    if secret_key.len() < 16 {
+/// directly as the signing key; `tenant` selects the per-tenant root
+/// (see [`ChallengeConfig::tenant`]), `None` the global keys.
+pub(crate) fn sign_canonical_v2(
+    canonical: &str,
+    secret_key: &str,
+    tenant: Option<&str>,
+) -> Result<String, SignError> {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
-    let derived = DerivedKeys::from_master(secret_key, None);
+    let derived = DerivedKeys::from_master(secret_key, tenant);
     let key = derived.challenge_key();
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
-    Ok(hex::encode(&mac.finalize().into_bytes()))
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Domain tag of the record-metadata MAC input.
+pub const RECORD_META_MAC_DOMAIN: &str = "kiwi/record-meta/v1";
+
+/// Domain tag of the consumed-result MAC input.
+pub const CONSUMED_RESULT_MAC_DOMAIN: &str = "kiwi/consumed-result/v1";
+
+fn mac_lp(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(value.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn mac_opt(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        None => out.push(b'0'),
+        Some(v) => {
+            out.extend_from_slice(b"1:");
+            mac_lp(out, v);
+        }
+    }
+}
+
+/// The exact record-metadata MAC input bytes, shared verbatim with PHP
+/// `ServerStateMac::recordMetaInput()`:
+/// `domain \n lp(challenge) \n issued_at_ns \n opt(hostname)` where
+/// `lp(s) = len(s) ":" s`, `opt(None) = "0"`, `opt(s) = "1:" lp(s)`.
+pub fn record_meta_mac_input(
+    challenge: &str,
+    issued_at_ns: u64,
+    hostname: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + challenge.len());
+    out.extend_from_slice(RECORD_META_MAC_DOMAIN.as_bytes());
+    out.push(b'\n');
+    mac_lp(&mut out, challenge);
+    out.push(b'\n');
+    out.extend_from_slice(issued_at_ns.to_string().as_bytes());
+    out.push(b'\n');
+    mac_opt(&mut out, hostname);
+    out
+}
+
+/// The exact consumed-result MAC input bytes, shared verbatim with PHP
+/// `ServerStateMac::consumedResultInput()`:
+/// `domain \n lp(challenge) \n (1|0) \n opt(binding) \n opt(operation_identity)`.
+pub fn consumed_result_mac_input(
+    challenge: &str,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96 + challenge.len());
+    out.extend_from_slice(CONSUMED_RESULT_MAC_DOMAIN.as_bytes());
+    out.push(b'\n');
+    mac_lp(&mut out, challenge);
+    out.push(b'\n');
+    out.push(if valid { b'1' } else { b'0' });
+    out.push(b'\n');
+    mac_opt(&mut out, binding);
+    out.push(b'\n');
+    mac_opt(&mut out, operation_identity);
+    out
+}
+
+fn server_state_hmac(key: &[u8; 32], input: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(input);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn server_state_hmac_matches(key: &[u8; 32], input: &[u8], tag: &str) -> bool {
+    if tag.len() != 64 {
+        return false;
+    }
+    let Some(bytes) = hex_decode_strict(tag) else {
+        return false;
+    };
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(input);
+    mac.verify_slice(&bytes).is_ok()
+}
+
+/// True when `tag` has the server-state MAC wire shape (64 lowercase hex).
+pub fn is_server_state_mac_shape(tag: &str) -> bool {
+    tag.len() == 64 && tag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The record-metadata MAC (`server_mac`) under the server-state purpose
+/// key (`K_server_state`, see [`crate::keys::DerivedKeys`]).
+pub fn record_meta_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    issued_at_ns: u64,
+    hostname: Option<&str>,
+) -> String {
+    server_state_hmac(
+        derived.server_state_key(),
+        &record_meta_mac_input(challenge, issued_at_ns, hostname),
+    )
+}
+
+/// The consumed-result MAC (`consumed_result.mac`) under the server-state
+/// purpose key.
+pub fn consumed_result_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+) -> String {
+    server_state_hmac(
+        derived.server_state_key(),
+        &consumed_result_mac_input(challenge, valid, binding, operation_identity),
+    )
+}
+
+/// True when the record carries a well-formed `server_mac` matching its
+/// own challenge string, issuance clock and hostname (constant time).
+pub fn verify_record_meta(derived: &DerivedKeys, record: &ChallengeRecord) -> bool {
+    match record.server_mac.as_deref() {
+        Some(tag) => server_state_hmac_matches(
+            derived.server_state_key(),
+            &record_meta_mac_input(
+                &record.challenge,
+                record.issued_at_ns,
+                record.hostname.as_deref(),
+            ),
+            tag,
+        ),
+        None => false,
+    }
+}
+
+/// True when `tag` is a well-formed consumed-result MAC matching the given
+/// record challenge, verdict, binding and operation identity (constant
+/// time).
+pub fn verify_consumed_result_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+    tag: &str,
+) -> bool {
+    server_state_hmac_matches(
+        derived.server_state_key(),
+        &consumed_result_mac_input(challenge, valid, binding, operation_identity),
+        tag,
+    )
 }
 
 /// Sign the payload with the secret key, returning a hex HMAC tag
 /// (protocol v1 canonical input; see [`ChallengePayload`]).
 ///
-/// The secret key must be at least 16 bytes (the same minimum the PHP
-/// implementation enforces); 32 random bytes is the recommended size. Shorter
-/// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
+/// The secret key must be at least [`MIN_MASTER_BYTES`] bytes (the same
+/// minimum the PHP implementation enforces); shorter keys are rejected
+/// with [`SignError::KeyTooShort`] before any hashing.
 pub fn sign_payload(payload: &ChallengePayload, secret_key: &str) -> Result<String, SignError> {
     sign_canonical(&canonical_signing_input(payload), secret_key)
 }
 
 /// Verify that a signature matches the payload under the given key.
 ///
-/// The key minimum from [`sign_payload`] (16 bytes) applies here too — a key
-/// too short to have ever signed a valid challenge is rejected up front. The
-/// comparison itself is done in constant time: the hex signature is decoded
-/// to bytes and checked with `Mac::verify_slice`, which never short-circuits
-/// on a mismatching prefix and processes the full tag regardless of the
-/// inputs' relationship to the expected value.
+/// The key minimum from [`sign_payload`] ([`MIN_MASTER_BYTES`]) applies here
+/// too — a key too short to have ever signed a valid challenge is rejected up
+/// front. The comparison itself is done in constant time: the hex signature is
+/// decoded to bytes and checked with `Mac::verify_slice`, which never
+/// short-circuits on a mismatching prefix and processes the full tag
+/// regardless of the inputs' relationship to the expected value.
 pub fn verify_signature(
     payload: &ChallengePayload,
     signature: &str,
@@ -990,7 +1383,30 @@ pub fn verify_signature_v2(
     signature: &str,
     secret_key: &str,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2(&canonical_signing_input_v2(record), signature, secret_key)
+    verify_signature_v2_with_tenant(record, signature, secret_key, None)
+}
+
+/// The tenant-scoped v2 signature verification: the challenge-signing
+/// key derives under the per-tenant root (see
+/// [`ChallengeConfig::tenant`]), so a record issued under tenant `t1`
+/// verifies only under `Some("t1")` — never under another tenant and
+/// never under the global (`None`) keys. Identical verdicts to
+/// [`verify_signature_v2`] for `None`.
+pub fn verify_signature_v2_with_tenant(
+    record: &ChallengeRecord,
+    signature: &str,
+    secret_key: &str,
+    tenant: Option<&str>,
+) -> Result<bool, SignError> {
+    verify_canonical_v2(
+        &canonical_signing_input_v2_with_mac(
+            record,
+            signed_canonical_commits_record_meta(&record.challenge),
+        ),
+        signature,
+        secret_key,
+        tenant,
+    )
 }
 
 /// Verify a v2 signature with an already derived challenge-signing key —
@@ -1005,11 +1421,18 @@ pub(crate) fn verify_signature_v2_with_keys(
     signature: &str,
     derived: &DerivedKeys,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2_with_keys(&canonical_signing_input_v2(record), signature, derived)
+    verify_canonical_v2_with_keys(
+        &canonical_signing_input_v2_with_mac(
+            record,
+            signed_canonical_commits_record_meta(&record.challenge),
+        ),
+        signature,
+        derived,
+    )
 }
 
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     // The HMAC-SHA256 tag is exactly 64 hex characters — a
@@ -1019,7 +1442,7 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     if signature.len() != 64 {
         return Ok(false);
     }
-    let signature_bytes = match hex::decode(signature) {
+    let signature_bytes = match hex_decode_strict(signature) {
         Some(bytes) => bytes,
         None => return Ok(false), // malformed signature can never match
     };
@@ -1030,19 +1453,21 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
 }
 
 /// Verify a canonical input against the `HKDF`-derived challenge key (protocol
-/// v2). Same constant-time guarantee as [`verify_canonical`].
+/// v2), under the optional tenant root. Same constant-time guarantee as
+/// [`verify_canonical`].
 fn verify_canonical_v2(
     canonical: &str,
     signature: &str,
     secret_key: &str,
+    tenant: Option<&str>,
 ) -> Result<bool, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     verify_canonical_v2_with_keys(
         canonical,
         signature,
-        &DerivedKeys::from_master(secret_key, None),
+        &DerivedKeys::from_master(secret_key, tenant),
     )
 }
 
@@ -1059,7 +1484,7 @@ fn verify_canonical_v2_with_keys(
     if signature.len() != 64 {
         return Ok(false);
     }
-    let signature_bytes = match hex::decode(signature) {
+    let signature_bytes = match hex_decode_strict(signature) {
         Some(bytes) => bytes,
         None => return Ok(false), // malformed signature can never match
     };
@@ -1080,10 +1505,11 @@ pub struct Issued {
 /// In-memory challenge cache that reduces Redis writes when the same client
 /// (identified by IP hash + scope) re-requests within a 1-second window.
 ///
-/// Entries older than 1 second are pruned lazily on every `get` and `put`,
+/// Entries older than 1 second are pruned lazily on every `get` and `put`.
+/// A fresh `get` refreshes the entry's timestamp, so recency tracks use,
 /// and the map is HARD-bounded: a `put` that would exceed the maximum
-/// evicts the least-recently-used entry, so 256 is a real memory maximum regardless of
-/// how many distinct IP+scope pairs arrive within a window.
+/// evicts the least-recently-used entry, so 256 is a real memory maximum
+/// regardless of how many distinct IP+scope pairs arrive within a window.
 pub struct ChallengeCache {
     entries: HashMap<String, (Issued, Instant)>,
     /// Fresh entries survive up to this age before being pruned.
@@ -1093,10 +1519,11 @@ pub struct ChallengeCache {
 /// Maximum difficulty the in-browser SHA-256 solver can reliably complete.
 ///
 /// The widget solver (`packages/kiwicaptcha/src/widget.rs`) caps its search
-/// at `MAX = 5_000_000` hashes. At `n` target bits the expected work is
-/// `2^n` hashes; at 20 bits that is ~1.05M (solve probability ≈ 99.1% within
-/// the cap), while at 24 bits it is ~16.7M (solve probability ≈ 25.9% —
-/// ~74% of users would fail). Difficulty is therefore clamped to this
+/// at `MAX = 20_000_000` hashes. At `n` target bits the expected work is
+/// `2^n` hashes; at 20 bits that is ~1.05M (exhaustion probability
+/// ≈ 5.2×10⁻⁹ within the cap), while at 24 bits it is ~16.7M (exhaustion
+/// probability ≈ 30% — the solver fails to find a solution inside the cap
+/// for roughly three in ten users). Difficulty is therefore clamped to this
 /// ceiling so the auto-tuner can never issue a challenge the widget cannot
 /// solve.
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
@@ -1113,10 +1540,11 @@ pub const MIN_DIFFICULTY: u32 = 1;
 pub const MAX_DIFFICULTY: u32 = 20;
 
 /// The maximum counter value any solver may legitimately produce (the widget
-/// caps its search at 5M hashes, both WASM and the pure-JS fallback).
+/// caps its search at 20M hashes, both WASM and the pure-JS fallback; the
+/// protocol/limits.json authority shared with the PHP core).
 /// [`crate::token::SolutionToken::decode`] rejects counters above this bound,
 /// and `verify_solution` accepts only solutions the solvers could produce.
-pub const SOLVER_MAX_HASHES: u64 = 5_000_000;
+pub const SOLVER_MAX_HASHES: u64 = 20_000_000;
 
 /// Maximum challenge lifetime (seconds) a record may claim. Records with
 /// `expires_at - issued_at` above this are malformed (they could otherwise
@@ -1125,12 +1553,128 @@ pub const MAX_TTL_SECS: u64 = 300;
 
 /// The binary's maximum challenge protocol version, mirrored by the PHP
 /// core (`ChallengeRecord::MAX_PROTOCOL_VERSION`) and the extension's
-/// readiness probe (KiwiHealthController): 4 since the execution-capable
-/// canonical (protocol v4) landed — armed issuance writes version 4 and
-/// the verifier accepts versions 1..=4. A central security-policy floor
-/// above this means the binary cannot verify the challenges the fleet
-/// now issues.
-pub const MAX_PROTOCOL_VERSION: u8 = 4;
+/// readiness probe (KiwiHealthController): 5 since the identity-bearing
+/// rsw canonical (protocol v5) landed — identity-armed rsw issuance
+/// writes version 5 and the verifier accepts versions 1..=5. A central
+/// security-policy floor above this means the binary cannot verify the
+/// challenges the fleet now issues.
+pub const MAX_PROTOCOL_VERSION: u8 = 5;
+
+/// The first protocol version that requires the authenticated rsw
+/// modulus identity on an rsw record. Identity-bearing records at
+/// versions 2..=4 are the pre-v5 legacy shape, accepted (and resolved
+/// through the legacy base64-text alias) for the bounded migration
+/// window.
+pub const RSW_IDENTITY_PROTOCOL_VERSION: u8 = 5;
+
+/// The base challenge protocol version every binary reads: the
+/// identityless, decoyless, executionless canonical. Unarmed issuance
+/// always writes it, so it needs no confirmed fleet capability.
+pub const BASE_PROTOCOL_VERSION: u8 = 2;
+
+/// The decoy-capable canonical version (requires a confirmed ceiling of
+/// at least 3).
+pub const DECOY_PROTOCOL_VERSION: u8 = 3;
+
+/// The execution-capable canonical version (requires a confirmed ceiling
+/// of at least 4).
+pub const EXECUTION_PROTOCOL_VERSION: u8 = 4;
+
+/// Why an emission-capability ceiling is invalid or a requested arm
+/// exceeds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EmissionCapabilityError {
+    /// The ceiling is below [`BASE_PROTOCOL_VERSION`]: it cannot describe
+    /// any fleet that reads even the base protocol.
+    #[error("the emission ceiling is below the base protocol version ({BASE_PROTOCOL_VERSION})")]
+    BelowBase,
+    /// An explicitly requested extension needs a higher confirmed
+    /// ceiling. The request fails instead of being silently downgraded.
+    #[error("the requested protocol extension requires a higher emission ceiling than the confirmed one")]
+    Exceeded,
+}
+
+/// The explicit issuance emission-capability ceiling: the highest
+/// challenge protocol version this writer's fleet is confirmed to read.
+///
+/// The RSW modulus identity is emitted only when the ceiling reaches
+/// [`RSW_IDENTITY_PROTOCOL_VERSION`]; a pre-v5 verifier rejects the
+/// unknown protocol version, so an unconfirmed fleet must keep receiving
+/// the legacy identityless [`BASE_PROTOCOL_VERSION`] shape. The default
+/// is [`EmissionCapabilities::base`] — never an implicit v5 — because a
+/// rolling-upgrade-capable deployment cannot assume every reader is
+/// current. The Symfony controller derives it from the confirmed central
+/// `min_protocol_version` floor; direct core callers pass
+/// [`EmissionCapabilities::confirmed`] only once every reader in their
+/// own environment accepts the ceiling.
+///
+/// It is a real authority over every protocol extension: arming the
+/// decoy requires [`EmissionCapabilities::admits_decoy`], arming the
+/// execution program requires [`EmissionCapabilities::admits_execution`],
+/// and either request beyond the confirmed ceiling fails issuance with
+/// [`SignError::EmissionCapabilityExceeded`] instead of silently
+/// downgrading. The one documented fallback is the rsw modulus identity,
+/// which degrades to the identityless base shape below
+/// [`RSW_IDENTITY_PROTOCOL_VERSION`] (additive signing metadata with a
+/// defined backward-compatible form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmissionCapabilities {
+    max_protocol_version: u8,
+}
+
+impl EmissionCapabilities {
+    /// The capability-free ceiling: unarmed base emission only.
+    pub const fn base() -> Self {
+        Self {
+            max_protocol_version: BASE_PROTOCOL_VERSION,
+        }
+    }
+
+    /// A confirmed ceiling. A value below [`BASE_PROTOCOL_VERSION`] is
+    /// refused: it cannot describe any readable fleet.
+    pub const fn confirmed(max_protocol_version: u8) -> Result<Self, EmissionCapabilityError> {
+        if max_protocol_version < BASE_PROTOCOL_VERSION {
+            return Err(EmissionCapabilityError::BelowBase);
+        }
+        Ok(Self {
+            max_protocol_version,
+        })
+    }
+
+    /// The confirmed ceiling value.
+    pub const fn max_protocol_version(&self) -> u8 {
+        self.max_protocol_version
+    }
+
+    /// Whether the confirmed ceiling admits the base canonical (always
+    /// true for a valid ceiling).
+    pub const fn admits_base(&self) -> bool {
+        self.max_protocol_version >= BASE_PROTOCOL_VERSION
+    }
+
+    /// Whether the confirmed ceiling admits the decoy-capable canonical.
+    pub const fn admits_decoy(&self) -> bool {
+        self.max_protocol_version >= DECOY_PROTOCOL_VERSION
+    }
+
+    /// Whether the confirmed ceiling admits the execution-capable
+    /// canonical.
+    pub const fn admits_execution(&self) -> bool {
+        self.max_protocol_version >= EXECUTION_PROTOCOL_VERSION
+    }
+
+    /// Whether the confirmed ceiling admits the identity-bearing rsw
+    /// canonical.
+    pub const fn admits_rsw_identity(&self) -> bool {
+        self.max_protocol_version >= RSW_IDENTITY_PROTOCOL_VERSION
+    }
+}
+
+impl Default for EmissionCapabilities {
+    fn default() -> Self {
+        Self::base()
+    }
+}
 
 /// Maximum tolerated clock skew (seconds) between the issuer and verifier
 /// clocks. The TTL check rejects challenges whose `issued_at` is
@@ -1181,8 +1725,13 @@ pub const MAX_ARGON_TIME: u32 = 16;
 /// record.
 pub const MIN_PARALLELISM: u32 = 1;
 /// Hard ceiling on the Argon2id parallelism the verifier accepts in a signed
-/// record.
-pub const MAX_PARALLELISM: u32 = 4;
+/// record. The ceiling is pinned to 1 (the floor): the PHP core derives
+/// Argon2id through libsodium, which has no parallelism parameter and
+/// refuses any p != 1 as authentic-but-unsupported, so a signed p >= 2
+/// record must never verify in Rust either — the two "byte-identical"
+/// verifiers must accept exactly the same parameter space. Neither
+/// shipped issuer emits p != 1.
+pub const MAX_PARALLELISM: u32 = 1;
 
 /// The floor for the rsw sequential-squaring cost T. Below it the
 /// challenge would finish too fast to carry meaningful sequential cost,
@@ -1215,8 +1764,12 @@ pub const RSW_TARGET_BITS_PIN: u32 = 1;
 /// implementation stays far below the assumed rate.
 pub const RSW_SOLVER_SQUARINGS_PER_SEC: f64 = 5e6;
 
-/// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
-/// Used to derive the per-challenge minimum solve duration.
+/// The SHA-256 timing floor's assumed upper-bound hash rate
+/// (hashes/sec). NOT an expected browser rate: it is deliberately far
+/// above any real solver so the derived minimum solve duration only
+/// rejects solves that arrive faster than hardware could possibly go.
+/// At every issuable target the derived bound is sub-millisecond, so
+/// the effective floor is the absolute 5 ms minimum.
 pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 
 /// The combinatorial decoy-name grammar, the server-side naming space for
@@ -1448,7 +2001,7 @@ pub fn compose_decoy_prefix(slot1: usize, slot2: usize, slot3: usize) -> String 
 /// impossible. Mirrors the PHP `Issuer::decoyNameSuffix`.
 fn decoy_name_suffix() -> Result<String, SignError> {
     let bytes = security_random::<8>().map_err(|_| SignError::Rng)?;
-    Ok(hex::encode(&bytes))
+    Ok(hex::encode(bytes))
 }
 
 /// Pick a random armed decoy field name with the `CSPRNG` (never a
@@ -1484,6 +2037,9 @@ fn pick_decoy_slot_index(vocab_len: usize) -> Result<usize, SignError> {
 
 /// Expected hashes per second for the Argon2id wasm solver at moderate memory
 /// (8-64 MiB). Used to derive the per-challenge minimum solve duration.
+/// The Argon2id timing floor's assumed upper-bound rate (hashes/sec),
+/// not an expected browser rate (the wasm solver manages ~1e3-1e4/s);
+/// the 50 ms absolute floor dominates at every issuable target.
 pub const ARGON2_SOLVER_HASHES_PER_SEC: f64 = 5e5;
 
 impl ChallengeCache {
@@ -1518,20 +2074,26 @@ impl ChallengeCache {
         format!("{ip_hash}|{scope}")
     }
 
-    fn is_fresh(&self, ts: &Instant) -> bool {
-        ts.elapsed() < self.ttl
-    }
-
     pub fn get(&mut self, ip_hash: &str, scope: &str) -> Option<&Issued> {
+        // One entry lookup decides freshness: a fresh hit refreshes the
+        // entry's timestamp so the eviction below evicts by
+        // least-recently-used, and a stale entry is removed so the map
+        // stays self-pruning.
+        let ttl = self.ttl;
         let key = Self::cache_key(ip_hash, scope);
-        if let Some((_, ts)) = self.entries.get(&key) {
-            if self.is_fresh(ts) {
-                return self.entries.get(&key).map(|(issued, _)| issued);
+        match self.entries.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if entry.get().1.elapsed() < ttl {
+                    let (issued, ts) = entry.into_mut();
+                    *ts = Instant::now();
+                    Some(issued)
+                } else {
+                    entry.remove();
+                    None
+                }
             }
-            // Stale entry: remove it now so the map stays self-pruning.
-            self.entries.remove(&key);
+            std::collections::hash_map::Entry::Vacant(_) => None,
         }
-        None
     }
 
     pub fn put(&mut self, ip_hash: &str, scope: &str, issued: Issued) {
@@ -1624,7 +2186,38 @@ pub fn issue_challenge(
     active_solves: u64,
     request_binding: Option<&str>,
 ) -> Result<Issued, SignError> {
+    issue_challenge_with_capabilities(
+        EmissionCapabilities::base(),
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+    )
+}
+
+/// Issue a challenge under an explicit emission-capability ceiling (see
+/// [`EmissionCapabilities`]): identical to [`issue_challenge`] except the
+/// RSW modulus identity is armed only when the confirmed ceiling admits
+/// [`RSW_IDENTITY_PROTOCOL_VERSION`]. The plain [`issue_challenge`] keeps
+/// the capability-free default, so a direct caller in a
+/// rolling-upgrade-capable deployment must confirm the ceiling before v5
+/// records exist on the wire.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_capabilities(
+    capabilities: EmissionCapabilities,
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+) -> Result<Issued, SignError> {
     issue_challenge_inner(
+        capabilities,
         config,
         scope,
         client_ip,
@@ -1670,7 +2263,39 @@ pub fn issue_challenge_with_decoy(
     request_binding: Option<&str>,
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
+    issue_challenge_with_decoy_capabilities(
+        // The decoy-arming convenience entry point assumes the decoy
+        // dimension's floor by default; pass a *_capabilities variant for
+        // a confirmed fleet ceiling.
+        EmissionCapabilities::confirmed(DECOY_PROTOCOL_VERSION)
+            .expect("the decoy protocol version is a valid ceiling"),
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        arm_decoy_field,
+    )
+}
+
+/// Issue a decoy-armed (or plain) challenge under an explicit
+/// emission-capability ceiling; see [`issue_challenge_with_capabilities`].
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_decoy_capabilities(
+    capabilities: EmissionCapabilities,
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
     issue_challenge_inner(
+        capabilities,
         config,
         scope,
         client_ip,
@@ -1730,7 +2355,45 @@ pub fn issue_challenge_with_execution(
     execution_version: Option<u8>,
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
+    issue_challenge_with_execution_capabilities(
+        // The execution-arming convenience entry point assumes the
+        // execution dimension's floor by default; pass a *_capabilities
+        // variant for a confirmed fleet ceiling.
+        EmissionCapabilities::confirmed(EXECUTION_PROTOCOL_VERSION)
+            .expect("the execution protocol version is a valid ceiling"),
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        arm_execution,
+        execution_action,
+        execution_version,
+        arm_decoy_field,
+    )
+}
+
+/// Issue an execution-armed (or plain) challenge under an explicit
+/// emission-capability ceiling; see [`issue_challenge_with_capabilities`].
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_execution_capabilities(
+    capabilities: EmissionCapabilities,
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_execution: bool,
+    execution_action: Option<&str>,
+    execution_version: Option<u8>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
     issue_challenge_inner(
+        capabilities,
         config,
         scope,
         client_ip,
@@ -1748,6 +2411,7 @@ pub fn issue_challenge_with_execution(
 /// The shared issuance body (see the [`issue_challenge`] contract).
 #[allow(clippy::too_many_arguments)]
 fn issue_challenge_inner(
+    capabilities: EmissionCapabilities,
     config: &ChallengeConfig,
     scope: &str,
     client_ip: &str,
@@ -1760,6 +2424,16 @@ fn issue_challenge_inner(
     execution_action: Option<&str>,
     execution_version: Option<u8>,
 ) -> Result<Issued, SignError> {
+    // The emission ceiling is a real protocol authority: an explicitly
+    // requested extension beyond the confirmed ceiling fails issuance
+    // instead of being silently downgraded (the rsw identity is the one
+    // documented additive fallback, handled below).
+    if arm_decoy_field && !capabilities.admits_decoy() {
+        return Err(SignError::EmissionCapabilityExceeded);
+    }
+    if arm_execution && !capabilities.admits_execution() {
+        return Err(SignError::EmissionCapabilityExceeded);
+    }
     if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
     }
@@ -1774,6 +2448,14 @@ fn issue_challenge_inner(
     }
     if let Some(region) = &config.region {
         if !valid_identifier(region, 64) {
+            return Err(SignError::InvalidIdentifier);
+        }
+    }
+    // The tenant id shares the narrow identifier alphabet with the
+    // region and the same 64-byte cap; it feeds the HKDF info label,
+    // so a non-conforming value must never reach a derivation.
+    if let Some(tenant) = &config.tenant {
+        if !valid_identifier(tenant, 64) {
             return Err(SignError::InvalidIdentifier);
         }
     }
@@ -1843,7 +2525,11 @@ fn issue_challenge_inner(
         ) else {
             return Err(SignError::InvalidRswParams);
         };
-        if crate::rsw::RswTrapdoor::new(modulus, lambda).is_err() {
+        // The validated-pair memo serves the repeated issuance
+        // validation: the expensive primality tests run once per
+        // process for a configured pair, and every later issuance is a
+        // cache hit.
+        if crate::rsw::RswTrapdoor::validated(modulus, lambda).is_none() {
             return Err(SignError::InvalidRswParams);
         }
         if config.rsw_t < MIN_RSW_T || config.rsw_t > MAX_RSW_T {
@@ -1878,8 +2564,13 @@ fn issue_challenge_inner(
     }
 
     // Nonce-bound IP binding tag (v2) — or empty when binding is disabled.
+    // Both the tag and the signature below derive under the configured
+    // tenant root when one is set (see ChallengeConfig::tenant).
+    let tenant = config.tenant.as_deref();
     let binding = match config.binding_mode {
-        BindingMode::Bound => binding_tag(&nonce, client_ip, &config.secret_key)?,
+        BindingMode::Bound => {
+            binding_tag_for_tenant(&nonce, client_ip, &config.secret_key, tenant)?
+        }
         BindingMode::None => String::new(),
     };
 
@@ -1965,6 +2656,24 @@ fn issue_challenge_inner(
     // program, signed into the canonical below.
     let execution_commitment: Option<String> =
         execution_program.as_deref().map(execution_commitment);
+    // The authenticated rsw modulus identity (protocol v5): the
+    // canonical-byte fingerprint, exactly the rsw-keygen's
+    // rsw_modulus_n_sha256. Computed before the record is built so it
+    // rides canonical_signing_input_v2() and the signature. The
+    // configured pair was validated above, so the fingerprint must
+    // succeed; a non-canonical modulus is refused rather than minted
+    // without an identity.
+    let rsw_identity: Option<String> = if is_rsw && capabilities.admits_rsw_identity() {
+        match config.rsw_modulus_n.as_deref() {
+            Some(modulus) => Some(
+                crate::rsw::modulus_fingerprint_hex(modulus)
+                    .map_err(|_| SignError::InvalidRswParams)?,
+            ),
+            None => return Err(SignError::InvalidRswParams),
+        }
+    } else {
+        None
+    };
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
@@ -1984,11 +2693,18 @@ fn issue_challenge_inner(
         issued_at_ns: now_ns,
         attempts_used: 0,
         // Armed issuance writes protocol v4 (the execution-capable
-        // canonical, signed with the execution commitment segments when
+        // canonical, signed with the tagged `e=` execution segment when
         // the dimension is armed); decoy-only issuance writes protocol
-        // v3 (the decoy-capable canonical); unarmed issuance stays v2,
-        // byte-identical to the pre-decoy format.
-        protocol_version: if execution_program.is_some() {
+        // v3 (the decoy-capable canonical); unarmed issuance stays v2
+        // with no extension segment. An rsw issuance
+        // writes protocol v5: the identity-bearing canonical (the tagged
+        // `r=` identity segment, followed by `m=1` when the record
+        // carries a server-state MAC) — a pre-v5 verifier
+        // rejects the unknown version instead of silently ignoring the
+        // identity.
+        protocol_version: if rsw_identity.is_some() {
+            RSW_IDENTITY_PROTOCOL_VERSION
+        } else if execution_program.is_some() {
             4
         } else if arm_decoy_field {
             3
@@ -2011,11 +2727,27 @@ fn issue_challenge_inner(
             .as_ref()
             .map(|_| execution_version.unwrap_or(1)),
         execution_commitment: execution_commitment.clone(),
+        // The authenticated rsw modulus identity: the canonical-byte
+        // fingerprint, set before canonical_signing_input_v2()/signing
+        // so the identity segment is covered by the signature.
+        rsw_modulus_sha256: rsw_identity.clone(),
+        // A placeholder MAC so the canonical commits the m=1 marker
+        // before signing. The real tag is sealed below over the signed
+        // challenge; only its presence is read while signing.
+        server_mac: Some(String::new()),
     };
     let canonical = canonical_signing_input_v2(&record);
-    let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
+    let signature = sign_canonical_v2(&canonical, &config.secret_key, tenant)?;
     let challenge = format!("{}.{}", B64.encode(&canonical), signature);
     record.challenge = challenge.clone();
+    // The record-metadata MAC authenticates the unsigned server-side
+    // fields (issued_at_ns, hostname) bound to this exact challenge.
+    record.server_mac = Some(record_meta_mac(
+        &DerivedKeys::from_master(&config.secret_key, tenant),
+        &record.challenge,
+        record.issued_at_ns,
+        record.hostname.as_deref(),
+    ));
     // The prefix binds the client's counter input to this exact challenge.
     record.prefix = format!("{challenge}|{salt}|");
 
@@ -2085,7 +2817,8 @@ pub fn issue_challenge_with_profile(
         effective.p = profile.p;
         effective.argon2_target_bits = profile.target_bits as u32;
     }
-    issue_challenge(
+    issue_challenge_with_capabilities(
+        EmissionCapabilities::base(),
         &effective,
         scope,
         client_ip,
@@ -2109,9 +2842,10 @@ pub fn payload_from_record(record: &ChallengeRecord) -> ChallengePayload {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
-    /// The HMAC secret key must be at least 16 bytes (the PHP implementation
-    /// enforces the same minimum); 32 random bytes is the recommended size.
-    #[error("HMAC secret key is too short (minimum 16 bytes; 32 random bytes recommended)")]
+    /// The HMAC secret key must be at least 32 bytes (the PHP implementation
+    /// enforces the same minimum); 32 random bytes is both the floor and the
+    /// recommended size.
+    #[error("HMAC secret key is too short (minimum 32 bytes)")]
     KeyTooShort,
     /// The OS cryptographic random source failed — challenge creation MUST
     /// fail rather than fall back to a weak generator.
@@ -2134,6 +2868,13 @@ pub enum SignError {
     /// (raised by [`binding_tag`] when a nonce-bound binding tag is computed).
     #[error("client IP is not a valid IPv4 or IPv6 address")]
     InvalidIp,
+    /// Issuance was asked to arm a protocol extension beyond the
+    /// confirmed [`EmissionCapabilities`] ceiling. The request fails
+    /// explicitly instead of being silently downgraded. (The rsw modulus
+    /// identity is the one documented fallback: it degrades to the
+    /// identityless base shape below [`RSW_IDENTITY_PROTOCOL_VERSION`].)
+    #[error("the requested protocol extension exceeds the confirmed emission ceiling")]
+    EmissionCapabilityExceeded,
     /// SHA-256 difficulty must be within the solver ceiling — 0 would
     /// mint a trivially-solvable challenge and values above the ceiling can
     /// never be solved by the widget.
@@ -2156,39 +2897,22 @@ pub enum SignError {
     InvalidRswParams,
 }
 
-// Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
-// HMAC outputs and IP hashes are the only consumers.
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            s.push_str(&format!("{b:02x}"));
-        }
-        s
+// Strict LOWERCASE-hex decode of signature and server-state MAC tags.
+// The emitters (`hex::encode`, PHP `hash_hmac`) always spell tags in
+// lowercase, and the PHP twin compares tag text case-sensitively
+// (`hash_equals` against the lowercase expected tag), so an uppercase
+// or mixed-case spelling is a different wire token. Accepting it would
+// (1) give one signature two verification-true encodings — challenge-
+// string malleability for anything keyed on the challenge bytes — and
+// (2) create a Rust/PHP parser differential (the Rust verifier would
+// accept a challenge the PHP verifier rejects). Fail closed on every
+// non-lowercase character; the `hex` 0.4 crate still supplies the
+// even-length / non-hex validation for the lowercase spelling.
+fn hex_decode_strict(s: &str) -> Option<Vec<u8>> {
+    if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
     }
-
-    /// Decode a hex string (lower- or upper-case) into bytes, or `None` if it
-    /// has an odd length or contains a non-hex character.
-    pub fn decode(s: &str) -> Option<Vec<u8>> {
-        if !s.len().is_multiple_of(2) {
-            return None;
-        }
-        let mut out = Vec::with_capacity(s.len() / 2);
-        let mut high = None;
-        for c in s.bytes() {
-            let nibble = match c {
-                b'0'..=b'9' => c - b'0',
-                b'a'..=b'f' => c - b'a' + 10,
-                b'A'..=b'F' => c - b'A' + 10,
-                _ => return None,
-            };
-            match high.take() {
-                Some(h) => out.push((h << 4) | nibble),
-                None => high = Some(nibble),
-            }
-        }
-        Some(out)
-    }
+    hex::decode(s).ok()
 }
 
 #[cfg(test)]
@@ -2205,12 +2929,13 @@ mod tests {
     #[test]
     fn issued_challenge_has_correct_difficulty() {
         let config = ChallengeConfig {
-            secret_key: "super-secret-key".into(),
+            secret_key: "super-secret-key-32-bytes-01234567".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             argon2_target_bits: 8,
@@ -2260,7 +2985,7 @@ mod tests {
 
     #[test]
     fn signatures_verify_round_trip() {
-        let key = "this-is-a-16-byte-key";
+        let key = "this-is-a-32-byte-key-0123456789a";
         let payload = ChallengePayload {
             nonce: "n".into(),
             scope: "login".into(),
@@ -2269,7 +2994,7 @@ mod tests {
         };
         let sig = sign_payload(&payload, key).unwrap();
         assert!(verify_signature(&payload, &sig, key).unwrap());
-        assert!(!verify_signature(&payload, &sig, "wrong-key-16-bytes").unwrap());
+        assert!(!verify_signature(&payload, &sig, "wrong-key-32-bytes-0123456789abc").unwrap());
         // Tampering with the nonce breaks the signature.
         let mut tampered = payload.clone();
         tampered.nonce = "x".into();
@@ -2284,8 +3009,13 @@ mod tests {
             ip_hash: hash_ip("9.9.9.9", "key"),
             issued_at: 123,
         };
-        for key in ["", "x", "0123456789abcde"] {
-            // 0, 1 and 15 bytes — all below the 16-byte minimum.
+        for key in [
+            "",
+            "x",
+            "0123456789abcde",
+            "0123456789abcdef0123456789abcde",
+        ] {
+            // 0, 1, 15 and 31 bytes — all below the 32-byte minimum.
             assert!(
                 matches!(sign_payload(&payload, key), Err(SignError::KeyTooShort)),
                 "key {key:?} must be rejected"
@@ -2298,12 +3028,85 @@ mod tests {
                 "key {key:?} must be rejected"
             );
         }
-        // Exactly 16 bytes is the minimum — accepted.
-        let key16 = "0123456789abcdef";
-        assert!(sign_payload(&payload, key16).is_ok());
+        // Exactly 32 bytes is the minimum — accepted.
+        let key32_min = "0123456789abcdef0123456789abcdef";
+        assert!(sign_payload(&payload, key32_min).is_ok());
         // 32 random bytes (recommended) — accepted.
         let key32 = "0123456789abcdef0123456789abcdef";
         assert!(sign_payload(&payload, key32).is_ok());
+    }
+
+    #[test]
+    fn secret_floor_is_32_bytes_at_every_signing_entry_point() {
+        // The PHP core enforces a 32-byte floor on the master/secret key
+        // (Config::__construct) and the execution key
+        // (ExecutionChallengeGenerator::validateKey); these entry points
+        // must agree exactly: 31 bytes rejected, 32 bytes accepted.
+        let short = "0123456789abcdef0123456789abcde";
+        let floor = "0123456789abcdef0123456789abcdef";
+        assert_eq!(short.len(), 31, "precondition: one byte below the floor");
+        assert_eq!(floor.len(), 32, "precondition: exactly at the floor");
+
+        let payload = ChallengePayload {
+            nonce: "n".into(),
+            scope: "login".into(),
+            ip_hash: hash_ip("9.9.9.9", floor),
+            issued_at: 123,
+        };
+
+        // v1 sign/verify.
+        assert!(matches!(
+            sign_payload(&payload, short),
+            Err(SignError::KeyTooShort)
+        ));
+        assert!(matches!(
+            verify_signature(&payload, "abc", short),
+            Err(SignError::KeyTooShort)
+        ));
+        let sig = sign_payload(&payload, floor).unwrap();
+        assert!(verify_signature(&payload, &sig, floor).unwrap());
+
+        // IP-binding tag.
+        assert!(matches!(
+            binding_tag("n", "1.2.3.4", short),
+            Err(SignError::KeyTooShort)
+        ));
+        assert!(binding_tag("n", "1.2.3.4", floor).is_ok());
+
+        // Issuance.
+        let mut config = profile_base_config();
+        config.secret_key = short.into();
+        assert!(matches!(
+            issue_challenge(
+                &config,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None
+            ),
+            Err(SignError::KeyTooShort)
+        ));
+        config.secret_key = floor.into();
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+
+        // v2 verification (the production record path).
+        assert!(matches!(
+            verify_signature_v2(&issued.record, "abc", short),
+            Err(SignError::KeyTooShort)
+        ));
+        let sig2 = crate::verify::signature_from_challenge(&issued.record);
+        assert!(verify_signature_v2(&issued.record, sig2, floor).unwrap());
     }
 
     #[test]
@@ -2315,11 +3118,13 @@ mod tests {
             issued_at: 123,
         };
         // A valid tag must verify…
-        let sig = sign_payload(&payload, "this-is-a-16-byte-key").unwrap();
-        assert!(verify_signature(&payload, &sig, "this-is-a-16-byte-key").unwrap());
+        let sig = sign_payload(&payload, "this-is-a-32-byte-key-0123456789a").unwrap();
+        assert!(verify_signature(&payload, &sig, "this-is-a-32-byte-key-0123456789a").unwrap());
         // …and an undecodable "signature" must be a mismatch, never an error.
-        assert!(!verify_signature(&payload, "not-hex!", "this-is-a-16-byte-key").unwrap());
-        assert!(!verify_signature(&payload, "abc", "this-is-a-16-byte-key").unwrap());
+        assert!(
+            !verify_signature(&payload, "not-hex!", "this-is-a-32-byte-key-0123456789a").unwrap()
+        );
+        assert!(!verify_signature(&payload, "abc", "this-is-a-32-byte-key-0123456789a").unwrap());
     }
 
     #[test]
@@ -2350,6 +3155,7 @@ mod tests {
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 0,
                 t: 1,
@@ -2387,15 +3193,22 @@ mod tests {
 
     #[test]
     fn hex_decode_round_trips() {
-        assert_eq!(hex::decode("").unwrap(), Vec::<u8>::new());
-        assert_eq!(hex::decode("00ff").unwrap(), vec![0x00, 0xff]);
-        assert_eq!(hex::decode("00FF").unwrap(), vec![0x00, 0xff]);
+        assert_eq!(hex_decode_strict(""), Some(Vec::<u8>::new()));
+        assert_eq!(hex_decode_strict("00ff"), Some(vec![0x00, 0xff]));
+        // Non-lowercase hex is non-canonical and must fail closed: the
+        // signing/MAC emitters only ever spell tags in lowercase and the
+        // PHP twin compares tag text case-sensitively, so a case variant
+        // is a second wire spelling of the same tag (malleability) and a
+        // Rust/PHP parser differential.
+        assert_eq!(hex_decode_strict("00FF"), None, "uppercase hex must fail");
+        assert_eq!(hex_decode_strict("00Ff"), None, "mixed-case hex must fail");
+        assert_eq!(hex_decode_strict("00fF"), None, "mixed-case hex must fail");
         assert_eq!(
-            hex::decode(&hex::encode(b"kiwi")).unwrap(),
-            b"kiwi".to_vec()
+            hex_decode_strict(&hex::encode(b"kiwi")),
+            Some(b"kiwi".to_vec())
         );
-        assert!(hex::decode("0").is_none(), "odd length must fail");
-        assert!(hex::decode("0g").is_none(), "non-hex char must fail");
+        assert!(hex_decode_strict("0").is_none(), "odd length must fail");
+        assert!(hex_decode_strict("0g").is_none(), "non-hex char must fail");
     }
 
     #[test]
@@ -2407,6 +3220,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2476,12 +3290,13 @@ mod tests {
     #[test]
     fn each_challenge_has_unique_nonce() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2525,12 +3340,13 @@ mod tests {
     #[test]
     fn auto_tune_adjusts_target_bits() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2564,7 +3380,7 @@ mod tests {
         let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25, None).unwrap();
         assert!(mid.challenge.target_bits >= 14 && mid.challenge.target_bits <= 16);
         // Peak load — clamped to the solver ceiling (not 24), because the
-        // browser solver's 5M-hash cap would fail ~74% of solves at 24 bits.
+        // browser solver's 20M-hash cap would fail ~30% of solves at 24 bits.
         let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 50, None).unwrap();
         assert_eq!(peak.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
     }
@@ -2574,12 +3390,13 @@ mod tests {
         // PHP rejects target_bits > 20 at construction; Rust must NOT clamp
         // a static configuration — issuance rejects it (parity).
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2613,17 +3430,35 @@ mod tests {
     }
 
     #[test]
+    fn auto_tune_with_a_zero_floor_never_issues_a_zero_bit_target() {
+        let mut config = profile_base_config();
+        config.auto_tune = true;
+        config.auto_tune_min_bits = 0;
+        config.auto_tune_max_bits = 24;
+        // The floor is clamped to 1: a zero-bit target is an
+        // already-solved challenge, and the PHP core's issuance
+        // validation rejects one outright, so the cores must agree.
+        assert_eq!(config.tuned_target_bits(0), 1);
+        assert_eq!(
+            config.tuned_target_bits(50),
+            crate::challenge::SOLVER_MAX_TARGET_BITS,
+            "the ceiling still clamps the interpolated value"
+        );
+    }
+
+    #[test]
     fn auto_tune_disabled_ignores_tuning_bounds() {
         // With auto_tune off, the tuning bounds must have NO effect: only the
         // solver ceiling caps target_bits. A target_bits below the tuning min
         // stays as-is — it is never raised to the tuning bound.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2655,12 +3490,13 @@ mod tests {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let issued = issue_challenge(
             &ChallengeConfig {
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
                 argon2_target_bits: 8,
@@ -2706,12 +3542,13 @@ mod tests {
         // the least-recently-used entry after the prune, so 256 is a real maximum.
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2753,12 +3590,13 @@ mod tests {
     fn challenge_cache_put_prunes_expired_entries() {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2807,12 +3645,13 @@ mod tests {
     #[test]
     fn challenge_cache_hit_returns_same_challenge() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2850,12 +3689,13 @@ mod tests {
     #[test]
     fn challenge_cache_miss_on_different_scope() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2890,12 +3730,13 @@ mod tests {
 
     fn profile_base_config() -> ChallengeConfig {
         ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2919,12 +3760,13 @@ mod tests {
     /// lambda with the smallest allowed sequential cost (fast solves).
     fn rsw_config(t: u32) -> ChallengeConfig {
         ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
             rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
             rsw_t: t,
+            tenant: None,
             algorithm: PoWAlgorithm::Rsw,
             m_kib: 0,
             t: 1,
@@ -2947,7 +3789,47 @@ mod tests {
 
     #[test]
     fn rsw_issuance_carries_the_canonical_parameter_mapping() {
-        let issued = issue_challenge(
+        // The capability-free default emits the legacy identityless shape:
+        // a direct core caller in a rolling-upgrade-capable deployment
+        // must confirm the ceiling before v5 records exist on the wire.
+        let identityless = issue_challenge(
+            &rsw_config(MIN_RSW_T),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(identityless.record.protocol_version, 2);
+        assert_eq!(identityless.record.rsw_modulus_sha256, None);
+        // A confirmed ceiling below the feature version stays legacy; the
+        // exact feature version (and above) arms the identity.
+        for ceiling in [2u8, 4] {
+            let issued = issue_challenge_with_capabilities(
+                crate::challenge::EmissionCapabilities::confirmed(ceiling)
+                    .expect("the confirmed ceiling is at least the base protocol"),
+                &rsw_config(MIN_RSW_T),
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                issued.record.protocol_version, 2,
+                "ceiling {ceiling} stays legacy"
+            );
+            assert_eq!(issued.record.rsw_modulus_sha256, None);
+        }
+        let issued = issue_challenge_with_capabilities(
+            crate::challenge::EmissionCapabilities::confirmed(
+                crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &rsw_config(MIN_RSW_T),
             "login",
             "1.2.3.4",
@@ -2972,8 +3854,15 @@ mod tests {
             "the modulus rides the client-facing response"
         );
         assert_eq!(
-            issued.record.protocol_version, 2,
-            "rsw issuance stays protocol v2"
+            issued.record.protocol_version, 5,
+            "identity-armed rsw issuance is protocol v5"
+        );
+        assert_eq!(
+            issued.record.rsw_modulus_sha256.as_deref(),
+            crate::rsw::modulus_fingerprint_hex(crate::rsw::fixtures::MODULUS_N_B64)
+                .ok()
+                .as_deref(),
+            "the record carries the canonical-byte modulus identity"
         );
         assert_eq!(
             issued.record.decoy_field, None,
@@ -3232,8 +4121,8 @@ mod tests {
         // the armed name (a grammar prefix plus the 16-hex suffix, at
         // most 47 bytes), the record is issued as protocol v3 (the
         // decoy-capable canonical), the canonical input ends with the
-        // `|<name>` segment, and the signature verifies over that exact
-        // extended input.
+        // tagged `|d=<name>` segment, and the signature verifies over
+        // that exact extended input.
         let issued = issue_challenge_with_decoy(
             &profile_base_config(),
             "login",
@@ -3268,17 +4157,19 @@ mod tests {
 
         let canonical = canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with(&format!("|{decoy}")),
-            "the decoy name must be the FINAL canonical segment: {canonical}"
+            canonical.ends_with(&format!("|d={decoy}|m=1")),
+            "the decoy name is the final tagged extension before the m= marker: {canonical}"
         );
         assert_eq!(
             canonical.split('|').count(),
-            19,
-            "v3 canonical input: the 18-field v2 base + the decoy segment"
+            21,
+            "revision-4 v3 canonical: the 19-field base + the tagged decoy and m= segments"
         );
         // The signature covers the extended input (verifies as issued).
         let sig = crate::verify::signature_from_challenge(&issued.record);
-        assert!(verify_signature_v2(&issued.record, sig, "test-key-16-bytes!").unwrap());
+        assert!(
+            verify_signature_v2(&issued.record, sig, "test-key-32-bytes-0123456789abcd").unwrap()
+        );
         // The client-decodable challenge string carries it too (the
         // canonical payload IS the pre-image of the challenge base64).
         let (payload, _sig) = issued
@@ -3287,7 +4178,7 @@ mod tests {
             .rsplit_once('.')
             .expect("challenge is base64.signature");
         let decoded = B64.decode(payload).expect("challenge payload decodes");
-        assert!(String::from_utf8_lossy(&decoded).ends_with(&decoy));
+        assert!(String::from_utf8_lossy(&decoded).ends_with(&format!("|d={decoy}|m=1")));
 
         // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
@@ -3313,6 +4204,97 @@ mod tests {
         assert!(
             seen.len() >= 2,
             "per-issuance decoy picks must vary across challenges"
+        );
+    }
+
+    #[test]
+    fn canonical_revision3_is_injective_across_capability_shapes() {
+        // The revision-2 encoding signed `v2|...` for every
+        // protocol version and appended the decoy, execution pair and
+        // rsw identity as bare positional segments, so a v5 rsw record
+        // with identity H and no decoy signed the same bytes as a v3
+        // record with decoy H, and a v4 execution pair (V, C) signed the
+        // bytes of a v5 record with decoy V and identity C. Revision 3
+        // signs protocol_version and tags every extension; this test
+        // pins the attack shapes apart.
+        let plain = issue_challenge(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap()
+        .record;
+        let decoy_name = "billing_address_line_a3f9c21d8e5b7401";
+
+        // Attack 1: v3 decoy H vs v5 rsw identity H.
+        let mut v3_decoy = plain.clone();
+        v3_decoy.protocol_version = 3;
+        v3_decoy.decoy_field = Some(decoy_name.to_string());
+        let mut v5_identity = plain.clone();
+        v5_identity.protocol_version = 5;
+        v5_identity.rsw_modulus_sha256 = Some(decoy_name.to_string());
+        assert_ne!(
+            canonical_signing_input_v2(&v3_decoy),
+            canonical_signing_input_v2(&v5_identity),
+            "a decoy name must never collide with an rsw identity"
+        );
+
+        // Attack 2: v4 execution pair (V, C) vs v5 decoy V + identity C.
+        let mut v4_execution = plain.clone();
+        v4_execution.protocol_version = 4;
+        v4_execution.execution_version = Some(1);
+        v4_execution.execution_commitment = Some("a".repeat(64));
+        let mut v5_decoy_identity = plain.clone();
+        v5_decoy_identity.protocol_version = 5;
+        v5_decoy_identity.decoy_field = Some("1".to_string());
+        v5_decoy_identity.rsw_modulus_sha256 = Some("a".repeat(64));
+        assert_ne!(
+            canonical_signing_input_v2(&v4_execution),
+            canonical_signing_input_v2(&v5_decoy_identity),
+            "an execution pair must never collide with decoy+identity"
+        );
+
+        // Attack 3: a stored protocol-version flip changes the signed
+        // bytes, so a legitimate v5 signature cannot be replayed as v3.
+        let mut flipped = v5_identity.clone();
+        flipped.protocol_version = 3;
+        flipped.rsw_modulus_sha256 = None;
+        flipped.decoy_field = Some(decoy_name.to_string());
+        assert_ne!(
+            canonical_signing_input_v2(&v5_identity),
+            canonical_signing_input_v2(&flipped),
+            "a version flip must change the signed canonical"
+        );
+
+        // And the signature gate refuses the flipped record outright.
+        let issued = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_001,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        let signature = crate::verify::signature_from_challenge(&issued.record);
+        assert!(verify_signature_v2(
+            &issued.record,
+            signature,
+            "test-key-32-bytes-0123456789abcd"
+        )
+        .unwrap());
+        let mut tampered = issued.record.clone();
+        tampered.protocol_version = 2;
+        tampered.decoy_field = None;
+        assert!(
+            !verify_signature_v2(&tampered, signature, "test-key-32-bytes-0123456789abcd").unwrap(),
+            "dropping the decoy and flipping the version must invalidate the signature"
         );
     }
 
@@ -3548,11 +4530,24 @@ mod tests {
     }
 
     #[test]
-    fn decoy_field_disabled_keeps_the_old_wire_and_canonical_format() {
+    fn max_protocol_version_is_pinned_to_the_shared_fleet_contract() {
+        // One value every reader advertises: the doctor command, the
+        // extension readiness probe (KiwiHealthController) and the PHP core
+        // (ChallengeRecord) must never disagree, or issuance outruns
+        // verification somewhere in the fleet. A move here moves all of
+        // them in the same change.
+        assert_eq!(
+            MAX_PROTOCOL_VERSION, 5,
+            "MAX_PROTOCOL_VERSION must stay 5: the doctor, the readiness probe and the PHP core pin the same shared contract"
+        );
+    }
+
+    #[test]
+    fn decoy_field_disabled_keeps_the_plain_canonical_shape() {
         // The plain path (and the explicit false arm) issues NO decoy and
-        // stays protocol v2: the canonical string keeps the exact
-        // pre-extension shape (18 fields, kid last — byte-identical), and
-        // neither JSON surface carries the key.
+        // stays protocol v2: the canonical keeps the revision-4 base
+        // shape (19 fields plus the m= marker, protocol_version signed as
+        // the second segment) and neither JSON surface carries the key.
         for issued in [
             issue_challenge(
                 &profile_base_config(),
@@ -3580,17 +4575,21 @@ mod tests {
             assert!(issued.record.decoy_field.is_none());
             assert_eq!(
                 issued.record.protocol_version, 2,
-                "an unarmed issuance stays protocol v2, byte-identical to the pre-decoy format"
+                "an unarmed issuance stays protocol v2 with no extension segment"
             );
             let canonical = canonical_signing_input_v2(&issued.record);
             assert_eq!(
                 canonical.split('|').count(),
-                18,
-                "the base v2 canonical input stays 18 fields (no decoy segment)"
+                20,
+                "the revision-4 base canonical has 19 fields plus the m= marker (canonical tag + protocol_version + 17 record fields)"
             );
             assert!(
-                canonical.ends_with(&issued.record.kid.to_string()),
-                "kid stays the final field when no decoy is armed"
+                canonical.starts_with("v4|2|"),
+                "the canonical revision and the signed protocol version lead the base"
+            );
+            assert!(
+                canonical.ends_with(&format!("{}|m=1", issued.record.kid)),
+                "kid stays the final base field before the m= marker"
             );
             let record_json = serde_json::to_value(&issued.record).unwrap();
             assert!(
@@ -3664,7 +4663,7 @@ mod tests {
         )
         .unwrap();
         let sig = crate::verify::signature_from_challenge(&armed.record);
-        let secret = "test-key-16-bytes!";
+        let secret = "test-key-32-bytes-0123456789abcd";
         assert!(verify_signature_v2(&armed.record, sig, secret).unwrap());
 
         // Renamed to a different grammar name (same shape, different pick).
@@ -3749,7 +4748,8 @@ mod tests {
         let counter = crate::verify::solve_for_test(&record).unwrap();
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3765,6 +4765,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3772,6 +4773,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(
@@ -3847,7 +4849,8 @@ mod tests {
             };
             let mut ctx = crate::verify::VerifyContext {
                 record: &mut record,
-                secret_key: "test-key-16-bytes!",
+                secret_key: "test-key-32-bytes-0123456789abcd",
+                tenant: None,
                 secrets_by_kid: None,
                 revoked_kids: None,
                 counter,
@@ -3863,6 +4866,7 @@ mod tests {
                 expected_region: None,
                 expected_issuer: None,
                 expected_policy_version: None,
+                policy_version_floor: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,
@@ -3870,6 +4874,7 @@ mod tests {
                 rsw_proof: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
+                rsw_keyring: None,
             };
             assert!(
                 matches!(
@@ -3905,7 +4910,8 @@ mod tests {
         let counter = crate::verify::solve_for_test(&record).expect("argon solve finds a counter");
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3921,6 +4927,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3928,6 +4935,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             crate::verify::verify_solution(&mut ctx),
@@ -4017,12 +5025,12 @@ mod tests {
         // always ends with `|<kid>`.
         let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with("|auth-gw-eu|1"),
+            canonical.ends_with("|auth-gw-eu|1|m=1"),
             "canonical: {canonical}"
         );
         let unbound_canonical = crate::challenge::canonical_signing_input_v2(&unbound.record);
         assert!(
-            unbound_canonical.ends_with("||1"),
+            unbound_canonical.ends_with("||1|m=1"),
             "unbound issuer renders as the empty segment before the final kid: {unbound_canonical}"
         );
         // The record's signature covers the issuer: tampering with it breaks
@@ -4036,10 +5044,12 @@ mod tests {
             .rsplit_once('.')
             .map(|(_, sig)| sig)
             .unwrap();
-        assert!(
-            !crate::challenge::verify_signature_v2(&tampered, signature, "test-key-16-bytes!")
-                .unwrap()
-        );
+        assert!(!crate::challenge::verify_signature_v2(
+            &tampered,
+            signature,
+            "test-key-32-bytes-0123456789abcd"
+        )
+        .unwrap());
     }
 
     #[test]
@@ -4240,8 +5250,9 @@ mod tests {
     #[test]
     fn issuance_stamps_and_signs_the_kid() {
         // config.kid is stamped on the record and signed as the
-        // final canonical field — the record JSON carries it and
-        // the signed challenge string embeds it byte-exactly.
+        // final base canonical field before the m= marker — the record
+        // JSON carries it and the signed challenge string embeds it
+        // byte-exactly.
         let base = profile_base_config();
         let with_kid = ChallengeConfig {
             kid: 5,
@@ -4261,8 +5272,8 @@ mod tests {
         assert_eq!(issued.record.kid, 5);
         let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with("|5"),
-            "the kid must be the FINAL canonical field: {canonical}"
+            canonical.ends_with("|5|m=1"),
+            "the kid must be the final base field before the m= marker: {canonical}"
         );
         // The challenge's base64 half is byte-exactly the canonical.
         let b64 = issued.record.challenge.split('.').next().unwrap();
@@ -4495,5 +5506,137 @@ mod tests {
         assert!(debug.contains("execution_key: None"));
         assert!(debug.contains("rsw_lambda: None"));
         assert!(debug.contains("rsw_modulus_n: None"));
+        assert!(debug.contains("tenant: None"));
+    }
+
+    // ── tenant-scoped key derivation ──────────────────────────────────
+
+    /// The cross-language tenant vector inputs: tenant id `t1` under the
+    /// shared reference master (the tenant-root construction pinned by
+    /// the keys suite — both language cores derive the same root).
+    const TENANT_MASTER: &str = "0123456789abcdef0123456789abcdef";
+    const TENANT_IP: &str = "198.51.100.7";
+
+    fn tenant_config(tenant: Option<&str>) -> ChallengeConfig {
+        let mut config = sha_issue_config();
+        config.secret_key = TENANT_MASTER.into();
+        config.tenant = tenant.map(str::to_string);
+        config
+    }
+
+    fn sha_issue_config() -> ChallengeConfig {
+        ChallengeConfig {
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
+            kid: 1,
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
+        }
+    }
+
+    fn embedded_signature(record: &ChallengeRecord) -> &str {
+        record
+            .challenge
+            .rsplit_once('.')
+            .map(|(_, sig)| sig)
+            .unwrap()
+    }
+
+    #[test]
+    fn tenant_issuance_signs_and_binds_under_the_tenant_root() {
+        // The t1-issued record verifies only under tenant t1: the v2
+        // signature and the nonce-bound binding tag both derive under
+        // the per-tenant root, so t2 and the global keys fail.
+        let issued = issue_challenge(
+            &tenant_config(Some("t1")),
+            "login",
+            TENANT_IP,
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        let sig = embedded_signature(&issued.record);
+        assert!(
+            verify_signature_v2_with_tenant(&issued.record, sig, TENANT_MASTER, Some("t1"))
+                .unwrap(),
+            "the t1 record verifies under the t1 root"
+        );
+        assert!(
+            !verify_signature_v2_with_tenant(&issued.record, sig, TENANT_MASTER, Some("t2"))
+                .unwrap(),
+            "a different tenant root never verifies the t1 record"
+        );
+        assert!(
+            !verify_signature_v2(&issued.record, sig, TENANT_MASTER).unwrap(),
+            "the global keys never verify the t1 record"
+        );
+        // The binding tag is the t1-derived tag, byte-exact.
+        assert_eq!(
+            issued.record.binding_tag,
+            binding_tag_for_tenant(&issued.record.nonce, TENANT_IP, TENANT_MASTER, Some("t1"))
+                .unwrap()
+        );
+        assert_ne!(
+            issued.record.binding_tag,
+            binding_tag(&issued.record.nonce, TENANT_IP, TENANT_MASTER).unwrap(),
+            "the global binding key produces a different tag"
+        );
+        // None keeps the byte-identical tenant-free issuance.
+        let unscoped = issue_challenge(
+            &tenant_config(None),
+            "login",
+            TENANT_IP,
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(verify_signature_v2(
+            &unscoped.record,
+            embedded_signature(&unscoped.record),
+            TENANT_MASTER
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn tenant_issuance_rejects_a_malformed_tenant_id() {
+        for bad in ["", "has space", "uni\u{e9}id", &"x".repeat(65)] {
+            assert!(
+                matches!(
+                    issue_challenge(
+                        &tenant_config(Some(bad)),
+                        "login",
+                        TENANT_IP,
+                        1_000_000,
+                        1_700_000_000_000_000,
+                        0,
+                        None,
+                    ),
+                    Err(SignError::InvalidIdentifier)
+                ),
+                "tenant {bad:?} must be refused at issuance"
+            );
+        }
     }
 }

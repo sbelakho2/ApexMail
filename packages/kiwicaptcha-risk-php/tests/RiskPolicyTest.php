@@ -8,6 +8,7 @@ use KiwiCaptcha\Risk\ResourcePressure;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
+use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
 use PHPUnit\Framework\TestCase;
 
@@ -53,7 +54,9 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(100, $policy->baseRisk(999));
         self::assertSame(RiskAction::Allow, $policy->minimum(1));
         self::assertSame(RiskAction::Sha16, $policy->minimum(2));
-        self::assertSame(RiskAction::Allow, $policy->minimum(999));
+        // Unconfigured scopes use the conservative default_scope row
+        // (sha20 minimum / sha20 degraded), never Allow.
+        self::assertSame(RiskAction::Sha20, $policy->minimum(999));
     }
 
     private function sortRecursive(array &$value): void
@@ -131,8 +134,37 @@ final class RiskPolicyTest extends TestCase
     public function testSourceFastHardOverride(): void
     {
         $policy = RiskPolicy::fromConfig($this->config());
+        // Velocity alone must not hard-deny a shared address: the reason
+        // is recorded and the action is floored at the strongest
+        // non-interactive band.
         $d = $policy->decide(1, 0, SignalVector::fromArray(['source_fast' => 950]), $this->healthy(), 0, 1_700_000_000_000);
+        self::assertSame(RiskAction::Argon32, $d->action);
+        self::assertTrue($d->hasReason(RiskReason::HardRateLimit));
+
+        // Corroboration (another hard signal at its floor) restores the
+        // hard deny.
+        $d = $policy->decide(
+            1,
+            0,
+            SignalVector::fromArray(['source_fast' => 950, 'bad_proof' => 300]),
+            $this->healthy(),
+            0,
+            1_700_000_000_000
+        );
         self::assertSame(RiskAction::Deny, $d->action);
+        self::assertTrue($d->hasReason(RiskReason::HardRateLimit));
+
+        // A saturated backend re-escalates the velocity floor to the
+        // interactive step-up flow instead of weakening it.
+        $d = $policy->decide(
+            1,
+            0,
+            SignalVector::fromArray(['source_fast' => 950]),
+            new ResourcePressure(0, 1000),
+            0,
+            1_700_000_000_000
+        );
+        self::assertSame(RiskAction::StepUp, $d->action);
         self::assertTrue($d->hasReason(RiskReason::HardRateLimit));
 
         $d = $policy->decide(1, 0, SignalVector::fromArray(['source_fast' => 949]), $this->healthy(), 0, 1_700_000_000_000);
@@ -207,6 +239,36 @@ final class RiskPolicyTest extends TestCase
         RiskPolicy::fromConfig($config);
     }
 
+    public function testGlobalFloorsStrictFailClosedValidation(): void
+    {
+        // Missing global_floors entirely rejects the config (no silent
+        // defaults — Rust parity).
+        $config = $this->config();
+        unset($config['global_floors']);
+        try {
+            RiskPolicy::fromConfig($config);
+            self::fail('a missing global_floors must be rejected');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('global_floors', $e->getMessage());
+        }
+
+        // Short floors (4 entries) reject the config.
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20'];
+        try {
+            RiskPolicy::fromConfig($config);
+            self::fail('a short global_floors must be rejected');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('5 entries', $e->getMessage());
+        }
+
+        // A non-array global_floors rejects the config.
+        $config = $this->config();
+        $config['global_floors'] = 'sha20';
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
     public function testGlobalFloorsValidation(): void
     {
         // Level 0 must be Allow.
@@ -229,76 +291,68 @@ final class RiskPolicyTest extends TestCase
         self::assertCount(5, $policy->globalFloors);
     }
 
-    public function testGlobalFloorKeysAreCanonical(): void
+    public function testSharedReasonVectorsMatchTheCrossLanguageContract(): void
     {
-        // The level keys are exactly the five canonical spellings 0..4,
-        // each declared exactly once. A non-canonical spelling ('01',
-        // '+1', '04') must never be parsed onto a logical level, and a
-        // five-member set that repeats one logical level leaves another
-        // level absent: both are configuration errors here exactly like
-        // the Rust parser's literal-level grammar.
-        foreach ([
-            [0 => 'allow', 1 => 'sha16', '01' => 'deny', 2 => 'sha18', 3 => 'sha20'],
-            [0 => 'allow', 1 => 'sha16', '+1' => 'deny', 2 => 'sha18', 3 => 'sha20'],
-            [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', '04' => 'sha20'],
-        ] as $floors) {
-            $config = $this->config();
-            $config['global_floors'] = $floors;
-            try {
-                RiskPolicy::fromConfig($config);
-                self::fail(sprintf('the malformed global_floors %s must be rejected', json_encode($floors)));
-            } catch (\InvalidArgumentException $e) {
-                self::assertThat(
-                    $e->getMessage(),
-                    self::logicalOr(
-                        self::stringContains('global_floors'),
-                        self::stringContains('Global floor level'),
-                    ),
-                );
+        // The shared reason vectors: identical inputs must surface the
+        // identical ordered reason list in PHP and Rust, including the
+        // contributor ordering and the stable tie order.
+        $path = \dirname(__DIR__).'/../../protocol/risk-v1/fixtures.json';
+        $fixtures = json_decode((string) file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
+        $vectors = $fixtures['reason_vectors'] ?? null;
+        self::assertIsArray($vectors);
+        self::assertNotEmpty($vectors);
+
+        foreach ($vectors as $vector) {
+            $policy = RiskPolicy::fromConfig([
+                'version' => 3,
+                'weights' => RiskWeights::fromArray($vector['weights'])->toArray(),
+                'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+                'global_floors' => [0 => 'allow', 1 => 'allow', 2 => 'allow', 3 => 'allow', 4 => 'allow'],
+            ]);
+            $decision = $policy->decide(
+                1,
+                (int) $vector['score'],
+                SignalVector::fromArray($vector['signals']),
+                new ResourcePressure(
+                    argonCapacity: (int) $vector['argon_capacity'],
+                    issuanceCapacity: (int) $vector['issuance_capacity'],
+                ),
+                (int) $vector['global_level'],
+                1_700_000_000_000,
+            );
+            self::assertSame(
+                $vector['expected_reasons'],
+                array_map(static fn (RiskReason $reason): string => $reason->value, $decision->reasons),
+                $vector['why'],
+            );
+            if (isset($vector['expected_action'])) {
+                self::assertSame($vector['expected_action'], $decision->action->value, $vector['why']);
             }
         }
     }
 
-    public function testGlobalFloorsRequireEveryCanonicalLevelExactlyOnce(): void
+    public function testGlobalFloorActionsMustBeStrings(): void
     {
-        // The total global_floors grammar, the exact acceptance set of the
-        // Rust reference parser: the five canonical levels 0..4, each
-        // declared exactly once. A missing set, a partial set, a missing
-        // middle level and a duplicate logical level are all refused —
-        // the parser NEVER substitutes a built-in default for an
-        // operator-omitted level (which would silently swap an intended
-        // floor for another action) and PHP never accepts a policy config
-        // the Rust engine refuses to load.
-        foreach ([
-            null,                                                          // missing entirely
-            [1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],      // no level 0
-            [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20'],      // no level 4
-            [0 => 'allow', 1 => 'sha16', 2 => 'sha18'],                    // partial
-            [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', '01' => 'sha20'], // dup logical level, non-canonical spelling
-        ] as $floors) {
+        // The shared malformed value vectors: an integer, boolean, array
+        // or object action is rejected here exactly like the Rust
+        // parser's JSON-string requirement.
+        $path = \dirname(__DIR__).'/../../protocol/risk-v1/fixtures.json';
+        self::assertFileExists($path);
+        $fixtures = json_decode((string) file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
+        $vectors = $fixtures['malformed_policy_vectors']['malformed_global_floor_values'] ?? null;
+        self::assertIsArray($vectors);
+        self::assertNotEmpty($vectors);
+
+        foreach ($vectors as $vector) {
             $config = $this->config();
-            if ($floors === null) {
-                unset($config['global_floors']);
-            } else {
-                $config['global_floors'] = $floors;
-            }
+            $config['global_floors'][(int) $vector['level']] = $vector['value'];
             try {
                 RiskPolicy::fromConfig($config);
-                self::fail(sprintf('the non-total global_floors %s must be refused', json_encode($floors)));
+                self::fail(sprintf('the malformed global floor action at level %s must be rejected (%s)', $vector['level'], $vector['why']));
             } catch (\InvalidArgumentException $e) {
-                self::assertThat(
-                    $e->getMessage(),
-                    self::logicalOr(
-                        self::stringContains('global_floors'),
-                        self::stringContains('Global floor level'),
-                        self::stringContains('Global floor actions'),
-                    ),
-                );
+                self::assertStringContainsString('must be a string', $e->getMessage());
             }
         }
-
-        $policy = RiskPolicy::fromConfig($this->config());
-        self::assertCount(5, $policy->globalFloors, 'the canonical five-level set parses');
     }
 
     public function testGlobalFloorAppliedInDegradedMode(): void
@@ -419,9 +473,9 @@ final class RiskPolicyTest extends TestCase
         $d = $policy->degradedDecision(2);
         self::assertSame(RiskAction::Sha20, $d->action);
 
-        // unknown scope degrades to allow
+        // unknown scope degrades to the conservative default_scope row
         $d = $policy->degradedDecision(999);
-        self::assertSame(RiskAction::Allow, $d->action);
+        self::assertSame(RiskAction::Sha20, $d->action);
     }
 
     public function testDegradedGlobalLevelPassthrough(): void
@@ -474,5 +528,76 @@ final class RiskPolicyTest extends TestCase
         }
         self::assertSame(RiskAction::Deny->rank(), $maxRank, 'the ladder top must actually be reachable');
         self::assertSame(RiskAction::Deny, RiskAction::actionForScore(1000), 'the cap action is Deny at the top score');
+    }
+
+    public function testSharedMalformedPolicyVectorsAreRejected(): void
+    {
+        $vectors = json_decode((string) file_get_contents(__DIR__ . '/../../../protocol/risk-v1/fixtures.json'), true, 8, JSON_THROW_ON_ERROR)['malformed_policy_vectors'] ?? null;
+        self::assertIsArray($vectors, 'the shared malformed-policy vectors must load');
+
+        $base = [
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']],
+        ];
+        foreach ($vectors['malformed_policy_scopes'] as $vector) {
+            $config = $base;
+            $config['scopes'] = [$vector['key'] => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed scope key %s must be rejected', var_export($vector['key'], true)));
+            } catch (\InvalidArgumentException $e) {
+                // A canonical-but-out-of-range integer key fails the
+                // range message; every non-canonical spelling fails
+                // the canonical-integer message.
+                self::assertThat(
+                    $e->getMessage(),
+                    self::logicalOr(
+                        self::stringContains('canonical integer u32'),
+                        self::stringContains('must be within 1..4294967295')
+                    ),
+                    $vector['key']
+                );
+            }
+        }
+        foreach ($vectors['malformed_policy_flags'] as $vector) {
+            $config = $base;
+            $config['scopes'] = [1 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => $vector['value'], 'degraded' => 'sha20']];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed flag %s must be rejected', var_export($vector['value'], true)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('literal boolean', $e->getMessage());
+            }
+        }
+        // The shared malformed global-floor sets: the level keys are
+        // exactly the five canonical spellings 0..4, each declared
+        // exactly once. PHP's array key rules already reject non-integer
+        // spellings, and the Rust parser must reject the identical
+        // vectors through its literal level grammar — one shared asset,
+        // one acceptance set.
+        foreach ($vectors['malformed_global_floor_sets'] as $vector) {
+            $config = $base;
+            $config['global_floors'] = $vector['floors'];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed global_floors %s must be rejected (%s)', json_encode($vector['floors']), $vector['why']));
+            } catch (\InvalidArgumentException $e) {
+                // Every malformed set fails one of the canonical-level
+                // rules: a non-canonical spelling fails the integer-key
+                // message, a missing level fails the exact-count
+                // message, and an out-of-range level fails the range
+                // message.
+                self::assertThat(
+                    $e->getMessage(),
+                    self::logicalOr(
+                        self::stringContains('global_floors'),
+                        self::stringContains('Global floor level'),
+                    ),
+                    $vector['why'],
+                );
+            }
+        }
     }
 }

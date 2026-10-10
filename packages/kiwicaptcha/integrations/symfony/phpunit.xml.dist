@@ -4,6 +4,13 @@
          bootstrap="vendor/autoload.php"
          colors="true"
          failOnWarning="true">
+    <php>
+        <!-- The suite boots many real compiled kernels (one per wiring
+             variant), so the peak sits well above the CLI default; the
+             explicit headroom keeps a green suite from tipping over the
+             memory cliff on a new kernel-compiling test. -->
+        <ini name="memory_limit" value="512M"/>
+    </php>
     <testsuites>
         <testsuite name="kiwicaptcha-symfony">
             <directory>tests</directory>

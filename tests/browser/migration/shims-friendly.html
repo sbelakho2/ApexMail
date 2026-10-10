@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Friendly Captcha shims fixture</title>
+  <script src="/kiwi-captcha/api.js" defer></script>
+  <script src="/kiwi-captcha/widget-shims.js" defer></script>
+</head>
+<body>
+  <form id="signup" action="/submit" method="post">
+    <label>Name <input name="name"></label>
+    <div class="frc-captcha" data-sitekey="FCMSHIM0000000000" data-start="auto" data-kiwi-scope="login"></div>
+    <button type="submit">Submit</button>
+  </form>
+  <p id="out"></p>
+</body>
+</html>

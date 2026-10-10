@@ -1,0 +1,19 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/contacts.rs b/services/mail-server/crates/api-server/src/routes/contacts.rs
+index c8256053..5ec1e7bf 100644
+--- a/services/mail-server/crates/api-server/src/routes/contacts.rs
++++ b/services/mail-server/crates/api-server/src/routes/contacts.rs
+@@ -824,12 +824,12 @@ async fn fetch_contact(
+     tenant_id: &str,
+     id: Uuid,
+ ) -> Result<ContactRow, ApiError> {
++    let _ = tenant_id; // MUTANT M01: tenant scoping dropped
+     sqlx::query_as::<_, ContactRow>(
+         "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
+-         FROM contacts WHERE id = $1 AND tenant_id = $2",
++         FROM contacts WHERE id = $1",
+     )
+     .bind(id)
+-    .bind(tenant_id)
+     .fetch_optional(&state.db)
+     .await?
+     .ok_or_else(|| ApiError::NotFound("contact not found".into()))

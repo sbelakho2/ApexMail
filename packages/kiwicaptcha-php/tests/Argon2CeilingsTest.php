@@ -38,6 +38,7 @@ final class Argon2CeilingsTest extends TestCase
         $salt = base64_encode(random_bytes(16));
         $bindingTag = Issuer::bindingTag($nonce, '198.51.100.7', Vectors::SECRET);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             'login',
             $bindingTag,

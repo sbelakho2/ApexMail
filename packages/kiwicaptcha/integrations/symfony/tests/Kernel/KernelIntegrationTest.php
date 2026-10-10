@@ -110,7 +110,9 @@ final class KernelIntegrationTest extends TestCase
         self::assertSame(1, substr_count($html, ' nonce="n-csp-abc123"'), 'the nonce rides the files-mode driver script tag exactly once');
         self::assertStringContainsString('data-kiwi-endpoint="/kiwi-captcha/challenge"', $html);
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
-        self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'default strict privacy mode renders telemetry off');
+        self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html, 'the profile-less default posture arms the minimal evidence telemetry');
+        self::assertStringContainsString('data-kiwi-telemetry-src="/kiwi-captcha/assets/telemetry.', $html, 'the files tier carries the versioned telemetry asset URL');
+        self::assertStringContainsString('data-kiwi-telemetry-integrity="sha256-', $html, 'the telemetry asset URL carries its SRI digest');
         self::assertStringContainsString('name="captcha"', $html);
         self::assertStringContainsString('data-kiwi-token', $html);
         // The runtime and the worker stay lazy: no inline blocks, no
@@ -193,7 +195,7 @@ final class KernelIntegrationTest extends TestCase
         $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
         // The driver script always mentions the attribute; the container
         // must not carry it when no binding is configured.
-        self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'the container must carry the default telemetry mode');
+        self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html, 'the container must carry the default evidence telemetry mode');
         self::assertStringNotContainsString('data-kiwi-request-binding=', $html, 'without the option the widget container must not render data-kiwi-request-binding');
     }
 

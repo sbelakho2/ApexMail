@@ -78,8 +78,11 @@ final class PrivacyScanTest extends TestCase
         $subnetIdPrev = $factory->subnetIdForEpoch($ctx, $netEpoch - 1);
         $subnetIdNext = $factory->subnetIdForEpoch($ctx, $netEpoch + 1);
         $principalId = $factory->principalId(self::PRINCIPAL);
-        $sessionUa = $factory->sessionId(self::UA);
-        $sessionEmail = $factory->sessionId(self::EMAIL);
+        // The session pseudonym binds the decoded 16 bytes; the raw UA and
+        // email never become session material, so hashing them into the
+        // cookie representation keeps the privacy scan meaningful.
+        $sessionUa = $factory->sessionId(substr(hash('sha256', self::UA), 0, 32));
+        $sessionEmail = $factory->sessionId(substr(hash('sha256', self::EMAIL), 0, 32));
 
         $observations = [
             new RiskObservation(event: RiskEventKind::PreIssue, scope: 1, sourceEpoch: $srcEpoch, sourceIdPrev: $sourceIdPrev, sourceId: $sourceId, sourceIdNext: $sourceIdNext, subnetEpoch: $netEpoch, subnetIdPrev: $subnetIdPrev, subnetId: $subnetId, subnetIdNext: $subnetIdNext, sessionId: $sessionUa, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
@@ -96,7 +99,7 @@ final class PrivacyScanTest extends TestCase
         // scan below covers it too. Write the two entry shapes the
         // controller now produces: a pseudonym entry (the remoteip and the
         // request binding stored only as purpose-separated keyed HMACs —
-        // the audit's privacy fix) and a deliberately leaky control entry
+        // the privacy redaction) and a deliberately leaky control entry
         // carrying the raw address and raw binding, to prove the scan
         // actually covers the idempotency namespace and would catch a
         // regression.

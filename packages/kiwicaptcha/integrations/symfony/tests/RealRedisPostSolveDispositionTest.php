@@ -17,6 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
@@ -118,6 +119,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
             'stage2Nonce' => $stage2Nonce,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ], JSON_THROW_ON_ERROR), 'EX', 300);
     }
 
@@ -217,8 +220,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -311,8 +314,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -574,7 +577,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
         self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null)[0]);
 
-        // The audit's exact shape: an unexpected state with the current
+        // The canonical shape: an unexpected state with the current
         // nonce as stage2Nonce. A narrow Lua predicate would let it
         // through; the canonical schema predicate refuses it.
         $corrupt = [
@@ -592,6 +595,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
             'stage2Nonce' => $nonce,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
         $this->client->set($this->obligationKey(), self::GUARD_CHAIN, 'EX', 300);
         $this->client->set($this->chainKey(), (string) json_encode($corrupt), 'EX', 300);
@@ -609,6 +614,86 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         [$claim, , $guard] = $store->claim($nonce2, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null);
         self::assertSame('complete', $claim);
         self::assertNotSame(PostSolveFinalizeOutcome::Finalized, $guard, 'the malformed chain record must never authorize the stored Pass replay');
+    }
+
+    public function testOrdinaryPassWithChainingWiredAndNoObligationFinalizesAndReplaysAgainstRealRedis(): void
+    {
+        // The guard-enabled path with no open obligation: the missing
+        // obligation mapping is the Lua false under RESP2, never nil.
+        // The ordinary Pass must commit and its replay must claim
+        // complete with the finalized guard, so chaining being wired
+        // never blocks an ordinary pass.
+        $chainStore = new RedisChainedChallengeStateStore($this->client, 'ci-postsolve-chain');
+        $store = new RedisPostSolveDispositionStore($this->client, 'ci-postsolve-chain', 300, 0, 100, $chainStore);
+        $nonce = bin2hex(random_bytes(16));
+        $obligationId = self::GUARD_OBLIGATION;
+
+        [$claim, , $guard] = $store->claim($nonce, 'owner-a', 300, null, $obligationId, null, null);
+        self::assertSame('claimed', $claim);
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $guard, 'a claim with no obligation is authorized');
+
+        $outcome = $store->finalizeGuarded(
+            $nonce,
+            'owner-a',
+            new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-plain'),
+            $obligationId,
+            null,
+            null,
+        );
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $outcome, 'the ordinary Pass with no open obligation commits');
+
+        [$replay, $record, $replayGuard] = $store->claim($nonce, 'owner-b', 300, null, $obligationId, null, null);
+        self::assertSame('complete', $replay);
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $replayGuard, 'the replay claims complete with no guard refusal');
+        self::assertSame(PostSolveDispositionKind::Pass, $record?->disposition?->kind);
+        self::assertSame('decision-plain', $record?->disposition?->decisionId);
+    }
+
+    public function testLegacyNamespaceObligationRefusesThePassAgainstRealRedis(): void
+    {
+        // migrating_v2: the obligation was written before the namespace
+        // cutover, so it lives in the legacy namespace while the
+        // disposition store guards on the digest namespace. The chain
+        // store resolves the provenance; the Pass candidate must be
+        // refused instead of accepted blind.
+        $rawNamespace = 'ci-postsolve-mig';
+        $namespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', RedisNamespace::VERSION_DIGEST);
+        $legacyNamespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', RedisNamespace::VERSION_LEGACY);
+        $chainStore = new RedisChainedChallengeStateStore($this->client, $rawNamespace, 0, 100, RedisNamespace::VERSION_DIGEST, true);
+        $store = new RedisPostSolveDispositionStore($this->client, $namespace, 300, 0, 100, $chainStore);
+        $obligationId = self::GUARD_OBLIGATION;
+        $legacyObligationKey = '{kiwi:'.$legacyNamespace.'}:chain-obligation:'.$obligationId;
+        $this->client->set($legacyObligationKey, self::GUARD_CHAIN, 'EX', 300);
+
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300, null, $obligationId, null, null)[0]);
+        $outcome = $store->finalizeGuarded(
+            $nonce,
+            'owner-a',
+            new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-legacy'),
+            $obligationId,
+            null,
+            null,
+        );
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $outcome, 'a pre-cutover obligation refuses the Pass');
+        $record = json_decode((string) $this->client->get('{kiwi:'.$namespace.'}:postsolve:'.$nonce), true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $record['state'], 'the refused Pass performs no write');
+
+        // A stored Pass replay takes the same refusal.
+        $storedNonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($storedNonce, 'owner-a', 300)[0]);
+        self::assertTrue($store->finalize($storedNonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        [$claim, , $guard] = $store->claim($storedNonce, 'owner-b', 300, null, $obligationId, null, null);
+        self::assertSame('complete', $claim);
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $guard, 'the legacy obligation refuses the stored Pass replay');
+
+        // A Deny candidate is not the guard's concern and still commits.
+        $denyNonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($denyNonce, 'owner-a', 300)[0]);
+        self::assertSame(
+            PostSolveFinalizeOutcome::Finalized,
+            $store->finalizeGuarded($denyNonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Deny), $obligationId, null, null),
+        );
     }
 
     public function testChainRequiredDispositionWireShapeAgainstRealRedis(): void
@@ -786,7 +871,53 @@ final class RealRedisPostSolveDispositionTest extends TestCase
      *
      * @param array<string, mixed> $raw the corrupt wire record
      */
+    public function testCorruptionBetweenClaimAndFinalizeIsNeverReencoded(): void
+    {
+        // The mutation boundaries apply the exact-record predicate: a
+        // record that was valid at claim and is corrupted afterwards
+        // (an unknown authority field, or an ambiguous duplicate
+        // spelling) is refused by the guarded finalize with the typed
+        // corrupt outcome, and the bytes are never re-encoded into an
+        // authorization-bearing complete state.
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        $this->attachDecision($nonce, 'decision-between');
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce))[0]);
+        $recordKey = $this->key($nonce);
+        $raw = (string) $this->client->get($recordKey);
+        self::assertIsString($raw);
+
+        $tampers = [
+            'unknown authority field' => str_replace('"disposition":null', '"disposition":null,"unexpected_authority_field":1', $raw),
+            'semantic duplicate state' => str_replace('"state":"pending"', '"state":"pending","st\\u0061te":"complete"', $raw),
+        ];
+        foreach ($tampers as $label => $tampered) {
+            self::assertNotSame($raw, $tampered, $label.': the tamper applies');
+            $this->client->set($recordKey, $tampered, 'EX', 300);
+            $outcome = $store->finalizeGuarded(
+                $nonce,
+                'owner-a',
+                new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-between'),
+                null,
+                null,
+                null,
+            );
+            self::assertSame(PostSolveFinalizeOutcome::Corrupt, $outcome, $label.': the guarded finalize answers corrupt');
+            self::assertSame($tampered, $this->client->get($recordKey), $label.': the corrupt record is never re-encoded');
+        }
+    }
+
     private function corruptRecordOutcome(array $raw): string
+    {
+        return $this->corruptRawOutcome((string) json_encode($raw));
+    }
+
+    /**
+     * The same end-to-end outcome for a corrupt record injected as RAW
+     * JSON bytes (duplicate spellings cannot be expressed as a PHP array:
+     * the decoder collapses them before any array exists).
+     */
+    private function corruptRawOutcome(string $rawJson): string
     {
         $storage = new RedisStorage($this->client, 'ci-postsolve-corrupt:');
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
@@ -800,7 +931,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
         usleep(((int) $challenge->minDurationMs + 10) * 1000);
 
-        $this->client->set($this->key($challenge->nonce), (string) json_encode($raw), 'EX', 300);
+        $this->client->set($this->key($challenge->nonce), $rawJson, 'EX', 300);
 
         $verifier = new Verifier($storage);
         $stack = new RequestStack();
@@ -824,6 +955,54 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertCount(1, $violations);
 
         return $violations[0]->getCode();
+    }
+
+    /**
+     * @return iterable<string, array{0: string}>
+     */
+    public static function provideDuplicateDispositionMembers(): iterable
+    {
+        $base = [
+            'v' => 2,
+            'state' => 'complete',
+            'owner' => null,
+            'lease_until' => null,
+            'disposition' => [
+                'kind' => 'pass',
+                'decision_id' => 'decision-dup',
+                'chain_id' => null,
+                'chain_expires_at' => null,
+            ],
+            'decision_id' => 'decision-dup',
+        ];
+        $raw = (string) json_encode($base, JSON_THROW_ON_ERROR);
+        yield 'kind literal-first' => [str_replace('"kind":"pass"', '"kind":"pass","k\\u0069nd":"deny"', $raw)];
+        yield 'kind alias-first' => [str_replace('"kind":"pass"', '"k\\u0069nd":"deny","kind":"pass"', $raw)];
+        yield 'state literal-first' => [str_replace('"state":"complete"', '"state":"complete","st\\u0061te":"pending"', $raw)];
+        yield 'state alias-first' => [str_replace('"state":"complete"', '"st\\u0061te":"pending","state":"complete"', $raw)];
+        yield 'decision_id literal-first' => [str_replace('"decision_id":"decision-dup"', '"decision_id":"decision-dup","decision\\u005fid":"decision-forged"', $raw)];
+        yield 'decision_id alias-first' => [str_replace('"decision_id":"decision-dup"', '"decision\\u005fid":"decision-forged","decision_id":"decision-dup"', $raw)];
+    }
+
+    /**
+     * @dataProvider provideDuplicateDispositionMembers
+     */
+    public function testSemanticallyDuplicatedDispositionMembersAreRefusedInBothOrders(string $ambiguous): void
+    {
+        // The raw JSON bytes carry a semantic duplicate (an escaped alias
+        // next to the literal spelling, in both member orders): the strict
+        // persisted-JSON authority refuses the document before json_decode
+        // collapses it, so a forged `deny` can never be read as the
+        // retained `pass` disposition. The outcome is the fail-closed
+        // temporary_unavailable, never a pass.
+        if (!str_contains($ambiguous, '\\u')) {
+            self::markTestSkipped('the duplicate spelling was not injected');
+        }
+        self::assertSame(
+            KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR,
+            $this->corruptRawOutcome($ambiguous),
+            'an ambiguous disposition record fails closed',
+        );
     }
 
     public function testCorruptWireRecordWithUnknownSchemaVersionFailsClosed(): void
@@ -946,8 +1125,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],
@@ -1039,8 +1218,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
             ],

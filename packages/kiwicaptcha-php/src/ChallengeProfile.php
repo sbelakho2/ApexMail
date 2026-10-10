@@ -20,7 +20,9 @@ namespace KiwiCaptcha;
  * the verifier would reject:
  * - SHA-256: targetBits within 1..20.
  * - Argon2id: targetBits within 1..10, t within 3..6, p === 1, mKib
- *   within 8..65536.
+ *   a power of two within 8..65536 (the protocol profile space, so
+ *   every verifier — including log2-only bindings — can rederive what
+ *   the profile mints).
  */
 final class ChallengeProfile
 {
@@ -92,6 +94,15 @@ final class ChallengeProfile
         if ($this->mKib < 8 * $this->p || $this->mKib > 65536) {
             throw new \InvalidArgumentException(
                 sprintf('Argon2id memory m_kib must be within %d..65536 (got %d)', 8 * $this->p, $this->mKib)
+            );
+        }
+        // The protocol profile space is powers of two within
+        // 8..=65536 KiB (see Config::isPowerOfTwo): a profile that
+        // would mint outside it is refused here at configuration
+        // time, never per request.
+        if (!Config::isPowerOfTwo($this->mKib)) {
+            throw new \InvalidArgumentException(
+                sprintf('Argon2id memory m_kib must be a power of two within 8..65536 (got %d) — the protocol profile space', $this->mKib)
             );
         }
     }

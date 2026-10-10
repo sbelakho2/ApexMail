@@ -1,8 +1,8 @@
 {
   "$schema": "kiwicaptcha.execution-v1/1",
   "format_version": 1,
-  "max_execution_version": 5,
-  "opcode_count": 45,
+  "max_execution_version": 6,
+  "opcode_count": 50,
   "opcodes": {
     "ADD": 0,
     "SUB": 1,
@@ -48,7 +48,12 @@
     "DOM_EVENT_PHASE": 41,
     "DOM_URL_CANON": 42,
     "DOM_TEXT_MUTATE": 43,
-    "DOM_SELECT_DEP": 44
+    "DOM_SELECT_DEP": 44,
+    "CSS_GEOM": 45,
+    "MUT_ORDER": 46,
+    "EV_PHASE_FULL": 47,
+    "RANGE_ORDER": 48,
+    "INT_OBS": 49
   },
   "trace_names": [
     "add",
@@ -95,6 +100,11 @@
     "dphase",
     "durlc",
     "dmutate",
-    "dsdep"
+    "dsdep",
+    "dcsgeom",
+    "dmutord",
+    "devphf",
+    "drange",
+    "dintobs"
   ]
 }

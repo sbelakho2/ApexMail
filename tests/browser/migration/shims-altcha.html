@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Altcha shims fixture</title>
+  <script src="/kiwi-captcha/api.js" defer></script>
+  <script src="/kiwi-captcha/widget-shims.js" defer></script>
+</head>
+<body>
+  <form id="signup" action="/submit" method="post">
+    <label>Name <input name="name"></label>
+    <altcha-widget name="altcha" data-kiwi-scope="login"></altcha-widget>
+    <button type="submit">Submit</button>
+  </form>
+  <p id="out"></p>
+</body>
+</html>

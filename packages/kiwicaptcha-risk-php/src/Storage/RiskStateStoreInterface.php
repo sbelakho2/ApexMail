@@ -35,7 +35,7 @@ interface RiskStateStoreInterface
     /**
      * Registers the decision's pending outcome-ledger entry (SET NX EX via
      * the canonical outcome_register.lua): {"o":"P","scope","hour","score","w":1}
-     * keyed {kiwi:<ns>}:cal:ledger:<decisionId> with the store's
+     * keyed {kiwi:<ns>}:outcome:<decisionId> with the store's
      * outcomeTtlSecs. Used when calibration is disabled; the engine always
      * registers one ledger entry per decision regardless of calibration.
      *

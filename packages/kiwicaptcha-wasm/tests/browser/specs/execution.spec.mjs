@@ -9,11 +9,15 @@ import { fileURLToPath } from 'node:url';
 // a deterministic bytecode blob). The driver lazily loads the fixed
 // audited interpreter asset (execution.<sha256>.js, served by the
 // existing immutable content-addressed asset route with SRI), runs the
-// program in a sandboxed ephemeral iframe (srcdoc, per challenge,
-// removed after), and appends the resulting execution digest (64 hex)
-// to the solution token. The fixture /verify recomputes the expected
-// digest from the stored program and rejects a mismatch with the
-// deterministic execution_mismatch outcome.
+// program in a short-lived sandboxed iframe (srcdoc with the sandbox
+// flags allow-scripts allow-same-origin; per challenge, removed after),
+// and appends the resulting execution digest (64 hex) to the solution
+// token. The sandbox is DOM and execution isolation for the
+// first-party interpreter, whose bytes the content-addressed URL and
+// the native SRI check pin; it is not a hostile-code security
+// boundary. The fixture /verify recomputes the expected digest from
+// the stored program and rejects a mismatch with the deterministic
+// execution_mismatch outcome.
 //
 // Lazy invariant: a SHA-only challenge without a program pays zero
 // bytes for the interpreter — the no-program spec asserts zero requests.
@@ -47,17 +51,37 @@ async function verifyToken(page, token) {
   return { status: resp.status(), body: await resp.json() };
 }
 
+
+function decodeTrace(base64url) {
+  const standard = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(standard, 'base64').toString('utf8');
+}
+
 test.describe('ExecutionChallengeV1 (browser)', () => {
   test('an armed challenge executes in the sandboxed interpreter and verifies end to end', async ({ page }) => {
     await armedPage(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
 
-    // The token carries the 5th execution-digest segment: 64 lowercase hex.
+    // The token carries the 5th execution segment: the 64-lowercase-hex
+    // digest, optionally followed by ':trace' (the driver's base64url
+    // trace evidence).
     const plain = Buffer.from(token, 'base64').toString('utf8');
     const parts = plain.split('.');
-    expect(parts.length, 'an armed token must carry the execution digest as the final segment').toBe(5);
-    expect(parts[4], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
+    expect(evidence[1].length, 'the base64url trace must be non-empty').toBeGreaterThan(0);
+    const trace = decodeTrace(evidence[1]);
+    expect(
+      trace.includes('obs('),
+      'the causal observe entry must appear in every armed trace'
+    ).toBe(true);
+    expect(
+      trace.includes('u8r(') && trace.includes('u8c('),
+      'the observed byte must be read back from the u8 state'
+    ).toBe(true);
 
     const result = await verifyToken(page, token);
     expect(result.body.ok, `the armed solve must verify (got ${result.body.code})`).toBe(true);
@@ -69,16 +93,41 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(iframes, 'the sandboxed execution iframe must be removed after the run').toBe(0);
   });
 
+  test('a corpus of fresh armed lifecycles all verify end to end', async ({ page }) => {
+    // K fresh armed lifecycles, one per page load. Every issued
+    // program carries the guaranteed structure: a DOM construction
+    // block (createElement with a drawn id, a mutate op, an append)
+    // followed by real probes of the constructed node. The browser
+    // must genuinely run the DOM construction and the probe reads, so
+    // a client that only synthesizes shadow values cannot reproduce
+    // the trace. The fixture /verify recomputes the digest from the
+    // stored program and validates the trace entry by entry.
+    const K = 30;
+    for (let i = 0; i < K; i++) {
+      await armedPage(page);
+      const token = await page.locator('[data-kiwi-token]').inputValue();
+      expect(token.length, `lifecycle ${i}: the armed solve must mint a token`).toBeGreaterThan(0);
+      const result = await verifyToken(page, token);
+      expect(
+        result.body.ok,
+        `lifecycle ${i}: the armed solve must verify end to end (got ${result.body.code})`
+      ).toBe(true);
+    }
+  });
+
   test('a WRONG (tampered) digest is the deterministic execution_mismatch', async ({ page }) => {
     await armedPage(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();
     const plain = Buffer.from(token, 'base64').toString('utf8');
     const parts = plain.split('.');
     expect(parts.length).toBe(5);
-    // Flip the first hex character of the digest.
-    const tamperedDigest = (parts[4][0] === '0' ? '1' : '0') + parts[4].slice(1);
-    expect(tamperedDigest).not.toBe(parts[4]);
-    parts[4] = tamperedDigest;
+    // Flip the first hex character of the digest (the trace after the
+    // ':' is left intact — only the digest changes).
+    const digestPart = parts[4].split(':')[0];
+    const tracePart = parts[4].slice(digestPart.length);
+    const tamperedDigest = (digestPart[0] === '0' ? '1' : '0') + digestPart.slice(1);
+    expect(tamperedDigest).not.toBe(digestPart);
+    parts[4] = tamperedDigest + tracePart;
     const tamperedToken = Buffer.from(parts.join('.')).toString('base64');
 
     const result = await verifyToken(page, tamperedToken);
@@ -147,12 +196,13 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(armed[0].resourceType(), 'the interpreter load is the iframe script (the driver performs no fetch of its own)').toBe('script');
   });
 
-  test('the op-count bound holds and the wall-clock stays far under the documented ~20 ms budget', async ({ page }) => {
-    // The documented budget: ~20 ms on low-end devices for the VM run.
-    // The measured span here is the whole armed lifecycle from the
+  test('the armed lifecycle completes well within the request-budget bound (execution timing is measured by the client-performance lab, not here)', async ({ page }) => {
+    // The measured span is the whole armed lifecycle from the
     // challenge response to the solved token, a deliberately loose
-    // wall-clock assertion; the deterministic proxy is the 8..24
-    // op-count bound the program parser enforces (asserted below).
+    // wall-clock bound on that lifecycle. The VM-run timing budget is
+    // measured by the client-performance lab, never asserted from this
+    // span; the deterministic proxy asserted below is the 8..24
+    // op-count bound the program parser enforces.
     const started = Date.now();
     await armedPage(page);
     expect(Date.now() - started).toBeLessThan(60_000);
@@ -175,6 +225,147 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     const opCount = blob[pos];
     expect(opCount).toBeGreaterThanOrEqual(8);
     expect(opCount).toBeLessThanOrEqual(24);
+  });
+
+  test('an N-1 client (no version-2 capability) is issued a version-1 program, no observe entry, and still verifies end to end', async ({ page }) => {
+    // The real execution-versioning gate: the fixture issues the
+    // version-2 causal grammar only when the client advertised
+    // Kiwi-Execution-Max-Version >= 2 on the challenge request. The
+    // route below rewrites the armed driver's header value to 1,
+    // standing in for a stale page whose driver never advertises (the
+    // server reads the header, and absent and 1 both mint version 1).
+    // The grammar byte of the blob is 1, the executed trace carries no
+    // obs( entry, and the solve still verifies end to end: the current
+    // interpreter runs both generations.
+    await page.route('**/challenge*', async (route) => {
+      const headers = { ...route.request().headers(), 'kiwi-execution-max-version': '1' };
+      await route.continue({ headers });
+    });
+    await page.goto('/?assets=files&execution=1');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 120_000,
+    });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const plain = Buffer.from(token, 'base64').toString('utf8');
+    const evidence = plain.split('.').at(-1).split(':');
+    expect(evidence.length, 'the execution evidence must be present after the digest').toBe(2);
+    const standard = evidence[1].replace(/-/g, '+').replace(/_/g, '/');
+    const trace = Buffer.from(standard, 'base64').toString('utf8');
+    expect(
+      trace.includes('obs('),
+      'a version-1 program must never carry the causal observe entry'
+    ).toBe(false);
+
+    // The grammar version byte of the program the same N-1 issuance
+    // mints. The direct mint passes the header value 1, the same
+    // advertisement a stale driver presents (absent and 1 mint the
+    // same version-1 program). The blob layout is: format(1),
+    // scopeLen(1), scope, actionLen(1), action, opVersion(1), then
+    // opCount(1).
+    const resp = await page.request.post('http://127.0.0.1:8085/challenge?execution=1', {
+      headers: { 'Kiwi-Execution-Max-Version': '1' },
+      data: { scope: 'login' },
+    });
+    const challenge = await resp.json();
+    expect(typeof challenge.execution_program).toBe('string');
+    const blob = Buffer.from(challenge.execution_program, 'base64');
+    let pos = 1;
+    const scopeLen = blob[pos++];
+    pos += scopeLen;
+    const actionLen = blob[pos++];
+    pos += actionLen;
+    expect(blob[pos], 'the grammar version byte of an N-1 issuance must be 1').toBe(1);
+
+    const result = await verifyToken(page, token);
+    expect(result.body.ok, `the version-1 solve must verify end to end (got ${result.body.code})`).toBe(true);
+  });
+
+  test('a version-5 armed challenge runs the causal object-graph grammar in the browser and verifies end to end', async ({ page }) => {
+    // The v5 issuance knob (?exec_cap=5) raises the fixture's simulated
+    // deployment cap so the version-5 grammar is actually issued: the
+    // driver advertises Kiwi-Execution-Max-Version 5, and the effective
+    // grammar is the minimum of that advertisement and the fixture cap.
+    // A version-5 program carries the fixed six-op causal spine over the
+    // version-4 skeleton (clone, reparent, the u8 read of the reparent
+    // cell, the observed URL-canon op, the text mutation and the
+    // closing canonical serialization), so its trace must show those
+    // entries executed against the real DOM.
+    const execRequests = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/assets/execution.')) execRequests.push(request);
+    });
+    await armedPage(page, '&exec_cap=5');
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const plain = Buffer.from(token, 'base64').toString('utf8');
+    const parts = plain.split('.');
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
+    const trace = decodeTrace(evidence[1]);
+    expect(trace.includes('dclone('), 'the v5 spine must deep-clone the current node').toBe(true);
+    expect(trace.includes('drepar('), 'the v5 spine must reparent the clone under the drawn target').toBe(true);
+    expect(trace.includes('durlc('), 'the v5 spine must run the observed URL-canon op').toBe(true);
+    expect(trace.includes('dmutate('), 'the v5 spine must replace the text').toBe(true);
+    expect(trace.includes('sreal('), 'the v5 spine must close over the canonical serialization').toBe(true);
+    for (const m of trace.match(/durlc\([^)]+\)/g) ?? []) {
+      expect(m, 'every URL-canon entry is the 64-lowercase-hex digest').toMatch(/^durlc\([0-9a-f]{64}\)$/);
+    }
+
+    const result = await verifyToken(page, token);
+    expect(result.body.ok, `the version-5 solve must verify end to end (got ${result.body.code})`).toBe(true);
+    expect(execRequests, 'the v5 armed lifecycle must perform exactly one interpreter fetch').toHaveLength(1);
+
+    // The issuance itself is a version-5 mint: the same v5-cap
+    // advertisement produces the causal grammar (blob layout:
+    // format(1), scopeLen(1), scope, actionLen(1), action,
+    // opVersion(1)).
+    const resp = await page.request.post('http://127.0.0.1:8085/challenge?execution=1&exec_cap=5', {
+      headers: { 'Kiwi-Execution-Max-Version': '5' },
+      data: { scope: 'login' },
+    });
+    const challenge = await resp.json();
+    expect(typeof challenge.execution_program).toBe('string');
+    const blob = Buffer.from(challenge.execution_program, 'base64');
+    let pos = 1;
+    const scopeLen = blob[pos++];
+    pos += scopeLen;
+    const actionLen = blob[pos++];
+    pos += actionLen;
+    expect(blob[pos], 'the grammar version byte of a v5-capable issuance must be 5').toBe(5);
+  });
+
+  test('a version-7 program from a newer server is refused by the version byte: the controlled kiwi:execution-unavailable state, never a token', async ({ page }) => {
+    // The mixed-fleet decode fence: every interpreter version bounds
+    // its own opcode space, and a newer server's grammar is rejected
+    // by the declared version byte alone (the driver advertises 6, so
+    // the fixture mints 6 and the tamper below rewrites the op-version
+    // byte of the response's program to 7, the first unknown rung). The
+    // armed lifecycle must fail closed in the controlled
+    // kiwi:execution-unavailable state with no token — never a silent
+    // success, never an unarmed solve.
+    await page.route('**/challenge*', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (typeof body.execution_program === 'string' && body.execution_program.length > 0) {
+        const blob = Buffer.from(body.execution_program, 'base64');
+        let pos = 1;
+        const scopeLen = blob[pos++];
+        pos += scopeLen;
+        const actionLen = blob[pos++];
+        pos += actionLen;
+        blob[pos] = 7;
+        body.execution_program = Buffer.from(blob).toString('base64');
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto('/?assets=files&execution=1&exec_cap=5');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:execution-unavailable', {
+      timeout: 30_000,
+    });
+    expect(await page.locator('[data-kiwi-token]').inputValue(), 'no token may be minted without a runnable program').toBe('');
   });
 
   test('an interpreter failure enters the controlled kiwi:execution-unavailable state, never a silent success', async ({ page }) => {

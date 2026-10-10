@@ -180,18 +180,19 @@ use crate::challenge::{
     verify_signature, verify_signature_v2_with_keys, ChallengeRecord, PoWAlgorithm,
 };
 use crate::keys::DerivedKeys;
-use crate::rsw::RswTrapdoor;
+use crate::rsw::{RswKeyring, RswKeyringError, RswTrapdoor};
 use crate::token::SolutionToken;
 use crate::verify::{
-    check_execution_binding, check_request_binding, check_rsw_params, ct_eq, final_revalidate,
-    measurable_solve_duration_ms, proof_is_valid, signature_from_challenge, validate_record,
-    RequestBindingExpectation, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
+    check_execution_binding_cached, check_request_binding, check_rsw_params, ct_eq,
+    final_revalidate, measurable_solve_duration_ms, policy_version_accepted, proof_is_valid,
+    signature_from_challenge, validate_record, ExecutionEvidenceCache, RequestBindingExpectation,
+    VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Default number of pooled Redis connections.
@@ -308,23 +309,420 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// and borrowed immutably by every invocation. Building a
 /// `redis::Script` per call would re-hash the full source on the hot
 /// verify path; these objects are immutable and shareable by design.
+/// Shared envelope inspection for the runtime transition scripts.
+///
+/// Every script classifies the runtime state from the decoded top-level
+/// envelope (the byte ceiling bounds the parse) and splices the raw JSON
+/// bytes through the top-level field spans located by this scanner, so
+/// neither a nested state marker nor a nested `"state":"pending"` string
+/// can drive or redirect a transition. The record is never re-encoded
+/// through cjson, so large integers never switch to scientific notation.
+const ENVELOPE_LUA_PRELUDE: &str = r#"
+-- Shared envelope inspection for the runtime transition scripts.
+--
+-- The runtime state is classified from the decoded top-level envelope,
+-- never from a whole-document byte search: a corrupt or foreign value
+-- that merely CONTAINS a nested "state":"pending" (or consumed /
+-- cancelled) string can never drive a transition. The mutations still
+-- splice the raw JSON bytes (the record is never re-encoded through
+-- cjson, so large integers never switch to scientific notation), and
+-- every splice targets the top-level field span located by the scanner
+-- below, so a nested occurrence can never be rewritten either. The
+-- byte ceiling bounds the JSON parse before it happens.
+local KIWI_ENVELOPE_MAX_BYTES = 131072
+local KIWI_ENVELOPE_MAX_DEPTH = 32
+
+local function kiwiNullish(x)
+  return x == nil or x == cjson.null
+end
+
+local function kiwiIsSpace(c)
+  return string.find(' \t\r\n', c, 1, true) ~= nil
+end
+
+local function kiwiSkipSpace(v, i, n)
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if not kiwiIsSpace(c) then break end
+    i = i + 1
+  end
+  return i
+end
+
+local function kiwiSkipSpaceBack(v, j)
+  while j >= 1 do
+    local c = string.sub(v, j, j)
+    if not kiwiIsSpace(c) then break end
+    j = j - 1
+  end
+  return j
+end
+
+-- The index of the LAST byte of the JSON value starting at s, or nil
+-- when the value is malformed.
+local function kiwiValueEnd(v, s, n)
+  local c = string.sub(v, s, s)
+  if c == '"' then
+    local i = s + 1
+    local esc = false
+    while i <= n do
+      local ci = string.sub(v, i, i)
+      if esc then esc = false
+      elseif ci == '\\' then esc = true
+      elseif ci == '"' then return i end
+      i = i + 1
+    end
+    return nil
+  elseif c == '{' or c == '[' then
+    local open = c
+    local close = (c == '{') and '}' or ']'
+    local depth = 0
+    local i = s
+    while i <= n do
+      local ci = string.sub(v, i, i)
+      if ci == '"' then
+        i = i + 1
+        local esc = false
+        while i <= n do
+          local cj = string.sub(v, i, i)
+          if esc then esc = false
+          elseif cj == '\\' then esc = true
+          elseif cj == '"' then break end
+          i = i + 1
+        end
+        if i > n then return nil end
+      elseif ci == open then
+        depth = depth + 1
+      elseif ci == close then
+        depth = depth - 1
+        if depth == 0 then return i end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+  local i = s
+  while i <= n do
+    local ci = string.sub(v, i, i)
+    if ci == ',' or ci == '}' or ci == ']' or ci == ' ' or ci == '\t' or ci == '\r' or ci == '\n' then
+      break
+    end
+    i = i + 1
+  end
+  if i == s then return nil end
+  return i - 1
+end
+
+-- The recursive semantic-duplicate scan of a whole stored document: a
+-- JSON object may not carry two members whose keys decode to the same
+-- name at ANY nesting level (an escaped alias such as "st\u0061te" is
+-- the same field as "state"). This is the same authority the Symfony
+-- persisted-state predicate (PersistedJsonLuaPredicate) applies, so the
+-- core envelope and the state machines share one cleanliness rule.
+local function kiwiSkipString(v, i, n)
+  i = i + 1
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if c == '\\' then
+      i = i + 2
+    elseif c == '"' then
+      return i + 1
+    else
+      i = i + 1
+    end
+  end
+  return nil
+end
+
+local kiwiUniqueScanValue
+local kiwiUniqueScanObject
+local kiwiUniqueScanArray
+
+kiwiUniqueScanValue = function(v, i, n, depth)
+  if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
+  if i > n then return nil end
+  local c = string.sub(v, i, i)
+  if c == '{' then
+    return kiwiUniqueScanObject(v, i + 1, n, depth)
+  end
+  if c == '[' then
+    return kiwiUniqueScanArray(v, i + 1, n, depth)
+  end
+  if c == '"' then
+    return kiwiSkipString(v, i, n)
+  end
+  local start = i
+  while i <= n do
+    local c2 = string.sub(v, i, i)
+    if c2 == ',' or c2 == '}' or c2 == ']' or kiwiIsSpace(c2) then break end
+    i = i + 1
+  end
+  if i == start then return nil end
+  return i
+end
+
+kiwiUniqueScanObject = function(v, i, n, depth)
+  if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
+  local seen = {}
+  i = kiwiSkipSpace(v, i, n)
+  if i <= n and string.sub(v, i, i) == '}' then return i + 1 end
+  while true do
+    i = kiwiSkipSpace(v, i, n)
+    if i > n or string.sub(v, i, i) ~= '"' then return nil end
+    local keyEnd = kiwiSkipString(v, i, n)
+    if keyEnd == nil then return nil end
+    local token = string.sub(v, i, keyEnd - 1)
+    local ok, key = pcall(cjson.decode, token)
+    if not ok or type(key) ~= 'string' then return nil end
+    if seen[key] ~= nil then return nil end
+    seen[key] = true
+    i = kiwiSkipSpace(v, keyEnd, n)
+    if i > n or string.sub(v, i, i) ~= ':' then return nil end
+    i = kiwiUniqueScanValue(v, kiwiSkipSpace(v, i + 1, n), n, depth + 1)
+    if i == nil then return nil end
+    i = kiwiSkipSpace(v, i, n)
+    if i > n then return nil end
+    local sep = string.sub(v, i, i)
+    if sep == ',' then
+      i = i + 1
+    elseif sep == '}' then
+      return i + 1
+    else
+      return nil
+    end
+  end
+end
+
+kiwiUniqueScanArray = function(v, i, n, depth)
+  if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
+  i = kiwiSkipSpace(v, i, n)
+  if i <= n and string.sub(v, i, i) == ']' then return i + 1 end
+  while true do
+    i = kiwiUniqueScanValue(v, i, n, depth + 1)
+    if i == nil then return nil end
+    i = kiwiSkipSpace(v, i, n)
+    if i > n then return nil end
+    local sep = string.sub(v, i, i)
+    if sep == ',' then
+      i = i + 1
+    elseif sep == ']' then
+      return i + 1
+    else
+      return nil
+    end
+  end
+end
+
+-- True when the whole document is one well-formed JSON object with no
+-- semantic duplicate key at any nesting level and no trailing bytes.
+local function kiwiDocumentIsUnique(v)
+  local n = #v
+  if n == 0 or n > KIWI_ENVELOPE_MAX_BYTES then return false end
+  local i = kiwiSkipSpace(v, 1, n)
+  if i > n or string.sub(v, i, i) ~= '{' then return false end
+  local endIndex = kiwiUniqueScanObject(v, i + 1, n, 0)
+  if endIndex == nil then return false end
+  return kiwiSkipSpace(v, endIndex, n) > n
+end
+
+-- The spans of every TOP-LEVEL field of the JSON object v, indexed by
+-- the field's DECODED (semantic) name as {key_start, value_start,
+-- value_end}. Returns nil when v is not a JSON object, the document
+-- exceeds the byte ceiling, the document is malformed, or two members
+-- decode to the same name: JSON keys may carry escapes ("st\u0061te"
+-- is the key `state`), and cjson.decode() resolves them, so the
+-- spelling the classifier sees must also be the spelling the scanner
+-- keys on. An envelope with a semantic duplicate is ambiguous
+-- corruption and is never classified or mutated by a transition —
+-- exactly like the HTTP layer's duplicate-key scanner.
+local function kiwiTopLevelFields(v)
+  local n = #v
+  if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
+  -- The WHOLE document must be semantically unique at every nesting
+  -- level before any top-level span is trusted (one cleanliness rule
+  -- across the core envelope and the persisted-state machines).
+  if not kiwiDocumentIsUnique(v) then return nil end
+  local i = 1
+  i = kiwiSkipSpace(v, i, n)
+  if string.sub(v, i, i) ~= '{' then return nil end
+  i = i + 1
+  local fields = {}
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if string.find(' \t\r\n,', c, 1, true) then
+      i = i + 1
+    elseif c == '}' then
+      return fields
+    elseif c == '"' then
+      local j = i + 1
+      local esc = false
+      while j <= n do
+        local cj = string.sub(v, j, j)
+        if esc then esc = false
+        elseif cj == '\\' then esc = true
+        elseif cj == '"' then break end
+        j = j + 1
+      end
+      if j > n then return nil end
+      local name = string.sub(v, i + 1, j - 1)
+      local nameOk, decodedName = pcall(cjson.decode, '"' .. name .. '"')
+      if not nameOk or type(decodedName) ~= 'string' then return nil end
+      if fields[decodedName] ~= nil then return nil end
+      local p = j + 1
+      p = kiwiSkipSpace(v, p, n)
+      if string.sub(v, p, p) ~= ':' then return nil end
+      local s = p + 1
+      s = kiwiSkipSpace(v, s, n)
+      local e = kiwiValueEnd(v, s, n)
+      if e == nil then return nil end
+      fields[decodedName] = {i, s, e}
+      i = e + 1
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+-- The spans of the top-level field `key`, or nil when it is absent,
+-- duplicated, or the document is malformed or oversized. Depth-,
+-- string- and escape-aware, so a nested field with the same name can
+-- never be mistaken for the envelope's own.
+local function kiwiTopLevelField(v, key)
+  local fields = kiwiTopLevelFields(v)
+  if fields == nil then return nil end
+  return fields[key]
+end
+-- Replace the value of the top-level field `key` with the raw literal,
+-- or nil when the field is absent, duplicated or the document is
+-- malformed.
+local function kiwiReplaceTopLevel(v, key, literal)
+  local span = kiwiTopLevelField(v, key)
+  if span == nil then return nil end
+  local head = string.sub(v, 1, span[2] - 1)
+  local tail = string.sub(v, span[3] + 1)
+  return head .. literal .. tail
+end
+
+-- Remove the top-level field `key` (with one adjacent comma), or nil
+-- when the field is absent, duplicated or the document is malformed.
+local function kiwiRemoveTopLevel(v, key)
+  local span = kiwiTopLevelField(v, key)
+  if span == nil then return nil end
+  local i = span[3] + 1
+  i = kiwiSkipSpace(v, i, #v)
+  if string.sub(v, i, i) == ',' then
+    return string.sub(v, 1, span[1] - 1) .. string.sub(v, i + 1)
+  end
+  local j = span[1] - 1
+  j = kiwiSkipSpaceBack(v, j)
+  if string.sub(v, j, j) == ',' then
+    return string.sub(v, 1, j - 1) .. string.sub(v, span[3] + 1)
+  end
+  return string.sub(v, 1, span[1] - 1) .. string.sub(v, span[3] + 1)
+end
+
+-- Append a raw field literal before the object's closing brace, or nil
+-- when the document is not a JSON object.
+local function kiwiAppendTopLevel(v, literal)
+  local n = #v
+  local i = 1
+  i = kiwiSkipSpace(v, i, n)
+  if string.sub(v, i, i) ~= '{' then return nil end
+  local depth = 0
+  local last = nil
+  local first = i
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if c == '"' then
+      i = i + 1
+      local esc = false
+      while i <= n do
+        local ci = string.sub(v, i, i)
+        if esc then esc = false
+        elseif ci == '\\' then esc = true
+        elseif ci == '"' then break end
+        i = i + 1
+      end
+      if i > n then return nil end
+    elseif c == '{' or c == '[' then
+      depth = depth + 1
+    elseif c == '}' or c == ']' then
+      depth = depth - 1
+      if depth == 0 then last = i break end
+    end
+    i = i + 1
+  end
+  if last == nil then return nil end
+  local p = last - 1
+  p = kiwiSkipSpaceBack(v, p)
+  if p == first then
+    return string.sub(v, 1, last - 1) .. literal .. string.sub(v, last)
+  end
+  return string.sub(v, 1, last - 1) .. ',' .. literal .. string.sub(v, last)
+end
+
+-- The decoded top-level envelope, or nil when the value exceeds the
+-- byte ceiling or is not a JSON object.
+local function kiwiDecodeEnvelope(v)
+  if #v > KIWI_ENVELOPE_MAX_BYTES then return nil end
+  local ok, decoded = pcall(cjson.decode, v)
+  if not ok or type(decoded) ~= 'table' then return nil end
+  return decoded
+end
+"#;
+
 struct StoreScripts {
     consume: redis::Script,
     delete_if_pending: redis::Script,
     cancel: redis::Script,
     commit_result: redis::Script,
+    claim_resume: redis::Script,
+    release_resume: redis::Script,
+    commit_clearing_claim: redis::Script,
 }
 
 impl StoreScripts {
     fn new() -> StoreScripts {
         StoreScripts {
-            consume: redis::Script::new(CONSUME_TRANSITION_LUA),
-            delete_if_pending: redis::Script::new(DELETE_IF_PENDING_LUA),
-            cancel: redis::Script::new(CANCEL_TRANSITION_LUA),
-            commit_result: redis::Script::new(COMMIT_RESULT_LUA),
+            consume: redis::Script::new(&format!("{ENVELOPE_LUA_PRELUDE}{CONSUME_TRANSITION_LUA}")),
+            delete_if_pending: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{DELETE_IF_PENDING_LUA}"
+            )),
+            cancel: redis::Script::new(&format!("{ENVELOPE_LUA_PRELUDE}{CANCEL_TRANSITION_LUA}")),
+            commit_result: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{COMMIT_RESULT_LUA}"
+            )),
+            claim_resume: redis::Script::new(&format!("{ENVELOPE_LUA_PRELUDE}{CLAIM_RESUME_LUA}")),
+            release_resume: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{RELEASE_RESUME_LUA}"
+            )),
+            commit_clearing_claim: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{COMMIT_RESULT_CLEARING_CLAIM_LUA}"
+            )),
         }
     }
 }
+
+/// The default resume-claim TTL in seconds: the initial value of
+/// [`RedisChallengeStore::resume_claim_ttl_secs`]. A crashed recovery
+/// leaves only this short lease before a later retry may claim again —
+/// a long poison marker would block resultless recovery for its full
+/// TTL even when nothing is running. The configured lease must cover
+/// the maximum supported derivation and request duration: fencing
+/// stays correct on expiry (a stale owner can never commit), so the
+/// lower bound is the longest single resume, and the lease only
+/// protects the single-derivation efficiency property, never
+/// correctness.
+///
+/// Contract: the core minimum is 1 second — the storage boundary
+/// (`validate_claim_ttl`) rejects a lower TTL, and a sub-second
+/// lease would expire before the claim is even usable (the lease
+/// would be non-functional). The bundle production policy is at
+/// least 60 seconds (the Symfony `resume_claim_ttl_secs` lower
+/// bound): the claim TTL is an efficiency bound, fencing stays
+/// correct on expiry, and a stale owner can never commit.
+const CLAIM_TTL_SECS: u64 = 60;
 
 /// One Lua script for the consumed-state transition: atomically
 /// marks a pending record consumed (keeping it — the storage-level `state`
@@ -353,39 +751,42 @@ impl StoreScripts {
 /// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
-/// The default resume-claim TTL in seconds: the initial value of
-/// [`RedisChallengeStore::resume_claim_ttl_secs`]. A crashed recovery
-/// leaves only this short lease before a later retry may claim again —
-/// a long poison marker would block resultless recovery for its full
-/// TTL even when nothing is running. The configured lease must cover
-/// the maximum supported derivation and request duration: fencing
-/// stays correct on expiry (a stale owner can never commit), so the
-/// lower bound is the longest single resume, and the lease only
-/// protects the single-derivation efficiency property, never
-/// correctness.
-///
-/// Contract: the core minimum is 1 second — the storage boundary
-/// (`validate_claim_ttl`) rejects a lower TTL, and a sub-second
-/// lease would expire before the claim is even usable (the lease
-/// would be non-functional). The bundle production policy is at
-/// least 60 seconds (the Symfony `resume_claim_ttl_secs` lower
-/// bound): the claim TTL is an efficiency bound, fencing stays
-/// correct on expiry, and a stale owner can never commit.
-const CLAIM_TTL_SECS: u64 = 60;
 
 const CONSUME_TRANSITION_LUA: &str = r#"
--- The state marker is replaced IN PLACE (the record's JSON bytes are
+-- kiwicaptcha consume transition
+--
+-- The state marker is replaced in place (the record's JSON bytes are
 -- never re-encoded — large integers would switch to scientific
--- notation). Byte-compatible with the PHP consume script: both write
--- the same runtime envelope from issuance onward, so either
--- implementation can transition records written by the other.
+-- notation). The runtime state is classified from the decoded
+-- top-level envelope and the splice targets the top-level state field
+-- span, so neither a nested state marker nor a nested
+-- `"state":"pending"` string can drive or redirect the transition.
+-- Byte-compatible with the PHP consume script: both write the same
+-- runtime envelope from issuance onward, so either implementation can
+-- transition records written by the other.
 local v = redis.call('GET', KEYS[1])
 if not v then return false end
-if string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then return false end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return false
+end
+local state = decoded['state']
+if state == 'consumed' then
     return {v, 0}
 end
+if state ~= 'pending' then
+    -- A cancelled record (or any other state) is never consumable: the
+    -- transition reports the record as missing (false) and the verifier
+    -- fails the token closed instead of ever redeeming it.
+    return false
+end
 -- The pending-envelope guard: a genuinely issued pending record
--- carries ONLY the null markers ("consumed_result":null and
+-- carries only the null markers ("consumed_result":null and
 -- "operation_identity":null) and no claim lease fields. A pending
 -- envelope that ALSO carries a terminal or claim field (a non-null
 -- consumed_result, a non-null operation_identity, or any
@@ -397,30 +798,44 @@ end
 -- the consume transition itself may introduce these fields, and only
 -- into the envelope it just flipped. Mirrors the PHP consume script
 -- byte for byte.
-if (string.find(v, '"consumed_result":', 1, true) and not string.find(v, '"consumed_result":null', 1, true))
-    or (string.find(v, '"operation_identity":', 1, true) and not string.find(v, '"operation_identity":null', 1, true))
-    or string.find(v, '"resume_owner":"', 1, true)
-    or string.find(v, '"resume_until":', 1, true) then
+if not kiwiNullish(decoded['consumed_result'])
+    or not kiwiNullish(decoded['operation_identity'])
+    or not kiwiNullish(decoded['resume_owner'])
+    or not kiwiNullish(decoded['resume_until']) then
     return false
 end
-local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
-if n ~= 1 then
-    -- A cancelled record (or any other non-pending state) is never
-    -- consumable: the gsub finds no pending marker, so the transition
-    -- reports the record as missing (nil) and the verifier fails the
-    -- token closed instead of ever redeeming it.
+local updated = kiwiReplaceTopLevel(v, 'state', '"consumed"')
+if updated == nil then
     return false
 end
+-- The operation-identity splice is part of the caller's contract when
+-- ARGV[1] is non-empty: a pending envelope that carries no
+-- operation_identity marker (only store() writes the null marker, so a
+-- hand-written or foreign envelope may lack it) cannot receive the
+-- identity. The flip still completes durably, but the fifth reply
+-- element reports whether the splice landed so the caller fails closed
+-- instead of proceeding on a silently identity-less consumed record.
+-- Mirrors the PHP consume script byte for byte.
+local identitySpliced = 0
 if ARGV[1] ~= '' then
-    local withIdentity, m = string.gsub(updated, '"operation_identity":null', '"operation_identity":' .. ARGV[1], 1)
-    if m == 1 then
+    local withIdentity = kiwiReplaceTopLevel(updated, 'operation_identity', ARGV[1])
+    if withIdentity ~= nil then
         updated = withIdentity
+        identitySpliced = 1
     end
 end
-local ttl = redis.call('TTL', KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call('SET', KEYS[1], updated, 'EX', ttl)
-return {updated, 1}
+-- The re-SET preserves the key's exact remaining TTL in milliseconds: a
+-- persistent (foreign) key is refused untouched (a negative `PTTL`
+-- means no expiry — the transition never destroys foreign state), and a
+-- sub-second remainder is floored at 1000 ms so the consumed evidence
+-- stays observable.
+local pttl = redis.call('PTTL', KEYS[1])
+if pttl < 0 then
+    return false
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call('SET', KEYS[1], updated, 'PX', pttl)
+return {updated, 1, identitySpliced}
 "#;
 
 /// One atomic delete-if-pending cleanup: GET decides — a missing record
@@ -440,17 +855,45 @@ return {updated, 1}
 /// replica that never saw the delete.
 const DELETE_IF_PENDING_LUA: &str = r#"
 -- kiwicaptcha delete-if-pending (atomic cleanup)
+--
+-- The runtime state is classified from the decoded top-level envelope,
+-- never from a whole-document byte search: a value whose top-level
+-- state is unknown (or undecodable) is corrupt, reported without
+-- mutating the record, and a nested "state":"pending" string inside a
+-- corrupt value can never trigger the delete. A consumed record is
+-- returned verbatim and kept. A cancelled record is returned verbatim
+-- and kept too: the cancelled challenge is dead but retained until its
+-- TTL, never eagerly deleted. Only the exact pending state is deleted.
+--
+-- The DEL is a durability-critical write: the caller applies the same
+-- verified WAIT barrier as the other transitions, so a burned challenge
+-- that only vanished from the primary is substantially less likely to
+-- be resurrected as pending by a promoted stale replica (WAIT is
+-- durability hardening, not a consensus guarantee: Redis replication
+-- remains eventually consistent across every failover pattern).
 local v = redis.call("GET", KEYS[1])
 if not v then
   return {'missing'}
 end
-if string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return {'corrupt'}
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return {'corrupt'}
+end
+local state = decoded['state']
+if state == 'consumed' then
   return {'consumed', v}
 end
-if string.find(v, '"state":"cancelled"', 1, true) then
+if state == 'cancelled' then
   return {'cancelled', v}
 end
-if string.find(v, '"state":"pending"', 1, true) then
+if state == 'pending' then
   redis.call("DEL", KEYS[1])
   return {'deleted-pending'}
 end
@@ -480,32 +923,52 @@ return {'corrupt'}
 /// replica), so [`RedisChallengeStore::cancel`] applies the same verified
 /// replica wait as the other transitions after it.
 const CANCEL_TRANSITION_LUA: &str = r#"
--- kiwicaptcha cancel transition (atomic pending -> cancelled)
+-- kiwicaptcha cancel transition
 --
--- CRITICAL: the record is NEVER re-encoded through cjson — re-encoding
+-- CRITICAL: the record is never re-encoded through cjson — re-encoding
 -- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
--- and breaks both strict parsers. The state field is spliced into the
--- RAW stored JSON string (store() always writes the exact
--- `"state":"pending"` marker), mirroring the consume transition. A
--- consumed record is terminal and never cancellable; a cancelled record
--- is idempotent. The flip preserves the key TTL.
+-- and breaks both strict parsers. The runtime state is classified from
+-- the decoded top-level envelope and the flip targets the top-level
+-- state field span, mirroring the consume transition. A consumed record
+-- is terminal and never cancellable; a cancelled record is idempotent;
+-- any other state is refused. The flip preserves the key's remaining
+-- lifetime in milliseconds; a key without an expiry (PTTL < 0) is
+-- refused untouched, never rewritten with a synthesized lifetime.
 local v = redis.call("GET", KEYS[1])
 if not v then
-  return false
+  return nil
 end
-if string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return nil
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return nil
+end
+local state = decoded['state']
+if state == 'consumed' then
   return {'consumed'}
 end
-if string.find(v, '"state":"cancelled"', 1, true) then
+if state == 'cancelled' then
   return {'cancelled'}
 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-local updated, n = string.gsub(v, '"state":"pending"', '"state":"cancelled"', 1)
-if n ~= 1 then
+if state ~= 'pending' then
+  return nil
+end
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
   return false
 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
+if pttl < 1000 then pttl = 1000 end
+local updated = kiwiReplaceTopLevel(v, 'state', '"cancelled"')
+if updated == nil then
+  return nil
+end
+redis.call("SET", KEYS[1], updated, "PX", pttl)
 return {'cancelled-now'}
 "#;
 
@@ -515,25 +978,287 @@ return {'cancelled-now'}
 /// are kept untouched — only the small result object is freshly encoded
 /// (bools + a short string, immune to the cjson large-integer issue).
 const COMMIT_RESULT_LUA: &str = r#"
--- The `"consumed_result":null` marker written by store() is replaced
--- IN PLACE, byte-compatible with the PHP commit script (both languages
--- splice the same runtime envelope; the small result object is freshly
--- encoded — valid is a REAL JSON boolean, binding a string or null).
+-- kiwicaptcha commit result
+--
+-- The `"consumed_result":null` field is replaced in place through its
+-- top-level span, byte-compatible with the PHP commit script (both
+-- languages splice the same runtime envelope; the small result object
+-- is freshly encoded — valid is a REAL JSON boolean, binding a string
+-- or null). The state and the result field are read from the decoded
+-- top-level envelope, so a nested marker can never fake a committed or
+-- resultless record.
 local v = redis.call('GET', KEYS[1])
 if not v then return 0 end
-if not string.find(v, '"state":"consumed"', 1, true) then return 0 end
-if not string.find(v, '"consumed_result":null', 1, true) then return 0 end
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then return 0 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return 0
+end
+if decoded['state'] ~= 'consumed' then return 0 end
+if not kiwiNullish(decoded['consumed_result']) then return 0 end
 local result
 if ARGV[2] ~= '' then
     result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
 else
     result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
 end
-local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
-if n ~= 1 then return 0 end
-local ttl = redis.call('TTL', KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call('SET', KEYS[1], updated, 'EX', ttl)
+if ARGV[3] ~= '' then
+    local parsed = cjson.decode(result)
+    parsed['mac'] = ARGV[3]
+    result = cjson.encode(parsed)
+end
+local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
+if updated == nil then return 0 end
+-- The re-SET preserves the key's exact remaining TTL in milliseconds; a
+-- persistent (foreign) key is refused with no write (a negative `PTTL`
+-- means no expiry — the commit never destroys foreign state).
+local pttl = redis.call('PTTL', KEYS[1])
+if pttl < 0 then
+    return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call('SET', KEYS[1], updated, 'PX', pttl)
+return 1
+"#;
+
+/// One atomic resume-derivation claim: exactly one concurrent
+/// same-operation recovery may derive and commit; the losers re-read and
+/// resolve the winner's committed outcome. The claim lives inside the
+/// record envelope as `resume_owner` and `resume_until` (epoch
+/// microseconds), spliced before the closing brace, so the transition
+/// is a single-key splice that a Redis Cluster deployment routes to one
+/// slot. A crash leaves only the short lease given by `ttl_secs`: once
+/// `resume_until` passes, a later retry may claim again. The record
+/// checks use the raw markers, the same strategy as the rest of this
+/// storage layer, which never re-encodes the record's JSON bytes.
+/// Returns the owner token when the claim was taken, nil when the
+/// record is missing, not consumed-resultless, persistent (a negative
+/// `PTTL`), or already claimed by a live or unparseable owner. Mirrors
+/// the PHP `RedisStorage::claimResumeDerivation()` exactly.
+const CLAIM_RESUME_LUA: &str = r#"
+-- kiwicaptcha resume-derivation claim
+--
+-- The re-derivation claim for a resultless consumed record (the resume
+-- path): exactly one concurrent same-operation recovery may derive and
+-- commit; the losers re-read and resolve the winner's committed
+-- outcome. KEYS[1] = the record key only. ARGV[1] = the random owner
+-- token, ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the
+-- record envelope: `"resume_owner":"<hex token>","resume_until":<epoch
+-- useconds>` is appended before the envelope's closing brace (the record
+-- key TTL is preserved in exact milliseconds), so this script touches
+-- exactly one key and is single-slot on a Redis Cluster. A crash leaves
+-- only the short lease: once resume_until (epoch useconds) passes, a
+-- later retry may claim again. The state, the result field and the claim
+-- fields are read from the decoded top-level envelope, so a nested
+-- marker can never fake a consumed record, a resultless record or a
+-- live claim.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return nil
+end
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return nil
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return nil
+end
+if decoded['state'] ~= 'consumed' then
+  return nil
+end
+if not kiwiNullish(decoded['consumed_result']) then
+  return nil
+end
+-- Live-claim check: refuse while a live claim is held. An owner marker
+-- without a parseable expiry is treated as live (fail safe: never a
+-- second unsynchronized derivation). The lease clock is epoch
+-- useconds.
+if not kiwiNullish(decoded['resume_owner']) then
+  local untilVal = tonumber(decoded['resume_until'])
+  local t = redis.call("TIME")
+  local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+  if untilVal == nil or untilVal > now_us then
+    return nil
+  end
+  -- Expired claim: strip the stale fields before appending the fresh
+  -- ones. A shape that cannot be stripped is refused as still-claimed
+  -- rather than duplicated.
+  local stripped = kiwiRemoveTopLevel(v, 'resume_until')
+  if stripped == nil then
+    return nil
+  end
+  stripped = kiwiRemoveTopLevel(stripped, 'resume_owner')
+  if stripped == nil then
+    return nil
+  end
+  v = stripped
+end
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return nil
+end
+if pttl < 1000 then pttl = 1000 end
+local t = redis.call("TIME")
+local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local untilVal = string.format('%d', now_us + tonumber(ARGV[2]) * 1000000)
+local updated = kiwiAppendTopLevel(
+  v,
+  '"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal
+)
+if updated == nil then
+  return nil
+end
+redis.call("SET", KEYS[1], updated, "PX", pttl)
+return ARGV[1]
+"#;
+
+/// Compare-and-delete the resume claim: only the claim's owner may
+/// release it (a stale owner after a crash + TTL expiry can never
+/// delete a newer recovery's claim). One key: the claim is embedded in
+/// the record envelope, so the compare-and-clear runs over the record
+/// key only, single-slot on a Redis Cluster. Returns 1 when the release
+/// cleared the claim, 0 when the claim is missing, owned by another
+/// token, or the key is persistent (a negative `PTTL` — the release
+/// never touches a foreign key).
+const RELEASE_RESUME_LUA: &str = r#"
+-- kiwicaptcha resume-derivation claim release (compare-and-delete)
+--
+-- KEYS[1] = the record key only (the claim is embedded in the record
+-- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
+-- owner token. The claim fields are cleared from the envelope only when
+-- they still hold exactly this owner: a stale owner after a crash and
+-- TTL expiry can never delete a newer recovery's claim. The owner and
+-- the state come from the decoded top-level envelope, so a nested
+-- marker can never fake an ownership match. The record key's remaining
+-- lifetime in milliseconds is preserved; a key without an expiry
+-- (PTTL < 0) is refused untouched, never rewritten with a synthesized
+-- lifetime.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return 0
+end
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return 0
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return 0
+end
+if decoded['state'] ~= 'consumed' then
+  return 0
+end
+if decoded['resume_owner'] ~= ARGV[1] then
+  return 0
+end
+local updated = kiwiRemoveTopLevel(v, 'resume_until')
+if updated == nil then
+  return 0
+end
+updated = kiwiRemoveTopLevel(updated, 'resume_owner')
+if updated == nil then
+  return 0
+end
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call("SET", KEYS[1], updated, "PX", pttl)
+return 1
+"#;
+
+/// The resume-path commit that fences on the live claim and clears it
+/// atomically with the result write: ownership lost (missing, expired
+/// at the epoch-microsecond fence, or owned by a different token)
+/// returns 2 with no write; the successful write splices the result and
+/// clears the claim fields in the same single-key run, preserving the
+/// record key's exact remaining TTL in milliseconds (a persistent,
+/// foreign key is refused with no write).
+const COMMIT_RESULT_CLEARING_CLAIM_LUA: &str = r#"
+-- kiwicaptcha commit result
+--
+-- The resume-path claim is a fencing precondition carried in ARGV[3]:
+-- the envelope must hold a live claim owned by exactly this token
+-- before the protected mutation is written. Ownership lost (missing,
+-- expired, or owned by a different token) returns 2 with no write, so
+-- a stale owner whose claim expired mid-derivation can never commit,
+-- and the successful write clears the claim fields in the same atomic
+-- transition. The claim is embedded in the record envelope, so this
+-- script touches exactly one key (single-slot on a Redis Cluster).
+-- The `"consumed_result":null` field is replaced in place through its
+-- top-level span; only the small result object is encoded (valid a real
+-- JSON boolean, binding a string or null), never the record's own JSON
+-- bytes. The state, the result field and the claim fields are read from
+-- the decoded top-level envelope, so a nested marker can never fake a
+-- committed record, a resultless record or a live claim. The lease
+-- clock is epoch useconds.
+local v = redis.call('GET', KEYS[1])
+if not v then
+  return 0
+end
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return 0
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return 0
+end
+if decoded['state'] ~= 'consumed' then
+  return 0
+end
+if not kiwiNullish(decoded['consumed_result']) then
+  return 0
+end
+-- Fencing: a live claim owned by this exact token. An expired or
+-- unparseable claim refuses too (fail safe).
+if decoded['resume_owner'] ~= ARGV[3] then
+  return 2
+end
+local untilVal = tonumber(decoded['resume_until'])
+local t = redis.call("TIME")
+local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+if untilVal == nil or untilVal <= now_us then
+  return 2
+end
+local result
+if ARGV[2] ~= '' then
+    result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
+else
+    result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
+end
+if ARGV[4] ~= '' then
+    local parsed = cjson.decode(result)
+    parsed['mac'] = ARGV[4]
+    result = cjson.encode(parsed)
+end
+local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
+if updated == nil then return 0 end
+local cleared = kiwiRemoveTopLevel(updated, 'resume_until')
+if cleared == nil then return 0 end
+cleared = kiwiRemoveTopLevel(cleared, 'resume_owner')
+if cleared == nil then return 0 end
+local pttl = redis.call('PTTL', KEYS[1])
+if pttl < 0 then
+  return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call('SET', KEYS[1], cleared, 'PX', pttl)
 return 1
 "#;
 
@@ -651,12 +1376,85 @@ pub enum RuntimeState {
 /// concurrent or retried consumer returns the same outcome
 /// without re-deriving. This is storage-level runtime state — it is never
 /// part of the [`ChallengeRecord`] wire schema.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StoredConsumedResult {
-    /// Whether the proof met the difficulty target.
+    /// Whether the proof met the difficulty target. The canonical form is
+    /// a real JSON boolean; the legacy integer form (1/0) written by
+    /// earlier commits is accepted here exactly like the PHP
+    /// `ConsumedResult::fromArray()` accepts it, so a mixed-language or
+    /// rolling deployment reads the same committed outcome on both sides.
+    /// Anything else (`"1"`, 1.9, 2, null) is malformed.
     pub valid: bool,
     /// The record's application-supplied transaction binding at commit time.
     pub binding: Option<String>,
+    /// The optional server-state MAC over the challenge, verdict,
+    /// binding and recorded operation identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+/// The storage boundary for a committed result: exactly the object form,
+/// exactly the two keys, and exactly true/false/1/0 for `valid`. Serde's
+/// derived struct deserializer also accepts a positional sequence
+/// (`[true, null]`), which the PHP `ConsumedResult::fromArray()` boundary
+/// rejects, so the object form is enforced explicitly.
+impl<'de> serde::Deserialize<'de> for StoredConsumedResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(deserialize_with = "deserialize_consumed_valid")]
+            valid: bool,
+            binding: Option<String>,
+            #[serde(default)]
+            mac: Option<String>,
+        }
+        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let wire: Wire = serde_json::from_value(serde_json::Value::Object(object))
+            .map_err(serde::de::Error::custom)?;
+
+        if wire
+            .mac
+            .as_deref()
+            .is_some_and(|mac| !crate::challenge::is_server_state_mac_shape(mac))
+        {
+            return Err(serde::de::Error::custom(
+                "consumed_result.mac must be 64 lowercase hex",
+            ));
+        }
+        Ok(StoredConsumedResult {
+            valid: wire.valid,
+            binding: wire.binding,
+            mac: wire.mac,
+        })
+    }
+}
+
+/// Deserialize the committed `valid` flag from a real JSON boolean or the
+/// legacy integer 1/0. Every other representation is rejected, so a
+/// malformed persisted result stays indeterminate (resultless) on both
+/// sides of the language boundary.
+fn deserialize_consumed_valid<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum RawValid {
+        Bool(bool),
+        Int(i64),
+    }
+    match serde::Deserialize::deserialize(deserializer)? {
+        RawValid::Bool(value) => Ok(value),
+        RawValid::Int(1) => Ok(true),
+        RawValid::Int(0) => Ok(false),
+        RawValid::Int(other) => Err(serde::de::Error::custom(format!(
+            "consumed result valid must be a boolean or 0/1, got {other}"
+        ))),
+    }
 }
 
 /// A stored value decoded at the storage layer: the [`ChallengeRecord`]
@@ -684,21 +1482,237 @@ struct StoredChallenge {
 /// serde_json and never drives a large allocation.
 pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
 
+/// The single-parse shadow of a stored value: every canonical record
+/// field carries the exact serde attribute of [`ChallengeRecord`] (the
+/// legacy alias and defaults), plus the five runtime-envelope keys as
+/// raw JSON values, so one `from_str` pass accepts exactly the language
+/// the strict record parse accepted after the runtime keys were
+/// stripped. `deny_unknown_fields` keeps the strictness: any key
+/// outside this shape makes the whole value undecodable.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEnvelope {
+    nonce: String,
+    scope: String,
+    #[serde(alias = "ip_hash")]
+    binding_tag: String,
+    issued_at: u64,
+    expires_at: u64,
+    algorithm: crate::challenge::PoWAlgorithm,
+    m_kib: u32,
+    t: u32,
+    p: u32,
+    target_bits: u32,
+    salt: String,
+    prefix: String,
+    challenge: String,
+    min_duration_ms: u64,
+    #[serde(default)]
+    issued_at_ns: u64,
+    #[serde(default)]
+    attempts_used: u32,
+    #[serde(default = "crate::challenge::default_protocol_version")]
+    protocol_version: u8,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default = "crate::challenge::default_policy_version")]
+    policy_version: u32,
+    #[serde(default)]
+    request_binding: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    decoy_field: Option<String>,
+    #[serde(default)]
+    execution_program: Option<String>,
+    #[serde(default)]
+    execution_version: Option<u8>,
+    #[serde(default)]
+    execution_commitment: Option<String>,
+    #[serde(default)]
+    rsw_modulus_sha256: Option<String>,
+    #[serde(default = "crate::challenge::default_kid")]
+    kid: u32,
+    #[serde(default)]
+    server_mac: Option<String>,
+    #[serde(default)]
+    state: Option<serde_json::Value>,
+    #[serde(default)]
+    consumed_result: Option<serde_json::Value>,
+    #[serde(default)]
+    operation_identity: Option<serde_json::Value>,
+    // The claim fields are accepted and dropped (the canonical record
+    // parse must never see them); the underscore names mark them
+    // intentionally unread.
+    #[serde(rename = "resume_owner", default)]
+    _resume_owner: Option<serde_json::Value>,
+    #[serde(rename = "resume_until", default)]
+    _resume_until: Option<serde_json::Value>,
+}
+
 /// Decode a stored value that MAY carry the storage-level runtime fields
 /// `state` / `consumed_result` / `operation_identity` and the shared
-/// resume-claim fields `resume_owner` / `resume_until`. The runtime fields
-/// are stripped before the strict [`ChallengeRecord`] parse, so
-/// `deny_unknown_fields` stays effective: any other foreign key makes the
-/// whole value undecodable. The claim fields are the same runtime
-/// envelope that PHP writes (both languages embed the claim in the
-/// record), so a PHP-claimed record stays readable here. A non-null
-/// `operation_identity` (a PHP-written
-/// record whose identity-aware consume spliced a value in — the PHP core
-/// rejects malformed identities before the transition, so any stored value
-/// is at most 128 bytes of `[A-Za-z0-9_-]`) parses and is
-/// stripped like any other runtime field — the canonical record never sees
-/// it. Returns `None` on any parse failure — a corrupt key must never blow
+/// resume-claim fields `resume_owner` / `resume_until`. One `from_str`
+/// pass parses the whole envelope (see [`StoredEnvelope`]); the runtime
+/// values keep their lenient conversions — a non-string `state` or
+/// `operation_identity` reads as absent, and a malformed
+/// `consumed_result` reads as absent while the record still decodes. A
+/// non-null `operation_identity` (a PHP-written record whose
+/// identity-aware consume spliced a value in — the PHP core rejects
+/// malformed identities before the transition, so any stored value is
+/// at most 128 bytes of `[A-Za-z0-9_-]`) parses and is stripped like
+/// any other runtime field — the canonical record never sees it.
+/// Returns `None` on any parse failure — a corrupt key must never blow
 /// up the verify path, mirroring the PHP `RedisStorage::decode()`.
+/// The recursive semantic-duplicate scan of a stored JSON document: a
+/// JSON object may not carry two members whose keys decode to the same
+/// name (an escaped alias such as `"st\u0061te"` is the same field as
+/// `"state"`). serde_json collapses such members before any derived
+/// struct sees them, exactly like `json_decode`/`cjson`, so the raw
+/// bytes are walked here first. Returns true when a duplicate exists or
+/// the document cannot be walked (fail closed).
+fn stored_json_has_duplicate_keys(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut cursor = 0usize;
+    if skip_ws(bytes, &mut cursor) >= bytes.len() || bytes[cursor] != b'{' {
+        // Not an object: hand it to the typed decoder, which rejects it.
+        return false;
+    }
+    cursor += 1;
+    scan_json_object(bytes, &mut cursor, 0).is_none()
+}
+
+fn scan_json_object(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<()> {
+    if depth > 32 {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    skip_ws(bytes, cursor);
+    if bytes.get(*cursor) == Some(&b'}') {
+        *cursor += 1;
+
+        return Some(());
+    }
+    loop {
+        skip_ws(bytes, cursor);
+        if bytes.get(*cursor) != Some(&b'"') {
+            return None;
+        }
+        let key = scan_json_string(bytes, cursor)?;
+        let decoded: String = serde_json::from_str(&key).ok()?;
+        if !seen.insert(decoded) {
+            return None;
+        }
+        skip_ws(bytes, cursor);
+        if bytes.get(*cursor) != Some(&b':') {
+            return None;
+        }
+        *cursor += 1;
+        scan_json_value(bytes, cursor, depth + 1)?;
+        skip_ws(bytes, cursor);
+        match bytes.get(*cursor) {
+            Some(&b',') => {
+                *cursor += 1;
+            }
+            Some(&b'}') => {
+                *cursor += 1;
+
+                return Some(());
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn scan_json_value(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<()> {
+    if depth > 32 {
+        return None;
+    }
+    skip_ws(bytes, cursor);
+    match bytes.get(*cursor)? {
+        b'{' => {
+            *cursor += 1;
+            scan_json_object(bytes, cursor, depth)
+        }
+        b'[' => {
+            *cursor += 1;
+            skip_ws(bytes, cursor);
+            if bytes.get(*cursor) == Some(&b']') {
+                *cursor += 1;
+
+                return Some(());
+            }
+            loop {
+                scan_json_value(bytes, cursor, depth + 1)?;
+                skip_ws(bytes, cursor);
+                match bytes.get(*cursor) {
+                    Some(&b',') => {
+                        *cursor += 1;
+                    }
+                    Some(&b']') => {
+                        *cursor += 1;
+
+                        return Some(());
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'"' => {
+            scan_json_string(bytes, cursor)?;
+
+            Some(())
+        }
+        _ => {
+            let start = *cursor;
+            while let Some(c) = bytes.get(*cursor) {
+                if matches!(c, b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n') {
+                    break;
+                }
+                *cursor += 1;
+            }
+            if *cursor == start {
+                None
+            } else {
+                Some(())
+            }
+        }
+    }
+}
+
+/// Consume a JSON string token (including the quotes) and return it raw.
+fn scan_json_string(bytes: &[u8], cursor: &mut usize) -> Option<String> {
+    let start = *cursor;
+    if bytes.get(*cursor) != Some(&b'"') {
+        return None;
+    }
+    *cursor += 1;
+    while let Some(c) = bytes.get(*cursor) {
+        match c {
+            b'\\' => *cursor += 2,
+            b'"' => {
+                *cursor += 1;
+
+                return Some(String::from_utf8_lossy(&bytes[start..*cursor]).into_owned());
+            }
+            _ => *cursor += 1,
+        }
+    }
+    None
+}
+
+fn skip_ws(bytes: &[u8], cursor: &mut usize) -> usize {
+    while let Some(c) = bytes.get(*cursor) {
+        if !matches!(c, b' ' | b'\t' | b'\r' | b'\n') {
+            break;
+        }
+        *cursor += 1;
+    }
+    *cursor
+}
+
 fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     // Bound before the parse: the canonical record JSON is a
     // few hundred bytes — a value at 128 KiB+ is a corrupt/attacker-written
@@ -707,29 +1721,114 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     if raw.len() > MAX_STORED_RECORD_JSON_BYTES {
         return None;
     }
-    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let consumed_result = value
-        .get("consumed_result")
+    // The semantic-duplicate gate: serde_json keeps one member of an
+    // escaped alias pair, so the raw bytes are checked before the typed
+    // parse — the same authority the PHP StrictJson decoder and the Lua
+    // transition gate apply.
+    if stored_json_has_duplicate_keys(raw) {
+        return None;
+    }
+    let envelope: StoredEnvelope = serde_json::from_str(raw).ok()?;
+    let state = envelope
+        .state
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let consumed_result = envelope
+        .consumed_result
+        .as_ref()
         .and_then(|v| serde_json::from_value(v.clone()).ok());
-    let state = value
-        .get("state")
+    let operation_identity = envelope
+        .operation_identity
+        .as_ref()
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let operation_identity = value
-        .get("operation_identity")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let obj = value.as_object_mut()?;
-    obj.remove("state");
-    obj.remove("consumed_result");
-    obj.remove("operation_identity");
-    // The shared resume-claim fields: PHP and Rust write them into the
-    // envelope atomically with the claim, so the canonical record parse
-    // must never see them (a live claim must not make the record
-    // undecodable for the other language's recovery).
-    obj.remove("resume_owner");
-    obj.remove("resume_until");
-    let record: ChallengeRecord = serde_json::from_value(value).ok()?;
+    // The protocol-extension grammar matrix at the storage boundary,
+    // the same table the verifier's structural validation applies (the
+    // PHP decoder enforces the identical table at its fromArray
+    // boundary): a record whose protocol version does not admit its
+    // decoy/extension combination is undecodable stored state, never a
+    // record that reaches verification to be rejected later.
+    if !crate::challenge::protocol_extension_grammar_ok(
+        envelope.protocol_version,
+        envelope.decoy_field.is_some(),
+        envelope.execution_program.is_some(),
+        envelope.rsw_modulus_sha256.is_some(),
+    ) {
+        return None;
+    }
+    // The full structural contract, not only the grammar matrix: the
+    // record a storage read surfaces can never carry a shape
+    // verification would reject as malformed (partial execution
+    // triplets, broken identifiers, impossible lifetimes) — the same
+    // one-call authority the verifier itself consults.
+    {
+        let probe = ChallengeRecord {
+            nonce: envelope.nonce.clone(),
+            scope: envelope.scope.clone(),
+            binding_tag: envelope.binding_tag.clone(),
+            issued_at: envelope.issued_at,
+            expires_at: envelope.expires_at,
+            algorithm: envelope.algorithm,
+            m_kib: envelope.m_kib,
+            t: envelope.t,
+            p: envelope.p,
+            target_bits: envelope.target_bits,
+            salt: envelope.salt.clone(),
+            prefix: envelope.prefix.clone(),
+            challenge: envelope.challenge.clone(),
+            min_duration_ms: envelope.min_duration_ms,
+            issued_at_ns: envelope.issued_at_ns,
+            attempts_used: envelope.attempts_used,
+            protocol_version: envelope.protocol_version,
+            region: envelope.region.clone(),
+            policy_version: envelope.policy_version,
+            request_binding: envelope.request_binding.clone(),
+            issuer: envelope.issuer.clone(),
+            hostname: envelope.hostname.clone(),
+            decoy_field: envelope.decoy_field.clone(),
+            execution_program: envelope.execution_program.clone(),
+            execution_version: envelope.execution_version,
+            execution_commitment: envelope.execution_commitment.clone(),
+            kid: envelope.kid,
+            rsw_modulus_sha256: envelope.rsw_modulus_sha256.clone(),
+            server_mac: envelope.server_mac.clone(),
+        };
+        if !crate::challenge::record_is_structurally_valid(&probe) {
+            return None;
+        }
+    }
+    let record = ChallengeRecord {
+        nonce: envelope.nonce,
+        scope: envelope.scope,
+        binding_tag: envelope.binding_tag,
+        issued_at: envelope.issued_at,
+        expires_at: envelope.expires_at,
+        algorithm: envelope.algorithm,
+        m_kib: envelope.m_kib,
+        t: envelope.t,
+        p: envelope.p,
+        target_bits: envelope.target_bits,
+        salt: envelope.salt,
+        prefix: envelope.prefix,
+        challenge: envelope.challenge,
+        min_duration_ms: envelope.min_duration_ms,
+        issued_at_ns: envelope.issued_at_ns,
+        attempts_used: envelope.attempts_used,
+        protocol_version: envelope.protocol_version,
+        region: envelope.region,
+        policy_version: envelope.policy_version,
+        request_binding: envelope.request_binding,
+        issuer: envelope.issuer,
+        hostname: envelope.hostname,
+        decoy_field: envelope.decoy_field,
+        execution_program: envelope.execution_program,
+        execution_version: envelope.execution_version,
+        execution_commitment: envelope.execution_commitment,
+        kid: envelope.kid,
+        rsw_modulus_sha256: envelope.rsw_modulus_sha256,
+        server_mac: envelope.server_mac,
+    };
     Some(StoredChallenge {
         record,
         state,
@@ -743,26 +1842,37 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
 /// `first` flag. The stored outcome is taken from the returned JSON itself,
 /// so `first == false` carries the winner's committed result when one
 /// exists.
-fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
-    let (raw, first) = match value {
+fn parse_consume(value: redis::Value) -> Option<(ConsumeResult, bool)> {
+    let (raw, first, identity_spliced) = match value {
         redis::Value::Nil => return None,
-        redis::Value::Array(items) if items.len() == 2 => {
+        redis::Value::Array(items) if items.len() == 2 || items.len() == 3 => {
             let raw = match &items[0] {
                 redis::Value::BulkString(bytes) => String::from_utf8_lossy(bytes).into_owned(),
                 _ => return None,
             };
             let first = matches!(&items[1], redis::Value::Int(1));
-            (raw, first)
+            // The third reply element is the identity-splice flag; an
+            // older two-element reply (a stale loaded script) reports
+            // false so the caller still fails closed when an identity
+            // was requested.
+            let spliced = items
+                .get(2)
+                .map(|v| matches!(v, redis::Value::Int(1)))
+                .unwrap_or(false);
+            (raw, first, spliced)
         }
         _ => return None,
     };
     let stored = decode_stored(&raw)?;
-    Some(ConsumeResult {
-        record: stored.record,
-        first,
-        stored_result: if first { None } else { stored.consumed_result },
-        operation_identity: stored.operation_identity,
-    })
+    Some((
+        ConsumeResult {
+            record: stored.record,
+            first,
+            stored_result: if first { None } else { stored.consumed_result },
+            operation_identity: stored.operation_identity,
+        },
+        identity_spliced,
+    ))
 }
 
 /// Parse the Lua cancel-transition reply into a [`CancelResult`]: `nil`
@@ -801,7 +1911,6 @@ fn parse_delete_if_pending(value: redis::Value) -> DeleteIfPending {
     };
     match state.as_str() {
         "cancelled" => DeleteIfPending::Cancelled,
-        "corrupt" => DeleteIfPending::Corrupt,
         "consumed" => {
             let raw = match items.get(1) {
                 Some(redis::Value::BulkString(bytes)) => {
@@ -821,6 +1930,7 @@ fn parse_delete_if_pending(value: redis::Value) -> DeleteIfPending {
             }))
         }
         "deleted-pending" => DeleteIfPending::DeletedPending,
+        "corrupt" => DeleteIfPending::Corrupt,
         _ => DeleteIfPending::Missing,
     }
 }
@@ -864,6 +1974,17 @@ fn operation_identity_json(identity: &str) -> redis::RedisResult<String> {
 /// `expires_at - now` (min 1 s) — byte-compatible with the PHP core's
 /// `RedisStorage` (same key layout, same JSON schema, same TTL rule), so
 /// records written by one side verify on the other.
+///
+/// Storage-boundary byte-exactness constraint: the stored value is the
+/// compact serde JSON of the record plus the runtime envelope, and
+/// every later transition splices raw string markers into those exact
+/// bytes (`"state":"pending"` → `"state":"consumed"` and the small
+/// result object) — the record's JSON is never re-encoded, because a
+/// `cjson`/JSON re-encode would rewrite large integers
+/// (`issued_at_ns` ~1.7e15) into scientific notation that both strict
+/// parsers reject. Any writer at this boundary must preserve the
+/// compact form, the exact marker bytes and the no-re-encode rule, or
+/// the cross-language record interchange breaks.
 ///
 /// `consume()` is a Lua transition: the pending record is kept
 /// with a storage-level `state = "consumed"` field so a concurrent loser
@@ -1135,7 +2256,7 @@ impl RedisChallengeStore {
         // same atomic transition — both cores validate identities
         // against the narrow `[A-Za-z0-9_-]` 1..128-byte alphabet and
         // reject malformed ones before the transition) are spliced into
-        // the RAW JSON (never re-encoded — large integers must stay
+        // the raw JSON (never re-encoded — large integers must stay
         // decimal), exactly as PHP writes them, so the atomic
         // pending->consumed transition works across the two
         // implementations. The canonical record fields are untouched.
@@ -1280,6 +2401,8 @@ impl RedisChallengeStore {
         };
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
+        let identity_requested = operation_identity.is_some();
+        let mut identity_spliced = true;
         Self::run_command(conn, |c| {
             let v = Self::invoke_script::<redis::Value>(
                 c,
@@ -1287,7 +2410,12 @@ impl RedisChallengeStore {
                 &key,
                 &[&identity_arg],
             )?;
-            let parsed = parse_consume(v);
+            let (parsed, spliced) = match parse_consume(v) {
+                Some((result, spliced)) => (Some(result), spliced),
+                None => (None, true),
+            };
+            identity_spliced = spliced;
+            let parsed = parsed;
             // Durability barrier: only the fresh pending → consumed
             // transition mutated the store, so only it waits. The wait
             // proves that at least N replicas acknowledged the write; it
@@ -1302,6 +2430,22 @@ impl RedisChallengeStore {
             // cannot turn an idempotent retry into a failure.
             if matches!(parsed, Some(ref result) if result.first) && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            // The identity-splice contract (mirrors the PHP
+            // doConsume): a fresh flip with a requested identity that
+            // could not land is a storage-write failure, not a silent
+            // success. The flip itself stays durable, so a same-identity
+            // retry recovers the consumed record instead of redeeming
+            // it twice.
+            if identity_requested
+                && !identity_spliced
+                && matches!(parsed, Some(ref result) if result.first)
+            {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::ResponseError,
+                    "consume identity splice refused",
+                    "the consume transition could not record the operation identity: the stored envelope carries no operation_identity marker".to_string(),
+                )));
             }
             Ok(parsed)
         })
@@ -1350,8 +2494,9 @@ impl RedisChallengeStore {
     /// every non-missing variant carries the [`ChallengeRecord`] parsed
     /// from the same bytes the state transition wrote — never from two
     /// separate reads that could race. The state marker is parsed from
-    /// the raw stored JSON, exactly like the PHP single-snapshot read; a
-    /// value with no state marker reads as Pending (with its record), a
+    /// the decoded top-level envelope, exactly like the PHP
+    /// single-snapshot read; a value with no state marker (or a
+    /// non-string one) fails closed as Missing, a
     /// cancelled value reads as Cancelled (with its record), and an
     /// undecodable envelope — pending, cancelled or consumed — reads as
     /// Missing (the lenient corrupt-key rule of
@@ -1391,26 +2536,29 @@ impl RedisChallengeStore {
         let Some(raw) = raw else {
             return Ok(RuntimeState::Missing);
         };
-        if raw.contains("\"state\":\"cancelled\"") {
-            return Ok(match decode_stored(&raw) {
-                Some(stored) => RuntimeState::Cancelled(Box::new(stored.record)),
-                None => RuntimeState::Missing,
-            });
+        // The runtime state comes from the decoded top-level envelope,
+        // never from a whole-document byte search: a nested
+        // `"state":"consumed"` string inside a corrupt or foreign value
+        // can never classify the record. An unknown or undecodable state
+        // fails closed as missing, never as pending.
+        let Some(stored) = decode_stored(&raw) else {
+            return Ok(RuntimeState::Missing);
+        };
+        match stored.state.as_deref() {
+            Some("consumed") => Ok(RuntimeState::Consumed(Box::new(ConsumedState {
+                record: stored.record,
+                stored_result: stored.consumed_result,
+                operation_identity: stored.operation_identity,
+            }))),
+            Some("cancelled") => Ok(RuntimeState::Cancelled(Box::new(stored.record))),
+            Some("pending") => Ok(RuntimeState::Pending(Box::new(stored.record))),
+            // An absent state marker is NOT pending: under the current
+            // envelope contract every stored record carries one, and the
+            // PHP classifier fails the same state closed as missing. An
+            // absent or non-string state is corrupt state, never a
+            // redeemable pending record.
+            _ => Ok(RuntimeState::Missing),
         }
-        if raw.contains("\"state\":\"consumed\"") {
-            return match decode_stored(&raw) {
-                Some(stored) => Ok(RuntimeState::Consumed(Box::new(ConsumedState {
-                    record: stored.record,
-                    stored_result: stored.consumed_result,
-                    operation_identity: stored.operation_identity,
-                }))),
-                None => Ok(RuntimeState::Missing),
-            };
-        }
-        Ok(match decode_stored(&raw) {
-            Some(stored) => RuntimeState::Pending(Box::new(stored.record)),
-            None => RuntimeState::Missing,
-        })
     }
 
     /// Atomically claim the re-derivation ownership of a resultless
@@ -1448,77 +2596,23 @@ impl RedisChallengeStore {
         // could otherwise observe the same apparent owner across a lease
         // expiry). Secure RNG failure -> no claim -> the recovery
         // answers StorageUnavailable.
-        let owner: String = security_random::<16>()
-            .map(|token| token.iter().map(|b| format!("{b:02x}")).collect())
-            .map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::IoError,
-                    "resume claim owner generation failed",
-                    e.to_string(),
-                ))
-            })?;
+        let owner: String = security_random::<16>().map(hex::encode).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "resume claim owner generation failed",
+                e.to_string(),
+            ))
+        })?;
+        let ttl_arg = ttl_secs.to_string();
         let mut conn = self.checkout()?;
-        let script = redis::Script::new(
-            r#"-- kiwicaptcha resume-derivation claim
---
--- The re-derivation claim for a resultless consumed record (the resume
--- path): exactly one concurrent same-operation recovery may derive and
--- commit; the losers re-read and resolve the winner's committed outcome.
--- KEYS[1] = the record key only. ARGV[1] = the random owner token,
--- ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the record
--- envelope: `"resume_owner":"<hex token>","resume_until":<epoch secs>`
--- is spliced before the envelope's closing brace (the record key TTL is
--- preserved), so this script touches exactly one key and is single-slot
--- on a Redis Cluster. A crash leaves only the short lease: once
--- resume_until passes, a later retry may claim again. The record checks
--- use the RAW markers (the same strategy as the rest of this storage
--- layer, which never re-encodes the record's JSON bytes): the envelope
--- stores `"consumed_result":null`, and a cjson decode would map a JSON
--- null to cjson.null, never Lua nil, refusing every resultless record.
-local v = redis.call("GET", KEYS[1])
-if not v then
-  return nil
-end
-if not string.find(v, '"state":"consumed"', 1, true) then
-  return nil
-end
-if not string.find(v, '"consumed_result":null', 1, true) then
-  return nil
-end
--- Live-claim check: refuse while a live claim is held. An owner marker
--- without a parseable expiry is treated as live (fail safe: never a
--- second unsynchronized derivation).
-local untilStr = string.match(v, '"resume_until":(%d+)')
-if string.find(v, '"resume_owner":"', 1, true) then
-  local time = redis.call("TIME")
-  local now = tonumber(time[1])
-  if untilStr == nil or tonumber(untilStr) > now then
-    return nil
-  end
-  -- Expired claim: strip the stale fields before appending the fresh
-  -- ones. The fields always sit at the envelope's end (only this script
-  -- family writes them); a shape that cannot be stripped is refused as
-  -- still-claimed rather than duplicated.
-  local stripped, n = string.gsub(v, ',"resume_owner":"[^"]*","resume_until":%d+}$', '}')
-  if n ~= 1 then
-    return nil
-  end
-  v = stripped
-end
-local time = redis.call("TIME")
-local untilVal = tonumber(time[1]) + tonumber(ARGV[2])
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
-redis.call("SET", KEYS[1], updated, "EX", ttl)
-return ARGV[1]
-"#,
-        );
-        let claimed: Option<String> = script
-            .key(&record_key)
-            .arg(&owner)
-            .arg(ttl_secs)
-            .invoke(&mut conn)?;
+        let claimed: Option<String> = Self::run_command(&mut conn, |c| {
+            Self::invoke_script(
+                c,
+                &self.scripts.claim_resume,
+                &record_key,
+                &[&owner, &ttl_arg],
+            )
+        })?;
 
         Ok(claimed)
     }
@@ -1540,30 +2634,9 @@ return ARGV[1]
         validate_resume_owner(owner)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
-        let script = redis::Script::new(
-            r#"-- kiwicaptcha resume-derivation claim release (compare-and-delete)
---
--- KEYS[1] = the record key only (the claim is embedded in the record
--- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
--- owner token. The claim fields are cleared from the envelope only when
--- they still hold exactly this owner: a stale owner after a crash and
--- TTL expiry can never delete a newer recovery's claim. The record key
--- TTL is preserved.
-local v = redis.call("GET", KEYS[1])
-if not v then
-  return 0
-end
-local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_until":%d+}$', '}')
-if n ~= 1 then
-  return 0
-end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
-return 1
-"#,
-        );
-        let released: i64 = script.key(&record_key).arg(owner).invoke(&mut conn)?;
+        let released: i64 = Self::run_command(&mut conn, |c| {
+            Self::invoke_script(c, &self.scripts.release_resume, &record_key, &[owner])
+        })?;
 
         Ok(released == 1)
     }
@@ -1698,7 +2771,32 @@ return 1
         binding: Option<&str>,
     ) -> redis::RedisResult<bool> {
         let mut conn = self.checkout()?;
-        self.commit_result_with_conn(&mut conn, nonce, valid, binding)
+        self.commit_result_with_conn(&mut conn, nonce, valid, binding, None)
+    }
+
+    /// Commit a consumed result together with its server-state MAC — the
+    /// authenticated counterpart of [`Self::commit_result`], mirroring the
+    /// PHP `AuthenticatedResultCommitInterface`. `mac` is the
+    /// [`crate::challenge::consumed_result_mac`] tag over the record
+    /// challenge, the verdict, the binding and the recorded operation
+    /// identity (or `None` for the legacy unauthenticated shape). The
+    /// production verifier commits through the authenticated seam and only
+    /// replays a stored success whose MAC verifies, so a storage writer
+    /// who does not hold the master secret cannot forge `valid=true` on a
+    /// consumed record.
+    ///
+    /// Semantics are otherwise identical to [`Self::commit_result`]
+    /// (one-shot while the record is `consumed` with no result, best
+    /// effort, verified replica wait when configured).
+    pub fn commit_result_with_mac(
+        &self,
+        nonce: &str,
+        valid: bool,
+        binding: Option<&str>,
+        mac: Option<&str>,
+    ) -> redis::RedisResult<bool> {
+        let mut conn = self.checkout()?;
+        self.commit_result_with_conn(&mut conn, nonce, valid, binding, mac)
     }
 
     /// The outcome commit on an already checked-out connection — the
@@ -1712,12 +2810,17 @@ return 1
         nonce: &str,
         valid: bool,
         binding: Option<&str>,
+        mac: Option<&str>,
     ) -> redis::RedisResult<bool> {
         let key = format!("{}{}", self.prefix, nonce);
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let stored = Self::run_command(conn, |c| {
-            let args = [if valid { "1" } else { "0" }, binding.unwrap_or("")];
+            let args = [
+                if valid { "1" } else { "0" },
+                binding.unwrap_or(""),
+                mac.unwrap_or(""),
+            ];
             let r = Self::invoke_script::<i64>(c, &self.scripts.commit_result, &key, &args)?;
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
@@ -1751,68 +2854,31 @@ return 1
         binding: Option<&str>,
         claim_owner: &str,
     ) -> redis::RedisResult<bool> {
+        self.commit_result_clearing_claim_with_mac(nonce, valid, binding, claim_owner, None)
+    }
+
+    fn commit_result_clearing_claim_with_mac(
+        &self,
+        nonce: &str,
+        valid: bool,
+        binding: Option<&str>,
+        claim_owner: &str,
+        mac: Option<&str>,
+    ) -> redis::RedisResult<bool> {
         validate_resume_owner(claim_owner)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
-        let script = redis::Script::new(
-            r#"-- kiwicaptcha commit result
---
--- The resume-path claim is a fencing precondition carried in ARGV[3]:
--- the envelope must hold a live claim owned by exactly this token
--- before the protected mutation is written. Ownership lost (missing,
--- expired, or owned by a different token) returns 2 with no write, so
--- a stale owner whose claim expired mid-derivation can never commit,
--- and the successful write clears the claim fields in the same atomic
--- transition. The claim is embedded in the record envelope, so this
--- script touches exactly one key (single-slot on a Redis Cluster).
--- The `"consumed_result":null` marker is replaced in place; only the
--- small result object is encoded (valid a real JSON boolean, binding
--- a string or null), never the record's own JSON bytes.
-local v = redis.call("GET", KEYS[1])
-if not v then
-  return 0
-end
-if not string.find(v, '"state":"consumed"', 1, true) then
-  return 0
-end
-if not string.find(v, '"consumed_result":null', 1, true) then
-  return 0
-end
--- Fencing: a live claim owned by this exact token. The owner token is
--- hex ([0-9a-f]), so it is safe inside the Lua pattern. The claim must
--- be live: an expired claim no longer fences (the stale owner may not
--- commit). An unparseable expiry refuses too (fail safe).
-local untilStr = string.match(v, '"resume_owner":"' .. ARGV[3] .. '","resume_until":(%d+)')
-local time = redis.call("TIME")
-local now = tonumber(time[1])
-if untilStr == nil or tonumber(untilStr) <= now then
-  return 2
-end
-local result
-if ARGV[2] ~= '' then
-    result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
-else
-    result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
-end
-local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
-if n ~= 1 then return 0 end
-local cleared, m = string.gsub(updated, ',"resume_owner":"' .. ARGV[3] .. '","resume_until":%d+}$', '}')
-if m ~= 1 then return 0 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], cleared, "EX", ttl)
-return 1
-"#,
-        );
         let stored = Self::run_command(&mut conn, |c| {
-            let r: i64 = script
-                .key(&record_key)
-                .arg(if valid { "1" } else { "0" })
-                .arg(binding.unwrap_or(""))
-                .arg(claim_owner)
-                .invoke(c)?;
+            let args = [
+                if valid { "1" } else { "0" },
+                binding.unwrap_or(""),
+                claim_owner,
+                mac.unwrap_or(""),
+            ];
+            let r: i64 =
+                Self::invoke_script(c, &self.scripts.commit_clearing_claim, &record_key, &args)?;
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
@@ -1848,14 +2914,21 @@ return 1
                 e.to_string(),
             )));
         }
-        let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        let token_hex: String = hex::encode(token);
         let mut conn = self.checkout()?;
-        redis::cmd("SETEX")
-            .arg(&fence_key)
-            .arg(60)
-            .arg(&token_hex)
-            .query::<String>(&mut conn)?;
-        Self::wait_verified(&mut conn, wait_replicas, wait_timeout_ms).map_err(|e| {
+        // The fence write rides the same error-handling path as every
+        // other command on a checked-out connection: an I/O failure
+        // poisons the connection (the no-retry rule), never returns it
+        // to the idle pool possibly desynced.
+        Self::run_command(&mut conn, |c| {
+            redis::cmd("SETEX")
+                .arg(&fence_key)
+                .arg(60)
+                .arg(&token_hex)
+                .query::<String>(c)?;
+            Self::wait_verified(c, wait_replicas, wait_timeout_ms)
+        })
+        .map_err(|e| {
             redis::RedisError::from((
                 e.kind(),
                 "replication fence not satisfied",
@@ -2014,6 +3087,9 @@ pub enum AdmissionError {
 ///
 /// See the module docs for the check order, the one-shot semantics, the
 /// storage error semantics, and the consume no-retry rule.
+/// The lazily derived per-(tenant, kid) purpose keys of a verifier.
+type DerivedKeysCache = HashMap<(u32, Option<String>), Arc<DerivedKeys>>;
+
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
@@ -2032,31 +3108,56 @@ pub struct ProductionVerifier {
     accept_legacy_v1: bool,
     expected_region: Option<String>,
     expected_policy_version: Option<u32>,
+    /// The rollout-window floor for [`ProductionVerifier::expected_policy_version`]:
+    /// during a declared N → N+1 policy rollout a mixed fleet legitimately
+    /// redeems challenges issued under either epoch, so a floor of N with an
+    /// expected version of N+1 accepts `floor <= policy_version <= expected`
+    /// — strict equality otherwise (the default, `None`). A floor greater
+    /// than the expected version accepts nothing (fail closed). Ignored when
+    /// no expected version is set.
+    policy_version_floor: Option<u32>,
     expected_issuer: Option<String>,
-    /// The `HKDF` purpose keys per signing key id, derived once per kid for
-    /// the verifier's lifetime (the verifier owns immutable secrets — a
-    /// master secret never changes under a running verifier; the only
-    /// exception is the builder's [`ProductionVerifier::with_secrets_by_kid`],
-    /// which replaces the secret set and resets this cache so the prior
-    /// keys can never survive the replacement). The cheap
-    /// phase runs up to four `HKDF` derivations per verification without
-    /// this cache (signature + IP binding, each re-checked after the
-    /// consume); with it, every signature / binding check after the first
-    /// per kid reuses the cached [`DerivedKeys`] — see
-    /// [`ProductionVerifier::resolve_derived_keys`].
-    derived_keys: OnceLock<HashMap<u32, Arc<DerivedKeys>>>,
+    /// The tenant id every purpose key derives under (see
+    /// [`crate::challenge::ChallengeConfig::tenant`]): `None` keeps the
+    /// global keys, byte-identical to the tenant-free verification.
+    tenant: Option<String>,
+    /// The per-(tenant, kid) `HKDF` purpose keys, derived lazily on the
+    /// first verification that resolves a given `(tenant, kid)` pair and
+    /// cached for the verifier's lifetime (the verifier owns immutable
+    /// secrets and one fixed tenant; the only invalidation is the
+    /// builder's [`ProductionVerifier::with_secrets_by_kid`] /
+    /// [`ProductionVerifier::with_tenant`], which replaces the secret
+    /// set or the tenant and resets this cache so keys derived earlier
+    /// can never survive the replacement). A cold start derives exactly
+    /// the pair the first record names, never the whole keyring. A
+    /// poisoned lock (a panic while deriving — none of this code
+    /// panics) recovers the intact map instead of failing every later
+    /// verification.
+    derived_keys: Mutex<DerivedKeysCache>,
     /// Clock override (the PHP Verifier's `$now` closure equivalent):
     /// returns the current Unix time in seconds used by the TTL checks and
     /// the post-derive final re-validation. Defaults to the real clock.
     now_unix: fn() -> u64,
-    /// The decoded rsw trapdoor of this verifier (modulus + secret
-    /// lambda), or `None` when the deployment does not verify rsw
-    /// records. A signed rsw record then fails with
+    /// The configured rsw trapdoor pair, stored raw (canonical base64
+    /// strings) and decoded lazily through the process-wide
+    /// validated-pair memo at first use — the builder never panics on a
+    /// malformed pair. `None` when the deployment does not verify rsw
+    /// records; a configured-but-invalid pair resolves to no trapdoor,
+    /// and a signed rsw record then fails with
     /// [`VerifyError::UnsupportedRswParams`] at the proof site: the
     /// record is authentic but this verifier cannot represent the
-    /// trapdoor computation, exactly the Argon2id configuration-mismatch
-    /// semantics of the PHP core.
-    rsw: Option<RswTrapdoor>,
+    /// trapdoor computation, exactly the Argon2id
+    /// configuration-mismatch semantics of the PHP core.
+    rsw: Option<(String, String)>,
+    /// The rsw trapdoor rotation keyring (see
+    /// [`crate::rsw::RswKeyring`]): historical pairs indexed by their
+    /// authenticated modulus identity, the Rust mirror of the PHP
+    /// `$rswVerificationKeys`. A record whose authenticated identity is
+    /// not the active pair resolves through this keyring, so a rotated
+    /// (or mixed-node) outstanding challenge still verifies; an unknown
+    /// identity resolves to no trapdoor and fails closed with
+    /// [`VerifyError::UnsupportedRswParams`].
+    rsw_keyring: RswKeyring,
 }
 
 fn real_now_unix() -> u64 {
@@ -2104,30 +3205,112 @@ impl ProductionVerifier {
             accept_legacy_v1: false,
             expected_region: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             expected_issuer: None,
-            derived_keys: OnceLock::new(),
+            tenant: None,
+            derived_keys: Mutex::new(HashMap::new()),
             now_unix: real_now_unix,
             rsw: None,
+            rsw_keyring: RswKeyring::new(),
         }
     }
 
     /// Configure the rsw time-lock trapdoor: the modulus n and the
     /// secret lambda = lcm(p-1, q-1), both canonical standard base64
-    /// (generated with the shipped tools/rsw-keygen binary and
-    /// validated at build time with the shared decode, including the
-    /// weak-input rejections). When set, rsw records verify through
-    /// the trapdoor; the default (unset) treats a signed rsw record as
-    /// authentic but unsupported
-    /// ([`VerifyError::UnsupportedRswParams`]).
+    /// (generated with the shipped tools/rsw-keygen binary). The pair
+    /// is stored raw and decoded lazily through the process-wide
+    /// validated-pair memo (including the weak-input rejections); when
+    /// set, rsw records verify through the trapdoor. The default
+    /// (unset) treats a signed rsw record as authentic but unsupported
+    /// ([`VerifyError::UnsupportedRswParams`]); a configured-but-invalid
+    /// pair resolves to no trapdoor at verification time and yields the
+    /// same typed rejection — the builder never panics.
     pub fn with_rsw_trapdoor(
         mut self,
         modulus_b64: impl Into<String>,
         lambda_b64: impl Into<String>,
     ) -> Self {
-        self.rsw = Some(
-            RswTrapdoor::new(&modulus_b64.into(), &lambda_b64.into())
-                .expect("rsw trapdoor configuration is validated at build time"),
+        self.rsw = Some((modulus_b64.into(), lambda_b64.into()));
+        self
+    }
+
+    /// Register a historical rsw trapdoor pair under its authenticated
+    /// modulus identity — the canonical-byte fingerprint
+    /// (`crate::rsw::modulus_fingerprint_hex`, exactly the rsw-keygen's
+    /// `rsw_modulus_n_sha256`) or its legacy base64-text alias during
+    /// the migration window. A record whose identity resolves here
+    /// verifies even after the active pair rotated.
+    ///
+    /// The entry is fully validated and the builder returns the typed
+    /// [`RswKeyringError`] instead of silently dropping a misconfigured
+    /// key: an identity that matches neither form of the paired modulus,
+    /// a non-canonical modulus, or a pair that fails trapdoor validation
+    /// all refuse configuration. An invalid historical entry can
+    /// therefore never shadow — and disable — a valid active pair.
+    pub fn with_rsw_verification_key(
+        mut self,
+        identity: impl Into<String>,
+        modulus_b64: impl Into<String>,
+        lambda_b64: impl Into<String>,
+    ) -> Result<Self, RswKeyringError> {
+        self.rsw_keyring
+            .insert(&identity.into(), &modulus_b64.into(), &lambda_b64.into())?;
+        Ok(self)
+    }
+
+    /// Enable or disable the legacy base64-text rsw identity alias (the
+    /// bounded migration window for identity-bearing records issued
+    /// before the canonical fingerprint rule). Disabled by default: once
+    /// every pre-v5 record has drained, a stale alias must not keep the
+    /// temporary grammar alive. Enable it only during the documented
+    /// drain (see the operations guide), keyring entries included.
+    pub fn with_rsw_legacy_identity(mut self, enabled: bool) -> Self {
+        self.rsw_keyring = std::mem::take(&mut self.rsw_keyring).with_legacy_aliases(enabled);
+        self
+    }
+
+    /// The rsw trapdoor selected by the record's authenticated modulus
+    /// identity: the rotation keyring first, then the active pair,
+    /// through the one resolver the generic verifier also uses. The
+    /// legacy base64-text alias resolves a pre-v5 identity only; a v5
+    /// identity resolves its canonical fingerprint exactly; an identity
+    /// in neither (or a v5 record without one) resolves to `None` —
+    /// which the proof site answers as the authentic-but-unsupported
+    /// [`VerifyError::UnsupportedRswParams`], never by falling through
+    /// to an arbitrary active pair.
+    fn rsw_trapdoor_for(&self, record: &ChallengeRecord) -> Option<Arc<RswTrapdoor>> {
+        crate::rsw::resolve_rsw_trapdoor(
+            self.rsw
+                .as_ref()
+                .map(|(modulus, lambda)| (modulus.as_str(), lambda.as_str())),
+            Some(&self.rsw_keyring),
+            record.rsw_modulus_sha256.as_deref(),
+            record.protocol_version,
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// Configure the tenant scope of every verification: the purpose
+    /// keys derive under the per-tenant root (see
+    /// [`crate::challenge::ChallengeConfig::tenant`]), so this verifier
+    /// accepts only challenges issued under the same tenant of the same
+    /// master. The tenant id must be 1..=64 bytes of the narrow
+    /// identifier alphabet (the issuance-boundary rule).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `tenant` fails the identifier gate.
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        let tenant = tenant.into();
+        assert!(
+            crate::challenge::valid_identifier(&tenant, 64),
+            "the tenant id must be 1..=64 bytes of [A-Za-z0-9._:-]"
         );
+        self.tenant = Some(tenant);
+        // The cache is keyed by (kid, tenant): the switch invalidates
+        // every key derived under the prior scope.
+        self.derived_keys = Mutex::new(HashMap::new());
         self
     }
 
@@ -2149,7 +3332,7 @@ impl ProductionVerifier {
     /// keys).
     pub fn with_secrets_by_kid(mut self, secrets: impl IntoIterator<Item = (u32, String)>) -> Self {
         self.secrets_by_kid = Some(secrets.into_iter().collect());
-        self.derived_keys = OnceLock::new();
+        self.derived_keys = Mutex::new(HashMap::new());
         self
     }
 
@@ -2240,6 +3423,34 @@ impl ProductionVerifier {
     /// The configured expected policy epoch, if any.
     pub fn expected_policy_version(&self) -> Option<u32> {
         self.expected_policy_version
+    }
+
+    /// Declare a policy-epoch rollout window: together with
+    /// [`ProductionVerifier::with_expected_policy_version`] set to N+1, a
+    /// floor of N accepts challenges issued under either epoch
+    /// (`floor <= policy_version <= expected`) so a mixed N/N+1 fleet
+    /// redeems cross-node with zero spurious rejections while the rollout
+    /// settles. Without a floor the check stays the strict equality (a
+    /// wrong epoch outside a window is still rejected with
+    /// [`VerifyError::WrongPolicyVersion`]). A floor greater than the
+    /// expected version accepts nothing (fail closed). Use
+    /// [`ProductionVerifier::without_policy_version_floor`] to close the
+    /// window.
+    pub fn with_policy_version_floor(mut self, floor: u32) -> Self {
+        self.policy_version_floor = Some(floor);
+        self
+    }
+
+    /// Close the policy-epoch rollout window (the default): the epoch check
+    /// reverts to strict equality with the expected version.
+    pub fn without_policy_version_floor(mut self) -> Self {
+        self.policy_version_floor = None;
+        self
+    }
+
+    /// The configured policy-epoch rollout floor, if any.
+    pub fn policy_version_floor(&self) -> Option<u32> {
+        self.policy_version_floor
     }
 
     /// Require every verified challenge to have been issued by this issuer
@@ -2374,6 +3585,12 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
+        // This verification call's execution-evidence memo: the armed
+        // program decodes (and its trace walks and digests compute)
+        // once, and the post-consume re-check of the same inputs reuses
+        // the verdict.
+        let mut exec_cache = ExecutionEvidenceCache::default();
+
         // 2. checkout A — the snapshot connection of the three-checkout
         //    model (snapshot/cheap on A, consume+WAIT on B, commit on C;
         //    the derivation holds no connection): it covers the
@@ -2458,6 +3675,7 @@ impl ProductionVerifier {
                 expected_request_binding,
                 token.execution_digest.as_deref(),
                 token.execution_trace.as_deref(),
+                &mut exec_cache,
             ) {
                 // The replay-exemption split (VerifyError::is_replay_exempt):
                 // only the narrow set of failures that describe the original
@@ -2502,6 +3720,7 @@ impl ProductionVerifier {
                                 expected_request_binding,
                                 token.execution_digest.as_deref(),
                                 token.execution_trace.as_deref(),
+                                &mut exec_cache,
                             ) {
                                 // A hard verdict masked by the exempt
                                 // circumstance: the evidence stays preserved
@@ -2687,19 +3906,21 @@ impl ProductionVerifier {
             expected_request_binding,
             token.execution_digest.as_deref(),
             token.execution_trace.as_deref(),
+            &mut exec_cache,
         ) {
             return VerifyOutcome::Invalid(e);
         }
 
         // 8. Single proof verdict. SHA-256/Argon2id derive the hash; an
         //    rsw record compares the presented final value against the
-        //    trapdoor expectation (the verifier's own decoded trapdoor,
+        //    trapdoor expectation (the verifier's own resolved trapdoor,
         //    never a record field).
+        let trapdoor = self.rsw_trapdoor_for(&record);
         let valid = match proof_is_valid(
             &record,
             token.counter,
             token.rsw_proof.as_deref(),
-            self.rsw.as_ref(),
+            trapdoor.as_deref(),
         ) {
             Ok(valid) => valid,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -2722,6 +3943,7 @@ impl ProductionVerifier {
             (self.now_unix)(),
             self.expected_region.as_deref(),
             self.expected_policy_version,
+            self.policy_version_floor,
             self.expected_issuer.as_deref(),
         ) {
             return VerifyOutcome::Invalid(e);
@@ -2736,6 +3958,16 @@ impl ProductionVerifier {
         //    the connection is released as soon as the commit returns; a
         //    checkout failure is treated exactly like a commit failure
         //    (best-effort, the outcome stands).
+        let result_mac = match self.resolve_derived_keys(&record) {
+            Ok(keys) => crate::challenge::consumed_result_mac(
+                &keys,
+                &record.challenge,
+                valid,
+                record.request_binding.as_deref(),
+                operation_identity,
+            ),
+            Err(e) => return VerifyOutcome::Invalid(e),
+        };
         if valid {
             let outcome = VerifyOutcome::Valid {
                 nonce: record.nonce.clone(),
@@ -2753,6 +3985,7 @@ impl ProductionVerifier {
                     &token.nonce,
                     true,
                     record.request_binding.as_deref(),
+                    Some(&result_mac),
                 );
             }
             outcome
@@ -2763,6 +3996,7 @@ impl ProductionVerifier {
                     &token.nonce,
                     false,
                     record.request_binding.as_deref(),
+                    Some(&result_mac),
                 );
             }
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -2813,6 +4047,11 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
+        // This recovery call's execution-evidence memo (the cheap phase
+        // and the replay gate below share one program decode when both
+        // evaluate the same inputs).
+        let mut exec_cache = ExecutionEvidenceCache::default();
+
         // 2. The retained consumed state must exist (the record was
         //    consumed and retained, or expired away).
         let state = match self.store.consumed_state(&token.nonce) {
@@ -2853,6 +4092,7 @@ impl ProductionVerifier {
                 expected_request_binding,
                 token.execution_digest.as_deref(),
                 token.execution_trace.as_deref(),
+                &mut exec_cache,
             ) {
                 return VerifyOutcome::Invalid(e);
             }
@@ -2876,6 +4116,7 @@ impl ProductionVerifier {
             expected_request_binding,
             token.execution_digest.as_deref(),
             token.execution_trace.as_deref(),
+            &mut exec_cache,
         ) {
             return VerifyOutcome::Invalid(e);
         }
@@ -2976,11 +4217,12 @@ impl ProductionVerifier {
         //    resultless recovery whose fresh mutation was not proven
         //    durable cannot authorize anything, exactly like the
         //    original consume whose WAIT failed).
+        let resume_trapdoor = self.rsw_trapdoor_for(&state.record);
         let valid = match proof_is_valid(
             &state.record,
             token.counter,
             token.rsw_proof.as_deref(),
-            self.rsw.as_ref(),
+            resume_trapdoor.as_deref(),
         ) {
             Ok(valid) => valid,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -3004,11 +4246,22 @@ impl ProductionVerifier {
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         };
         let valid = matches!(outcome, VerifyOutcome::Valid { .. });
-        let commit = self.store.commit_result_clearing_claim(
+        let result_mac = match self.resolve_derived_keys(&state.record) {
+            Ok(keys) => crate::challenge::consumed_result_mac(
+                &keys,
+                &state.record.challenge,
+                valid,
+                state.record.request_binding.as_deref(),
+                state.operation_identity.as_deref(),
+            ),
+            Err(e) => return VerifyOutcome::Invalid(e),
+        };
+        let commit = self.store.commit_result_clearing_claim_with_mac(
             &token.nonce,
             valid,
             state.record.request_binding.as_deref(),
             &claim_guard.owner,
+            Some(&result_mac),
         );
         match commit {
             Ok(true) => {
@@ -3115,6 +4368,25 @@ impl ProductionVerifier {
                     _ => false,
                 };
                 if identity_ok {
+                    // Every retained success on the shipped Redis backend
+                    // must carry a MAC for this record and the identity
+                    // written by the consume transition. A MAC-less or
+                    // transplanted success is malformed, never a grant.
+                    let authentic = self.resolve_derived_keys(&state.record).is_ok_and(|keys| {
+                        result.mac.as_deref().is_some_and(|tag| {
+                            crate::challenge::verify_consumed_result_mac(
+                                &keys,
+                                &state.record.challenge,
+                                result.valid,
+                                result.binding.as_deref(),
+                                state.operation_identity.as_deref(),
+                                tag,
+                            )
+                        })
+                    });
+                    if !authentic {
+                        return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+                    }
                     // Failed-barrier replay guard (the PHP mirror): the
                     // consume and commit mutations that produced this
                     // stored success may have landed on the primary with
@@ -3173,7 +4445,10 @@ impl ProductionVerifier {
     /// execution fields of the decoded solution token (the optional
     /// digest and digest:trace wire segments); the execution binding is
     /// evaluated against the record's stored program exactly like the
-    /// [`crate::verify::verify_solution`] reference flow.
+    /// [`crate::verify::verify_solution`] reference flow. `exec_cache`
+    /// is this verification call's evidence memo: the peek and the
+    /// post-consume re-check of the same inputs share one program
+    /// decode, trace walk and digest computation.
     #[allow(clippy::too_many_arguments)]
     fn check_cheap(
         &self,
@@ -3185,6 +4460,7 @@ impl ProductionVerifier {
         expected_request_binding: RequestBindingExpectation<'_>,
         execution_digest: Option<&str>,
         execution_trace: Option<&str>,
+        exec_cache: &mut ExecutionEvidenceCache,
     ) -> Result<(), VerifyError> {
         // The record must carry the nonce it was loaded under: a stored
         // nonce that differs from the lookup key is impossible in a
@@ -3202,7 +4478,7 @@ impl ProductionVerifier {
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_ip_binding(record, client_ip)?;
         self.check_deployment_expectations(record)?;
-        check_execution_binding(record, execution_digest, execution_trace)?;
+        check_execution_binding_cached(record, execution_digest, execution_trace, exec_cache)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3231,6 +4507,7 @@ impl ProductionVerifier {
     /// tail can never replay a retained success around an exempt
     /// expiry). The fresh-challenge path never calls this: the public
     /// first-error precedence for pending records is unchanged.
+    #[allow(clippy::too_many_arguments)]
     fn replay_security_check(
         &self,
         record: &ChallengeRecord,
@@ -3239,6 +4516,7 @@ impl ProductionVerifier {
         expected_request_binding: RequestBindingExpectation<'_>,
         execution_digest: Option<&str>,
         execution_trace: Option<&str>,
+        exec_cache: &mut ExecutionEvidenceCache,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
@@ -3248,7 +4526,7 @@ impl ProductionVerifier {
         // ambiguous interpretation).
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_deployment_expectations(record)?;
-        check_execution_binding(record, execution_digest, execution_trace)?;
+        check_execution_binding_cached(record, execution_digest, execution_trace, exec_cache)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3305,6 +4583,19 @@ impl ProductionVerifier {
             Ok(true) => {}
             _ => return Err(VerifyError::BadSignature),
         }
+        // The record-metadata MAC: when the signed canonical commits the
+        // m=1 marker, a valid `server_mac` is required regardless of the
+        // timing floor. A present MAC always verifies.
+        let signed_mac = crate::challenge::signed_canonical_commits_record_meta(&record.challenge);
+        if signed_mac && record.server_mac.is_none() {
+            return Err(VerifyError::BadSignature);
+        }
+        if record.server_mac.is_some() {
+            let keys = self.resolve_derived_keys(record)?;
+            if !crate::challenge::verify_record_meta(&keys, record) {
+                return Err(VerifyError::BadSignature);
+            }
+        }
 
         // 3c2. Hard Argon2id parameter ceilings — after the
         //      signature is authenticated, before any Params::new/allocation.
@@ -3325,91 +4616,64 @@ impl ProductionVerifier {
     /// Resolve the record's signing secret: the single-key path uses the
     /// configured secret; the `secrets_by_kid` path selects per the
     /// record's kid with the forward/rollback guard.
-    ///
-    /// The documented 16-byte HMAC secret minimum is enforced here,
-    /// fail closed: the single-key path and every `secrets_by_kid`
-    /// entry must clear the same minimum that
-    /// [`crate::challenge::sign_canonical_v2`] enforces at issuance and
-    /// that the PHP `Config`/`Verifier` constructors enforce. This is
-    /// the production verifier's only secret-resolution seam; the
-    /// cached-`DerivedKeys` fast path (`verify_signature_v2_with_keys`)
-    /// deliberately skips the generic `verify_canonical_v2` length gate,
-    /// so without this check a deployment configured with a short
-    /// master secret would verify challenges that no conforming issuer
-    /// could have signed. A short secret is a configuration fault, never
-    /// an authentic record: it answers [`VerifyError::BadSignature`] —
-    /// the exact mapping the generic verifier produces for
-    /// [`SignError::KeyTooShort`](crate::challenge::SignError::KeyTooShort)
-    /// — before any key derivation.
     fn resolve_signing_secret<'a>(
         &'a self,
         record: &ChallengeRecord,
     ) -> Result<&'a str, VerifyError> {
-        let secret = match &self.secrets_by_kid {
+        match &self.secrets_by_kid {
             Some(secrets) => {
                 let max_kid = secrets.keys().max().copied().unwrap_or(0);
                 if record.kid > max_kid {
                     return Err(VerifyError::UnknownKid);
                 }
                 match secrets.get(&record.kid) {
-                    Some(secret) => secret.as_str(),
-                    None => return Err(VerifyError::UnknownKid),
+                    Some(secret) => Ok(secret.as_str()),
+                    None => Err(VerifyError::UnknownKid),
                 }
             }
-            None => self.secret_key.as_str(),
-        };
-        if secret.len() < 16 {
-            // The documented HMAC minimum (the PHP Config/Verifier
-            // constructors and the issuance signer enforce the same):
-            // fail closed instead of deriving purpose keys from a
-            // brute-forceable master.
-            return Err(VerifyError::BadSignature);
+            None => Ok(&self.secret_key),
         }
-        Ok(secret)
     }
 
-    /// The `HKDF` purpose keys of the record's signing secret, derived once
-    /// per key id and cached for the verifier's lifetime (the secrets are
-    /// immutable once configured — the builder's
-    /// [`ProductionVerifier::with_secrets_by_kid`] replacement resets the
-    /// cache, so the derivation is a pure function of the kid under the
-    /// current secret set). The
-    /// cache is precomputed as ONE map on first use — every configured
-    /// kid under a `secrets_by_kid` map, or the single secret under the
-    /// `u32::MAX` sentinel (the single-key path always derives from the
-    /// same master, so it shares ONE entry instead of one per kid) —
-    /// because a [`OnceLock`] is write-once: the full map is built and
-    /// installed in a single `set`, and every later lookup is a pure map
-    /// hit. A concurrent first-derivation race is benign: both threads
-    /// compute identical maps, and the loser's `set` is simply ignored.
+    /// The `HKDF` purpose keys of the record's signing secret, derived
+    /// lazily per `(tenant, kid)` pair and cached for the verifier's
+    /// lifetime (the secrets and the tenant are immutable once
+    /// configured — the builder's
+    /// [`ProductionVerifier::with_secrets_by_kid`] and
+    /// [`ProductionVerifier::with_tenant`] replacements reset the cache,
+    /// so the derivation is a pure function of the pair under the
+    /// current configuration). The first miss derives exactly the pair
+    /// the record names — never the whole keyring — so a verifier with
+    /// many configured kids pays one derivation per kid it actually
+    /// verifies. The single-key path always derives from the same
+    /// master and shares ONE `(u32::MAX sentinel, tenant)` entry.
     fn resolve_derived_keys(
         &self,
         record: &ChallengeRecord,
     ) -> Result<Arc<DerivedKeys>, VerifyError> {
         let secret = self.resolve_signing_secret(record)?;
-        let cache_key = if self.secrets_by_kid.is_some() {
-            record.kid
-        } else {
-            u32::MAX
-        };
-        if let Some(keys) = self.derived_keys.get().and_then(|map| map.get(&cache_key)) {
+        let cache_key = (
+            if self.secrets_by_kid.is_some() {
+                record.kid
+            } else {
+                u32::MAX
+            },
+            self.tenant.clone(),
+        );
+        // A poisoned lock (a panic while a derivation held it — none of
+        // this code panics) recovers the intact map: the cache is pure
+        // derived state, and failing every later verification would
+        // serve nothing.
+        let mut cache = self
+            .derived_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(keys) = cache.get(&cache_key) {
             return Ok(Arc::clone(keys));
         }
-        let map = match &self.secrets_by_kid {
-            Some(secrets) => secrets
-                .iter()
-                .map(|(kid, secret)| (*kid, Arc::new(DerivedKeys::from_master(secret, None))))
-                .collect(),
-            None => HashMap::from([(u32::MAX, Arc::new(DerivedKeys::from_master(secret, None)))]),
-        };
-        let _ = self.derived_keys.set(map);
-        // Read back through the installed map: a concurrent builder may
-        // have won the `set` with an identical computation.
-        self.derived_keys
-            .get()
-            .and_then(|installed| installed.get(&cache_key))
-            .map(Arc::clone)
-            .ok_or(VerifyError::UnknownKid)
+        let keys = Arc::new(DerivedKeys::from_master(secret, self.tenant.as_deref()));
+        cache.insert(cache_key, Arc::clone(&keys));
+        Ok(keys)
     }
 
     /// The TTL on the server clock, like the PHP `time()`. The challenge
@@ -3451,11 +4715,15 @@ impl ProductionVerifier {
         }
 
         // Security-policy epoch: the policy that authorized
-        // this challenge must still be in force.
-        if let Some(expected) = self.expected_policy_version {
-            if record.policy_version != expected {
-                return Err(VerifyError::WrongPolicyVersion);
-            }
+        // this challenge must still be in force (or, during a declared
+        // rollout window, be one of the two in-flight epochs — see
+        // `policy_version_accepted`).
+        if !policy_version_accepted(
+            record.policy_version,
+            self.expected_policy_version,
+            self.policy_version_floor,
+        ) {
+            return Err(VerifyError::WrongPolicyVersion);
         }
 
         // Issuer identity: an issuer-expecting deployment
@@ -3515,6 +4783,9 @@ impl ProductionVerifier {
         if record.issued_at_ns == 0 {
             return Err(VerifyError::MalformedRecord);
         }
+        if record.min_duration_ms > 0 && record.server_mac.is_none() {
+            return Err(VerifyError::MalformedRecord);
+        }
         if record.min_duration_ms > 0 {
             if now_ns >= record.issued_at_ns {
                 if now_ns - record.issued_at_ns < record.min_duration_ms.saturating_mul(1_000) {
@@ -3571,6 +4842,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -3614,7 +4886,7 @@ mod tests {
     #[test]
     fn hkdf_purpose_keys_derive_once_per_kid_and_are_reused() {
         let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
-        let secret_2 = "another-secret-16-bytes";
+        let secret_2 = "another-secret-32-bytes-0123456789";
         let verifier =
             ProductionVerifier::new(RedisChallengeStore::new(client, "hkdf-cache:"), SECRET)
                 .with_secrets_by_kid([(1u32, SECRET.to_string()), (2u32, secret_2.to_string())]);
@@ -3677,6 +4949,7 @@ mod tests {
                         RequestBindingExpectation::Unenforced,
                         None,
                         None,
+                        &mut ExecutionEvidenceCache::default(),
                     )
                     .expect("the issued record passes its own cheap phase");
             }
@@ -3687,6 +4960,96 @@ mod tests {
         assert!(
             Arc::ptr_eq(&keys_1, &keys_1_after),
             "the cached Arc is stable across repeated cheap phases"
+        );
+    }
+
+    /// The policy-epoch rollout window on the production verifier's
+    /// deployment check: inside a declared window a mixed N/N+1 fleet
+    /// redeems cross-node (floor <= policy_version <= expected), outside a
+    /// window a wrong epoch is still rejected (strict equality), and an
+    /// inverted window accepts nothing. The store's client never needs to
+    /// be reachable: `check_deployment_expectations` is pure.
+    #[test]
+    fn policy_rollout_window_gates_the_deployment_expectations() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
+        let verifier = || {
+            ProductionVerifier::new(
+                RedisChallengeStore::new(client.clone(), "policy-window:"),
+                SECRET,
+            )
+        };
+        let issue = |policy_version: u32| {
+            let mut config = sha_config(4);
+            config.policy_version = policy_version;
+            issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None)
+                .expect("issuance")
+                .record
+        };
+        let floor_epoch = issue(1);
+        let next_epoch = issue(2);
+        let stale_epoch = issue(0);
+        let future_epoch = issue(3);
+
+        // Outside a window: strict equality with the expected epoch.
+        assert_eq!(
+            verifier()
+                .with_expected_policy_version(1)
+                .check_deployment_expectations(&floor_epoch),
+            Ok(())
+        );
+        assert_eq!(
+            verifier()
+                .with_expected_policy_version(2)
+                .check_deployment_expectations(&floor_epoch),
+            Err(VerifyError::WrongPolicyVersion)
+        );
+
+        // Declared rollout window [1, 2]: both fleet epochs redeem.
+        let window = || {
+            verifier()
+                .with_expected_policy_version(2)
+                .with_policy_version_floor(1)
+        };
+        assert_eq!(window().check_deployment_expectations(&floor_epoch), Ok(()));
+        assert_eq!(window().check_deployment_expectations(&next_epoch), Ok(()));
+        assert_eq!(
+            window().check_deployment_expectations(&stale_epoch),
+            Err(VerifyError::WrongPolicyVersion),
+            "an epoch below the window floor is rejected"
+        );
+        assert_eq!(
+            window().check_deployment_expectations(&future_epoch),
+            Err(VerifyError::WrongPolicyVersion),
+            "an epoch above the expectation is rejected"
+        );
+
+        // Closing the window reverts to strict equality.
+        assert_eq!(
+            window()
+                .without_policy_version_floor()
+                .check_deployment_expectations(&floor_epoch),
+            Err(VerifyError::WrongPolicyVersion),
+            "outside a window a wrong epoch is still rejected"
+        );
+
+        // An inverted window (floor above the expectation) accepts nothing.
+        assert_eq!(
+            verifier()
+                .with_expected_policy_version(1)
+                .with_policy_version_floor(2)
+                .check_deployment_expectations(&floor_epoch),
+            Err(VerifyError::WrongPolicyVersion)
+        );
+
+        // The builders round-trip their values.
+        let configured = window();
+        assert_eq!(configured.expected_policy_version(), Some(2));
+        assert_eq!(configured.policy_version_floor(), Some(1));
+
+        // No expectation disables the epoch check entirely.
+        assert_eq!(
+            verifier().check_deployment_expectations(&future_epoch),
+            Ok(())
         );
     }
 
@@ -3761,6 +5124,96 @@ mod tests {
             keys_b.challenge_key(),
             DerivedKeys::from_master(SECRET, None).challenge_key(),
             "the replaced ring must never serve ring A's stale keys"
+        );
+    }
+
+    /// The record-metadata MAC capability through the production
+    /// verifier's authenticated shape gate: a record whose signed
+    /// canonical commits `m=1` must carry the MAC regardless of the
+    /// timing floor. Stripping `server_mac` from an authentic record
+    /// (floor configured 0, so no floor exemption can mask it) is refused
+    /// with `BadSignature` by the cheap phase AND by the compositional
+    /// replay gate; the same record with the intact MAC reaches the
+    /// normal path. The store's client never dials: `check_cheap` and
+    /// `replay_security_check` are pure.
+    #[test]
+    fn stripped_server_mac_is_refused_by_the_production_verifier() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
+        let verifier =
+            ProductionVerifier::new(RedisChallengeStore::new(client, "meta-mac:"), SECRET);
+
+        let mut config = sha_config(4);
+        config.min_duration_ms = Some(0); // floor off: the committed marker must refuse the strip
+        let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None)
+            .expect("issuance");
+        assert_eq!(issued.record.min_duration_ms, 0);
+        assert!(issued.record.server_mac.is_some(), "issuance seals the MAC");
+        assert!(
+            crate::challenge::signed_canonical_commits_record_meta(&issued.record.challenge),
+            "issuance commits the m=1 marker"
+        );
+        let now_ns = issued.record.issued_at_ns + 1_000_000;
+
+        // Control: the intact m=1 record reaches the normal path in both
+        // gates it is composed from.
+        verifier
+            .check_cheap(
+                &issued.record,
+                &issued.record.nonce,
+                "login",
+                IP,
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            )
+            .expect("the intact m=1 record passes the cheap phase");
+        verifier
+            .replay_security_check(
+                &issued.record,
+                "login",
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            )
+            .expect("the intact m=1 record passes the replay gate");
+
+        // Attack: stripping the MAC leaves the signed m=1 marker without
+        // its tag. The signature still verifies (the marker is parsed from
+        // the signed challenge, never inferred from the stored field), so
+        // only the dedicated m=1 gate can refuse it.
+        let mut stripped = issued.record.clone();
+        stripped.server_mac = None;
+        assert_eq!(
+            verifier.check_cheap(
+                &stripped,
+                &stripped.nonce,
+                "login",
+                IP,
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            ),
+            Err(VerifyError::BadSignature),
+            "a stripped server_mac must be refused by the committed m=1 marker even with the floor off"
+        );
+        assert_eq!(
+            verifier.replay_security_check(
+                &stripped,
+                "login",
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            ),
+            Err(VerifyError::BadSignature),
+            "the replay gate must carry the same m=1 refusal"
         );
     }
 
@@ -3876,25 +5329,27 @@ mod tests {
             solve_for_test(&issued.record).expect("4-bit sha solves"),
         );
 
-        // The durable state: consume-with-identity + the deterministic
-        // valid commit via a plain wait-free store.
+        // The durable state exactly as production writes it: a full
+        // verification on a plain wait-free store consumes with the
+        // identity and commits the valid result with its consumed-result
+        // MAC. A hand-seeded MAC-less result is malformed by design
+        // (resolve_consumed refuses it) and would never reach the fence.
         let plain =
             RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
         plain.store(&issued.record).unwrap();
-        assert!(
-            plain
-                .consume_with_operation_identity(&issued.record.nonce, Some(identity))
-                .unwrap()
-                .is_some(),
-            "the consume transition lands"
+        let plain_verifier = ProductionVerifier::new(plain, SECRET);
+        let fresh = plain_verifier.verify(
+            &token,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            Some(identity),
+            RequestBindingExpectation::Unenforced,
         );
-        plain
-            .commit_result(
-                &issued.record.nonce,
-                true,
-                issued.record.request_binding.as_deref(),
-            )
-            .unwrap();
+        assert!(
+            matches!(fresh, VerifyOutcome::Valid { .. }),
+            "the plain wait-free store accepts the fresh solve and commits the MAC: {fresh:?}"
+        );
 
         // The accepting verifier requires one acknowledged replica: the
         // fence WAIT returns 0 acked and must fail closed.
@@ -4567,6 +6022,83 @@ mod tests {
     }
 
     #[test]
+    fn a_one_second_claim_is_a_true_one_second_lease() {
+        // The millisecond TTL rule: a `ttl_secs` of 1 writes an exact
+        // 1 s lease (no whole-second rounding), so the claim is live
+        // immediately after it is taken and re-claimable shortly after
+        // the second elapses.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-lease-1s:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let rec = resultless_consumed(&url, &prefix);
+
+        let _owner = store
+            .claim_resume_derivation(&rec.nonce, 1)
+            .unwrap()
+            .expect("the 1 s claim is taken");
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_none(),
+            "the lease is live immediately after the claim"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_some(),
+            "the lease expires after the exact second and the claim is re-takeable"
+        );
+    }
+
+    #[test]
+    fn persistent_keys_are_refused_untouched_by_the_transitions() {
+        // A persistent (TTL-less, foreign) key reports a negative
+        // `PTTL`: the consume, cancel and commit transitions refuse it
+        // with their missing shapes and never write, so foreign state
+        // survives byte-intact.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:persistent-key:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+
+        let raw = "{\"state\":\"pending\",\"consumed_result\":null,\"operation_identity\":null}";
+        let key = format!("{prefix}persistent-nonce");
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(raw)
+            .query::<()>(&mut conn)
+            .unwrap();
+        assert!(
+            redis::cmd("PTTL")
+                .arg(&key)
+                .query::<i64>(&mut conn)
+                .unwrap()
+                == -1,
+            "the seeded key is persistent"
+        );
+
+        assert!(
+            store.consume("persistent-nonce").unwrap().is_none(),
+            "the consume refuses a persistent key as missing"
+        );
+        assert!(
+            store.cancel("persistent-nonce").unwrap().is_none(),
+            "the cancel refuses a persistent key as missing"
+        );
+        assert!(
+            !store.commit_result("persistent-nonce", true, None).unwrap(),
+            "the commit refuses a persistent key"
+        );
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, raw, "the refused transitions leave the bytes intact");
+    }
+
+    #[test]
     fn resume_commit_fences_on_a_live_claim_and_clears_the_fields() {
         // The fencing commit: a stale owner (mismatched token) and an
         // expired owner are refused before any write, and the current
@@ -4724,6 +6256,457 @@ mod tests {
     }
 
     #[test]
+    fn nested_state_markers_never_alter_the_top_level_transition() {
+        // The whole-document byte search is gone: a nested
+        // `"state":"pending"` (or consumed) string can never drive,
+        // redirect or block a transition.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:nested-marker:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+
+        // 1. A top-level unknown state carrying a nested pending marker:
+        //    corrupt, never deleted, never classified pending.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let corrupt = raw.replace(
+            "\"state\":\"pending\"",
+            "\"state\":\"unknown\",\"consumed_result\":{\"valid\":true,\"binding\":null,\"state\":\"pending\"}",
+        );
+        assert_ne!(raw, corrupt);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&corrupt)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::Corrupt
+        ));
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, corrupt, "the unknown-state value is never mutated");
+        assert!(matches!(
+            store.runtime_state(&issued.record.nonce).unwrap(),
+            RuntimeState::Missing
+        ));
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, Some("op"))
+                .unwrap()
+                .is_none(),
+            "an unknown top-level state is never consumable"
+        );
+
+        // 2. A top-level pending state carrying a nested consumed marker
+        //    in consumed_result: the delete follows the top-level state,
+        //    and the consume refuses the forged carried result.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let tampered = raw.replace(
+            "\"consumed_result\":null",
+            "\"consumed_result\":{\"valid\":true,\"binding\":null,\"state\":\"consumed\"}",
+        );
+        assert_ne!(raw, tampered);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, None)
+                .unwrap()
+                .is_none(),
+            "a pending envelope carrying a result is refused, never installed"
+        );
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::DeletedPending
+        ));
+
+        // 3. A top-level pending record with a nested consumed marker in
+        //    an unknown field: the consume flips the top-level state and
+        //    leaves the nested bytes untouched.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let tampered = raw.replace(
+            "\"state\":\"pending\"",
+            "\"state\":\"pending\",\"extra\":{\"state\":\"consumed\"}",
+        );
+        assert_ne!(raw, tampered);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        // The strict storage decoder refuses to surface a record carrying
+        // an unknown field, so the API result is not asserted here: the
+        // Redis transition itself must still target the top-level state.
+        let _ = store
+            .consume_with_operation_identity(&issued.record.nonce, None)
+            .unwrap();
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let head = &after[..after.find("\"extra\"").expect("the nested field survives")];
+        assert!(
+            head.contains("\"state\":\"consumed\""),
+            "the top-level state is the one that was flipped: {after}"
+        );
+        assert!(
+            after.contains("\"extra\":{\"state\":\"consumed\"}"),
+            "the nested marker is untouched: {after}"
+        );
+
+        // 4. A duplicated top-level state key: the decoded already-consumed
+        //    state is reported and never flipped again, and the cleanup
+        //    never deletes the ambiguous value as pending.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let duplicated = raw.replace(
+            "\"state\":\"pending\"",
+            "\"state\":\"pending\",\"state\":\"consumed\"",
+        );
+        assert_ne!(raw, duplicated);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&duplicated)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        // The strict Rust decoder rejects the ambiguous duplicate-key
+        // value outright, and the transition must not write anything
+        // either way: the record is never consumed twice.
+        let _ = store
+            .consume_with_operation_identity(&issued.record.nonce, None)
+            .unwrap();
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, duplicated, "no second consumption writes anything");
+        assert!(!matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::DeletedPending
+        ));
+
+        // 5. Marker text inside a string field is JSON-escaped, so no raw
+        //    marker exists and the pending delete still runs.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let escaped = raw.replace(
+            "\"hostname\":null",
+            r#""hostname":"x\"state\":\"pending\"x""#,
+        );
+        assert_ne!(raw, escaped);
+        assert_eq!(
+            escaped.matches("\"state\":\"pending\"").count(),
+            1,
+            "the escaped marker text adds no raw marker"
+        );
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&escaped)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::DeletedPending
+        ));
+    }
+
+    #[test]
+    fn stored_json_duplicate_scanner_semantics() {
+        assert!(!stored_json_has_duplicate_keys(r#"{"a":1,"b":{"c":2}}"#));
+        assert!(stored_json_has_duplicate_keys(r#"{"a":1,"a":2}"#));
+        assert!(stored_json_has_duplicate_keys(r#"{"a":1,"\u0061":2}"#));
+        assert!(stored_json_has_duplicate_keys(
+            r#"{"x":{"a":1,"\u0061":2}}"#
+        ));
+        assert!(!stored_json_has_duplicate_keys(
+            r#"{"s":"}|,{}[]\"","n":1.5e10,"arr":[1,{"a":2}],"b":true,"z":null}"#
+        ));
+        // A non-object defers to the typed decoder.
+        assert!(!stored_json_has_duplicate_keys("[1,2]"));
+        // Unwalkable documents fail closed (flagged as duplicates).
+        assert!(stored_json_has_duplicate_keys("{"));
+        assert!(stored_json_has_duplicate_keys(r#"{"a":"unterminated}"#));
+    }
+
+    #[test]
+    fn shared_consumed_result_vectors_match_the_contract() {
+        // The shared vectors: exactly the boolean form and the legacy
+        // integer 1/0 are accepted, and the identical set is rejected by
+        // the PHP ConsumedResult::fromArray() boundary.
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let vectors = fixtures["consumed_result_vectors"]
+            .as_array()
+            .expect("consumed result vectors");
+        assert!(!vectors.is_empty());
+        for vector in vectors {
+            let parsed: Result<StoredConsumedResult, _> =
+                serde_json::from_value(vector["result"].clone());
+            let why = vector["why"].as_str().unwrap_or("");
+            if vector["accepted"].as_bool().expect("accepted") {
+                assert!(parsed.is_ok(), "the result must be accepted: {why}");
+            } else {
+                assert!(parsed.is_err(), "the result must be rejected: {why}");
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_key_aliases_are_semantically_the_same_field() {
+        // JSON keys may carry escapes: "st\u0061te" IS the key `state` to
+        // every JSON decoder. An envelope carrying both a literal and an
+        // escaped spelling for one of the runtime fields is ambiguous and
+        // must never drive or be mutated by a transition.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:alias-marker:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+
+        // 1. A literal `state` plus an escaped alias in both orders and
+        //    with equal or conflicting values: no fresh consumption, no
+        //    delete, no mutation.
+        let aliases = [
+            (
+                r#""state":"pending","st\u0061te":"consumed""#,
+                r#""state":"pending""#,
+            ),
+            (
+                r#""st\u0061te":"consumed","state":"pending""#,
+                r#""state":"pending""#,
+            ),
+            (
+                r#""state":"pending","st\u0061te":"pending""#,
+                r#""state":"pending""#,
+            ),
+        ];
+        for (replacement, needle) in aliases {
+            let issued = issue_challenge(
+                &sha_config(4),
+                "login",
+                IP,
+                now_unix(),
+                now_micros(),
+                0,
+                None,
+            )
+            .unwrap();
+            store.store(&issued.record).unwrap();
+            let key = format!("{prefix}{}", issued.record.nonce);
+            let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+            let ambiguous = raw.replace(needle, replacement);
+            assert_ne!(raw, ambiguous);
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(&ambiguous)
+                .arg("EX")
+                .arg(300)
+                .query(&mut conn)
+                .unwrap();
+
+            let consumed = store
+                .consume_with_operation_identity(&issued.record.nonce, Some("op"))
+                .unwrap();
+            assert!(
+                consumed.is_none(),
+                "a semantically duplicated state field is never consumable: {ambiguous}"
+            );
+            let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+            assert_eq!(after, ambiguous, "the ambiguous value is never mutated");
+            assert!(!matches!(
+                store.delete_if_pending(&issued.record.nonce).unwrap(),
+                DeleteIfPending::DeletedPending
+            ));
+            let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+            assert_eq!(
+                after, ambiguous,
+                "the cleanup never mutates the ambiguous value"
+            );
+        }
+
+        // 2. An escaped alias for `operation_identity` (the consume splice
+        //    target): the transition refuses rather than rewriting one
+        //    spelling while the decoder reads the other.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let ambiguous = raw.replace(
+            r#""operation_identity":null"#,
+            r#""operation_identity":"op-1","op\u0065ration_identity":null"#,
+        );
+        assert_ne!(raw, ambiguous);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&ambiguous)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(store
+            .consume_with_operation_identity(&issued.record.nonce, Some("op"))
+            .unwrap()
+            .is_none());
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, ambiguous);
+
+        // 3. An escaped alias for `consumed_result` on the commit path:
+        //    the commit refuses and writes nothing.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let _ = store
+            .consume_with_operation_identity(&issued.record.nonce, None)
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let ambiguous = raw.replace(
+            r#""consumed_result":null"#,
+            r#""consumed_result":null,"consumed\u005fresult":null"#,
+        );
+        assert_ne!(raw, ambiguous);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&ambiguous)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(!store
+            .commit_result(&issued.record.nonce, true, None)
+            .unwrap());
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, ambiguous, "the refused commit writes nothing");
+
+        // 4. A NON-ambiguous escaped-only spelling still works: the
+        //    scanner decodes the key token, finds the semantic field and
+        //    splices its value in place.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let escaped_only = raw.replace(r#""state":"pending""#, r#""st\u0061te":"pending""#);
+        assert_ne!(raw, escaped_only);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&escaped_only)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, None)
+                .unwrap()
+                .is_some(),
+            "an unambiguous escaped spelling is a supported envelope"
+        );
+        let stored = decode_stored(
+            &redis::cmd("GET")
+                .arg(&key)
+                .query::<String>(&mut conn)
+                .unwrap(),
+        )
+        .expect("the escaped spelling decodes");
+        assert_eq!(stored.state.as_deref(), Some("consumed"));
+    }
+
+    #[test]
     fn resume_claim_rejects_a_non_positive_ttl() {
         // The boundary contract shared with the PHP
         // claimResumeDerivation: a lease TTL below 1 is a configuration
@@ -4787,11 +6770,7 @@ mod tests {
         );
         let valid = "0123456789abcdef0123456789abcdef";
         assert!(validate_resume_owner(valid).is_ok());
-        let random_owner: String = security_random::<16>()
-            .expect("secure RNG")
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let random_owner: String = hex::encode(security_random::<16>().expect("secure RNG"));
         assert!(
             validate_resume_owner(&random_owner).is_ok(),
             "the production owner shape must pass"
@@ -4953,102 +6932,6 @@ mod tests {
             outcome,
             VerifyOutcome::Invalid(VerifyError::MalformedRecord),
             "a consumed envelope with a foreign nonce never replays the stored result"
-        );
-    }
-
-    // ── the documented 16-byte HMAC secret minimum ─────────────────────
-    //
-    // The production verifier's cached-DerivedKeys fast path bypasses the
-    // generic verify_canonical_v2 KeyTooShort gate, so the minimum is
-    // enforced at the secret-resolution seam (resolve_signing_secret). A
-    // record signed under the short secret — the exact shape a weak
-    // deployment would present — must answer BadSignature, never Valid,
-    // on both the single-key and the per-kid paths.
-    #[test]
-    fn short_signing_secret_fails_closed_on_the_production_path() {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine;
-        use hmac::{Hmac, Mac};
-
-        let Some(url) = redis_url() else { return };
-        // 11 bytes: below the documented 16-byte minimum the issuance
-        // signer, the generic verifier, and the PHP Config/Verifier
-        // constructors all enforce.
-        let short = "short-secret";
-        assert!(short.len() < 16);
-
-        // An authentic 32-byte-secret record re-signed under the short
-        // secret's derived keys — signature AND nonce-bound binding tag —
-        // i.e. the fully self-consistent shape a short-secret deployment
-        // would issue and accept (the bypass this test pins). The
-        // canonical is computed AFTER the binding tag is patched, since
-        // the tag is part of the signed payload.
-        let config = sha_config(4);
-        let issued =
-            issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
-        let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
-        let short_keys = DerivedKeys::from_master(short, None);
-        let mut forged = issued.record.clone();
-        forged.binding_tag =
-            crate::challenge::binding_tag_with_keys(&forged.nonce, IP, &short_keys)
-                .expect("the IP literal parses");
-        let canonical = crate::challenge::canonical_signing_input_v2(&forged);
-        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(short_keys.challenge_key()).unwrap();
-        mac.update(canonical.as_bytes());
-        forged.challenge = format!(
-            "{}.{}",
-            B64.encode(canonical.as_bytes()),
-            hex::encode(mac.finalize().into_bytes())
-        );
-        forged.prefix = format!("{}|{}|", forged.challenge, forged.salt);
-        let token = encode_token(&forged.nonce, counter);
-        // A deterministic receipt past the timing floor: without the
-        // secret gate every OTHER invariant of the forged record passes,
-        // so the pre-fix verdict is a full Valid (the bypass), not a
-        // timing accident.
-        let receipt_ns = forged.issued_at_ns + 10_000_000;
-
-        // Single-key path.
-        let store = RedisChallengeStore::new(
-            redis::Client::open(url.clone()).unwrap(),
-            format!("kiwitest:short-secret-single:{}:", std::process::id()),
-        );
-        store.store(&forged).unwrap();
-        let single = ProductionVerifier::new(store, short);
-        assert_eq!(
-            single.verify(
-                &token,
-                "login",
-                IP,
-                receipt_ns,
-                None,
-                RequestBindingExpectation::Unenforced
-            ),
-            VerifyOutcome::Invalid(VerifyError::BadSignature),
-            "a sub-16-byte configured secret must fail closed, never verify"
-        );
-
-        // Per-kid path: a short entry in the rotation map is refused at
-        // resolution exactly like PHP's Verifier constructor refuses it.
-        let ringed = forged.clone();
-        let store2 = RedisChallengeStore::new(
-            redis::Client::open(url).unwrap(),
-            format!("kiwitest:short-secret-kid:{}:", std::process::id()),
-        );
-        store2.store(&ringed).unwrap();
-        let ring = ProductionVerifier::new(store2, SECRET)
-            .with_secrets_by_kid([(1u32, short.to_string())]);
-        assert_eq!(
-            ring.verify(
-                &token,
-                "login",
-                IP,
-                receipt_ns,
-                None,
-                RequestBindingExpectation::Unenforced
-            ),
-            VerifyOutcome::Invalid(VerifyError::BadSignature),
-            "a sub-16-byte per-kid secret must fail closed too"
         );
     }
 }

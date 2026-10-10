@@ -6,10 +6,14 @@
 //!
 //! - Hourly aggregate buckets `{kiwi:<ns>}:cal:<scope>:<hour>` (hour =
 //!   `now_ms / 3600000`, integer) — a hash of flat fields
-//!   `legit_count` / `legit_score_sum` / `abuse_count` / `abuse_score_sum`
-//!   (exact scores, not band-quantized) plus the sample counters
+//!   `legit_count` / `legit_score_sum` / `legit_above_sum` /
+//!   `abuse_count` / `abuse_score_sum` / `abuse_below_sum` (exact scores,
+//!   not band-quantized) plus the sample counters
 //!   `sample_total` / `sample_resolved` — written by
-//!   hincrbyfloat + expire 48h. At most 24 keys per scope are ever read.
+//!   hincrbyfloat + expire 48h. The clipped sums accumulate each sample's
+//!   weight-scaled distance on the wrong side of the decision boundary
+//!   `T = 600` (the sha20→argon16 edge in `action.rs`); a legacy bucket
+//!   without them contributes 0. At most 24 keys per scope are ever read.
 //!   The sample counters live in the same scope/hour buckets as the
 //!   observations, so scope, window, label population and resolution
 //!   population are exactly one cohort (no namespace-wide
@@ -19,7 +23,13 @@
 //!   "sampled":0|1}`, expire `receipt_ttl_secs`, consumed once by the atomic
 //!   confirm script.
 //! - Outcome-ledger entries `{kiwi:<ns>}:outcome:<decision_id>` — a
-//!   string JSON `{"o":"P|L|A","scope","hour","score","w"}` with expire
+//!   string JSON `{"o":"P|L|A","scope","hour","score","w","c","v"}` (`c`
+//!   records whether the first confirmation contributed a calibration
+//!   sample; absent on legacy ledgers and read as 0. `v` is the
+//!   clipped-sums generation: 2 means the confirmation wrote the
+//!   `legit_above_sum` / `abuse_below_sum` terms, so correction reverses
+//!   and redoes them; absent on legacy ledgers and read as 0, and a
+//!   legacy correction then leaves the clipped sums alone) with expire
 //!   `outcome_ttl_secs` (default 86400 s). The outcome ledger is always on
 //!   and independent of calibration: with calibration enabled it is created
 //!   atomically by `register_decision.lua` at decision time; with
@@ -31,19 +41,33 @@
 //! executed inside one canonical Lua invocation — the script at
 //! `resources/calibration.lua`, shared verbatim with PHP):
 //!
-//! Class-normalized exact score calibration (volume-independent): each
-//! confirmed observation carries its original risk score (0..1000):
+//! Boundary-relative class-normalized exact score calibration
+//! (volume-independent): each confirmed observation carries its original
+//! risk score (0..1000), and the error measures its distance on the
+//! wrong side of the decision boundary `T = 600` (the sha20→argon16 edge
+//! in `action.rs`), the score where the policy actually switches action
+//! bands:
 //!
 //! ```text
-//! fp_mean = Σ legit_scores / legit_count      (0 when no legit samples)
-//! fn_mean = (abuse_count × 1000 − Σ abuse_scores) / abuse_count
-//!                                             (0 when no abuse samples)
+//! fp_mean = Σ max(0, legit_score − T) / legit_count  (0 when no legit)
+//! fn_mean = Σ max(0, T − abuse_score) / abuse_count  (0 when no abuse)
 //! error   = fn_mean × fn_cost − fp_mean × fp_cost
 //! raw     = clamp(error × 2 / 10, −max_adjustment, +max_adjustment)
 //!                                                  (default ±150)
 //! ```
 //!
-//! Class normalization removes label-volume dominance; the
+//! The clipped sums are accumulated per sample at confirmation (and
+//! reversed/redone by correction), so the means are per-sample boundary
+//! distances, not aggregates of the full score sums. A healthy
+//! classifier (legit around 150, abuse around 600) lands on the correct
+//! side and contributes zero pressure; only misclassified samples move
+//! the bias.
+//!
+//! Label sources: only human- or support-verified outcomes should feed
+//! `confirm_outcome`, never an automatic success signal such as any
+//! successful login. A credentialed attacker can otherwise manufacture
+//! "legitimate" labels and pull the bias down. Class normalization
+//! removes label-volume dominance; the
 //! `false_positive_cost` / `false_negative_cost` knobs price false
 //! positives against false negatives explicitly (defaults 1.0 / 2.0). A
 //! perfectly separating classifier contributes ~zero pressure when the
@@ -85,8 +109,10 @@
 //! ledger CAS pending->L/A → hincrbyfloat into the decision-time bucket →
 //! expire): there is no crash window between consuming the receipt and
 //! recording the outcome, and all arguments are validated before the
-//! receipt is deleted (an invalid mode/weight is an error reply that
-//! leaves the receipt untouched). Confirmed outcomes are bucketed by when
+//! receipt is deleted or any key is touched (an invalid mode, weight,
+//! legitimate flag — exactly the canonical 0/1 strings — or TTL is an
+//! error reply that leaves the receipt, ledger and bucket untouched).
+//! Confirmed outcomes are bucketed by when
 //! the decision was made (`receipt.decision_hour`), never by confirmation
 //! time. The script returns a shared status: 0 = missing / already
 //! confirmed / corrupt receipt; 1 = first confirmation and calibration
@@ -103,7 +129,11 @@
 //! Correction is atomic via `resources/correction.lua` (one script
 //! invocation: GET the outcome ledger → validate scope/hour → reverse the
 //! original contribution with the exact recorded weight (ledger.w, clamped
-//! at zero) → add the corrected contribution → flip the ledger). If the
+//! at zero) → add the corrected contribution → flip the ledger). The
+//! clipped legs (`legit_above_sum` / `abuse_below_sum`) are reversed and
+//! redone only when `ledger.v == 2`; a legacy ledger without `v` reverses
+//! the count/score sums alone, because the bucket may hold post-upgrade
+//! samples whose clipped terms are not that decision's to subtract. If the
 //! decision-time bucket already expired the ledger still flips — the
 //! corrected outcome is authoritative for future events while the prior
 //! ephemeral reputation pressure is left to decay naturally (Kiwi does not
@@ -147,6 +177,11 @@ pub enum CalibrationError {
     /// bias the population, so it is a typed error instead of a silent 1.0.
     #[error("weighted sampling requires a confirmation weight for decision {0}")]
     WeightRequired(String),
+    /// A caller-supplied decision id is not safe as a Redis key component
+    /// (empty, control characters, or the `:`/`}` structure bytes) — the
+    /// receipt and outcome-ledger keys are built from it verbatim.
+    #[error("decision id is not a safe Redis key component (got 0x{0})")]
+    InvalidIdentifier(String),
 }
 
 /// Per-scope sampling metrics from [`CalibrationStore::sampling_metrics`]:
@@ -182,7 +217,7 @@ pub enum SamplingMode {
 
 impl SamplingMode {
     /// The argv[1] wire int shared with `resources/confirm.lua`.
-    fn as_int(self) -> u8 {
+    pub(crate) fn as_int(self) -> u8 {
         match self {
             SamplingMode::Complete => 0,
             SamplingMode::RandomSample => 1,
@@ -253,6 +288,26 @@ pub trait CalibrationStore: Send + Sync {
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError>;
 
+    /// Identity-aware confirmation: the same atomic confirmation, but
+    /// naming the identity whose reputation the label would credit so
+    /// the per-identity trust cap can bound trust-granting labels (the
+    /// generic [`CalibrationStore::confirm_outcome`] has no identity and
+    /// stays per-source capped only). The default implementation
+    /// ignores the identity and delegates to
+    /// [`CalibrationStore::confirm_outcome`], so stores without a
+    /// trust-cap dimension keep compiling and keep their exact
+    /// semantics; stores with the cap override this.
+    fn confirm_outcome_for(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+        identity: Option<&str>,
+    ) -> Result<u8, CalibrationError> {
+        let _ = identity;
+        self.confirm_outcome(decision_id, legitimate, weight)
+    }
+
     /// Corrects a decision's outcome atomically (one canonical Lua
     /// invocation — `resources/correction.lua`): flips the outcome ledger
     /// L <-> A and reverses the original bucket contribution (exact
@@ -321,6 +376,14 @@ pub struct RedisCalibrationStore {
     namespace_version: NamespaceVersion,
     scope_hmac_key: [u8; 32],
     conn: Mutex<Option<redis::Connection>>,
+    /// Connect timeout (ms) for the lazy calibration connection, seeded
+    /// from [`RedisCalibrationStore::CONNECTION_TIMEOUT_MS`] and tunable
+    /// through [`RedisCalibrationStore::with_io_timeouts`].
+    connection_timeout_ms: u64,
+    /// Socket read/write timeout (ms), seeded from
+    /// [`RedisCalibrationStore::COMMAND_TIMEOUT_MS`] and tunable through
+    /// [`RedisCalibrationStore::with_io_timeouts`].
+    command_timeout_ms: u64,
     min_samples: i64,
     max_adjustment: i32,
     max_change_per_minute: i32,
@@ -341,15 +404,17 @@ pub struct RedisCalibrationStore {
 }
 
 /// Bounded in-process per-scope bias cache: a hit serves the last computed
-/// bias (including 0) without any Redis call.
-struct BiasCache {
-    entries: HashMap<u32, (i32, Instant)>,
+/// bias (including 0) without any Redis call. Shared with the v2
+/// calibration store (`calibration_v2.rs`), which runs its own estimator
+/// over the same key layout.
+pub(crate) struct BiasCache {
+    pub(crate) entries: HashMap<u32, (i32, Instant)>,
     cap: usize,
     ttl: Duration,
 }
 
 impl BiasCache {
-    fn new(cap: usize, ttl: Duration) -> BiasCache {
+    pub(crate) fn new(cap: usize, ttl: Duration) -> BiasCache {
         BiasCache {
             entries: HashMap::new(),
             cap,
@@ -359,7 +424,7 @@ impl BiasCache {
 
     /// The cached bias when it is still younger than the TTL; a stale entry
     /// is dropped on the way out.
-    fn get(&mut self, scope: u32, now: Instant) -> Option<i32> {
+    pub(crate) fn get(&mut self, scope: u32, now: Instant) -> Option<i32> {
         match self.entries.get(&scope) {
             Some((bias, at)) if now.saturating_duration_since(*at) <= self.ttl => Some(*bias),
             Some(_) => {
@@ -372,7 +437,7 @@ impl BiasCache {
 
     /// Inserts (or refreshes) the scope's entry; when the cache is full the
     /// oldest entry is evicted first.
-    fn insert(&mut self, scope: u32, bias: i32, now: Instant) {
+    pub(crate) fn insert(&mut self, scope: u32, bias: i32, now: Instant) {
         if !self.entries.contains_key(&scope) && self.entries.len() >= self.cap {
             let oldest = self
                 .entries
@@ -452,6 +517,14 @@ impl RedisCalibrationStore {
     pub const CACHE_TTL_S: u64 = 30;
     /// Bounded in-process cache capacity (oldest entries are evicted).
     pub const CACHE_CAP: usize = 1024;
+    /// Connection timeout for establishing the TCP connection, shared with
+    /// the risk state store. The 75 ms default tolerates TLS, managed and
+    /// cross-AZ handshakes while staying fail-fast.
+    pub const CONNECTION_TIMEOUT_MS: u64 = crate::redis::RedisRiskStateStore::CONNECTION_TIMEOUT_MS;
+    /// Command (read/write) timeout applied to the socket, shared with the
+    /// risk state store. The tight 10 ms default keeps one wedged socket
+    /// from wedging the calibration path.
+    pub const COMMAND_TIMEOUT_MS: u64 = crate::redis::RedisRiskStateStore::COMMAND_TIMEOUT_MS;
 
     /// Builds a store on a fresh connection (lazy) with the default safety
     /// knobs (min_samples 1000, max_adjustment 150, max_change_per_minute
@@ -475,6 +548,19 @@ impl RedisCalibrationStore {
     /// without it scope-based keys fall back to the raw scope (deprecated).
     pub fn with_scope_key(mut self, key: [u8; 32]) -> Self {
         self.scope_hmac_key = key;
+        self
+    }
+
+    /// Overrides the connect and command (read/write) timeouts in
+    /// milliseconds, the same knobs
+    /// [`crate::redis::RedisRiskStateStore::with_io_timeouts`] exposes for
+    /// the risk state store. The shared defaults (75 ms connect, 10 ms
+    /// command) suit a local or same-region Redis; a TLS, managed or
+    /// cross-AZ endpoint may need a larger connect timeout while the
+    /// command timeout stays tight.
+    pub fn with_io_timeouts(mut self, connection_timeout_ms: u64, command_timeout_ms: u64) -> Self {
+        self.connection_timeout_ms = connection_timeout_ms;
+        self.command_timeout_ms = command_timeout_ms;
         self
     }
 
@@ -515,7 +601,7 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, or if
-    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`.
+    /// `min_samples < 1` / `max_adjustment < 1` / `max_change_per_minute < 1`.
     pub fn with_limits(
         client: redis::Client,
         namespace: &str,
@@ -539,7 +625,7 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, if
-    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
+    /// `min_samples < 1` / `max_adjustment < 1` / `max_change_per_minute < 1`,
     /// or if `receipt_ttl_secs < 1`.
     pub fn with_receipt_ttl(
         client: redis::Client,
@@ -579,10 +665,10 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, if
-    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
+    /// `min_samples < 1` / `max_adjustment < 1` / `max_change_per_minute < 1`,
     /// if `receipt_ttl_secs < 1` or `outcome_ttl_secs < 1`, if
     /// `minimum_resolution_ratio` is outside 0..=1, or if either cost is
-    /// not > 0.
+    /// outside 0.1..=10.0.
     #[allow(clippy::too_many_arguments)]
     pub fn with_options(
         client: redis::Client,
@@ -603,19 +689,43 @@ impl RedisCalibrationStore {
             "Calibration namespace must be non-empty and free of braces"
         );
         assert!(min_samples >= 1, "min_samples must be >= 1");
-        assert!(max_adjustment >= 0, "max_adjustment must be >= 0");
+        assert!(max_adjustment >= 1, "max_adjustment must be >= 1");
         assert!(
-            max_change_per_minute >= 0,
-            "max_change_per_minute must be >= 0"
+            max_change_per_minute >= 1,
+            "max_change_per_minute must be >= 1"
         );
         assert!(receipt_ttl_secs >= 1, "receipt_ttl_secs must be >= 1");
         assert!(outcome_ttl_secs >= 1, "outcome_ttl_secs must be >= 1");
         assert!(
+            receipt_ttl_secs <= 2_147_483_647 && outcome_ttl_secs <= 2_147_483_647,
+            "receipt_ttl_secs and outcome_ttl_secs must be <= 2147483647 (the scripts' expire ceiling)"
+        );
+        // The ppm is consumed only by the random-sample mode (Complete
+        // and Weighted always sample and ignore it; the PHP mirror's
+        // Complete/Weighted fixtures likewise carry an unused value).
+        // In random_sample mode 0 means "never sample" (a coherent
+        // kill switch, like the PHP calibrator's); above 1_000_000 the
+        // value is not a probability and is refused. The engine's
+        // confirmation path separately refuses ppm outside 1..=1_000_000
+        // because the inverse (1_000_000/ppm) is only defined there.
+        if mode == SamplingMode::RandomSample {
+            assert!(
+                sampling_probability_ppm <= 1_000_000,
+                "sampling_probability_ppm must be <= 1000000 for random_sample mode"
+            );
+        }
+        assert!(
             (0.0..=1.0).contains(&minimum_resolution_ratio),
             "minimum_resolution_ratio must be within 0..=1"
         );
-        assert!(false_positive_cost > 0.0, "false_positive_cost must be > 0");
-        assert!(false_negative_cost > 0.0, "false_negative_cost must be > 0");
+        assert!(
+            (0.1..=10.0).contains(&false_positive_cost),
+            "false_positive_cost must be within 0.1..=10.0"
+        );
+        assert!(
+            (0.1..=10.0).contains(&false_negative_cost),
+            "false_negative_cost must be within 0.1..=10.0"
+        );
         RedisCalibrationStore {
             client,
             namespace: deployment_namespace(namespace, NamespaceVersion::Legacy),
@@ -623,6 +733,8 @@ impl RedisCalibrationStore {
             namespace_version: NamespaceVersion::Legacy,
             scope_hmac_key: [0u8; 32],
             conn: Mutex::new(None),
+            connection_timeout_ms: Self::CONNECTION_TIMEOUT_MS,
+            command_timeout_ms: Self::COMMAND_TIMEOUT_MS,
             min_samples,
             max_adjustment,
             max_change_per_minute,
@@ -659,6 +771,33 @@ impl RedisCalibrationStore {
         self.script_calls.load(Ordering::Relaxed)
     }
 
+    /// The canonical registration script (register_decision.lua), shared
+    /// with the v2 store: a v2 receipt is the same JSON with the extra
+    /// generation field, stored by the same atomic script.
+    pub(crate) fn register_script(&self) -> &redis::Script {
+        &self.register_script
+    }
+
+    /// The receipt TTL knob shared with the v2 store's registration path.
+    pub(crate) fn receipt_ttl_secs(&self) -> u64 {
+        self.receipt_ttl_secs
+    }
+
+    /// The outcome-ledger TTL knob shared with the v2 store.
+    pub(crate) fn outcome_ttl_secs(&self) -> u64 {
+        self.outcome_ttl_secs
+    }
+
+    /// Drops the scope's cached bias so the next aggregation re-reads the
+    /// buckets (the v2 store calls this after its own confirm/correct).
+    pub(crate) fn invalidate_bias_cache(&self, scope: u32) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .remove(&scope);
+    }
+
     fn cache_insert(&self, scope: u32, bias: i32, now: Instant) {
         self.cache
             .lock()
@@ -667,11 +806,13 @@ impl RedisCalibrationStore {
     }
 
     /// Seeds an explicit hourly bucket with one exact-score observation
-    /// (flat fields `legit_count` / `legit_score_sum` /
-    /// `abuse_count` / `abuse_score_sum`, hincrbyfloat + expire 48h —
-    /// the exact wire shape `resources/confirm.lua` produces; `now_ms`
-    /// injected so tests can pin the hour). Ops/tests seeding: the
-    /// production confirm path is [`CalibrationStore::confirm_outcome`].
+    /// (flat fields `legit_count` / `legit_score_sum` / `legit_above_sum`
+    /// / `abuse_count` / `abuse_score_sum` / `abuse_below_sum`,
+    /// hincrbyfloat + expire 48h — the exact wire shape
+    /// `resources/confirm.lua` produces, including the per-sample
+    /// boundary distance; `now_ms` injected so tests can pin the hour).
+    /// Ops/tests seeding: the production confirm path is
+    /// [`CalibrationStore::confirm_outcome`].
     pub fn record_at(
         &self,
         scope: u32,
@@ -681,29 +822,40 @@ impl RedisCalibrationStore {
     ) -> Result<(), CalibrationError> {
         let hour = now_ms / 3_600_000;
         let key = self.bucket_key(scope, hour);
-        let (count_field, sum_field) = if legitimate {
-            ("legit_count", "legit_score_sum")
+        let (count_field, sum_field, clipped_field) = if legitimate {
+            ("legit_count", "legit_score_sum", "legit_above_sum")
         } else {
-            ("abuse_count", "abuse_score_sum")
+            ("abuse_count", "abuse_score_sum", "abuse_below_sum")
         };
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
+        let boundary = u32::from(crate::action::RiskAction::DECISION_BOUNDARY_SCORE);
+        let clipped = if legitimate {
+            score.saturating_sub(boundary)
+        } else {
+            boundary.saturating_sub(score)
+        };
+        self.with_connection(|conn| {
+            redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(count_field)
+                .arg(1.0)
+                .query::<()>(conn)
+                .map_err(backend)?;
+            redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(sum_field)
+                .arg(score as f64)
+                .query::<()>(conn)
+                .map_err(backend)?;
+            redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(clipped_field)
+                .arg(clipped as f64)
+                .query::<()>(conn)
+                .map_err(backend)?;
+            conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
+                .map_err(backend)?;
+            Ok(())
         })?;
-        redis::cmd("HINCRBYFLOAT")
-            .arg(&key)
-            .arg(count_field)
-            .arg(1.0)
-            .query::<()>(conn)
-            .map_err(backend)?;
-        redis::cmd("HINCRBYFLOAT")
-            .arg(&key)
-            .arg(sum_field)
-            .arg(score as f64)
-            .query::<()>(conn)
-            .map_err(backend)?;
-        conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
-            .map_err(backend)?;
         // A fresh outcome invalidates the scope's cached bias so the next
         // assessment re-aggregates.
         self.cache
@@ -714,7 +866,7 @@ impl RedisCalibrationStore {
         Ok(())
     }
 
-    fn scope_component(&self, scope: u32) -> String {
+    pub(crate) fn scope_component(&self, scope: u32) -> String {
         if self.scope_hmac_key == [0u8; 32] {
             return scope.to_string();
         }
@@ -724,7 +876,7 @@ impl RedisCalibrationStore {
         out.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    fn bucket_key(&self, scope: u32, hour: i64) -> String {
+    pub(crate) fn bucket_key(&self, scope: u32, hour: i64) -> String {
         format!(
             "{{kiwi:{}}}:cal:{}:{hour}",
             self.namespace,
@@ -732,7 +884,7 @@ impl RedisCalibrationStore {
         )
     }
 
-    fn state_key(&self, scope: u32) -> String {
+    pub(crate) fn state_key(&self, scope: u32) -> String {
         format!(
             "{{kiwi:{}}}:cal:state:{}",
             self.namespace,
@@ -740,7 +892,7 @@ impl RedisCalibrationStore {
         )
     }
 
-    fn receipt_key(&self, decision_id: &str) -> String {
+    pub(crate) fn receipt_key(&self, decision_id: &str) -> String {
         format!("{{kiwi:{}}}:cal:receipt:{decision_id}", self.namespace)
     }
 
@@ -753,21 +905,52 @@ impl RedisCalibrationStore {
         format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
-    /// Lazy single connection.
+    /// Lazy single connection with the store's IO timeouts (connection
+    /// 75 ms and command read/write 10 ms by default — see
+    /// [`RedisCalibrationStore::with_io_timeouts`]): the calibration read
+    /// runs synchronously in the assessment hot path, so a wedged socket
+    /// must never wedge every assessment thread.
     fn connection(&self) -> Result<MutexGuard<'_, Option<redis::Connection>>, CalibrationError> {
         let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_none() {
             let conn = self
                 .client
-                .get_connection()
+                .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
+                .map_err(|e| CalibrationError::Backend(e.to_string()))?;
+            conn.set_read_timeout(Some(Duration::from_millis(self.command_timeout_ms)))
+                .map_err(|e| CalibrationError::Backend(e.to_string()))?;
+            conn.set_write_timeout(Some(Duration::from_millis(self.command_timeout_ms)))
                 .map_err(|e| CalibrationError::Backend(e.to_string()))?;
             *guard = Some(conn);
         }
         Ok(guard)
     }
+
+    /// Runs one unit of calibration work on the single connection. ANY
+    /// error evicts the connection (dropped from the slot) before the
+    /// error propagates, so the next call reconnects: a timed-out or
+    /// failed reply may still be in flight on the socket, and reusing the
+    /// connection could desync the Redis reply stream (the same eviction
+    /// policy the risk state store's pool applies).
+    pub(crate) fn with_connection<T>(
+        &self,
+        f: impl FnOnce(&mut redis::Connection) -> Result<T, CalibrationError>,
+    ) -> Result<T, CalibrationError> {
+        let mut guard = self.connection()?;
+        let result = match guard.as_mut() {
+            Some(conn) => f(conn),
+            None => Err(CalibrationError::Backend(
+                "calibration connection vanished".to_string(),
+            )),
+        };
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
 }
 
-fn backend(e: redis::RedisError) -> CalibrationError {
+pub(crate) fn backend(e: redis::RedisError) -> CalibrationError {
     CalibrationError::Backend(e.to_string())
 }
 
@@ -794,11 +977,6 @@ impl CalibrationStore for RedisCalibrationStore {
         {
             return cached;
         }
-        let mut guard = match self.connection() {
-            Ok(guard) => guard,
-            Err(_) => return 0, // fail-open: never break issuance
-        };
-        let conn = guard.as_mut().expect("connection set by connection()");
 
         // Hot path: one canonical script invocation. Keys are the 24 hourly
         // buckets + the rate-limit state (the sample counters live
@@ -828,9 +1006,9 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.mode.as_int().to_string());
         invoke.arg(self.false_positive_cost.to_string());
         invoke.arg(self.false_negative_cost.to_string());
-        let bias: i64 = match invoke.invoke(conn) {
+        let bias: i64 = match self.with_connection(|conn| invoke.invoke(conn).map_err(backend)) {
             Ok(bias) => bias,
-            Err(_) => return 0,
+            Err(_) => return 0, // fail-open: never break issuance
         };
         self.script_calls.fetch_add(1, Ordering::Relaxed);
 
@@ -852,13 +1030,14 @@ impl CalibrationStore for RedisCalibrationStore {
         decision_hour: i64,
         weight: f64,
     ) -> Result<bool, CalibrationError> {
+        if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(CalibrationError::InvalidIdentifier(hex::encode(
+                decision_id,
+            )));
+        }
         let receipt_key = self.receipt_key(decision_id);
         let bucket_key = self.bucket_key(scope, decision_hour);
         let ledger_key = self.outcome_ledger_key(decision_id);
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
 
         // ONE canonical script invocation (register_decision.lua): SET NX EX
         // the receipt + create the pending outcome ledger + hincrby the
@@ -890,7 +1069,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(decision_hour.to_string());
         invoke.arg(score.clamp(0, 1000).to_string());
         invoke.arg(weight.to_string());
-        let registered: i64 = invoke.invoke(conn).map_err(backend)?;
+        let registered: i64 = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         Ok(registered != 0)
     }
 
@@ -900,6 +1079,11 @@ impl CalibrationStore for RedisCalibrationStore {
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError> {
+        if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(CalibrationError::InvalidIdentifier(hex::encode(
+                decision_id,
+            )));
+        }
         // Weighted sampling requires the caller's inverse sampling
         // probability: a missing weight would silently bias the population,
         // so it is a typed error, never a silent 1.0.
@@ -907,10 +1091,6 @@ impl CalibrationStore for RedisCalibrationStore {
             return Err(CalibrationError::WeightRequired(decision_id.to_string()));
         }
         let receipt_key = self.receipt_key(decision_id);
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
 
         // Key discovery: the decision-time bucket and the outcome ledger
         // keys need the receipt's scope + decision_hour, which only the
@@ -919,10 +1099,12 @@ impl CalibrationStore for RedisCalibrationStore {
         // concurrent consumption simply yields status 0 (the outcome is
         // recorded exactly once) and a receipt deleted in between is a
         // no-op, never a double record.
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(&receipt_key)
-            .query(conn)
-            .map_err(backend)?;
+        let raw: Option<String> = self.with_connection(|conn| {
+            redis::cmd("GET")
+                .arg(&receipt_key)
+                .query(conn)
+                .map_err(backend)
+        })?;
         let Some(raw) = raw else {
             return Ok(0);
         };
@@ -964,7 +1146,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.outcome_ttl_secs.to_string());
         invoke.arg(scope.to_string());
         invoke.arg(decision_hour.to_string());
-        let status: i64 = invoke.invoke(conn).map_err(backend)?;
+        let status: i64 = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         if status == 1 || status == 2 {
             // A first confirmation (status 1 or 2) invalidates the scope's
             // cached bias so the next assessment re-aggregates — status 2
@@ -986,19 +1168,22 @@ impl CalibrationStore for RedisCalibrationStore {
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<bool, CalibrationError> {
+        if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(CalibrationError::InvalidIdentifier(hex::encode(
+                decision_id,
+            )));
+        }
         let ledger_key = self.outcome_ledger_key(decision_id);
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
 
         // Key discovery: the decision-time bucket needs the ledger's scope
         // + hour. The pre-read GET is non-destructive — correction.lua
         // re-checks the ledger under the same key.
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(&ledger_key)
-            .query(conn)
-            .map_err(backend)?;
+        let raw: Option<String> = self.with_connection(|conn| {
+            redis::cmd("GET")
+                .arg(&ledger_key)
+                .query(conn)
+                .map_err(backend)
+        })?;
         let Some(raw) = raw else {
             return Ok(false);
         };
@@ -1034,7 +1219,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.outcome_ttl_secs.to_string());
         invoke.arg(scope.to_string());
         invoke.arg(hour.to_string());
-        let applied: i64 = invoke.invoke(conn).map_err(backend)?;
+        let applied: i64 = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         if applied != 0 {
             // A corrected outcome changes the scope's aggregate: drop the
             // cached bias so the next assessment re-aggregates.
@@ -1052,11 +1237,6 @@ impl CalibrationStore for RedisCalibrationStore {
         scope: u32,
         now_ms: i64,
     ) -> Result<SamplingMetrics, CalibrationError> {
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
-
         // ONE canonical script invocation (sampling_metrics.lua): 24
         // hgetall calls summing the scope's sample counters. argv[1] is
         // now_ms (informational).
@@ -1070,7 +1250,7 @@ impl CalibrationStore for RedisCalibrationStore {
             invoke.key(key.as_str());
         }
         invoke.arg(now_ms.to_string());
-        let counts: Vec<i64> = invoke.invoke(conn).map_err(backend)?;
+        let counts: Vec<i64> = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         let sampled_total = counts.first().copied().unwrap_or(0);
         let sampled_resolved = counts.get(1).copied().unwrap_or(0);
         // The ratio is integer-derived (always finite); the
@@ -1254,10 +1434,41 @@ mod tests {
         at: i64,
     ) {
         for _ in 0..legit {
-            store.record_at(scope, score, true, at).unwrap();
+            record_retry(store, scope, score, true, at);
         }
         for _ in 0..abuse {
-            store.record_at(scope, score, false, at).unwrap();
+            record_retry(store, scope, score, false, at);
+        }
+    }
+
+    /// Records one increment, retrying a transient reconnect failure.
+    /// A burst of parallel test connections can surface as a local
+    /// would-block on connect; the increment itself is a single
+    /// counter update, so the retry repeats the same operation instead
+    /// of failing the measurement.
+    fn record_retry(
+        store: &RedisCalibrationStore,
+        scope: u32,
+        score: u32,
+        legitimate: bool,
+        at: i64,
+    ) {
+        let mut attempts = 0u32;
+        loop {
+            match store.record_at(scope, score, legitimate, at) {
+                Ok(()) => return,
+                Err(err) => {
+                    attempts += 1;
+                    let transient = matches!(&err, CalibrationError::Backend(message)
+                        if message.contains("Resource temporarily unavailable")
+                            || message.contains("os error 35")
+                            || message.contains("Would block"));
+                    if !transient || attempts >= 5 {
+                        panic!("record_at failed after {attempts} attempt(s): {err:?}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempts)));
+                }
+            }
         }
     }
 
@@ -1364,59 +1575,58 @@ mod tests {
         // in full.
         let s = store_limits("bias", 1, 150, 100_000);
 
-        // Perfect separator (legit@100, abuse@900): with the default costs
-        // (fn 2x fp) a balanced classifier nets error = 100*2 - 100*1 = 100
-        // -> raw 20 (the cost-knob test shows 1/1 costs zero it out).
+        // Perfect separator (legit@100, abuse@900): both classes land on
+        // the correct side of T=600, so both clipped means are 0 and the
+        // error is exactly zero regardless of the cost knobs.
         fill(&s, 1, 100, 10, 0, now());
         fill(&s, 1, 900, 0, 10, now());
-        // Abuse predicted at low score (100): under-predicted threat ->
-        // fn_mean = 900 -> error 1800 -> raw 360 -> clamped 150.
+        // Abuse predicted at low score (100): 500 below T -> fn_mean 500
+        // -> error 1000 -> raw 200 -> clamped 150.
         fill(&s, 2, 100, 0, 10, now());
-        // Legit traffic predicted at high score (900): over-predicted ->
-        // fp_mean = 900 -> error -900 -> raw -180 -> clamped -150.
+        // Legit traffic predicted at high score (900): 300 above T ->
+        // fp_mean 300 -> error -300 -> raw -60.
         fill(&s, 3, 900, 10, 0, now());
         // Class normalization kills label-volume dominance: 60 legit@900
-        // + 40 abuse@100 has fp_mean = fn_mean = 900 -> error 900 -> 150
-        // (the volume-based formula would have read -36 here).
+        // + 40 abuse@100 has fp_mean 300 and fn_mean 500 -> error
+        // 1000 - 300 = 700 -> raw 140.
         fill(&s, 4, 900, 60, 0, now());
         fill(&s, 4, 100, 0, 40, now());
-        // 1 legit@100 + 2 abuse@100: fp 100, fn 900 -> error 1700 -> 150.
+        // 1 legit@100 + 2 abuse@100: fp 0, fn 500 -> error 1000 -> 150.
         fill(&s, 5, 100, 1, 2, now());
         // Positive truncation toward zero, byte-identical with PHP
-        // trunc_div: 1 legit@100 + 2 abuse@600/601 -> fn 399.5 -> error
-        // 699 -> raw 139.8 -> 139.
+        // trunc_div: 1 legit@100 (fp 0) + 2 abuse@300/301 -> fn
+        // (300+299)/2 = 299.5 -> error 599 -> raw 119.8 -> 119.
         fill(&s, 6, 100, 1, 0, now());
-        fill(&s, 6, 600, 0, 1, now());
-        fill(&s, 6, 601, 0, 1, now());
-        // Negative truncation: 1 legit@402 + 2 abuse@850/851 -> fn 149.5,
-        // error -103 -> raw -20.6 -> -20 (trunc toward zero).
-        fill(&s, 7, 402, 1, 0, now());
-        fill(&s, 7, 850, 0, 1, now());
-        fill(&s, 7, 851, 0, 1, now());
+        fill(&s, 6, 300, 0, 1, now());
+        fill(&s, 6, 301, 0, 1, now());
+        // Negative truncation: 2 legit@750/751 -> fp (150+151)/2 = 150.5,
+        // fn 0 -> error -150.5 -> raw -30.1 -> -30 (trunc toward zero).
+        fill(&s, 7, 750, 1, 0, now());
+        fill(&s, 7, 751, 1, 0, now());
         // No samples -> 0.
         seed_all(&s, &[1, 2, 3, 4, 5, 6, 7, 99]);
         std::thread::sleep(Duration::from_millis(700));
         assert_eq!(
             query_raw(s.namespace(), 1),
-            20,
-            "balanced separator with default costs"
+            0,
+            "both classes on the correct side of T contribute zero"
         );
         assert_eq!(query_raw(s.namespace(), 2), 150);
-        assert_eq!(query_raw(s.namespace(), 3), -150);
+        assert_eq!(query_raw(s.namespace(), 3), -60);
         assert_eq!(
             query_raw(s.namespace(), 4),
-            150,
+            140,
             "class normalization is volume-independent"
         );
         assert_eq!(query_raw(s.namespace(), 5), 150);
         assert_eq!(
             query_raw(s.namespace(), 6),
-            139,
+            119,
             "positive truncation toward zero"
         );
         assert_eq!(
             query_raw(s.namespace(), 7),
-            -20,
+            -30,
             "negative truncation toward zero"
         );
         assert_eq!(query_raw(s.namespace(), 99), 0);
@@ -2012,10 +2222,24 @@ mod tests {
         assert_eq!(SamplingMode::RandomSample.as_int(), 1);
         assert_eq!(SamplingMode::Weighted.as_int(), 2);
         // Complete/Weighted always sample; RandomSample follows the ppm.
-        assert!(make(SamplingMode::Complete, 0).sample());
-        assert!(make(SamplingMode::Weighted, 0).sample());
-        assert!(!make(SamplingMode::RandomSample, 0).sample());
+        // The constructor enforces the PHP-parity 1..=1_000_000 ppm range,
+        // so the minimum admissible value is 1 (0 is the rejected
+        // "calibration permanently inert" configuration).
+        assert!(make(SamplingMode::Complete, 1).sample());
+        assert!(make(SamplingMode::Weighted, 1).sample());
         assert!(make(SamplingMode::RandomSample, 1_000_000).sample());
+        assert!(
+            !make(SamplingMode::RandomSample, 0).sample(),
+            "ppm 0 is the never-sample kill switch, mirroring the PHP calibrator"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make(
+                SamplingMode::RandomSample,
+                1_000_001
+            )))
+            .is_err(),
+            "ppm above 1_000_000 is refused like the PHP constructor"
+        );
     }
 
     #[test]
@@ -2295,8 +2519,11 @@ mod tests {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        // Default costs (fp 1.0, fn 2.0): 10 legit@250 + 10 abuse@900 ->
-        // error = 100*2 - 250*1 = -50 -> raw -10.
+        // Inputs deliberately straddle the boundary on the wrong side:
+        // 10 legit@700 (100 above T) + 10 abuse@400 (200 below T) ->
+        // fp_mean 100, fn_mean 200.
+        // Default costs (fp 1.0, fn 2.0): error = 200*2 - 100*1 = 300
+        // -> raw 60.
         let d = store_full(
             "costd",
             1,
@@ -2309,10 +2536,10 @@ mod tests {
             1.0,
             2.0,
         );
-        fill(&d, 1, 250, 10, 0, now());
-        fill(&d, 1, 900, 0, 10, now());
-        // fn-heavy pricing (fp 3.0, fn 1.0): the same data -> error =
-        // 100*1 - 250*3 = -650 -> raw -130 (false positives cost 3x).
+        fill(&d, 1, 700, 10, 0, now());
+        fill(&d, 1, 400, 0, 10, now());
+        // fp-heavy pricing (fp 3.0, fn 1.0): the same data -> error =
+        // 200*1 - 100*3 = -100 -> raw -20 (false positives cost 3x).
         let c = store_full(
             "costc",
             1,
@@ -2325,10 +2552,10 @@ mod tests {
             3.0,
             1.0,
         );
-        fill(&c, 2, 250, 10, 0, now());
-        fill(&c, 2, 900, 0, 10, now());
-        // Equal costs (1.0/1.0): a perfectly separating classifier
-        // (legit@100 + abuse@900) contributes exactly zero pressure.
+        fill(&c, 2, 700, 10, 0, now());
+        fill(&c, 2, 400, 0, 10, now());
+        // Equal costs (1.0/1.0): the same straddling data -> error =
+        // 200 - 100 = 100 -> raw 20.
         let e = store_full(
             "coste",
             1,
@@ -2341,8 +2568,8 @@ mod tests {
             1.0,
             1.0,
         );
-        fill(&e, 3, 100, 10, 0, now());
-        fill(&e, 3, 900, 0, 10, now());
+        fill(&e, 3, 700, 10, 0, now());
+        fill(&e, 3, 400, 0, 10, now());
 
         assert_eq!(d.bias_for_scope(1, now()), 0, "seeds");
         assert_eq!(c.bias_for_scope(2, now()), 0, "seeds");
@@ -2362,7 +2589,7 @@ mod tests {
                 2.0
             )
             .bias_for_scope(1, now()),
-            -10,
+            60,
             "default costs"
         );
         assert_eq!(
@@ -2379,7 +2606,7 @@ mod tests {
                 1.0
             )
             .bias_for_scope(2, now()),
-            -130,
+            -20,
             "fp 3x / fn 1x"
         );
         assert_eq!(
@@ -2396,8 +2623,8 @@ mod tests {
                 1.0
             )
             .bias_for_scope(3, now()),
-            0,
-            "equal costs zero a balanced separator"
+            20,
+            "equal costs"
         );
     }
 
@@ -2553,6 +2780,143 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ledger_correction_leaves_the_clipped_sums_alone() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("lclip", SamplingMode::Complete, 0);
+        let ns = s.namespace().to_string();
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(&ns, 7);
+
+        // A post-upgrade counted sample: score 900 legit books the clipped
+        // distance 900 - 600 = 300.
+        register(&s, "clip-new", 7, 4, 900, true);
+        assert_eq!(s.confirm_outcome("clip-new", true, None).unwrap(), 1);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_above_sum"), 300.0);
+        let raw: String = conn.get(ledger_key(&ns, "clip-new")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(
+            value["v"], 2,
+            "a confirmation records the clipped-sums generation"
+        );
+        assert_eq!(
+            value["c"], 1,
+            "a counted first confirmation records the counted flag"
+        );
+
+        // A legacy ledger (no v, no clipped leg): fabricated exactly as a
+        // pre-upgrade confirmation wrote it, with its count/score terms in
+        // the bucket.
+        register(&s, "clip-leg", 7, 4, 900, true);
+        let legacy = serde_json::json!({
+            "o": "L",
+            "scope": 7,
+            "hour": hour(),
+            "score": 900,
+            "w": 1.0,
+            "c": 1,
+        });
+        let ledger = ledger_key(&ns, "clip-leg");
+        let _: () = redis::cmd("SET")
+            .arg(&ledger)
+            .arg(legacy.to_string())
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .expect("set legacy ledger");
+        let _: f64 = redis::cmd("HINCRBYFLOAT")
+            .arg(&key)
+            .arg("legit_count")
+            .arg(1)
+            .query(&mut conn)
+            .expect("seed legacy count");
+        let _: f64 = redis::cmd("HINCRBYFLOAT")
+            .arg(&key)
+            .arg("legit_score_sum")
+            .arg(900)
+            .query(&mut conn)
+            .expect("seed legacy score");
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 2.0);
+
+        // The legacy correction reverses count/score yet leaves the
+        // clipped sums exactly as the post-upgrade sample booked them.
+        assert!(s.correct_outcome("clip-leg", false, None).unwrap());
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 1.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 900.0);
+        assert_eq!(
+            hget_f64(&mut conn, &key, "legit_above_sum"),
+            300.0,
+            "a legacy correction must not reverse the clipped sums"
+        );
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_below_sum"), 0.0);
+
+        // A v=2 ledger still reverses and redoes the clipped legs:
+        // correcting the post-upgrade sample to abuse removes its 300.
+        assert!(s.correct_outcome("clip-new", false, None).unwrap());
+        assert_eq!(
+            hget_f64(&mut conn, &key, "legit_above_sum"),
+            0.0,
+            "a v=2 correction reverses the clipped sum"
+        );
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_count"), 2.0);
+    }
+
+    #[test]
+    fn unsampled_confirmation_writes_c0_and_its_correction_leaves_the_bucket_untouched() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        // Random-sample mode: a receipt whose decision was discarded
+        // (sampled = false) confirms with status 2.
+        let s = store_mode("unclip", SamplingMode::RandomSample, 0);
+        let ns = s.namespace().to_string();
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(&ns, 7);
+
+        register(&s, "unclip-1", 7, 4, 900, false);
+        assert_eq!(
+            s.confirm_outcome("unclip-1", true, None).unwrap(),
+            2,
+            "an unsampled random-sample decision is consumed with status 2"
+        );
+
+        // The writer generation still stamps v = 2, but the uncounted
+        // sample records c = 0 and books nothing in the bucket.
+        let raw: String = conn.get(ledger_key(&ns, "unclip-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "L");
+        assert_eq!(
+            value["v"], 2,
+            "generation-2 stamps v = 2 even on an unsampled confirmation"
+        );
+        assert_eq!(
+            value["c"], 0,
+            "an unsampled first confirmation records c = 0"
+        );
+        let fields: Vec<(String, String)> = conn.hgetall(&key).expect("hgetall");
+        assert!(
+            fields.is_empty(),
+            "an unsampled confirmation must not book a bucket sample"
+        );
+
+        // Correcting it flips the ledger outcome yet leaves the bucket
+        // exactly as it was: no sample existed to reverse or redo.
+        assert!(s.correct_outcome("unclip-1", false, None).unwrap());
+        let raw: String = conn.get(ledger_key(&ns, "unclip-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "A");
+        assert_eq!(value["w"], 1.0);
+        let fields: Vec<(String, String)> = conn.hgetall(&key).expect("hgetall");
+        assert!(
+            fields.is_empty(),
+            "an unsampled correction must leave every bucket field untouched"
+        );
+    }
+
+    #[test]
     fn weighted_confirm_without_weight_is_a_typed_error() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
@@ -2703,7 +3067,7 @@ mod tests {
         let mut conn = client().get_connection().expect("connection");
         let key = s.bucket_key(1, now() / 3_600_000);
         hset_corrupt(&mut conn, &key, "legit_count", "1e999");
-        hset_corrupt(&mut conn, &key, "legit_score_sum", "1e999");
+        hset_corrupt(&mut conn, &key, "legit_above_sum", "1e999");
 
         assert_eq!(
             s.bias_for_scope(1, now()),
@@ -2732,7 +3096,7 @@ mod tests {
         let mut conn = client().get_connection().expect("connection");
         let key = s.bucket_key(2, now() / 3_600_000);
         hset_corrupt(&mut conn, &key, "legit_count", "100");
-        hset_corrupt(&mut conn, &key, "legit_score_sum", "1e999");
+        hset_corrupt(&mut conn, &key, "legit_above_sum", "1e999");
         // Seed bias_mp = 0 / ts = Redis now - 60 s: the allowance is
         // 100_000 * 1000 * 60000 / 60000 = 1e8 milli-points >> 150 points.
         redis::cmd("HSET")
@@ -2856,5 +3220,28 @@ mod tests {
         assert_eq!(crate::score::score(0, &saturated, &w), 1000);
         assert_eq!(crate::score::score(1000, &saturated, &w), 1000);
         assert!(crate::score::score(1000, &saturated, &w) <= 1000);
+    }
+
+    /// The calibration store seeds its IO timeouts from the shared risk
+    /// state store contract and exposes the same `with_io_timeouts`
+    /// override, so a TLS/managed/cross-AZ calibration endpoint can raise
+    /// the connect timeout without loosening the tight command timeout.
+    /// Hermetic: construction never connects (the connection is lazy).
+    #[test]
+    fn io_timeouts_default_to_the_shared_contract_and_are_tunable() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("url parses");
+        let store = RedisCalibrationStore::new(client, "caltimeouts");
+        assert_eq!(
+            store.connection_timeout_ms,
+            crate::redis::RedisRiskStateStore::CONNECTION_TIMEOUT_MS
+        );
+        assert_eq!(
+            store.command_timeout_ms,
+            crate::redis::RedisRiskStateStore::COMMAND_TIMEOUT_MS
+        );
+
+        let tuned = store.with_io_timeouts(120, 15);
+        assert_eq!(tuned.connection_timeout_ms, 120);
+        assert_eq!(tuned.command_timeout_ms, 15);
     }
 }

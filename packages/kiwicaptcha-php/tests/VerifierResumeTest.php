@@ -653,7 +653,7 @@ final class VerifierResumeTest extends TestCase
             [$inner, $record, $token] = $this->issueAndSolve(requestBinding: $recordBinding);
             $identity = $this->identity('committed-'.($expected ?? 'null'));
             $inner->consumeWithOperationIdentity($record->nonce, $identity);
-            self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+            self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($inner, $record->nonce, true, $record->requestBinding), 'the committed result lands');
             $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT + 10_000);
             $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, $expected, $expectation);
             self::assertSame($shouldPass, $outcome->isOk(), sprintf('resume matrix record=%s expected=%s pass=%s got=%s', var_export($recordBinding, true), var_export($expected, true), var_export($shouldPass, true), $outcome->code()));
@@ -686,7 +686,7 @@ final class VerifierResumeTest extends TestCase
         // original logical redemption received.
         [$inner, $record, $token] = $this->issueAndSolve();
         $inner->consumeWithOperationIdentity($record->nonce, $this->identity('committed'));
-        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($inner, $record->nonce, true, $record->requestBinding), 'the committed result lands');
         $farFuture = static fn (): int => self::ISSUED_AT + 10_000;
 
         $outcome = (new Verifier($inner, now: $farFuture))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('committed'), 'login', self::CLIENT_IP);
@@ -741,7 +741,7 @@ final class VerifierResumeTest extends TestCase
         // another backend network path (the IP stays exempt).
         [$inner, $record, $token] = $this->issueAndSolveArmed();
         $inner->consumeWithOperationIdentity($record->nonce, $this->identity('armed-committed'));
-        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($inner, $record->nonce, true, $record->requestBinding), 'the committed result lands');
         $farFuture = static fn (): int => self::ISSUED_AT + 10_000;
 
         $outcome = (new Verifier($inner, now: $farFuture))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('armed-committed'), 'login', '203.0.113.9');
@@ -1700,7 +1700,7 @@ final class VerifierResumeTest extends TestCase
         [$inner, $record, $token] = $this->issueAndSolve();
         $identity = $this->identity('committed-ctx-control');
         $inner->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($inner, $record->nonce, true, $record->requestBinding));
         $outcome = (new Verifier($inner, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
         self::assertTrue($outcome->isOk(), 'the correct context resolves the retained Valid');
     }

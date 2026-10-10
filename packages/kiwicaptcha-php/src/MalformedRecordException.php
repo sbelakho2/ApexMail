@@ -74,7 +74,7 @@ final class MalformedRecordException extends \RuntimeException
     {
         $shown = \is_string($value) ? $value : get_debug_type($value);
 
-        return new self(sprintf('record algorithm must be exactly "sha256" or "argon2id", got "%s"', $shown));
+        return new self(sprintf('record algorithm must be exactly "sha256", "argon2id" or "rsw", got "%s"', $shown));
     }
 
     /**
@@ -112,7 +112,12 @@ final class MalformedRecordException extends \RuntimeException
      * explicitly (the capability becomes inferable from
      * protocol_version, which is the point).
      */
-    public static function decoyOnV2Record(): self
+    public static function invalidProtocolFieldCombination(int $protocolVersion): self
+    {
+        return new self(sprintf('protocol_version %d does not admit this decoy/extension field combination (the protocol grammar matrix rejects the record)', $protocolVersion));
+    }
+
+        public static function decoyOnV2Record(): self
     {
         return new self('record protocol_version 2 must not carry a "decoy_field" (the decoy segment is a protocol v3 canonical extension)');
     }
@@ -120,7 +125,7 @@ final class MalformedRecordException extends \RuntimeException
     /**
      * A protocol-v3 record without `decoy_field`: the decoy is mandatory
      * on v3, since the v3 canonical is the 18-field base plus the
-     * `|decoy_field` segment. A v3 record without one cannot have come
+     * tagged `d=` segment. A v3 record without one cannot have come
      * from a conforming issuer, because an armed issuance always writes
      * the segment. The rejection closes the stored-version-flip window:
      * a signed v2 record with its stored protocol_version flipped to 3

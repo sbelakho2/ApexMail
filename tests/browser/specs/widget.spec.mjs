@@ -114,7 +114,9 @@ test.describe('KiwiCaptcha browser solver', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          nonce: 'exhaust-nonce-' + calls,
+          // The canonical server nonce shape (44 chars, one padding =)
+          // keeps the forged challenge inside the validation contract.
+          nonce: ('exhaustnonce' + calls).padEnd(43, 'a') + '=',
           salt: btoa(String(calls).padStart(16, '0')),
           prefix: 'x',
           algorithm: 'argon2id',
@@ -132,7 +134,7 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(calls).toBeGreaterThanOrEqual(3); // the bounded retry flow re-acquired
     expect(cancelBodies.length).toBeGreaterThanOrEqual(1);
     expect(cancelBodies.length).toBeLessThanOrEqual(calls); // at most one per abandoned challenge
-    expect(cancelBodies[0]).toEqual({ nonce: 'exhaust-nonce-1' }); // the first abandoned nonce
+    expect(cancelBodies[0]).toEqual({ nonce: ('exhaustnonce1').padEnd(43, 'a') + '=' }); // the first abandoned nonce
     const notified = cancelBodies.map((b) => b.nonce);
     expect(new Set(notified).size).toBe(notified.length); // once per nonce, never a re-acquired nonce
   });
@@ -166,5 +168,38 @@ test.describe('KiwiCaptcha browser solver', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
     const doneCount = await page.evaluate(() => document.querySelector('#kiwicaptcha-root').querySelectorAll('*').length);
     expect(doneCount, `the solved widget must stay under 40 elements, got ${doneCount}`).toBeLessThan(40);
+  });
+
+  test('render/destroy leaves zero live matchMedia listeners on an ordinary widget', async ({ page }) => {
+    // The widget lifecycle owns every listener it registers. The removed
+    // SMIL-wink hook used to register an unowned matchMedia "change"
+    // listener per widget; this pins that a render/destroy cycle
+    // registers none (the pointer/coarse read for the risk descriptor is
+    // a property read, never a listener).
+    await page.addInitScript(() => {
+      window.__mmAdds = 0;
+      window.__mmRemoves = 0;
+      const original = window.matchMedia ? window.matchMedia.bind(window) : null;
+      window.matchMedia = (query) => {
+        const list = original ? original(query) : { matches: false };
+        for (const method of ['addEventListener', 'removeEventListener']) {
+          if (list && typeof list[method] === 'function') {
+            const bound = list[method].bind(list);
+            list[method] = (...args) => {
+              if (method === 'addEventListener') window.__mmAdds += 1;
+              else window.__mmRemoves += 1;
+              return bound(...args);
+            };
+          }
+        }
+        return list;
+      };
+    });
+    await page.goto('/?algorithm=sha256');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    await page.evaluate(() => window.KiwiCaptcha.destroy(document.querySelector('[data-kiwi-widget]')));
+    const counts = await page.evaluate(() => ({ adds: window.__mmAdds, removes: window.__mmRemoves }));
+    expect(counts.adds, 'a widget render must register zero matchMedia listeners').toBe(0);
+    expect(counts.removes).toBe(0);
   });
 });

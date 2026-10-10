@@ -117,7 +117,7 @@ final class RealRedisIntegrationTest extends TestCase
         $sem1 = new RedisAdmissionSemaphore($this->client, 1, 'ci-stale');
         $oldToken = $sem1->acquire();
         self::assertNotNull($oldToken);
-        $this->client->del('kiwicaptcha:argon2:leases:ci-stale');
+        $this->client->del('{kiwicaptcha:argon2:leases:ci-stale}:global');
         $newToken = $sem1->acquire();
         self::assertNotNull($newToken);
         $sem1->release((string) $oldToken); // stale release — must be a no-op
@@ -276,9 +276,67 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
     }
 
-    public function testOutstandingAdmissionIssuesAVerifiedWaitAgainstRealRedis(): void
+    public function testOrdinaryLaneMutationsDoNotForceAnAuthorityRevalidationPerEvalUnderPinnedPrimary(): void
     {
-        // The admission write is protected by the configured
+        // The per-challenge mutation components (rate limiter, Argon
+        // semaphore, outstanding accounting, scope cap, issuance
+        // counter) ride the typed seam's ordinary mutation lane, so
+        // under ha_authority pinned_primary their EVALs serve within
+        // the guard's verification window: the INFO + pin reads of the
+        // authority revalidation do NOT multiply per EVAL. Before the
+        // seam, the wrapper's fail-closed plain-EVAL classification
+        // forced one revalidation round trip per script (an INFO storm
+        // per challenge).
+        $url = getenv('KC_REDIS_URL');
+        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient($url, ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $counting->flushdb();
+        $ns = 'ci-authority-'.bin2hex(random_bytes(4));
+        $guard = new \BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard($counting, $ns, 30, 'storage');
+        $guard->initializePin();
+        $wrapped = new \BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient($guard, $counting);
+
+        $secret = '0123456789abcdef0123456789abcdef';
+        $limiter = new IssuanceRateLimiter(1000, 60, pepper: 'ci-ordinary', redis: $wrapped, globalMax: 1000, namespace: 'ci-ordinary');
+        $semaphore = new RedisAdmissionSemaphore($wrapped, 8, 'ci-ordinary');
+        $outstanding = new OutstandingChallenges($wrapped, '{'.$ns.'}:outstanding:', RiskKeys::fromMaster($secret), 20, 100, 5);
+        $scopeCap = new \BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap($wrapped, '{'.$ns.'}:issuance:', 1000, \BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap::deriveScopeHmacKey($secret));
+        $issuanceCounter = new \BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter($wrapped, '{'.$ns.'}:issuance-rate:');
+
+        // Warm the guard's verification window with one ordinary
+        // command, mirroring a worker that already served a request.
+        $wrapped->set($ns.':warm', '1');
+
+        $infoCount = static function (array $commands): int {
+            return \count(array_filter($commands, static fn (array $c): bool => $c[0] === 'INFO'));
+        };
+        $infosBefore = $infoCount($counting->commands);
+        $evalsBefore = \count(array_filter($counting->commands, static fn (array $c): bool => $c[0] === 'EVAL'));
+
+        $iterations = 5;
+        for ($i = 0; $i < $iterations; $i++) {
+            self::assertSame(1, $limiter->check('198.51.100.7'));
+            $lease = $semaphore->acquire();
+            self::assertNotNull($lease);
+            $semaphore->release($lease);
+            self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
+            self::assertTrue($scopeCap->allow('login', 1));
+            $issuanceCounter->record();
+        }
+
+        $commands = $counting->commands;
+        $evals = \count(array_filter($commands, static fn (array $c): bool => $c[0] === 'EVAL')) - $evalsBefore;
+        self::assertGreaterThanOrEqual($iterations * 5, $evals, 'the full-risk issuance workload actually ran (>= 5 EVALs per iteration)');
+        $revalidations = $infoCount($commands) - $infosBefore;
+        self::assertLessThanOrEqual(
+            1,
+            $revalidations,
+            sprintf('the ordinary-lane mutations serve within the guard verification window: %d EVALs performed %d authority revalidations (INFO reads), not one per EVAL', $evals, $revalidations),
+        );
+        $counting->disconnect();
+    }
+
+    public function testOutstandingAdmissionIssuesAVerifiedWaitAgainstRealRedis(): void
+    {        // The admission write is protected by the configured
         // replica-durability barrier exactly like the challenge storage —
         // a successful admission issues one verified WAIT, and a refused
         // admission (no write) never WAITs.
@@ -407,7 +465,7 @@ final class RealRedisIntegrationTest extends TestCase
     public function testPerScopeBudgetAndGlobalCapAgainstRealRedis(): void
     {
         $sem = new RedisAdmissionSemaphore($this->client, 100, 'ci-scope', 45_000, 64, 2);
-        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:'.hash('sha256', 'login');
+        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:scope:'.hash('sha256', 'login');
 
         // Scope 'login' fills its own budget of 2 while the global cap is
         // nowhere near full; a second scope still acquires (fairness).
@@ -428,11 +486,11 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertNull($sem->acquire('admin'));
         $sem->release($tokens[0]);
         $sem->release($tokens[1]);
-        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:ci-scope}:admin'), 'scoped release must free the scope set');
+        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:ci-scope}:scope:admin'), 'scoped release must free the scope set');
         self::assertNotNull($sem->acquire('admin'), 'the freed scope budget admits again immediately');
 
         // Global cap still binds on top of the per-scope budgets.
-        $globalKey = 'kiwicaptcha:argon2:leases:ci-scope-global';
+        $globalKey = '{kiwicaptcha:argon2:leases:ci-scope-global}:global';
         $global = new RedisAdmissionSemaphore($this->client, 2, 'ci-scope-global', 45_000, 64, 10);
         self::assertNotNull($global->acquire('a'));
         self::assertNotNull($global->acquire('b'));
@@ -455,23 +513,25 @@ final class RealRedisIntegrationTest extends TestCase
         $this->client->del('{kiwi:ci-health}:security-policy');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready without a central policy key');
 
-        // Compatible central policy (protocol 4, epoch 1): the
+        // Compatible central policy (protocol 3, epoch 1): the
         // execution-capable v4 canonical is this binary's max protocol.
         $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '1');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready with a compatible central policy');
 
-        // A newer protocol or epoch takes the binary out of the pool.
+        // A newer protocol floor takes the binary out of the pool; a
+        // newer epoch does not, because issuance stamps and the verifier
+        // enforces the effective epoch.
         $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '4', 'min_policy_epoch', '1');
-        self::assertSame(200, $controller()->ready()->getStatusCode(), 'central min_protocol_version 4 <= the binary max (4) — the v4-capable binary stays ready');
+        self::assertSame(200, $controller()->ready()->getStatusCode(), 'central min_protocol_version 4 <= the binary max (5) — the v5-capable binary stays ready');
 
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '5', 'min_policy_epoch', '1');
-        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 5 > the binary max (4)');
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '6', 'min_policy_epoch', '1');
+        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 6 > the binary max (5)');
 
         $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '2');
-        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_policy_epoch 2 > the configured risk.policy_version 1');
+        self::assertSame(200, $controller()->ready()->getStatusCode(), 'central min_policy_epoch 2 > the configured risk.policy_version 1: the node follows the effective epoch and stays ready');
 
-        // Live stays 200 while ready fails.
-        self::assertSame(200, $controller()->live()->getStatusCode(), 'live must stay 200 while ready fails');
+        // Live stays 200 regardless of readiness.
+        self::assertSame(200, $controller()->live()->getStatusCode(), 'live must stay 200 while ready evaluates');
 
         // Cleanup for the next test run.
         $this->client->del('{kiwi:ci-health}:security-policy');
@@ -563,8 +623,8 @@ final class RealRedisIntegrationTest extends TestCase
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
         $policy = \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
             'version' => \KiwiCaptcha\Risk\RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -579,7 +639,10 @@ final class RealRedisIntegrationTest extends TestCase
 
         $now = (int) $this->client->time()[0];
         $sourceId = $identityFactory->sourceId('198.51.100.7', $now);
-        $stateKey = '{kiwi:'.$namespace.'}:risk:src:'.intdiv($now, 900).':'.$sourceId;
+        // The encoded namespace the store derived from the raw
+        // discriminator (the raw value carries separator bytes, so the
+        // key segment is not the raw string).
+        $stateKey = '{kiwi:'.$store->namespace().'}:risk:src:'.intdiv($now, 900).':'.$sourceId;
         $issueDebt = fn (): int => (int) $this->client->hget($stateKey, 'iss');
         $redisNowMs = fn (): int => (($t = $this->client->time()) ? ((int) $t[0]) * 1000 + intdiv((int) $t[1], 1000) : 0);
 

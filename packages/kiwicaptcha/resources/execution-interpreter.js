@@ -8,8 +8,21 @@
 * Math.random, no Date in the op semantics — a program is a pure
 * function of its bytes, so the server mirrors recompute the identical
 * canonical op trace and digest. Opcode split: COMPUTE 0-15, DOM 16-27,
-* real-DOM probes 28-36, v5 object-graph ops 37-44. The op-count bound
-* (8..24 ops) keeps a whole run ~0.1 ms on a low-end device.
+* real-DOM probes 28-36, v5 object-graph ops 37-44, v6 real-platform
+* probes 45-49. The op-count bound (8..24 ops) keeps a whole run ~0.1 ms
+* on a low-end device (a v6 run adds two animation frames for the
+* intersection probe).
+*
+* Version 6 is the real-platform rung: its five probes read behavior a
+* pure reimplementation cannot shortcut (computed style over real
+* layout, MutationObserver microtask delivery order, the full
+* capture/target/bubble event path, Range line boxes and Selection
+* state, IntersectionObserver thresholds over real geometry). Each v6
+* probe runs on freshly constructed anonymous nodes it removes before
+* returning, so the program-visible DOM state is unchanged. The probe
+* values are quantized observations; the server verifier derives an
+* acceptance envelope per probe from the program operands, calibrated
+* by the cross-engine qualification matrix.
 *
 * The driver runs it in a SANDBOXED EPHEMERAL IFRAME per armed
 * challenge (srcdoc, sandbox="allow-scripts allow-same-origin";
@@ -18,12 +31,17 @@
 * popups, top-navigation and pointer lock stay blocked). The iframe
 * loads this asset via <script src integrity=...> (CSP-clean,
 * SRI-pinned) and the driver accepts messages only from that iframe.
+* A version-6 run awaits microtasks and animation frames before the
+* result message posts, so the run message resolves a few frames later
+* than the synchronous rungs (the parent-side timeout is far above it).
 *
 * Trace format: one `opname(result)` entry per op joined with ';';
 * results are decimal integers, "1"/"0", or standard base64; the
 * browser-observed entries 'obs(<dst>,<h>)' and (v5) 'durlc(<64 hex>)'
-* are replayed by the verifier. Digest: hex HMAC-SHA256 keyed by the
-* PROGRAM BYTES (the execution_key never leaves the server) over
+* are replayed by the verifier; the v6 entries are comma/colon-joined
+* digit tuples validated against their envelope. Digest: hex HMAC-SHA256
+* keyed by the PROGRAM BYTES (the execution_key never leaves the
+* server) over
 * `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`.
 * The VM runs its own SHA-256 + HMAC-SHA256 (crypto.subtle may be
 * unavailable there; synchronous code keeps the digest deterministic).
@@ -37,14 +55,20 @@
  var KIWI_EXECUTION_ERROR = "kiwi-execution-error";
  var MIN_OPS = 8;
  var MAX_OPS = 24;
- var OP_COUNT = 45;
+ var OP_COUNT = 50;
  // OP_SPACE[opVersion] = the first opcode each program version rejects.
- var OP_SPACE = [0, 33, 34, 35, 37, OP_COUNT];
+ var OP_SPACE = [0, 33, 34, 35, 37, 45, OP_COUNT];
  var FORMAT_VERSION = 1;
  var ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  var CLASS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
  var ATTR_NAMES = ["data-kiwi", "data-a", "data-b", "title", "data-x"];
  var TAG_NAMES = ["div", "span", "section", "p"];
+ // The version-6 probe vocabularies. The server mirrors carry the same
+ // constants and derive the acceptance envelope from the same draw
+ // bytes, so a probe word or span word is randomized per program yet
+ // bounded identically on both sides.
+ var CSS_WORDS = ["kiwicaptcha", "execution", "boundary"];
+ var RANGE_WORDS = ["alpha", "beta", "gamma", "delta"];
  var TRACE_NAMES = [
   "add", "sub", "mul", "xor", "and", "or", "shl", "shr",
   "u8c", "u8w", "u8r", "u8rot",
@@ -52,7 +76,8 @@
   "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
   "cadd", "ccont", "dparent", "ddispatch", "dserialize",
   "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth",
-  "dfrag", "dclone", "drepar", "dreflec", "dphase", "durlc", "dmutate", "dsdep"
+  "dfrag", "dclone", "drepar", "dreflec", "dphase", "durlc", "dmutate", "dsdep",
+  "dcsgeom", "dmutord", "devphf", "drange", "dintobs"
  ];
  // ── SHA-256 (FIPS 180-4) ──
  var K = [
@@ -208,8 +233,8 @@
   var actionBytes = take(actionLen);
   if (actionBytes === null) return null;
   var opVersion = byte();
-  // Versions 1..5 accepted (the compat window); each bounds its opcode space (OP_SPACE).
-  if (opVersion < 1 || opVersion > 5) return null;
+  // Versions 1..6 accepted (the compat window); each bounds its opcode space (OP_SPACE).
+  if (opVersion < 1 || opVersion > 6) return null;
   var opCount = byte();
   if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
   function readLenBytes(maxLen) {
@@ -411,6 +436,62 @@
      operands.push({ k: "b2", v: dsC });
      break;
     }
+    case 45: {
+     // CSS_GEOM: the constructed id, the raw style seed and the u8 cell.
+     var cgId = readLenBytes(16);
+     if (!cgId || cgId.length < 4) return null;
+     var cgSeed = byte(), cgCell = byte();
+     if (cgSeed === null || cgCell === null) return null;
+     operands.push({ k: "id", v: cgId });
+     operands.push({ k: "seed", v: cgSeed });
+     operands.push({ k: "cell", v: cgCell % 64 });
+     break;
+    }
+    case 46: {
+     // MUT_ORDER: the constructed id, two raw churn bytes and the cell.
+     var moId = readLenBytes(16);
+     if (!moId || moId.length < 4) return null;
+     var moB0 = byte(), moB1 = byte(), moCell = byte();
+     if (moB0 === null || moB1 === null || moCell === null) return null;
+     operands.push({ k: "id", v: moId });
+     operands.push({ k: "b0", v: moB0 });
+     operands.push({ k: "b1", v: moB1 });
+     operands.push({ k: "cell", v: moCell % 64 });
+     break;
+    }
+    case 47: {
+     // EV_PHASE_FULL: the constructed id and the u8 cell.
+     var evId = readLenBytes(16);
+     if (!evId || evId.length < 4) return null;
+     var evCell = byte();
+     if (evCell === null) return null;
+     operands.push({ k: "id", v: evId });
+     operands.push({ k: "cell", v: evCell % 64 });
+     break;
+    }
+    case 48: {
+     // RANGE_ORDER: the constructed id, two raw offset bytes and the cell.
+     var rgId = readLenBytes(16);
+     if (!rgId || rgId.length < 4) return null;
+     var rgA = byte(), rgB = byte(), rgCell = byte();
+     if (rgA === null || rgB === null || rgCell === null) return null;
+     operands.push({ k: "id", v: rgId });
+     operands.push({ k: "ra", v: rgA });
+     operands.push({ k: "rb", v: rgB });
+     operands.push({ k: "cell", v: rgCell % 64 });
+     break;
+    }
+    case 49: {
+     // INT_OBS: the constructed id, the raw geometry seed and the cell.
+     var ioId = readLenBytes(16);
+     if (!ioId || ioId.length < 4) return null;
+     var ioSeed = byte(), ioCell = byte();
+     if (ioSeed === null || ioCell === null) return null;
+     operands.push({ k: "id", v: ioId });
+     operands.push({ k: "seed", v: ioSeed });
+     operands.push({ k: "cell", v: ioCell % 64 });
+     break;
+    }
     default:
      return null;
    }
@@ -441,53 +522,54 @@
  }
  // ── The deterministic state machine ──
  // Serialization reads this module's own attribute record, never getAttributeNames.
- function runProgram(program, doc) {
-  var u8 = new Uint8Array(0);
-  var cur = null; // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
-  var docIds = {}; // id -> true for appended nodes
-  var entries = [];
-var v5 = program.opVersion >= 5;
-var frags = [null, null, null, null]; // the four v5 fragment slots
-  // POINT probe: 'div' iff the program appends any node at all.
-  var hasAppend = false;
-  for (var pre = 0; pre < program.ops.length; pre++) {
-   if (program.ops[pre].opcode === 18) { hasAppend = true; break; }
-  }
-  // GEOMETRY tops stay monotonic; an absent probe reports the previous.
-  var geomTop = -1;
-  function checksum() {
+ // The state lives in one runner object shared by the synchronous rungs
+ // (versions 1-5) and the asynchronous version-6 run, so both paths
+ // execute the identical op semantics.
+ function createRunner(doc, v5) {
+  var R = {
+   doc: doc,
+   v5: v5,
+   u8: new Uint8Array(0),
+   cur: null, // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
+   docIds: Object.create(null), // id -> true for appended nodes (null-proto: id is program-controlled)
+   entries: [],
+   frags: [null, null, null, null], // the four v5 fragment slots
+   hasAppend: false,
+   geomTop: -1
+  };
+  R.checksum = function () {
    var sum = 0;
-   for (var i = 0; i < u8.length; i++) sum = (sum + u8[i]) & 0xff;
+   for (var i = 0; i < R.u8.length; i++) sum = (sum + R.u8[i]) & 0xff;
    return sum;
-  }
-  function serializeAttrs(node) {
+  };
+  R.serializeAttrs = function (node) {
    var names = Object.keys(node.attrs).sort();
    var parts = [];
    for (var i = 0; i < names.length; i++) {
     parts.push(names[i] + "=" + node.attrs[names[i]]);
    }
    return parts.join(";");
-  }
+  };
   // The v5 cell rule: the entry lands in the u8 cell when in range.
-  function writeCell(cell, entry) {
-   if (cell < u8.length) u8[cell] = entry & 0xff;
-  }
-  function appendCurrent() {
-   if (cur && !cur.appended) {
-    doc.body.appendChild(cur.el);
-    cur.appended = true;
-    docIds[cur.id] = true;
+  R.writeCell = function (cell, entry) {
+   if (cell < R.u8.length) R.u8[cell] = entry & 0xff;
+  };
+  R.appendCurrent = function () {
+   if (R.cur && !R.cur.appended) {
+    R.doc.body.appendChild(R.cur.el);
+    R.cur.appended = true;
+    R.docIds[R.cur.id] = true;
    }
-  }
-  function copyMap(src) {
-   var out = {};
+  };
+  R.copyMap = function (src) {
+   var out = Object.create(null);
    for (var key in src) {
     if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = src[key];
    }
    return out;
-  }
+  };
   // URL canonicalization: scheme/host lowercased, fragment dropped (srcdoc-deterministic).
-  function canonicalUrl(href) {
+  R.canonicalUrl = function (href) {
    var h = String(href);
    var cut = h.indexOf("#");
    if (cut >= 0) h = h.substr(0, cut);
@@ -506,11 +588,11 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     h = scheme + ":" + rest;
    }
    return h;
-  }
+  };
   // Rung-scoped canonical node string: serializeAttrs plus the v5 dataset/classes/text.
-  function canonicalNodeString(node) {
-   if (!v5) return serializeAttrs(node);
-   var s5 = serializeAttrs(node);
+  R.canonicalNodeString = function (node) {
+   if (!R.v5) return R.serializeAttrs(node);
+   var s5 = R.serializeAttrs(node);
    var parts = s5 === "" ? [] : s5.split(";");
    var dnames = Object.keys(node.dataset || {}).sort();
    for (var j = 0; j < dnames.length; j++) parts.push(dnames[j] + "=" + node.dataset[dnames[j]]);
@@ -518,9 +600,8 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
    for (var k = 0; k < cnames.length; k++) parts.push(cnames[k]);
    if (node.text !== undefined && node.text !== "") parts.push(node.text);
    return parts.join(";");
-  }
-  for (var i = 0; i < program.ops.length; i++) {
-   var op = program.ops[i];
+  };
+  R.execOp = function (op) {
    var ops = op.operands;
    var value;
    switch (op.opcode) {
@@ -533,29 +614,29 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     case 6: value = String((opValue(ops, "a") << (opValue(ops, "b") & 31)) >>> 0); break;
     case 7: value = String(opValue(ops, "a") >>> (opValue(ops, "b") & 31)); break;
     case 8: {
-     u8 = new Uint8Array(opValue(ops, "len"));
-     value = String(checksum());
+     R.u8 = new Uint8Array(opValue(ops, "len"));
+     value = String(R.checksum());
      break;
     }
     case 9: {
      var idx = opValue(ops, "idx"), val = opValue(ops, "val") & 0xff;
-     if (idx < u8.length) u8[idx] = val;
-     value = String(checksum());
+     if (idx < R.u8.length) R.u8[idx] = val;
+     value = String(R.checksum());
      break;
     }
     case 10: {
      var ridx = opValue(ops, "idx");
-     value = String(ridx < u8.length ? u8[ridx] : 0);
+     value = String(ridx < R.u8.length ? R.u8[ridx] : 0);
      break;
     }
     case 11: {
      var k = opValue(ops, "k") % 8;
-     if (u8.length > 0 && k > 0) {
-      var rotated = new Uint8Array(u8.length);
-      for (var ri = 0; ri < u8.length; ri++) rotated[ri] = u8[(ri + k) % u8.length];
-      u8 = rotated;
+     if (R.u8.length > 0 && k > 0) {
+      var rotated = new Uint8Array(R.u8.length);
+      for (var ri = 0; ri < R.u8.length; ri++) rotated[ri] = R.u8[(ri + k) % R.u8.length];
+      R.u8 = rotated;
      }
-     value = String(checksum());
+     value = String(R.checksum());
      break;
     }
     case 12: value = String(opValue(ops, "s").length); break;
@@ -573,9 +654,9 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     case 16: {
      var idBytes = opValue(ops, "id");
      var id = bytesToAscii(idBytes);
-     var el = doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
+     var el = R.doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
      el.id = id;
-     cur = {
+     R.cur = {
       el: el,
       id: id,
       attrs: { id: id },
@@ -589,82 +670,82 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     case 17: {
      var name = ATTR_NAMES[opValue(ops, "name")];
      var valBytes = opValue(ops, "val");
-     if (cur) {
-      cur.el.setAttribute(name, bytesToAscii(valBytes));
-      cur.attrs[name] = bytesToAscii(valBytes);
+     if (R.cur) {
+      R.cur.el.setAttribute(name, bytesToAscii(valBytes));
+      R.cur.attrs[name] = bytesToAscii(valBytes);
      }
      value = b64Encode(asciiBytes(name));
      break;
     }
     case 18: {
-     appendCurrent();
+     R.appendCurrent();
      value = "1";
      break;
     }
     case 19: {
-     var qid = opId(ops);
-     value = docIds[qid] ? "1" : "0";
+     var qid = bytesToAscii(opValue(ops, "id"));
+     value = R.docIds[qid] ? "1" : "0";
      break;
     }
     case 20: {
      var gname = ATTR_NAMES[opValue(ops, "name")];
-     var gv = cur ? (cur.attrs[gname] || "") : "";
+     var gv = R.cur ? (R.cur.attrs[gname] || "") : "";
      value = b64Encode(asciiBytes(gv));
      break;
     }
     case 21: {
      var dkey = bytesToAscii(opValue(ops, "s"));
      var dval = bytesToAscii(opValue(ops, "val"));
-     if (cur) {
-      cur.el.dataset[dkey] = dval;
-      cur.dataset[dkey] = dval;
+     if (R.cur) {
+      R.cur.el.dataset[dkey] = dval;
+      R.cur.dataset[dkey] = dval;
      }
      value = b64Encode(opValue(ops, "s"));
      break;
     }
     case 22: {
      var gkey = bytesToAscii(opValue(ops, "s"));
-     var gv2 = cur ? (cur.dataset[gkey] || "") : "";
+     var gv2 = R.cur ? (R.cur.dataset[gkey] || "") : "";
      value = b64Encode(asciiBytes(gv2));
      break;
     }
     case 23: {
      var cls = bytesToAscii(opValue(ops, "s"));
-     if (cur) {
-      cur.el.classList.add(cls);
-      cur.classes[cls] = true;
+     if (R.cur) {
+      R.cur.el.classList.add(cls);
+      R.cur.classes[cls] = true;
      }
      value = b64Encode(opValue(ops, "s"));
      break;
     }
     case 24: {
      var ccls = bytesToAscii(opValue(ops, "s"));
-     value = (cur && cur.classes[ccls]) ? "1" : "0";
+     value = (R.cur && R.cur.classes[ccls]) ? "1" : "0";
      break;
     }
-    case 25: value = (cur && cur.appended) ? "1" : "0"; break;
+    case 25: value = (R.cur && R.cur.appended) ? "1" : "0"; break;
     case 26: {
-     if (cur) {
+     if (R.cur) {
       try {
-       cur.el.dispatchEvent(new doc.defaultView.Event("kiwi-exec"));
+       R.cur.el.dispatchEvent(new R.doc.defaultView.Event("kiwi-exec"));
       } catch (e) {}
      }
      value = "1";
      break;
     }
     case 27: {
-     appendCurrent();
-     var serialized = cur ? canonicalNodeString(cur) : "";
+     R.appendCurrent();
+     var serialized = R.cur ? R.canonicalNodeString(R.cur) : "";
      value = b64Encode(asciiBytes(serialized));
      break;
     }
     case 28: {
      // Real query readback of the current appended node: 'div|...' or 'none'.
-     var qrId = opId(ops);
-     if (!docIds[qrId]) {
+     var qrId = bytesToAscii(opValue(ops, "id"));
+     if (!R.docIds[qrId]) {
       value = "none";
-     } else if (cur && cur.id === qrId) {
-      value = "div|" + serializeAttrs(cur);
+     } else if (R.cur && R.cur.id === qrId) {
+      value = "div|" + R.serializeAttrs(R.cur);
      } else {
       value = "none";
      }
@@ -672,10 +753,10 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     }
     case 29: {
      // Real layout geometry, clamped to the verifier's invariants.
-     var gmEl = doc.getElementById(opId(ops));
+     var gmEl = R.doc.getElementById(bytesToAscii(opValue(ops, "id")));
      var gmTop = gmEl ? gmEl.offsetTop : 0;
-     if (gmTop < geomTop) gmTop = geomTop;
-     geomTop = gmTop;
+     if (gmTop < R.geomTop) gmTop = R.geomTop;
+     R.geomTop = gmTop;
      var gmHeight = gmEl ? gmEl.offsetHeight : 1;
      if (gmHeight < 1) gmHeight = 1;
      value = gmTop + "," + gmHeight;
@@ -683,30 +764,30 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     }
     case 30: {
      // The topmost-node point probe: 'div'/'none'.
-     value = hasAppend ? "div" : "none";
+     value = R.hasAppend ? "div" : "none";
      break;
     }
     case 31: {
      // Real event readback: 'kiwi-ev:tag' for the current node.
-     var evId = opId(ops);
-     if (!docIds[evId]) {
+     var evId = bytesToAscii(opValue(ops, "id"));
+     if (!R.docIds[evId]) {
       value = "none";
      } else {
-      value = "kiwi-ev:" + (cur && cur.id === evId ? "div" : "span");
+      value = "kiwi-ev:" + (R.cur && R.cur.id === evId ? "div" : "span");
      }
      break;
     }
     case 32: {
      // Canonical digest: hex SHA-256 of the rung-scoped node string ("" if none appended).
-     var srParts = (cur && cur.appended) ? canonicalNodeString(cur) : "";
+     var srParts = (R.cur && R.cur.appended) ? R.canonicalNodeString(R.cur) : "";
      value = bytesToHex(sha256Bytes(asciiBytes(srParts)));
      break;
     }
     case 33: {
      // OBSERVE: real layout height into the u8 state; verifier-replayed. Absent: 1.
-     var obsId = opId(ops);
+     var obsId = bytesToAscii(opValue(ops, "id"));
      var obsIdx = opValue(ops, "idx");
-     var obsEl = doc.getElementById(obsId);
+     var obsEl = R.doc.getElementById(obsId);
      var obsH = 1;
      if (obsEl) {
       obsEl.style.display = "block";
@@ -717,14 +798,13 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
      }
      if (obsH < 1) obsH = 1;
      if (obsH > 255) obsH = 255;
-     if (obsIdx < u8.length) u8[obsIdx] = obsH;
+     if (obsIdx < R.u8.length) R.u8[obsIdx] = obsH;
      value = obsIdx + "," + obsH;
      break;
     }
     case 34: {
      // DSIB: real previousElementSibling chain length (absent node: 0).
-     var dsibId = opId(ops);
-     var dsibEl = doc.getElementById(dsibId);
+     var dsibEl = R.doc.getElementById(bytesToAscii(opValue(ops, "id")));
      var dsibIdx = 0;
      while (dsibEl) {
        dsibEl = dsibEl.previousElementSibling;
@@ -735,20 +815,19 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     }
     case 35: {
      // DCHILD: real child of the current node; it becomes current.
-     var chId = opId(ops);
-     var chEl = doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
+     var chId = bytesToAscii(opValue(ops, "id"));
+     var chEl = R.doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
      chEl.id = chId;
-     if (cur && cur.el) cur.el.appendChild(chEl);
-     cur = { el: chEl, id: chId, attrs: { id: chId }, dataset: {}, classes: {}, appended: true };
+     if (R.cur && R.cur.el) R.cur.el.appendChild(chEl);
+     R.cur = { el: chEl, id: chId, attrs: { id: chId }, dataset: {}, classes: {}, appended: true };
      value = b64Encode(asciiBytes(chId));
      break;
     }
     case 36: {
      // DDEPTH: real ancestor-chain length up to body.
-     var ddId = opId(ops);
-     var ddEl = doc.getElementById(ddId);
+     var ddEl = R.doc.getElementById(bytesToAscii(opValue(ops, "id")));
      var ddDepth = 0;
-     while (ddEl && ddEl.parentElement && ddEl.parentElement !== doc.body) {
+     while (ddEl && ddEl.parentElement && ddEl.parentElement !== R.doc.body) {
        ddDepth++;
        ddEl = ddEl.parentElement;
      }
@@ -758,112 +837,112 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     case 37: {
      // DFRAG: move the current subtree into the detached fragment slot.
      var fgEntry = 0;
-     if (cur && cur.el) {
+     if (R.cur && R.cur.el) {
       var fgS = opValue(ops, "s");
-      if (!frags[fgS]) frags[fgS] = doc.createDocumentFragment();
-      frags[fgS].appendChild(cur.el);
-      cur.appended = false;
-      if (docIds[cur.id]) delete docIds[cur.id];
-      fgEntry = frags[fgS].children.length;
+      if (!R.frags[fgS]) R.frags[fgS] = R.doc.createDocumentFragment();
+      R.frags[fgS].appendChild(R.cur.el);
+      R.cur.appended = false;
+      if (R.docIds[R.cur.id]) delete R.docIds[R.cur.id];
+      fgEntry = R.frags[fgS].children.length;
      }
-     writeCell(opValue(ops, "cell"), fgEntry);
+     R.writeCell(opValue(ops, "cell"), fgEntry);
      value = String(fgEntry);
      break;
     }
     case 38: {
      // DCLONE: real deep clone, re-id, insert after the original.
-     var clId = opId(ops);
+     var clId = bytesToAscii(opValue(ops, "id"));
      var clEntry = 0;
-     if (cur && cur.el) {
-      clEntry = cur.el.getElementsByTagName("*").length + 1;
-      var copyEl = cur.el.cloneNode(true);
+     if (R.cur && R.cur.el) {
+      clEntry = R.cur.el.getElementsByTagName("*").length + 1;
+      var copyEl = R.cur.el.cloneNode(true);
       copyEl.id = clId;
-      if (cur.appended && cur.el.parentNode) cur.el.parentNode.insertBefore(copyEl, cur.el.nextSibling);
-      var rec = { el: copyEl, id: clId, attrs: copyMap(cur.attrs), dataset: copyMap(cur.dataset), classes: copyMap(cur.classes), appended: cur.appended };
+      if (R.cur.appended && R.cur.el.parentNode) R.cur.el.parentNode.insertBefore(copyEl, R.cur.el.nextSibling);
+      var rec = { el: copyEl, id: clId, attrs: R.copyMap(R.cur.attrs), dataset: R.copyMap(R.cur.dataset), classes: R.copyMap(R.cur.classes), appended: R.cur.appended };
       rec.attrs.id = clId;
-      if (cur.text !== undefined) rec.text = cur.text;
-      if (cur.appended) docIds[clId] = true;
-      cur = rec;
+      if (R.cur.text !== undefined) rec.text = R.cur.text;
+      if (R.cur.appended) R.docIds[clId] = true;
+      R.cur = rec;
      }
-     writeCell(opValue(ops, "cell"), clEntry);
+     R.writeCell(opValue(ops, "cell"), clEntry);
      value = String(clEntry);
      break;
     }
     case 39: {
      // DREPAR: real appendChild of the current subtree under the target; self-move = real no-op.
      var rpEntry = 0;
-     if (cur && cur.el) {
-      var rpEl = doc.getElementById(opId(ops));
+     if (R.cur && R.cur.el) {
+      var rpEl = R.doc.getElementById(bytesToAscii(opValue(ops, "id")));
       if (rpEl) {
        try {
-        rpEl.appendChild(cur.el);
-        cur.appended = !!rpEl.isConnected;
-        if (cur.appended) docIds[cur.id] = true;
-        else { if (docIds[cur.id]) delete docIds[cur.id]; }
+        rpEl.appendChild(R.cur.el);
+        R.cur.appended = !!rpEl.isConnected;
+        if (R.cur.appended) R.docIds[R.cur.id] = true;
+        else { if (R.docIds[R.cur.id]) delete R.docIds[R.cur.id]; }
        } catch (e) {}
        rpEntry = rpEl.children.length;
       }
      }
-     writeCell(opValue(ops, "cell"), rpEntry);
+     R.writeCell(opValue(ops, "cell"), rpEntry);
      value = String(rpEntry);
      break;
     }
     case 40: {
      // DREFLEC: the indexed reflected attribute value.
      var rfName = ATTR_NAMES[opValue(ops, "name")];
-     var rfVal = cur ? (cur.attrs[rfName] || "") : "";
+     var rfVal = R.cur ? (R.cur.attrs[rfName] || "") : "";
      value = b64Encode(asciiBytes(rfVal));
      break;
     }
     case 41: {
      // DPHASE: real bubbling dispatch count of constructed elements.
      var phCount = 0;
-     if (cur && cur.el) {
+     if (R.cur && R.cur.el) {
       var phH = function () { phCount++; };
-      var phEl = cur.el;
-      while (phEl && phEl !== doc.body) {
+      var phEl = R.cur.el;
+      while (phEl && phEl !== R.doc.body) {
        phEl.addEventListener("kiwi-exec-phase", phH, false);
        phEl = phEl.parentElement;
       }
       try {
-       cur.el.dispatchEvent(new doc.defaultView.Event("kiwi-exec-phase", { bubbles: true }));
+       R.cur.el.dispatchEvent(new R.doc.defaultView.Event("kiwi-exec-phase", { bubbles: true }));
       } catch (e) {}
-      phEl = cur.el;
-      while (phEl && phEl !== doc.body) {
+      phEl = R.cur.el;
+      while (phEl && phEl !== R.doc.body) {
        phEl.removeEventListener("kiwi-exec-phase", phH, false);
        phEl = phEl.parentElement;
       }
      }
-     writeCell(opValue(ops, "cell"), phCount);
+     R.writeCell(opValue(ops, "cell"), phCount);
      value = String(phCount);
      break;
     }
     case 42: {
      // DURLC: SHA-256 hex of the canonicalized document URL.
-     value = bytesToHex(sha256Bytes(asciiBytes(canonicalUrl(doc.defaultView && doc.defaultView.location ? doc.defaultView.location.href : doc.URL))));
+     value = bytesToHex(sha256Bytes(asciiBytes(R.canonicalUrl(R.doc.defaultView && R.doc.defaultView.location ? R.doc.defaultView.location.href : R.doc.URL))));
      break;
     }
     case 43: {
      // DMUTATE: real textContent replacement; entry = text byte length.
      var dmVal = bytesToAscii(opValue(ops, "val"));
      var dmLen = 0;
-     if (cur && cur.el) {
+     if (R.cur && R.cur.el) {
       var dmGone = [];
-      for (var dmi = 0; dmi < cur.el.children.length; dmi++) dmGone.push(cur.el.children[dmi].id);
-      cur.el.textContent = dmVal;
-      cur.text = dmVal;
+      for (var dmi = 0; dmi < R.cur.el.children.length; dmi++) dmGone.push(R.cur.el.children[dmi].id);
+      R.cur.el.textContent = dmVal;
+      R.cur.text = dmVal;
       dmLen = dmVal.length;
       for (var dmj = 0; dmj < dmGone.length; dmj++) {
-       if (docIds[dmGone[dmj]]) delete docIds[dmGone[dmj]];
+       if (R.docIds[dmGone[dmj]]) delete R.docIds[dmGone[dmj]];
       }
      }
-     writeCell(opValue(ops, "cell"), dmLen);
+     R.writeCell(opValue(ops, "cell"), dmLen);
      value = String(dmLen);
      break;
     }
     case 44: {
      // DSDEP: descend real child elements by the three index bytes.
-     var sdLevel = (cur && cur.el) ? cur.el : null;
+     var sdLevel = (R.cur && R.cur.el) ? R.cur.el : null;
      var sdDone = 0;
      var sdBytes = [opValue(ops, "b0"), opValue(ops, "b1"), opValue(ops, "b2")];
      while (sdLevel && sdDone < 3) {
@@ -878,9 +957,315 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     default:
      value = "0";
    }
-   entries.push(TRACE_NAMES[op.opcode] + "(" + value + ")");
+   return value;
+  };
+  return R;
+ }
+ function runProgram(program, doc) {
+  var R = createRunner(doc, program.opVersion >= 5);
+  var pre;
+  for (pre = 0; pre < program.ops.length; pre++) {
+   if (program.ops[pre].opcode === 18) { R.hasAppend = true; break; }
   }
-  return entries.join(";");
+  if (program.opVersion <= 5) {
+   for (var i = 0; i < program.ops.length; i++) {
+    var op = program.ops[i];
+    R.entries.push(TRACE_NAMES[op.opcode] + "(" + R.execOp(op) + ")");
+   }
+   return R.entries.join(";");
+  }
+  return runProgramV6(R, program.ops);
+ }
+ // The version-6 run: identical op semantics with the five real-platform
+ // probes (45-49) awaited in sequence. The promise resolves with the same
+ // canonical trace string the synchronous rungs return.
+ function runProgramV6(R, ops) {
+  return new Promise(function (resolve) {
+   var i = 0;
+   function step() {
+    while (i < ops.length) {
+     var op = ops[i++];
+     if (op.opcode >= 45) {
+      execPlatformOp(R, op).then(function (value) {
+       R.entries.push(TRACE_NAMES[op.opcode] + "(" + value + ")");
+       step();
+      }, function () {
+       // A platform probe that cannot run (a missing observer in a
+       // non-browser host) reports 0; the envelope rejects the entry.
+       R.entries.push(TRACE_NAMES[op.opcode] + "(0)");
+       step();
+      });
+      return;
+     }
+     R.entries.push(TRACE_NAMES[op.opcode] + "(" + R.execOp(op) + ")");
+    }
+    resolve(R.entries.join(";"));
+   }
+   step();
+  });
+ }
+ // The version-6 real-platform probes. Each requires the operand id to
+ // reference a node the program constructed and appended (the real
+ // construction proof), runs on freshly built anonymous nodes it removes
+ // before returning (the program-visible document state is unchanged),
+ // quantizes its observations and writes its primary observation into
+ // the operand's u8 cell (the verifier replays the cell like the v5
+ // observe rule).
+ function execPlatformOp(R, op) {
+  var ops = op.operands;
+  switch (op.opcode) {
+   case 45: return Promise.resolve(execCssGeom(R, ops));
+   case 46: return execMutOrder(R, ops);
+   case 47: return Promise.resolve(execEvPhaseFull(R, ops));
+   case 48: return Promise.resolve(execRangeOrder(R, ops));
+   case 49: return execIntObs(R, ops);
+   default: return Promise.resolve("0");
+  }
+ }
+ function execCssGeom(R, ops) {
+  // Randomized-CSS computed geometry: a fresh probe element carries the
+  // seed-drawn inline style (font size, border width, a probe word); the
+  // entry reports the computed font size and the laid-out height of the
+  // wrapped text, values only a real layout engine produces.
+  var id = bytesToAscii(opValue(ops, "id"));
+  if (!R.docIds[id]) return "none";
+  var el = R.doc.getElementById(id);
+  if (!el) return "none";
+  var seed = opValue(ops, "seed");
+  var fs = 10 + ((seed >> 5) % 5);
+  var brd = 1 + ((seed >> 3) % 3);
+  // Two words (a break opportunity between them) at the 64px probe
+  // width: the measured height is the wrapped line-box stack, a real
+  // layout quantity.
+  var word = CSS_WORDS[seed % CSS_WORDS.length] + " " + CSS_WORDS[(seed + 1) % CSS_WORDS.length];
+  var probe = R.doc.createElement("div");
+  probe.style.cssText = "box-sizing:content-box;width:64px;" +
+   "border-top-width:" + brd + "px;border-top-style:solid;" +
+   "border-bottom-width:" + brd + "px;border-bottom-style:solid;" +
+   "font-size:" + fs + "px;font-family:monospace;line-height:normal;";
+  probe.textContent = word;
+  el.appendChild(probe);
+  var fsv = 0;
+  try {
+   var cs = R.doc.defaultView.getComputedStyle(probe);
+   fsv = Math.round(parseFloat(cs.fontSize));
+  } catch (e0) { fsv = 0; }
+  if (!isFinite(fsv) || fsv < 0) fsv = 0;
+  var h = probe.offsetHeight;
+  if (!isFinite(h) || h < 0) h = 0;
+  if (h > 255) h = 255;
+  el.removeChild(probe);
+  R.writeCell(opValue(ops, "cell"), h);
+  return fsv + "," + h;
+ }
+ function execMutOrder(R, ops) {
+  // MutationObserver delivery order: the observer is registered, the
+  // seed-drawn churn (attributes, childList, characterData) runs, and a
+  // promise marker is queued after it. The entry reports the record-type
+  // codes in delivery order followed by the marker digit 7, the order
+  // only a microtask-correct engine produces.
+  return new Promise(function (resolve) {
+   var id = bytesToAscii(opValue(ops, "id"));
+   if (!R.docIds[id]) { resolve("none"); return; }
+   var el = R.doc.getElementById(id);
+   if (!el) { resolve("none"); return; }
+   var b0 = opValue(ops, "b0"), b1 = opValue(ops, "b1");
+   var codes = [];
+   var mo;
+   try {
+    mo = new R.doc.defaultView.MutationObserver(function (recs) {
+     for (var i = 0; i < recs.length; i++) {
+      codes.push(recs[i].type === "attributes" ? 1 : recs[i].type === "childList" ? 2 : 3);
+     }
+    });
+    mo.observe(el, { attributes: true, childList: true, characterData: true, subtree: true });
+   } catch (e0) { resolve("0"); return; }
+   // The churn is fully self-cleaning: the probe records the target's
+   // prior attribute state and removes only the nodes it added, so the
+   // program-visible document (the constructed tree under the target
+   // included) is unchanged when the probe returns.
+   var attrName = ATTR_NAMES[b0 % 5];
+   var hadAttr = el.hasAttribute(attrName);
+   var oldAttr = hadAttr ? el.getAttribute(attrName) : null;
+   el.setAttribute(attrName, "m");
+   var added = [];
+   var kids = 1 + (b0 % 2);
+   for (var k = 0; k < kids; k++) {
+    var churnChild = R.doc.createElement(TAG_NAMES[(b1 + k) % 4]);
+    el.appendChild(churnChild);
+    added.push(churnChild);
+   }
+   var txt = R.doc.createTextNode("x");
+   el.appendChild(txt);
+   added.push(txt);
+   if ((b1 & 1) === 1) txt.data = "y";
+   Promise.resolve().then(function () { codes.push(7); });
+   // One microtask yield: the observer microtask (queued at the first
+   // mutation) and the marker continuation run before this one.
+   Promise.resolve().then(function () {
+    mo.disconnect();
+    for (var r = 0; r < added.length; r++) {
+     if (added[r].parentNode === el) el.removeChild(added[r]);
+    }
+    if (hadAttr) el.setAttribute(attrName, oldAttr);
+    else el.removeAttribute(attrName);
+    R.writeCell(opValue(ops, "cell"), codes.length - 1);
+    resolve(codes.join(""));
+   });
+  });
+ }
+ function execEvPhaseFull(R, ops) {
+  // Real event phases: a fresh three-node chain, listeners on the root
+  // (capture 1, bubble 4) and the target (target phase, registration
+  // order: capture-flag 2 then bubble 3). The bubble listener's side
+  // effect (a dataset write) is read back after the dispatch, so the
+  // entry proves the listener really ran in phase order.
+  var id = bytesToAscii(opValue(ops, "id"));
+  if (!R.docIds[id]) return "none";
+  var host = R.doc.getElementById(id);
+  if (!host) return "none";
+  var codes = [];
+  var root = R.doc.createElement("div");
+  var mid = R.doc.createElement("div");
+  var target = R.doc.createElement("span");
+  mid.appendChild(target);
+  root.appendChild(mid);
+  host.appendChild(root);
+  var cap = function () { codes.push(1); };
+  var tcap = function () { codes.push(2); };
+  var tbub = function () {
+   codes.push(3);
+   try { target.dataset.kiwiphase = String(codes.length); } catch (e0) {}
+  };
+  var pbub = function () { codes.push(4); };
+  root.addEventListener("kiwi-v6", cap, true);
+  target.addEventListener("kiwi-v6", tcap, true);
+  target.addEventListener("kiwi-v6", tbub, false);
+  root.addEventListener("kiwi-v6", pbub, false);
+  var ds = "";
+  try {
+   target.dispatchEvent(new R.doc.defaultView.Event("kiwi-v6", { bubbles: true }));
+   ds = target.dataset.kiwiphase || "";
+  } catch (e1) { ds = ""; }
+  root.removeEventListener("kiwi-v6", cap, true);
+  target.removeEventListener("kiwi-v6", tcap, true);
+  target.removeEventListener("kiwi-v6", tbub, false);
+  root.removeEventListener("kiwi-v6", pbub, false);
+  host.removeChild(root);
+  R.writeCell(opValue(ops, "cell"), codes.length);
+  return codes.join("") + ":" + ds;
+ }
+ function execRangeOrder(R, ops) {
+  // Range and Selection over a constructed text graph: a fresh narrow
+  // container holds three span words, the drawn range crosses all three
+  // text nodes, and the entry reports the exact range string length,
+  // the line-box fragment count of getClientRects and the Selection
+  // range count after addRange.
+  var id = bytesToAscii(opValue(ops, "id"));
+  if (!R.docIds[id]) return "none";
+  var host = R.doc.getElementById(id);
+  if (!host) return "none";
+  var ra = opValue(ops, "ra"), rb = opValue(ops, "rb");
+  var container = R.doc.createElement("div");
+  container.style.cssText = "display:block;width:48px;font-size:12px;font-family:monospace;line-height:normal;";
+  var spans = [];
+  for (var s = 0; s < 3; s++) {
+   var sp = R.doc.createElement("span");
+   sp.textContent = RANGE_WORDS[(ra + s) % RANGE_WORDS.length];
+   container.appendChild(sp);
+   spans.push(sp);
+  }
+  host.appendChild(container);
+  var a = ra % 5;
+  var w2 = RANGE_WORDS[(ra + 2) % RANGE_WORDS.length];
+  var e = rb % (w2.length + 1);
+  var value;
+  try {
+   var range = R.doc.createRange();
+   range.setStart(spans[0].firstChild, a);
+   range.setEnd(spans[2].firstChild, e);
+   var t = range.toString().length;
+   var rects = range.getClientRects().length;
+   if (!isFinite(rects) || rects < 0) rects = 0;
+   if (rects > 255) rects = 255;
+   var sel = R.doc.defaultView.getSelection();
+   var sc = 0;
+   if (sel) {
+    try {
+     sel.removeAllRanges();
+     sel.addRange(range);
+     sc = sel.rangeCount;
+     sel.removeAllRanges();
+    } catch (e1) { sc = 0; }
+   }
+   value = t + "," + rects + "," + sc;
+   R.writeCell(opValue(ops, "cell"), rects);
+  } catch (e2) {
+   value = "0";
+  }
+  host.removeChild(container);
+  return value;
+ }
+ function execIntObs(R, ops) {
+  // IntersectionObserver thresholds: a fresh root box (120x40, clipped)
+  // holds a 60x20 target at the seed-drawn offset, so the observed
+  // intersection ratio is a real layout quantity. The entry reports the
+  // delivered-entry count, the quantized ratio and isIntersecting after
+  // two animation frames (or the fallback timeout) let the observer
+  // deliver its initial threshold state.
+  return new Promise(function (resolve) {
+   var id = bytesToAscii(opValue(ops, "id"));
+   if (!R.docIds[id]) { resolve("none"); return; }
+   var host = R.doc.getElementById(id);
+   if (!host) { resolve("none"); return; }
+   var seed = opValue(ops, "seed");
+   var m = 5 + (seed % 36);
+   var t0 = [0, 0.25, 0.5, 0.75][seed % 4];
+   var root = R.doc.createElement("div");
+   root.style.cssText = "position:relative;width:120px;height:40px;overflow:hidden;";
+   var tgt = R.doc.createElement("div");
+   tgt.style.cssText = "width:60px;height:20px;margin-top:" + m + "px;";
+   root.appendChild(tgt);
+   host.appendChild(root);
+   var fired = 0, q = 0, isInt = 0;
+   var io;
+   try {
+    io = new IntersectionObserver(function (entries) {
+     if (!fired && entries.length > 0) {
+      fired = 1;
+      var ratio = entries[0].intersectionRatio;
+      if (!isFinite(ratio) || ratio < 0) ratio = 0;
+      q = Math.round(ratio * 100);
+      if (q > 100) q = 100;
+      isInt = entries[0].isIntersecting ? 1 : 0;
+     }
+    }, { root: root, threshold: [t0] });
+    io.observe(tgt);
+   } catch (e0) {
+    host.removeChild(root);
+    resolve("0");
+    return;
+   }
+   var view = R.doc.defaultView;
+   function nextFrame(fn) {
+    var settledFrame = false;
+    var fin = function () {
+     if (settledFrame) return;
+     settledFrame = true;
+     fn();
+    };
+    try { view.requestAnimationFrame(function () { view.requestAnimationFrame(fin); }); } catch (e1) {}
+    setTimeout(fin, 250);
+   }
+   nextFrame(function () {
+    nextFrame(function () {
+     io.disconnect();
+     host.removeChild(root);
+     R.writeCell(opValue(ops, "cell"), q);
+     resolve(fired + "," + q + "," + isInt);
+    });
+   });
+  });
  }
  // ── The digest ──
  function computeDigest(programBytes, program, nonce, trace) {
@@ -901,7 +1286,19 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     parent.postMessage({ type: type, protocol: KIWI_EXECUTION_PROTOCOL, payload: payload || {} }, "/");
    } catch (e) {}
   }
-  window.addEventListener("message", function (event) { // nosemgrep: javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation — target origin '/' restricts posts to same-origin (srcdoc iframe); '*' is never used — see the inline comment
+  window.addEventListener("message", function (event) {
+   // Only the embedding parent may start a run: a sibling frame (or any
+   // other window holding this iframe's reference) posting forged run
+   // traffic is ignored — the mirror of the parent-side
+   // event.source === iframe.contentWindow gate. The about:srcdoc
+   // document serializes its own location.origin as "null", so the
+   // origin comparison reads the parent's; an unreadable parent origin
+   // is a foreign origin and fails closed.
+   var parentOrigin = null;
+   try { parentOrigin = window.parent.location.origin; } catch (e) {}
+   if (event.source !== parent || parentOrigin === null || event.origin !== parentOrigin) {
+    return;
+   }
    var data = event.data;
    if (!data || data.type !== KIWI_EXECUTION_RUN || data.protocol !== KIWI_EXECUTION_PROTOCOL) {
     return;
@@ -930,6 +1327,17 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     trace = runProgram(program, document);
    } catch (e) {
     post(KIWI_EXECUTION_ERROR, { id: id, reason: "program-execution" });
+    return;
+   }
+   if (trace && typeof trace.then === "function") {
+    // A version-6 run resolves a few microtasks and animation frames
+    // later (the platform probes await real delivery); the result
+    // message still carries the identical digest-plus-trace payload.
+    trace.then(function (settled) {
+     post(KIWI_EXECUTION_RESULT, { id: id, digest: computeDigest(programBytes, program, nonce, settled), trace: settled });
+    }, function () {
+     post(KIWI_EXECUTION_ERROR, { id: id, reason: "program-execution" });
+    });
     return;
    }
    var digest = computeDigest(programBytes, program, nonce, trace);

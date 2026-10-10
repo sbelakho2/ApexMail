@@ -171,6 +171,22 @@ impl FakeEndpoint {
             .insert(format!("{prefix}{}", record.nonce), json);
     }
 
+    /// Seeds a raw stored value under the key verbatim: the corrupt-
+    /// envelope suites land their hand-written bytes in the store
+    /// byte-exact, with no canonical envelope wrapped around them.
+    pub fn seed_raw(&self, key: &str, value: &str) {
+        self.records
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+    }
+
+    /// The raw stored bytes under the key (the byte-exactness oracle of
+    /// the refused-transition suites).
+    pub fn raw_record(&self, key: &str) -> Option<String> {
+        self.records.lock().unwrap().get(key).cloned()
+    }
+
     /// The recorded command log: `(conn_id, args)` in arrival order.
     pub fn commands(&self) -> Vec<(usize, Vec<String>)> {
         self.commands.lock().unwrap().clone()
@@ -258,29 +274,59 @@ impl FakeEndpoint {
                     // the empty identity of the no-identity call). The
                     // identity ARGV is the JSON-escaped string the real
                     // Lua splices into the marker in the same write.
-                    5 => Some(match stored {
-                        Some(v) if v.contains("\"state\":\"pending\"") => {
-                            let mut consumed =
-                                v.replace("\"state\":\"pending\"", "\"state\":\"consumed\"");
-                            if !args[4].is_empty() {
-                                consumed = consumed.replace(
-                                    "\"operation_identity\":null",
-                                    &format!("\"operation_identity\":{}", args[4]),
-                                );
+                    // The pending-envelope integrity guard mirrors the
+                    // real consume script: a pending value that also
+                    // carries a terminal or claim field (a non-null
+                    // result, a non-null identity, or any resume
+                    // marker) is refused with the missing shape and
+                    // the stored bytes are never touched.
+                    5 => {
+                        let guard_refuses = stored.as_deref().is_some_and(|v| {
+                            (v.contains("\"consumed_result\":")
+                                && !v.contains("\"consumed_result\":null"))
+                                || (v.contains("\"operation_identity\":")
+                                    && !v.contains("\"operation_identity\":null"))
+                                || v.contains("\"resume_owner\":\"")
+                                || v.contains("\"resume_until\":")
+                        });
+                        Some(match stored {
+                            Some(_) if guard_refuses => "$-1\r\n".to_string(),
+                            Some(v) if v.contains("\"state\":\"pending\"") => {
+                                let splice_ready = v.contains("\"operation_identity\":null");
+                                let mut consumed =
+                                    v.replace("\"state\":\"pending\"", "\"state\":\"consumed\"");
+                                if !args[4].is_empty() && splice_ready {
+                                    consumed = consumed.replace(
+                                        "\"operation_identity\":null",
+                                        &format!("\"operation_identity\":{}", args[4]),
+                                    );
+                                }
+                                // The third reply element is the identity-
+                                // splice flag the client contract requires:
+                                // a requested identity that could not be
+                                // spliced must fail the consume closed.
+                                let spliced = args[4].is_empty() || splice_ready;
+                                self.records.lock().unwrap().insert(key, consumed.clone());
+                                format!(
+                                    "*3\r\n${}\r\n{}\r\n:1\r\n:{}\r\n",
+                                    consumed.len(),
+                                    consumed,
+                                    if spliced { 1 } else { 0 }
+                                )
                             }
-                            self.records.lock().unwrap().insert(key, consumed.clone());
-                            format!("*2\r\n${}\r\n{}\r\n:1\r\n", consumed.len(), consumed)
-                        }
-                        Some(v) if v.contains("\"state\":\"consumed\"") => {
-                            format!("*2\r\n${}\r\n{}\r\n:0\r\n", v.len(), v)
-                        }
-                        _ => "$-1\r\n".to_string(),
-                    }),
-                    // commit ([`EVALSHA`, sha, numkeys, key, valid, binding]).
-                    // The result is spliced into the stored envelope the
-                    // way the real Lua splice does, so a later
-                    // runtime-state read resolves the committed outcome.
-                    6 if args[4] == "0" || args[4] == "1" => {
+                            Some(v) if v.contains("\"state\":\"consumed\"") => {
+                                format!("*3\r\n${}\r\n{}\r\n:0\r\n:1\r\n", v.len(), v)
+                            }
+                            _ => "$-1\r\n".to_string(),
+                        })
+                    }
+                    // commit ([`EVALSHA`, sha, numkeys, key, valid, binding,
+                    // consumed-result MAC]). The result is spliced into the
+                    // stored envelope the way the real Lua splice does, so a
+                    // later runtime-state read resolves the committed
+                    // outcome (and its MAC, which the hardened retained path
+                    // verifies).
+                    7 if args[4] == "0" || args[4] == "1" => {
                         let key = args[3].clone();
                         let mut records = self.records.lock().unwrap();
                         match records.get_mut(&key) {
@@ -288,13 +334,21 @@ impl FakeEndpoint {
                                 if v.contains("\"state\":\"consumed\"")
                                     && v.contains("\"consumed_result\":null") =>
                             {
-                                let encoded = match args.get(5).filter(|b| !b.is_empty()) {
-                                    Some(binding) => format!(
-                                        r#"{{"valid":{},"binding":"{binding}"}}"#,
-                                        args[4] == "1"
+                                let valid = args[4] == "1";
+                                let binding = args.get(5).filter(|b| !b.is_empty());
+                                let mac = args.get(6).filter(|m| !m.is_empty());
+                                let encoded = match (binding, mac) {
+                                    (Some(binding), Some(mac)) => format!(
+                                        r#"{{"valid":{valid},"binding":"{binding}","mac":"{mac}"}}"#
                                     ),
-                                    None => {
-                                        format!(r#"{{"valid":{},"binding":null}}"#, args[4] == "1")
+                                    (Some(binding), None) => {
+                                        format!(r#"{{"valid":{valid},"binding":"{binding}"}}"#)
+                                    }
+                                    (None, Some(mac)) => format!(
+                                        r#"{{"valid":{valid},"binding":null,"mac":"{mac}"}}"#
+                                    ),
+                                    (None, None) => {
+                                        format!(r#"{{"valid":{valid},"binding":null}}"#)
                                     }
                                 };
                                 *v = v.replace(

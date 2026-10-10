@@ -101,8 +101,8 @@ final class RealRedisChainedChallengeTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -295,10 +295,18 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainReservationResult::TakenOver, $service->reserveStage2($requirement->chainId, 'owner-b'), 'an expired lease is taken over');
 
         // A chain record without an expiry is corrupted state: fail
-        // closed ('missing'), never manufacture a lifetime.
+        // closed with the typed exception, never manufacture a lifetime
+        // and never answer the absence sentinel.
         $recordKey = sprintf('{kiwi:%s}:chain:%s', self::NAMESPACE, $requirement->chainId);
         $this->client->persist($recordKey);
-        self::assertSame(ChainReservationResult::Missing, $service->reserveStage2($requirement->chainId, 'owner-c'), 'a record without an expiry fails closed');
+        $before = (string) $this->client->get($recordKey);
+        try {
+            $service->reserveStage2($requirement->chainId, 'owner-c');
+            self::fail('a record without an expiry must fail closed');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        self::assertSame($before, $this->client->get($recordKey), 'the corrupt record is never rewritten');
     }
 
     public function testMarkIssuedLostReplyIsDurableAcrossAReconnect(): void
@@ -765,6 +773,8 @@ final class RealRedisChainedChallengeTest extends TestCase
             'stage2Nonce' => null,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
 
         // An unexpected state must never be transitioned by the reserve.
@@ -810,6 +820,52 @@ final class RealRedisChainedChallengeTest extends TestCase
             $store->markVerified($chainId, 'stage-2-nonce');
             self::fail('a terminal record with a numeric stage2Nonce must be refused');
         } catch (MalformedChainedChallengeStateException) {
+        }
+    }
+
+    public function testTransactionTerminalizationRefusesAStructurallyCorruptRecordAgainstRealRedis(): void
+    {
+        // The store's live pre-read refuses a corrupt record, so the Lua
+        // guard is pinned directly: a record whose rank contradicts its
+        // action would pass an earlier decode-only obligation check and
+        // transition, but the strict v2 predicate must answer 'corrupt'
+        // with zero writes, even with a matching obligation and mapping.
+        $obligationId = str_repeat('a', 64);
+        $chainId = 'corrupt-terminalization';
+        $recordKey = '{kiwi:'.self::NAMESPACE.'}:chain:'.$chainId;
+        $obligationKey = '{kiwi:'.self::NAMESPACE.'}:chain-obligation:'.$obligationId;
+        $corrupt = [
+            'v' => 2,
+            'stage1Nonce' => $this->nonce(),
+            'scope' => 'login',
+            'obligationId' => $obligationId,
+            'requiredAction' => 'sha20',
+            'requiredRank' => 8,
+            'policyVersion' => 1,
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => 'auth',
+            'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
+        ];
+        $raw = (string) json_encode($corrupt, JSON_THROW_ON_ERROR);
+        $this->client->set($recordKey, $raw, 'EX', 300);
+        $this->client->set($obligationKey, $chainId, 'EX', 300);
+
+        $reflection = new \ReflectionClass(RedisChainedChallengeStateStore::class);
+        $scripts = [
+            'MARK_TRANSACTION_DENIED_LUA' => 'denied',
+            'MARK_TRANSACTION_STEP_UP_REQUIRED_LUA' => 'step-up',
+        ];
+        foreach ($scripts as $constant => $label) {
+            $script = (string) $reflection->getConstant($constant);
+            $result = $this->client->eval($script, 2, $recordKey, $obligationKey, $chainId, $obligationId);
+            self::assertSame('corrupt', $result, $label.': a structurally corrupt record must answer corrupt');
+            self::assertSame($raw, (string) $this->client->get($recordKey), $label.': the corrupt record is never transitioned');
         }
     }
 
@@ -872,8 +928,11 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame($requirement->chainId, (string) $this->client->get(sprintf('{kiwi:%s}:chain-obligation:%s', self::NAMESPACE, $obligationId)), 'the obligation maps the chain');
 
         // The obligation moves to a fresh chain (a re-created chain of
-        // the same transaction) while the stale chain record survives.
+        // the same transaction) while the stale chain record survives:
+        // the compare-delete clears the old mapping, then the atomic
+        // create installs the fresh chain + mapping together.
         $fresh = $service->requireStage2($this->nonce(), 'login', 'txn-stale-2', 1, RiskAction::Sha18, $expiry);
+        $store->deleteObligation($requirement->chainId, $obligationId);
         $store->createWithObligation($fresh->chainId, $obligationId, $this->nonce(), 'login', 'txn-stale', 'sha18', 1, 300);
 
         // The stale-chainId terminalization is refused atomically:

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Submit-input reCAPTCHA migration fixture</title>
+  <script src="/kiwi-captcha/api.js?compat=recaptcha" async defer></script>
+</head>
+<body>
+  <form id="login" action="/login" method="post">
+    <input class="g-recaptcha" type="submit" value="Sign in" data-sitekey="6Lc_input_login" data-callback="onInputCaptcha">
+  </form>
+  <p id="out"></p>
+  <script>
+    function onInputCaptcha(token) { document.getElementById('out').textContent = 'cb:' + String(token).slice(0, 8); }
+  </script>
+</body>
+</html>

@@ -46,7 +46,7 @@ final class SiteVerifySecurityParityTest extends TestCase
             [[
                 'secret_key' => self::SECRET,
                 'risk' => [
-                    'siteverify_secrets' => ['compat-secret-42' => 'login'],
+                    'siteverify_secrets' => ['compat-secret-42-0123456789abcdef' => 'login'],
                 ],
             ]],
             $container,
@@ -63,7 +63,7 @@ final class SiteVerifySecurityParityTest extends TestCase
                 'secret_key' => self::SECRET,
                 'risk' => [
                     'scopes' => ['custom_action' => ['id' => 9, 'post_solve_check' => true]],
-                    'siteverify_secrets' => ['compat-secret-42' => 'custom_action'],
+                    'siteverify_secrets' => ['compat-secret-42-0123456789abcdef' => 'custom_action'],
                 ],
             ]],
             $container,

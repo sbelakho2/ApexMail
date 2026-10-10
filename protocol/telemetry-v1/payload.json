@@ -1,0 +1,63 @@
+{
+  "schema": "kiwicaptcha.telemetry-v1/1",
+  "title": "Interaction telemetry payload, version 1: the published wire schema and privacy contract",
+  "summary": "The widget interaction session emits one payload per solve, posted inside the solution token. The payload carries only coarse, privacy-preserving aggregates: event-class counts, one quantized inter-event entropy value, a focus-transition count, a paste-versus-type ratio and the sample count. No raw coordinates, no key values and no timing series ever leave the page.",
+  "payload_version": 1,
+  "wire": {
+    "container": "A single JSON object. It rides the solution token as the fourth dot-separated segment (the telemetry segment of the solution-token-v1 grammar); the token wire stays unchanged.",
+    "fields": {
+      "v": { "type": "integer", "const": 1, "meaning": "Payload schema version. A reader refuses any other value (fail-closed schema acceptance)." },
+      "ec": {
+        "type": "object",
+        "meaning": "Event-class counts. Every field is a bounded integer in 0..cap.",
+        "fields": {
+          "fo": "focus events (focusin and focusout inside the capture scope)",
+          "ke": "key events (keydown, repeats excluded)",
+          "pa": "paste events",
+          "po": "pointer events (pointerdown)",
+          "fm": "form-field mutation events (input and change)"
+        }
+      },
+      "qe": { "type": "integer", "range": "0..15", "meaning": "Quantized inter-event entropy, a 4-bit value over the observed inter-event gap distribution (see quantization below)." },
+      "ft": { "type": "integer", "range": "0..cap", "meaning": "Focus-transition count: focusin events that land on a different element than the previous focus target." },
+      "pt": { "type": "integer", "range": "0..1000", "meaning": "Paste-versus-type ratio in per-mille: pa divided by (pa + ke), zero when both are zero." },
+      "n": { "type": "integer", "range": "0..cap", "meaning": "Sample count: the number of events counted before the cap froze collection." }
+    },
+    "unknown_fields": "A reader must reject a payload that carries a field the schema does not define, or a value outside its documented range. Rejection degrades to the absent-payload state (neutral-unknown, never negative), never to a partial read.",
+    "collector_invariant": "Every counted event increments exactly one event class and the sample count, so a valid payload always satisfies fo + ke + pa + po + fm == n. A payload that violates the sum is rejected like any other schema violation.",
+    "example": "{\"v\":1,\"ec\":{\"fo\":6,\"ke\":10,\"pa\":0,\"po\":4,\"fm\":12},\"qe\":11,\"ft\":3,\"pt\":0,\"n\":32}"
+  },
+  "collection": {
+    "attachment": "Listeners attach at the FORM containing the widget, in the capture phase, so interaction anywhere in the host form is observed. When the widget renders without a form ancestor, the session degrades to widget-only attachment (the widget element alone); the degradation is a documented fallback, never a silent behavior difference.",
+    "event_classes": ["focus (focusin, focusout)", "key (keydown, repeats excluded)", "paste", "pointer (pointerdown)", "form (input, change)"],
+    "capture_phase": true,
+    "passive": true,
+    "lifetime": "The session attaches when the widget initializes (before the challenge request) and detaches when the solve finishes, fails or the widget is reset, destroyed or cancelled."
+  },
+  "cap": 32,
+  "cap_meaning": "The sample cap. Collection freezes once 32 events are counted; every count in ec, ft and n is therefore bounded by 32. The cap is also the entropy rule's minimum-sample count, so the entropy rule is exactly reachable and never a dead rule (see invariants).",
+  "entropy": {
+    "bits": 4,
+    "bucketing": "Each inter-event gap in milliseconds maps to one of 16 buckets: bucket(gap) = min(15, floor(log2(gap + 1))). Bucket 0 covers 0-1 ms, bucket 15 covers 32768 ms and beyond. Only the 16 running bucket counters are kept on the page; the gap values themselves are discarded immediately.",
+    "value": "qe is the Shannon entropy of the observed bucket distribution in bits, rescaled to 0..15: qe = floor(H_bits * 15 / 4), clamped. A metronomic cadence collapses to one bucket (qe near 0); an irregular human cadence spreads across buckets (qe high).",
+    "storage": "No gap value, no bucket index sequence and no timing series is stored or transmitted; only the final 4-bit qe value rides the payload.",
+    "minimum_samples": 32,
+    "minimum_samples_meaning": "The scoring rule that consumes qe applies only when n >= 32. Because the payload cap is also 32, the rule is reachable exactly at the cap and can never be a dead rule (a minimum above the cap could never fire; one below it would fire on thin evidence)."
+  },
+  "invariants": {
+    "no_dead_rule": "entropy.minimum_samples == cap (32 == 32). Fixture-tested in both risk cores.",
+    "absent_payload": "A missing, malformed or over-bound payload scores as neutral-unknown: zero contribution, never a negative signal and never a classification of any kind.",
+    "machine_evidence": "An agent driving genuine input (real key and pointer events, machine cadence) scores as positive evidence above the documented agent edge. It is never classified as absent and never scored as human.",
+    "human_band": "The deterministic human-band corpus (protocol/telemetry-v1/evidence-vectors.json) mirrors the qualification docs' human interaction (irregular cadence, mixed event classes, focus transitions, occasional paste) and scores at or below the human-band edge. Both cores pin the identical corpus and edges."
+  },
+  "privacy_contract": {
+    "collected": "Event-class counts, one 4-bit quantized entropy value, a focus-transition count, a paste-versus-type ratio and the sample count.",
+    "never_collected": "Raw pointer or touch coordinates, key values or key codes, element names or selectors, form field contents, timing series of any kind, device capability or screen-size signals.",
+    "retention": "The payload lives inside the single-use solution token and is consumed with it. Nothing from this payload enters long-term storage, logs or metrics."
+  },
+  "consumers": {
+    "interaction_anomaly": "The risk cores (packages/kiwicaptcha-risk and packages/kiwicaptcha-risk-php) parse this payload per the schema and derive the bounded interaction-anomaly signal, an additive risk-adding signal composed at the evidence stage of the decision pipeline.",
+    "reference_table": "The solve-time reference values the same stage consumes live in protocol/telemetry-v1/client-perf-p1.json.",
+    "shared_vectors": "protocol/telemetry-v1/evidence-vectors.json pins the scoring corpora, the accept/reject fixtures and the composed-stage vectors for both cores."
+  }
+}

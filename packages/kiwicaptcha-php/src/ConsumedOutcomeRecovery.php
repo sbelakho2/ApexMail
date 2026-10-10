@@ -31,14 +31,35 @@ namespace KiwiCaptcha;
  * {@see Verifier::verify()}, which maps a consumed token to the
  * duplicate vocabulary.
  *
+ * The identity-proven acceptance of a stored success holds the same
+ * failed-barrier replay guard as the verify and resume paths. When the
+ * storage implements {@see \KiwiCaptcha\ReplicationBarrierInterface},
+ * the replication fence is re-established before the stored outcome is
+ * returned, and a barrier or shortfall failure answers the retryable
+ * {@see VerifyError::StorageUnavailable} instead of an unproven
+ * success. A retained envelope whose stored nonce does not match the
+ * token's nonce is an impossible key-value pair and answers the
+ * deterministic MalformedRecord, never the stored result.
+ *
  * The retained evidence is readable even after the signed challenge has
  * expired (the storage's retention horizon covers the recovery window),
  * so a late-lifetime crash can still reproduce the original outcome.
+ *
+ * A stored success is released only when its server-state MAC verifies
+ * see {@see Verifier::storedSuccessAuthentic()}. A storage writer who
+ * forges `valid=true` under the recorded identity gets MalformedRecord,
+ * never a grant. Checking the MAC needs the verifier and the secret: on
+ * a storage that carries authenticated results
+ * see {@see AuthenticatedResultCommitInterface}, a recovery constructed
+ * without them fails every stored success closed.
  */
 final class ConsumedOutcomeRecovery
 {
     public function __construct(
         private readonly StorageInterface $storage,
+        private readonly ?Verifier $verifier = null,
+        #[\SensitiveParameter]
+        private readonly ?string $secretKey = null,
     ) {
     }
 
@@ -74,6 +95,14 @@ final class ConsumedOutcomeRecovery
         if ($consumed === null) {
             return null;
         }
+        if ($consumed->record->nonce !== $decoded->nonce) {
+            // The retained envelope was loaded by the token's nonce (the
+            // storage key); a stored nonce field that differs is an
+            // impossible key-value pair and never replays the retained
+            // result — the deterministic MalformedRecord, mirroring the
+            // verifier's consumed-envelope resolution.
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         if ($consumed->consumedResult === null) {
             // Crash between consume and commit: intrinsically ambiguous.
             return null;
@@ -94,6 +123,32 @@ final class ConsumedOutcomeRecovery
             || !hash_equals($consumed->operationIdentity, $operationIdentity)
         ) {
             return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
+        }
+
+        // The authenticity gate: a stored success must carry a
+        // server-state MAC that verifies for this record, binding and
+        // recorded identity. Forged or corrupt persisted state otherwise.
+        $authentic = $this->verifier !== null && $this->secretKey !== null
+            ? $this->verifier->storedSuccessAuthentic($consumed, $this->secretKey, $this->storage)
+            : !$this->storage instanceof AuthenticatedResultCommitInterface;
+        if (!$authentic) {
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
+
+        // Failed-barrier replay guard, the same fence the verify and
+        // resume paths hold before accepting a stored success: the
+        // consume/commit mutations that produced it may have landed on
+        // the primary with their WAIT failing, and accepting the stored
+        // result read-only would return a success a promotion could
+        // lose. The barrier is re-established before the acceptance, and
+        // a barrier or shortfall failure maps to the retryable
+        // StorageUnavailable.
+        try {
+            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                $this->storage->establishReplicationFence('the recovered stored-result acceptance');
+            }
+        } catch (\Throwable) {
+            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
         }
 
         // The stored valid outcome is an authorization grant, released

@@ -147,13 +147,14 @@ final class RegionClockSkewSharedRedisAuthorityRealRedisTest extends TestCase
         $ownerA = $storage->claimResumeDerivation($challenge->nonce, 2);
         self::assertIsString($ownerA, 'a consumed resultless record is claimable');
 
-        // The expiry is stamped from the server clock: resume_until tracks
-        // the Redis TIME command plus the TTL, not any region clock.
+        // The expiry is stamped from the server clock: resume_until
+        // (epoch microseconds) tracks the Redis TIME command plus the
+        // TTL, not any region clock.
         $data = $this->envelope($client, $prefix, $challenge->nonce);
         $serverTime = $client->time();
-        $serverSecs = (int) $serverTime[0];
-        self::assertLessThanOrEqual($serverSecs + 3, (int) ($data['resume_until'] ?? 0), 'the lease expiry must be the server clock plus the TTL');
-        self::assertGreaterThanOrEqual($serverSecs + 1, (int) ($data['resume_until'] ?? 0), 'the lease expiry must be the server clock plus the TTL');
+        $serverUs = (int) $serverTime[0] * 1_000_000 + (int) $serverTime[1];
+        self::assertLessThanOrEqual($serverUs + 3_000_000, (int) ($data['resume_until'] ?? 0), 'the lease expiry must be the server clock plus the TTL');
+        self::assertGreaterThanOrEqual($serverUs + 1_000_000, (int) ($data['resume_until'] ?? 0), 'the lease expiry must be the server clock plus the TTL');
 
         // Both region clocks sit far past the deadline: the pinned
         // issuance instant plus or minus five seconds is roughly a year
@@ -161,7 +162,7 @@ final class RegionClockSkewSharedRedisAuthorityRealRedisTest extends TestCase
         // past it. A local-clock lease would already be dead for both
         // regions. The shared authority still sees it as live, so the
         // second region is refused exactly like the first.
-        self::assertLessThan(self::ISSUED_AT - 5, (int) ($data['resume_until'] ?? 0), 'both region clocks are past the lease deadline');
+        self::assertLessThan((self::ISSUED_AT - 5) * 1_000_000, (int) ($data['resume_until'] ?? 0), 'both region clocks are past the lease deadline');
         self::assertNull($storage->claimResumeDerivation($challenge->nonce, 2), 'the live lease is refused for the other region too');
 
         // Once Redis TIME passes the deadline the lease dies for every

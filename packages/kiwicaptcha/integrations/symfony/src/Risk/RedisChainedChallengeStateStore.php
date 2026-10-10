@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Storage\ReplicaWaitException;
@@ -65,6 +66,19 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
 
     private const OBLIGATION_PREFIX = 'chain-obligation:';
 
+    /**
+     * The encoded primary namespace inside every key this store writes.
+     */
+    private readonly string $namespace;
+
+    /**
+     * The legacy encoded namespace on the digest key version: reads fall
+     * back to it (never writes), so the cutover cannot hide an open
+     * obligation or chain record. Null on the legacy key version, where
+     * the primary namespace already is the legacy segment.
+     */
+    private readonly ?string $legacyNamespace;
+
     private readonly RedisSecurityCommandExecutor $lua;
 
     /** The Kiwi challenge nonce shape: base64 of 32 random bytes. */
@@ -90,6 +104,7 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
     private const WIRE_KEYS = [
         'v', 'stage1Nonce', 'scope', 'obligationId', 'requiredAction', 'requiredRank', 'policyVersion',
         'chainDepth', 'state', 'owner', 'leaseUntil', 'stage2Nonce', 'requestBinding', 'expiresAt',
+        'requirementGeneration', 'reservedRequirementGeneration',
     ];
 
     /**
@@ -112,7 +127,22 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * caller applies the verified WAIT durability barrier to the
      * mutating arms only.
      */
-    private const CREATE_OR_GET_OBLIGATION_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    /**
+     * The migration-only compare-delete of a stale legacy obligation
+     * mapping: one key, one namespace, so it can never span the two hash
+     * slots in a single transaction.
+     */
+    private const DELETE_LEGACY_OBLIGATION_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+-- kiwicaptcha legacy-obligation compare-delete (migration only)
+local mapped = redis.call('GET', KEYS[1])
+if mapped and mapped == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  return 1
+end
+return 0
+LUA;
+
+    private const CREATE_OR_GET_OBLIGATION_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain obligation create-or-get (chain + obligation, one hash tag).
 -- EVERY key the script touches is a declared KEYS argument: KEYS[3] is the
 -- chain the obligation mapping points at, resolved by the caller from a
@@ -128,22 +158,71 @@ if mapped then
   end
   local chained = redis.call('GET', KEYS[3])
   if chained then
-    local ok, rec = pcall(cjson.decode, chained)
-    -- A past-expiry pointed-at record is stale exactly like a missing
-    -- or corrupt one: the create-or-get heals the mapping with a fresh
-    -- chain, the mirror of the Array store's expiresAt-vs-clock check.
-    if ok and isValidChainRecord(rec) and not chainRecordExpired(rec, now) then
+    -- The pointed-chain predicate is the SAME authority as READ_LUA:
+    -- a key without a lifetime is corrupted state, a non-decodable or
+    -- structurally invalid record is corrupted state. Corrupt state is
+    -- never healed (zero writes here) — only a genuinely missing or
+    -- signed-expired record is a stale mapping eligible for repair. The
+    -- caller turns 'corrupt' into the retryable fail-closed 503.
+    if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[3]))) then
+      return {'', 0, 'corrupt'}
+    end
+    local rec = decodeUniqueObject(chained)
+    if rec == nil or not isValidChainRecord(rec) then
+      return {'', 0, 'corrupt'}
+    end
+    -- The binding invariant: the mapping is not authenticated, so a
+    -- corrupted mapping could point this transaction at ANOTHER
+    -- transaction's perfectly valid chain. The pointed record must BE
+    -- this transaction's chain (obligation id, scope, request binding
+    -- and policy epoch all equal), or the state is corrupt with zero
+    -- writes — a stronger reassessment must never raise a foreign
+    -- chain's requirement.
+    local recBinding = rec['requestBinding']
+    if recBinding == nil or recBinding == cjson.null then
+      recBinding = ''
+    end
+    if rec['obligationId'] ~= ARGV[1]
+      or rec['scope'] ~= ARGV[4]
+      or tostring(rec['policyVersion']) ~= ARGV[7]
+      or recBinding ~= ARGV[8] then
+      return {'', 0, 'corrupt'}
+    end
+    -- A past-expiry pointed-at record is stale like a missing one: the
+    -- create-or-get heals the mapping with a fresh chain, the mirror of
+    -- the Array store's expiresAt-vs-clock check.
+    if not chainRecordExpired(rec, now) then
       local newRank = tonumber(ARGV[6])
       if newRank > tonumber(rec['requiredRank']) then
+        -- A requirement raise is monotonic and bumps the generation.
         rec['requiredRank'] = newRank
         rec['requiredAction'] = ARGV[5]
+        if rec['requirementGeneration'] == nil then
+          rec['requirementGeneration'] = 1
+        end
+        rec['requirementGeneration'] = tonumber(rec['requirementGeneration']) + 1
+        if rec['state'] == 'issued' or rec['state'] == 'completed' or rec['state'] == 'verified' then
+          -- The chain already carries an issued stage-2 challenge. The
+          -- old nonce can never be upgraded in place (a weaker challenge
+          -- would stay redeemable while the record claims a stronger
+          -- requirement), so the chain fails closed to the terminal
+          -- step-up state: MARK_VERIFIED accepts only `issued`, the
+          -- controller refuses to recover the stale nonce, and the
+          -- validator refuses to Pass a stage-2 record that does not
+          -- satisfy the current requirement.
+          rec['state'] = 'step_up_required'
+          rec['owner'] = cjson.null
+          rec['leaseUntil'] = cjson.null
+          rec['reservedRequirementGeneration'] = cjson.null
+        end
         redis.call('SET', KEYS[3], cjson.encode(rec), 'KEEPTTL')
         return {ARGV[11], 1, ''}
       end
       return {ARGV[11], 0, ''}
     end
   end
-  -- stale mapping: compare-delete + create fresh in the SAME script.
+  -- stale mapping (missing or expired pointed chain): compare-delete +
+  -- create fresh in the SAME script.
   if redis.call('GET', KEYS[2]) == ARGV[11] then
     redis.call('DEL', KEYS[2])
   end
@@ -162,7 +241,9 @@ local rec = {
   leaseUntil = cjson.null,
   stage2Nonce = cjson.null,
   requestBinding = ARGV[8],
-  expiresAt = tonumber(ARGV[9])
+  expiresAt = tonumber(ARGV[9]),
+  requirementGeneration = 1,
+  reservedRequirementGeneration = cjson.null
 }
 if rec['requestBinding'] == '' then
   rec['requestBinding'] = cjson.null
@@ -187,21 +268,36 @@ LUA;
      * expiry is stale -> 'missing' (never manufacture a lifetime, never
      * reserve a past-expiry record).
      */
-    private const RESERVE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
--- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining TTL).
+    private const RESERVE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
+-- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining lifetime).
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
--- A chain record WITHOUT an expiry is CORRUPTED state: fail closed,
--- never manufacture a lifetime from the configured TTL.
-local ttl = tonumber(redis.call('TTL', KEYS[1]))
-if ttl <= 0 then
+-- A PRESENT empty value is corrupted state, never absence.
+if existing == '' then
+  return 'corrupt'
+end
+-- The PTTL sentinels classify the boundary exactly: -2 is the key
+-- actually gone (missing), -1 is a PRESENT record whose lifetime was
+-- stripped (corrupt, the same answer every other transition gives), and
+-- a sub-second remainder (PTTL 0) is a LIVE key. Manufacturing
+-- 'missing' for a persistent record would let a corrupted reservation
+-- look like an expired challenge.
+local key_pttl_ms = tonumber(redis.call('PTTL', KEYS[1]))
+if key_pttl_ms == -2 then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+if chainKeyLifetimeMissing(key_pttl_ms) then
+  return 'corrupt'
+end
+-- The reservation lease never outlives the key lifetime, and a
+-- sub-second remainder rounds UP to one second so the bounded SET EX
+-- below can never write a non-positive expiry.
+local remaining_lease_secs = math.max(1, math.floor(key_pttl_ms / 1000))
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- A past-expiry but still-live record is stale: fail closed like the
@@ -232,22 +328,30 @@ if rec['state'] == 'reserved' then
     return 'busy'
   end
   local lease = tonumber(ARGV[2])
-  if ttl < lease then
-    lease = ttl
+  if remaining_lease_secs < lease then
+    lease = remaining_lease_secs
   end
   rec['state'] = 'reserved'
   rec['owner'] = ARGV[1]
   rec['leaseUntil'] = now + lease
+  if rec['requirementGeneration'] == nil or rec['requirementGeneration'] == cjson.null then
+    rec['requirementGeneration'] = 1
+  end
+  rec['reservedRequirementGeneration'] = tonumber(rec['requirementGeneration'])
   redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
   return 'taken_over'
 end
 local lease = tonumber(ARGV[2])
-if ttl < lease then
-  lease = ttl
+if remaining_lease_secs < lease then
+  lease = remaining_lease_secs
 end
 rec['state'] = 'reserved'
 rec['owner'] = ARGV[1]
 rec['leaseUntil'] = now + lease
+if rec['requirementGeneration'] == nil or rec['requirementGeneration'] == cjson.null then
+  rec['requirementGeneration'] = 1
+end
+rec['reservedRequirementGeneration'] = tonumber(rec['requirementGeneration'])
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'available'
 LUA;
@@ -264,7 +368,7 @@ LUA;
      * expiry is stale -> 'missing' (the same fail-closed guards as the
      * reservation).
      */
-    private const MARK_ISSUED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_ISSUED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain issuance: reserved(owner) -> issued(stage2Nonce), idempotent.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -272,11 +376,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -288,10 +392,28 @@ if rec['state'] == 'reserved' then
   if rec['owner'] ~= ARGV[1] then
     return 'not_owner'
   end
+  -- The reservation CAS: the minted challenge was issued against the
+  -- requirement generation captured at reservation time. A raise in
+  -- between bumped the chain's generation, so the weaker challenge must
+  -- never be installed: the caller discards it and retries against the
+  -- current requirement. A legacy reservation without the snapshot is
+  -- logically generation 1 (never "no fence").
+  local reservedGeneration = rec['reservedRequirementGeneration']
+  if reservedGeneration == nil or reservedGeneration == cjson.null then
+    reservedGeneration = 1
+  end
+  local currentGeneration = rec['requirementGeneration']
+  if currentGeneration == nil or currentGeneration == cjson.null then
+    currentGeneration = 1
+  end
+  if reservedGeneration ~= currentGeneration then
+    return 'stale_requirement'
+  end
   rec['state'] = 'issued'
   rec['stage2Nonce'] = ARGV[2]
   rec['owner'] = cjson.null
   rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
   redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
   return 'issued_new'
 end
@@ -322,7 +444,7 @@ LUA;
      * without a key lifetime or with a passed signed expiry is stale ->
      * 'missing' (a past-expiry chain can never verify).
      */
-    private const MARK_VERIFIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_VERIFIED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain verification: issued(stage2Nonce) -> verified(stage2Nonce), TERMINAL,
 -- deleting the obligation mapping only while it still points at this chain.
 local existing = redis.call('GET', KEYS[1])
@@ -331,11 +453,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -370,7 +492,7 @@ LUA;
      * -> 'conflict'; absent -> 'missing'. A record without a key lifetime
      * or with a passed signed expiry is stale -> 'missing'.
      */
-    private const MARK_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_STEP_UP_REQUIRED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain step-up: issued(stage2Nonce) -> step_up_required(stage2Nonce), TERMINAL,
 -- keeping the obligation mapping (the transaction stays bound to the step-up).
 local existing = redis.call('GET', KEYS[1])
@@ -379,11 +501,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -415,7 +537,7 @@ LUA;
      * 'conflict'; absent -> 'missing'. A record without a key lifetime
      * or with a passed signed expiry is stale -> 'missing'.
      */
-    private const MARK_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_DENIED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain denial: issued(stage2Nonce) -> denied(stage2Nonce), TERMINAL,
 -- keeping the obligation mapping (the transaction stays bound to the denial).
 local existing = redis.call('GET', KEYS[1])
@@ -424,11 +546,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -469,7 +591,7 @@ LUA;
      * gone), 'already_completed' (the mapping is gone, the transaction
      * already ended via Pass), absent -> 'missing'.
      */
-    private const MARK_TRANSACTION_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_TRANSACTION_DENIED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Transaction denial: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
 -- an OPEN obligation (available|reserved|issued|completed -> denied, KEEPTTL —
 -- the record keeps its OWN remaining TTL; the obligation mapping is KEPT, the
@@ -491,10 +613,13 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
 end
@@ -504,7 +629,7 @@ if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return 'missing'
 end
 local mapped = redis.call('GET', KEYS[2])
-if mapped == false then
+if not mapped then
   return 'already_completed'
 end
 if mapped ~= ARGV[1] then
@@ -525,6 +650,7 @@ end
 rec['state'] = 'denied'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'denied_new'
 LUA;
@@ -550,7 +676,7 @@ LUA;
      * mapping is gone, the transaction already ended via Pass), absent
      * -> 'missing'.
      */
-    private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Transaction step-up: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
 -- an OPEN obligation (available|reserved|issued|completed -> step_up_required,
 -- KEEPTTL — the record keeps its OWN remaining TTL; the obligation mapping is
@@ -572,10 +698,13 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
 end
@@ -585,7 +714,7 @@ if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return 'missing'
 end
 local mapped = redis.call('GET', KEYS[2])
-if mapped == false then
+if not mapped then
   return 'already_completed'
 end
 if mapped ~= ARGV[1] then
@@ -606,6 +735,7 @@ end
 rec['state'] = 'step_up_required'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'step_up_required_new'
 LUA;
@@ -617,7 +747,7 @@ LUA;
      * without a key lifetime or with a passed signed expiry is stale
      * (false), the same fail-closed guards as every other mutation.
      */
-    private const REARM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const REARM_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain rearm: issued(expectedNonce) -> available (a fresh stage-2 mint).
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -625,11 +755,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return false
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -643,6 +773,7 @@ end
 rec['state'] = 'available'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 rec['stage2Nonce'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
@@ -657,7 +788,7 @@ LUA;
      * never released (false), the same fail-closed guards as every other
      * mutation. The chain TTL is preserved (KEEPTTL, Redis 6.0+).
      */
-    private const RELEASE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const RELEASE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain release: reserved(owner) -> available, owner-gated.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -665,11 +796,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return false
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -686,6 +817,7 @@ end
 rec['state'] = 'available'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
 LUA;
@@ -699,7 +831,7 @@ LUA;
      * lifetime or with a passed signed expiry is stale (false, the
      * fail-closed guards shared with every mutation).
      */
-    private const COMPLETE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const COMPLETE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain completion (DEPRECATED legacy): reserved(owner) -> completed(stage2Nonce).
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -707,11 +839,11 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
+  return 'corrupt'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return false
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -725,10 +857,26 @@ end
 if rec['owner'] ~= ARGV[1] then
   return false
 end
+-- The same reservation CAS as markIssued: a raise between the
+-- reservation and the completion bumped the generation, so a weaker
+-- challenge is never completed; a legacy reservation without the
+-- snapshot is logically generation 1.
+local reservedGeneration = rec['reservedRequirementGeneration']
+if reservedGeneration == nil or reservedGeneration == cjson.null then
+  reservedGeneration = 1
+end
+local currentGeneration = rec['requirementGeneration']
+if currentGeneration == nil or currentGeneration == cjson.null then
+  currentGeneration = 1
+end
+if reservedGeneration ~= currentGeneration then
+  return false
+end
 rec['state'] = 'completed'
 rec['stage2Nonce'] = ARGV[2]
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return cjson.encode(rec)
 LUA;
@@ -741,7 +889,7 @@ LUA;
      * the caller applies the verified WAIT durability barrier to the
      * deletion only.
      */
-    private const DELETE_OBLIGATION_LUA = <<<'LUA'
+    private const DELETE_OBLIGATION_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 -- Chain obligation compare-delete: only while it still points at this chain.
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('DEL', KEYS[1])
@@ -762,22 +910,23 @@ LUA;
      * assertLiveRecord() pre-guard of every transition never lets a
      * stale record reach a mutation.
      */
-    private const READ_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const READ_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain live read: existence + key lifetime + strict decode + signed expiry.
 local existing = redis.call('GET', KEYS[1])
-if not existing or existing == '' then
+if not existing then
   return false
+end
+-- A PRESENT empty value is corruption, never absence.
+if existing == '' then
+  return 'corrupt'
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and fails
 -- closed at the read like everywhere else.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
-end
-local ok, rec = pcall(cjson.decode, existing)
-if not ok then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record reads as absent,
@@ -824,10 +973,29 @@ LUA;
      */
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
-        private readonly string $namespace = 'kiwi',
+        string $namespace = 'kiwi',
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        /**
+         * Whether the digest rollout also consults the legacy segment
+         * for obligations and chain records (the drained migration's
+         * safety net). A fresh install passes false: it has no
+         * pre-cutover state, so an unrelated deployment's colliding
+         * legacy keys must never surface as its own obligations.
+         */
+        private readonly bool $readLegacyFallback = true,
     ) {
+        // The store receives the RAW configured discriminator and derives
+        // the encoded {kiwi:<ns>} tag through the one shared derivation.
+        // On the digest key version it also holds the legacy segment: the
+        // obligation and chain reads fall back to it, so an open
+        // obligation written before the cutover is never invisible and a
+        // ticketless request can never downgrade to a fresh stage 1.
+        $this->namespace = RedisNamespace::deriveOr($namespace, 'kiwi', $namespaceKeyVersion);
+        $this->legacyNamespace = $readLegacyFallback && $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+            ? RedisNamespace::deriveOr($namespace, 'kiwi', RedisNamespace::VERSION_LEGACY)
+            : null;
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
         $this->lua = new RedisSecurityCommandExecutor($redis);
     }
@@ -860,6 +1028,8 @@ LUA;
                 'stage2Nonce' => null,
                 'requestBinding' => $requestBinding,
                 'expiresAt' => $this->serverTime() + max(1, $ttlSecs),
+                'requirementGeneration' => 1,
+                'reservedRequirementGeneration' => null,
             ], JSON_THROW_ON_ERROR),
             max(1, $ttlSecs),
         );
@@ -881,36 +1051,29 @@ LUA;
             throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
         }
         $requestBinding = $requestBinding !== '' ? $requestBinding : null;
-        $now = $this->serverTime();
         $ttl = max(1, $ttlSecs);
-        $this->setWithTtl(
-            $this->key($chainId),
-            (string) json_encode([
-                'v' => 2,
-                'stage1Nonce' => $stage1Nonce,
-                'scope' => $scope,
-                'obligationId' => $obligationId,
-                'requiredAction' => $requiredAction,
-                'requiredRank' => RiskAction::from($requiredAction)->rank(),
-                'policyVersion' => $policyVersion,
-                'chainDepth' => 2,
-                'state' => 'available',
-                'owner' => null,
-                'leaseUntil' => null,
-                'stage2Nonce' => null,
-                'requestBinding' => $requestBinding,
-                'expiresAt' => $now + $ttl,
-            ], JSON_THROW_ON_ERROR),
+        // The chain + obligation writes ride the atomic create-or-get Lua:
+        // one script, both keys in the same hash tag, executed by Redis as
+        // a single unit. The old two-write seam (the chain SET, then the
+        // obligation SET) could orphan the chain between the writes —
+        // present, yet unreachable through its obligation and uncleanable.
+        // An interruption before the script leaves neither key; a lost
+        // reply after it leaves both, mutually consistent. The WAIT
+        // barrier and the TTL behavior are the create-or-get ones: the
+        // fresh creation always mutates (so the barrier always runs on
+        // it) and writes both keys with the same EX lifetime.
+        $this->createOrGetObligation(
+            $obligationId,
+            $chainId,
+            $stage1Nonce,
+            $scope,
+            $requestBinding ?? '',
+            $requiredAction,
+            RiskAction::from($requiredAction)->rank(),
+            $policyVersion,
+            $this->serverTime() + $ttl,
             $ttl,
         );
-        $this->setWithTtl($this->obligationKey($obligationId), $chainId, $ttl);
-        // Durability barrier: the fresh chain + obligation write must
-        // reach the configured replica count before the caller hands out
-        // a ticket — a lost obligation would let the transaction restart
-        // at stage 1 after a promotion.
-        if ($this->waitReplicas > 0) {
-            $this->waitAndVerify('the chain creation with its obligation');
-        }
     }
 
     public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
@@ -921,13 +1084,51 @@ LUA;
         $chainKey = $this->key($chainId);
         $obligationKey = $this->obligationKey($obligationId);
 
+        // Migration provenance: a live obligation written before the
+        // namespace cutover must never be shadowed by a fresh primary
+        // one. The legacy chain is read (and validated) here; when its
+        // requirement is not weaker than the requested one it is
+        // returned untouched, and a stronger reassessment fails closed
+        // explicitly instead of creating a competing primary chain. Only
+        // a stale legacy mapping (dead, expired or corrupt record) is
+        // compare-deleted, so the primary create can never be blocked by
+        // a dead pointer — and no write ever spans the two namespaces in
+        // one transaction.
+        $lookup = $this->obligationLookup($obligationId);
+        if ($lookup !== null && $lookup['namespace'] === 'legacy') {
+            $legacyRequirement = $this->legacyRequirementOrNull($lookup['chainId']);
+            if ($legacyRequirement !== null) {
+                // The same binding invariant on the migration branch: a
+                // corrupted legacy mapping must never make this
+                // transaction adopt (or raise) a foreign chain.
+                $legacyBinding = $legacyRequirement['requestBinding'] ?? '';
+                if (($legacyRequirement['obligationId'] ?? null) !== $obligationId
+                    || ($legacyRequirement['scope'] ?? null) !== $scope
+                    || (string) $legacyBinding !== $requestBinding
+                    || (int) ($legacyRequirement['policyVersion'] ?? 0) !== $policyVersion
+                ) {
+                    throw new MalformedChainedChallengeStateException('the legacy obligation mapping resolves a chain that belongs to a different transaction');
+                }
+                if ($requiredRank <= (int) $legacyRequirement['requiredRank']) {
+                    return $lookup['chainId'];
+                }
+                throw new \RuntimeException('the open obligation predates the namespace cutover: a stronger reassessment cannot be applied to the legacy chain (drain the legacy state before raising the requirement)');
+            }
+            $this->deleteLegacyObligationIfUnchanged($obligationId, $lookup['chainId']);
+        }
+
         // The pointed-at chain is resolved from a plain read and passed as
         // a declared key; a concurrent create-or-get that moved the
         // mapping between the read and the script answers 'moved' and the
         // loop re-reads and retries (bounded, then fail-closed — a
         // silently wrong chain must never be returned).
         for ($attempt = 0; $attempt < 3; ++$attempt) {
-            $existing = $this->obligationChainId($obligationId);
+            // The lenient mapping read (not the validating
+            // obligationChainId): the repair below must see a stale
+            // mapping's pointed-at chain id so the script can compare it
+            // against its own read and heal the missing/expired corner.
+            $read = $this->obligationLookup($obligationId);
+            $existing = $read['chainId'] ?? null;
             $reply = $this->lua->executeSecurityFinal(self::CREATE_OR_GET_OBLIGATION_LUA, [
                 $chainKey,
                 $obligationKey,
@@ -953,6 +1154,15 @@ LUA;
             // script. Lua tables are 1-indexed; normalize before
             // destructuring.
             $parts = \is_array($reply) ? array_values($reply) : [];
+            if ((string) ($parts[2] ?? '') === 'corrupt') {
+                // The pointed-at chain is corrupt state (a non-decodable
+                // record, a structural violation, or a stripped key
+                // lifetime). Corrupt state is never healed and the
+                // mapping is never touched: the caller turns this into
+                // the retryable fail-closed path. Only a missing or
+                // genuinely expired record repairs the mapping.
+                throw new MalformedChainedChallengeStateException('the pointed-at chain record is malformed at the obligation boundary');
+            }
             if ((string) ($parts[2] ?? '') !== 'moved') {
                 $resolved = \is_string($parts[0] ?? null) ? $parts[0] : $chainId;
                 $mutated = (int) ($parts[1] ?? 0) === 1;
@@ -976,12 +1186,69 @@ LUA;
 
     public function obligationChainId(string $obligationId): ?string
     {
-        $chainId = $this->redis->get($this->obligationKey($obligationId));
-        if (!\is_string($chainId) || $chainId === '') {
+        $lookup = $this->obligationLookup($obligationId);
+        if ($lookup === null) {
             return null;
         }
+        // The validating mirror of the Array store's obligationChainId():
+        // the pointed-at chain record must strictly decode and be live —
+        // a corrupt record (a stripped key lifetime included) fails
+        // closed with MalformedChainedChallengeStateException and the
+        // mapping is never silently followed to corrupt state, while a
+        // missing or signed-expired record is the stale mapping answered
+        // null (the create-or-get repairs it; this read never mutates it).
+        return $this->read($lookup['chainId']) === null ? null : $lookup['chainId'];
+    }
 
-        return $chainId;
+    /**
+     * The obligation mapping with its provenance — the lenient read: the
+     * chain id plus the namespace it was read from ('primary' or
+     * 'legacy'), or null when no mapping exists, without validating the
+     * pointed-at chain record. Readers that want the validated answer
+     * (null on a stale mapping, fail-closed on a corrupt one) use
+     * {@see obligationChainId()}. The writers (the create-or-get retry
+     * loop and the migration branch) and the provenance probes consult
+     * this read, so a stale mapping can be repaired and a live legacy
+     * obligation can never be shadowed by a fresh primary one.
+     *
+     * @return array{chainId: string, namespace: 'primary'|'legacy'}|null
+     */
+    public function obligationLookup(string $obligationId): ?array
+    {
+        $chainId = $this->redis->get($this->obligationKey($obligationId));
+        if ($chainId === '') {
+            // A present empty mapping is damaged state, never "no open
+            // obligation": healing it would restart the transaction.
+            throw new MalformedChainedChallengeStateException('the obligation mapping is an empty value');
+        }
+        if (\is_string($chainId)) {
+            if (!ChainId::isValid($chainId)) {
+                throw new MalformedChainedChallengeStateException('the obligation mapping carries a malformed chain id');
+            }
+
+            return ['chainId' => $chainId, 'namespace' => 'primary'];
+        }
+        if ($this->legacyNamespace === null) {
+            return null;
+        }
+        // Migration read: the obligation mapping written before the
+        // namespace cutover. Reads never migrate the mapping — a
+        // transition on the legacy record fails closed in the caller
+        // (the primary-namespace scripts answer missing), which never
+        // restarts the transaction at stage 1.
+        $legacy = $this->redis->get($this->legacyObligationKey($obligationId));
+        if ($legacy === '') {
+            throw new MalformedChainedChallengeStateException('the legacy obligation mapping is an empty value');
+        }
+        if (\is_string($legacy)) {
+            if (!ChainId::isValid($legacy)) {
+                throw new MalformedChainedChallengeStateException('the legacy obligation mapping carries a malformed chain id');
+            }
+
+            return ['chainId' => $legacy, 'namespace' => 'legacy'];
+        }
+
+        return null;
     }
 
     /**
@@ -997,7 +1264,18 @@ LUA;
     {
         $raw = $this->lua->executeRead(self::READ_LUA, [$this->key($chainId)], []);
         if ($raw === false || $raw === null) {
-            return null;
+            if ($this->legacyNamespace === null) {
+                return null;
+            }
+            // Migration read: a chain record written before the namespace
+            // cutover. The strict decode below still applies, so a
+            // corrupt legacy record fails closed exactly like a primary
+            // one. Writes stay on the primary namespace; a transition on
+            // a legacy-only record fails closed in the caller.
+            $raw = $this->lua->executeRead(self::READ_LUA, [$this->legacyKey($chainId)], []);
+            if ($raw === false || $raw === null) {
+                return null;
+            }
         }
         if ($raw === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the read boundary');
@@ -1007,6 +1285,40 @@ LUA;
         }
 
         return self::wire(self::decodeState($raw));
+    }
+
+    /**
+     * The live legacy chain record for the migration branch, or null when
+     * the pointed-at record is genuinely missing or expired — states a
+     * stale mapping may heal. Corruption is NOT converted to null: the
+     * strict decode's MalformedChainedChallengeStateException propagates,
+     * the legacy obligation mapping is left untouched, and the caller
+     * fails closed. A retained legacy denial whose record was corrupted
+     * can therefore never be erased and replaced by a fresh chain.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function legacyRequirementOrNull(string $chainId): ?array
+    {
+        return $this->read($chainId);
+    }
+
+    /**
+     * Compare-delete a stale legacy obligation mapping (the record it
+     * pointed at is dead, expired or corrupt). One key, one namespace:
+     * the migration never spans the two hash slots in one transaction,
+     * and a mapping that moved since the read is left alone.
+     */
+    private function deleteLegacyObligationIfUnchanged(string $obligationId, string $expectedChainId): void
+    {
+        $deleted = (int) $this->lua->executeSecurityFinal(
+            self::DELETE_LEGACY_OBLIGATION_LUA,
+            [$this->legacyObligationKey($obligationId)],
+            [$expectedChainId],
+        );
+        if ($deleted === 1 && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the stale legacy obligation cleanup');
+        }
     }
 
     public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
@@ -1048,7 +1360,7 @@ LUA;
         if ($result === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the issuance boundary');
         }
-        $status = \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing', 'stale_requirement'], true)
             ? $result
             : 'missing';
 
@@ -1206,6 +1518,9 @@ LUA;
     {
         $this->assertLiveRecord($chainId);
         $rearmed = $this->lua->executeSecurityFinal(self::REARM_LUA, [$this->key($chainId)], [$expectedStage2Nonce]);
+        if ($rearmed === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the rearm boundary');
+        }
         $success = $rearmed === true || $rearmed === 1;
 
         // Durability barrier: the fresh issued -> available rearm must
@@ -1248,6 +1563,9 @@ LUA;
             throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
         }
         $raw = $this->lua->executeSecurityFinal(self::COMPLETE_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
+        if ($raw === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the completion boundary');
+        }
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
@@ -1334,18 +1652,41 @@ LUA;
         if (($rec['chainDepth'] ?? null) !== 2) {
             throw new MalformedChainedChallengeStateException('chain record chainDepth must be exactly 2');
         }
+        // The monotonic requirement generation: every raise increments it,
+        // and a reservation records the generation it was taken against.
+        // The field absent is the legacy shape (logical generation 1); an
+        // explicit null is corrupt (the canonical writer never emits it).
+        if (!\array_key_exists('requirementGeneration', $rec)) {
+            $requirementGeneration = 1;
+        } else {
+            $requirementGeneration = $rec['requirementGeneration'];
+            if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
+                throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+            }
+        }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
             throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified|step_up_required|denied');
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
+        $hasReservedGeneration = \array_key_exists('reservedRequirementGeneration', $rec);
+        $reservedGeneration = $rec['reservedRequirementGeneration'] ?? null;
+        if ($hasReservedGeneration && $reservedGeneration !== null
+            && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
+            throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
+        }
         if ($state === 'reserved') {
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
+            if ($hasReservedGeneration && $reservedGeneration === null) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must not be null in the reserved state');
+            }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
+        } elseif ($reservedGeneration !== null) {
+            throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be null outside the reserved state');
         }
         $stage2Nonce = $rec['stage2Nonce'] ?? null;
         if ($state === 'issued' || $state === 'verified' || $state === 'completed') {
@@ -1403,6 +1744,9 @@ LUA;
             'stage2Nonce' => $rec['stage2Nonce'],
             'obligationId' => $rec['obligationId'],
             'expiresAt' => $rec['expiresAt'],
+            'requirementGeneration' => $rec['requirementGeneration'] ?? 1,
+            'reservedRequirementGeneration' => $rec['reservedRequirementGeneration']
+                ?? ($rec['state'] === 'reserved' ? 1 : null),
         ];
     }
 
@@ -1439,6 +1783,16 @@ LUA;
     private function obligationKey(string $obligationId): string
     {
         return sprintf('{kiwi:%s}:%s%s', $this->namespace, self::OBLIGATION_PREFIX, $obligationId);
+    }
+
+    private function legacyKey(string $chainId): string
+    {
+        return sprintf('{kiwi:%s}:%s%s', $this->legacyNamespace, self::PREFIX, $chainId);
+    }
+
+    private function legacyObligationKey(string $obligationId): string
+    {
+        return sprintf('{kiwi:%s}:%s%s', $this->legacyNamespace, self::OBLIGATION_PREFIX, $obligationId);
     }
 
     /**

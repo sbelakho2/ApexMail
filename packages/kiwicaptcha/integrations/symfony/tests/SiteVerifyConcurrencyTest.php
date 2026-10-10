@@ -16,6 +16,7 @@ use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -188,8 +189,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
         // Flush any leftover idempotency entry from a previous run (the
         // UUID + backend namespace must start clean for the race).
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
         $probe->disconnect();
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-');
@@ -309,11 +310,11 @@ final class SiteVerifyConcurrencyTest extends TestCase
         // Flush any leftover idempotency entry from a previous run (both
         // the static-epoch and the effective-epoch namespaces must start
         // clean for the race).
-        $staticBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $effectiveBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
+        $staticBackendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $effectiveBackendId = hash_hmac('sha256', 'login|1|', self::SITEVERIFY_SECRET);
         $probe->del([
-            '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid,
-            '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid,
+            '{kiwi:kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid,
+            '{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid,
         ]);
         $probe->disconnect();
 
@@ -408,12 +409,12 @@ final class SiteVerifyConcurrencyTest extends TestCase
         try {
             // The claim namespace is the effective epoch's, never the
             // static configured epoch's.
-            $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
-            $staticKey = '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
+            $effectiveKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
+            $staticKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
             self::assertNotNull($probe->get($effectiveKey), 'the completed claim must live under the effective-epoch backend identity');
             self::assertNull($probe->get($staticKey), 'the static-epoch key must never be touched by the monitored workers');
         } finally {
-            $probe->del(['{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid, 'kiwicaptcha:'.$challenge->nonce]);
+            $probe->del(['{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid, 'kiwicaptcha:'.$challenge->nonce]);
         }
     }
 
@@ -466,8 +467,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = SolutionToken::create($challenge->nonce, $counter - 1, 5000, [])->encode();
         $uuid = 'a7c2c4a0-9f4b-4d1e-9c8a-0f3d5e7b1a2b';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
         $probe->disconnect();
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-slow-');
@@ -580,8 +581,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
         }
         $uuid = 'b1c2d3e4-5f6a-4b7c-8d9e-0f1a2b3c4d5e';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         // A storage whose consume() blocks 6s inside the verifier — a
         // window far inside the default 60s lease, during which the
@@ -779,8 +780,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
         }
         $uuid = 'c2d3e4f5-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 180), new RedisStorage($probe));
         $challenge = $issuer->issue('login', '127.0.0.1');
@@ -916,23 +917,29 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
         }
         $store = new RedisSiteVerifyIdempotencyStore($probe);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $uuid = 'd1e2f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6';
-        $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $key = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
         try {
-            [$claim, $owner] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            [$claim, $owner] = $store->claim($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claim);
             self::assertNotNull($owner);
 
             // The correct owner with a wrong response hash: atomic no-op,
             // the entry stays pending.
-            $store->finalize($backendId, $uuid, 'hash-b', $owner, ['success' => true]);
-            self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
+            $store->finalize($backendId, $uuid, hash('sha256', 'hash-b'), $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', 'hash-a'), hash('sha256', 'ip:127.0.0.1'), '')),
+                'a wrong-hash finalize must not complete the entry',
+            );
 
             // The correct owner with the correct hash completes the entry.
-            $store->finalize($backendId, $uuid, 'hash-a', $owner, ['success' => true]);
-            self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+            $store->finalize($backendId, $uuid, hash('sha256', 'hash-a'), $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+            self::assertSame(
+                ['success' => true, 'challenge_ts' => null, 'hostname' => null],
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', 'hash-a'), hash('sha256', 'ip:127.0.0.1'), '')),
+            );
         } finally {
             $probe->del($key);
         }
@@ -951,22 +958,22 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         }
         // A 1-second lease makes the expiry instant in the test.
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $uuid = 'e2f3a4b5-6c7d-4e8f-90a1-b2c3d4e5f6a7';
-        $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $key = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
         try {
-            [$claim] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            [$claim] = $store->claim($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claim);
 
             // Wait out the 1s lease (redis time is the lease clock; the
             // integer-second `>=` boundary keeps the lease held through
             // the second after expiry).
             usleep(2_500_000);
-            [$wrong] = $store->takeover($backendId, $uuid, 'hash-a', 300, 'ip:203.0.113.9');
+            [$wrong] = $store->takeover($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:203.0.113.9'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::StillPending, $wrong, 'a different remoteip fingerprint must never take over');
 
-            [$right] = $store->takeover($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            [$right] = $store->takeover($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::TookOver, $right);
         } finally {
             $probe->del($key);
@@ -1012,8 +1019,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuid = 'f5a6b7c8-9d0e-4f1a-b234-5c6d7e8f90a1';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // The "crash" seam: finalize() is a no-op for the owner, exactly
@@ -1035,12 +1042,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
-                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
             }
 
             public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
-                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
             }
 
             public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -1064,10 +1071,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
 
         try {
@@ -1083,7 +1090,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame(503, $ownerResponse->getStatusCode(), 'a refused finalize never returns the local result as authoritative');
             $ownerBody = json_decode((string) $ownerResponse->getContent(), true);
             self::assertSame(['internal-error'], $ownerBody['error-codes'] ?? null);
-            self::assertNull($crashingStore->stored($backendId, $uuid), 'the owner crashed before the Siteverify finalize');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($crashingStore->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the owner crashed before the Siteverify finalize',
+            );
 
             // Wait past the signed expiry (ttl 5s) and the fixed 3s lease.
             sleep(7);
@@ -1203,9 +1213,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuidA = 'b8c9d0e1-2f3a-4b5c-8d9e-0f1a2b3c4d5e';
         $uuidB = 'c9d0e1f2-3a4b-4c5d-9e0f-1a2b3c4d5e6f';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyA, $idemKeyB]);
 
         try {
@@ -1236,7 +1246,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             ]))->getContent(), true);
             self::assertSame(false, $second['success'] ?? null);
             self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
-            $storedB = $store->stored($backendId, $uuidB);
+            $storedB = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), ''));
             self::assertIsArray($storedB, 'the duplicate-detecting claim must be finalized as CompleteSame');
             self::assertSame(['timeout-or-duplicate'], $storedB['error-codes'] ?? null);
 
@@ -1286,8 +1296,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuidB = 'd0e1f2a3-4b5c-4d6e-9f0a-1b2c3d4e5f6a';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyB]);
 
         try {
@@ -1307,12 +1317,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
                 public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
-                    return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                    return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                 }
 
                 public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
-                    return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                    return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                 }
 
                 public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -1325,9 +1335,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     // The finalize never lands (crash window).
                 }
 
-                public function stored(string $backendId, string $idempotencyKey): ?array
+                public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
                 {
-                    return $this->inner->stored($backendId, $idempotencyKey);
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
                 }
             };
             $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 0.5);
@@ -1352,7 +1362,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame(503, $secondResponse->getStatusCode(), 'the refused replay finalize answers the 503');
             $second = json_decode((string) $secondResponse->getContent(), true);
             self::assertSame(['internal-error'], $second['error-codes'] ?? null);
-            self::assertNull($idempotencyStore->stored($backendId, $uuidB), 'the replay finalize crashed — claim B stays pending');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($idempotencyStore->storedForOperation($backendId, $uuidB, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the replay finalize crashed — claim B stays pending',
+            );
 
             // 3. B's lease expires (the short 3s configured lease).
             sleep(4);
@@ -1405,10 +1418,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $secret1 = 'secret-one-'.str_repeat('a', 16);
         $secret2 = 'secret-two-'.str_repeat('b', 16);
         $uuid = 'e1f2a3b4-5c6d-4e7f-8a90-1b2c3d4e5f6b';
-        $backendId1 = hash('sha256', $secret1.'|login|0|');
-        $backendId2 = hash('sha256', $secret2.'|login|0|');
-        $idemKey1 = '{kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
-        $idemKey2 = '{kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
+        $backendId1 = hash_hmac('sha256', 'login|0|', $secret1);
+        $backendId2 = hash_hmac('sha256', 'login|0|', $secret2);
+        $idemKey1 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
+        $idemKey2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
         $probe->del([$idemKey1, $idemKey2]);
 
         try {
@@ -1425,12 +1438,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
                 public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
-                    return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                    return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                 }
 
                 public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
-                    return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                    return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                 }
 
                 public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -1443,9 +1456,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     // The finalize never lands (crash window).
                 }
 
-                public function stored(string $backendId, string $idempotencyKey): ?array
+                public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
                 {
-                    return $this->inner->stored($backendId, $idempotencyKey);
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
                 }
             };
             $controller1 = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret1 => 'login'], $storage, null, null, $crashingStore, null, 0.5);
@@ -1478,7 +1491,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame(503, $secondResponse->getStatusCode(), 'the refused secret-2 finalize answers the 503');
             $second = json_decode((string) $secondResponse->getContent(), true);
             self::assertSame(['internal-error'], $second['error-codes'] ?? null);
-            self::assertNull($idempotencyStore->stored($backendId2, $uuid), 'the secret-2 finalize crashed — its claim stays pending');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($idempotencyStore->storedForOperation($backendId2, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the secret-2 finalize crashed — its claim stays pending',
+            );
 
             // 3. The lease expires while secret-2's entry is pending.
             sleep(4);
@@ -1536,9 +1552,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuidA = 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
         $uuidB = 'b2c3d4e5-6f7a-4b8c-9d0e-1f2a3b4c5d6e';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyA, $idemKeyB]);
         $probe->disconnect();
 
@@ -1579,12 +1595,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
                         public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                         {
-                            return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                            return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                         }
 
                         public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                         {
-                            return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                            return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                         }
 
                         public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -1597,10 +1613,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                             // The finalize never lands (crash window).
                         }
 
-                        public function stored(string $backendId, string $idempotencyKey): ?array
-                        {
-                            return $this->inner->stored($backendId, $idempotencyKey);
-                        }
+                        public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
                     };
                     $controller = new SiteVerifyController(
                         new Verifier($storage),
@@ -1753,9 +1769,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuidK = 'f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c';
         $uuidK2 = 'a3b4c5d6-7e8f-4a9b-8c0d-1e2f3a4b5c6d';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyK = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
-        $idemKeyK2 = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKeyK = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
+        $idemKeyK2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
         $probe->del([$idemKeyK, $idemKeyK2]);
         $fingerprintK = hash('sha256', $backendId."\0".$uuidK."\0".hash('sha256', $token)."\0".hash_hmac('sha256', 'siteverify-idem-ip-v1|127.0.0.1', self::SECRET)."\0"."\0no-binding");
 
@@ -1790,12 +1806,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
                 public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
-                    return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                    return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                 }
 
                 public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
-                    return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                    return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
                 }
 
                 public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -1810,9 +1826,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     throw new \RuntimeException('finalize outage');
                 }
 
-                public function stored(string $backendId, string $idempotencyKey): ?array
+                public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
                 {
-                    return $this->inner->stored($backendId, $idempotencyKey);
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
                 }
             };
             $bController = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $finalizeThrowing, null, 0.5);
@@ -1821,7 +1837,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             ]));
             self::assertSame(503, $bResponse->getStatusCode(), 'the takeover owner\'s crashed finalize must map to the retryable internal-error');
             self::assertSame(['internal-error'], json_decode((string) $bResponse->getContent(), true)['error-codes']);
-            self::assertNull($store->stored($backendId, $uuidK), 'B crashed before the Siteverify finalize — the entry stays pending');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidK, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'B crashed before the Siteverify finalize — the entry stays pending',
+            );
             $consumed = $storage->consumedState($challenge->nonce);
             self::assertNotNull($consumed, 'B consumed and committed the token');
             self::assertNotNull($consumed->consumedResult, 'B committed its success');
@@ -1910,8 +1929,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuid = 'a1a2a3a4-5b6c-4d7e-8f90-1a2b3c4d5e6f';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // A short fixed store lease (3s) with a waiter bound above it
@@ -1977,7 +1996,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'an indeterminate consume must map to the retryable 503 internal-error, never a permanent duplicate');
             self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-            self::assertNull($store->stored($backendId, $uuid), 'the indeterminate consume must NOT finalize the claim — the entry stays pending');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the indeterminate consume must NOT finalize the claim — the entry stays pending',
+            );
             self::assertNull($storage->consumedState($challenge->nonce), 'the transition never executed — the challenge stays perfectly redeemable');
 
             // Wait out the 3s lease (Redis time is the lease clock).
@@ -2042,8 +2064,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuid = 'b2b3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // A short fixed store lease (3s) with a waiter bound above it
@@ -2057,12 +2079,22 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // throws, so the request answers the retryable 503 even though the
         // transition + deterministic commit landed. Everything else
         // delegates.
-        $lostAfterTransition = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
-            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+        $lostAfterTransition = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface, \KiwiCaptcha\AuthenticatedResultCommitInterface {
+            public function __construct(private readonly RedisStorage $inner)
             {
             }
 
             private bool $responseLost = false;
+
+            public function commitAuthenticatedResult(string $nonce, \KiwiCaptcha\ConsumedResult $result): bool
+            {
+                return $this->inner->commitAuthenticatedResult($nonce, $result);
+            }
+
+            public function commitAuthenticatedResultResume(string $nonce, \KiwiCaptcha\ConsumedResult $result, string $owner): bool
+            {
+                return $this->inner->commitAuthenticatedResultResume($nonce, $result, $owner);
+            }
 
             public function store(\KiwiCaptcha\ChallengeRecord $record): void
             {
@@ -2120,7 +2152,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'a lost response after the consume transition must map to the retryable 503 internal-error');
             self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-            self::assertNull($store->stored($backendId, $uuid), 'the lost response must NOT finalize the claim — the entry stays pending');
+            self::assertNull(
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the lost response must NOT finalize the claim — the entry stays pending',
+            );
             $consumed = $storage->consumedState($challenge->nonce);
             self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
             self::assertSame(

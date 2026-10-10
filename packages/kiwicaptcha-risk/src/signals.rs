@@ -60,6 +60,12 @@ impl SignalVector {
 /// [`SignalVector`]. Both crates use the identical field names and
 /// fixed-point semantics (PHP mirror: honeypot, sessionInconsistency,
 /// tlsInconsistency).
+///
+/// There is deliberately no execution-evidence field: execution traces
+/// and digests are forgeable without a browser by a full-knowledge
+/// forger (the v6 envelopes are public functions of the shipped
+/// operands; measured pass rate 1.0), so they are never weighted as
+/// proof of a real browser anywhere in the risk engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RiskV2Signals {
     /// Honeypot/decoy evidence: `1000` when ANY honeypot event kind fired or
@@ -74,6 +80,14 @@ pub struct RiskV2Signals {
     /// when consistent or when no tag exists (first request / absent /
     /// over-bound value).
     pub tls_inconsistency: u16,
+    /// Target-account authentication-failure pressure: the bounded
+    /// leaky-bucket count of failures against this target, normalized
+    /// against the attack threshold so a stuffed target raises the score.
+    pub target_failure_pressure: u16,
+    /// Wider of the distinct-source and distinct-ASN spreads of the
+    /// failures against this target, normalized (never the sum) so a
+    /// wide spray raises the score.
+    pub target_spread: u16,
 }
 
 impl RiskV2Signals {

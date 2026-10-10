@@ -78,8 +78,8 @@ final class ProcessEmergencyCap
         if ($processPerSecond < 1) {
             throw new \InvalidArgumentException('Limiter window must be >= 1');
         }
-        if ($warmupRampSecs < 0.0) {
-            throw new \InvalidArgumentException('warmupRampSecs must be >= 0 (0 disables the ramp)');
+        if (!\is_finite($warmupRampSecs) || $warmupRampSecs < 0.0) {
+            throw new \InvalidArgumentException('warmupRampSecs must be finite and >= 0 (0 disables the ramp)');
         }
         $this->startedAtNs = hrtime(true);
         $this->stamps = new \SplQueue();

@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecu
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\SolutionToken;
@@ -19,6 +20,7 @@ use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\VerifyOutcome;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -244,6 +246,8 @@ final class SiteVerifyController
          * never needed here, matching the provider contract.
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway $riskGateway = null,
+        private readonly string $logGateNamespace = 'kiwicaptcha',
+        private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
         // The lease-ordering invariant is enforced at construction. The
@@ -309,7 +313,16 @@ final class SiteVerifyController
         $binary = @inet_pton($trimmed);
         $canonical = null;
         if ($binary !== false) {
-            if (\strlen($binary) === 16 && str_starts_with($binary, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
+            if (\strlen($binary) === 16
+                && (str_starts_with($binary, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")
+                    || (str_starts_with($binary, str_repeat("\x00", 12))
+                        && substr($binary, 12) !== "\x00\x00\x00\x00"
+                        && substr($binary, 12) !== "\x00\x00\x00\x01"))) {
+                // Both IPv4-mapped (::ffff:a.b.c.d) and the deprecated
+                // IPv4-compatible (::a.b.c.d, excluding :: and ::1)
+                // spellings fold to the 4-byte IPv4 form, exactly like
+                // Issuer::canonicalIpFamily() and the Rust core: one
+                // address must produce one idempotency pseudonym.
                 $binary = substr($binary, 12);
             }
             $canonical = (string) inet_ntop($binary);
@@ -337,15 +350,31 @@ final class SiteVerifyController
 
     private function logGateKey(): string
     {
-        return '{kiwicaptcha}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
+        // The invalid-secret diagnostic budget is a deployment key like
+        // every other one: two deployments sharing a Redis instance must
+        // not consume (and therefore suppress) each other's diagnostics.
+        return '{kiwi:'.RedisNamespace::deriveOr($this->logGateNamespace, 'kiwicaptcha', $this->namespaceKeyVersion)
+            .'}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
     }
 
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
     public function siteverify(Request $request): Response
     {
+        // Path canonicality: the raw request target must be the canonical
+        // origin-form path (the same shared gate as the native endpoints,
+        // {@see FramingChecksTrait::isCanonicalRequestTarget()}). A
+        // noncanonical target (matrix-parameter segment, trailing dot,
+        // fragment, absolute-form scheme+host, percent-encoded or dot
+        // segment) is a provider bad-request before any handling: an
+        // intermediary that normalizes the target must never create a
+        // second spelling of the endpoint.
+        if (!$this->isCanonicalRequestTarget((string) $request->getRequestUri())) {
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+
         if ($this->siteverifySecrets === []) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
+            return $this->privateJson(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
 
         // The universal canonical-framing rule (the ONE definition of the
@@ -356,14 +385,14 @@ final class SiteVerifyController
         // Content-Encoding singular + identity only (the provider
         // contract never compresses).
         if (!$request->isMethod('POST')) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         if (!$this->framingHeadersAcceptable($request)) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $contentEncoding = strtolower(trim((string) $request->headers->get('Content-Encoding', '')));
         if ($contentEncoding !== '' && $contentEncoding !== 'identity') {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
 
         // The body is read with a hard byte cap: at most MAX_BODY_BYTES +
@@ -375,12 +404,12 @@ final class SiteVerifyController
         // already-materialized content is length-guarded directly too.
         $requestBody = $this->readBoundedBody($request);
         if (\strlen($requestBody) > self::MAX_BODY_BYTES) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
         }
 
         $body = $this->parseBody($request, $requestBody);
         if ($body === null) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
@@ -396,10 +425,10 @@ final class SiteVerifyController
         // fits comfortably under 8192, the documented bound here (the
         // 16 KiB whole-body ceiling stays as the outer envelope).
         if (!\is_string($response) || $response === '') {
-            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['missing-input-response']]);
         }
         if (\strlen($response) > self::MAX_RESPONSE_BYTES) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
         // The remoteip is validated early, before any idempotency claim or
@@ -410,11 +439,20 @@ final class SiteVerifyController
         // Whitespace-only is treated as absent (the provider 'no-ip'
         // semantics); a null remoteip is unchanged.
         if ($remoteIp !== null) {
+            // A raw control byte is never optional whitespace: reject it
+            // before the trim below can launder a padded value into a
+            // valid address.
+            if (preg_match('/[\x00-\x1F\x7F]/', $remoteIp) === 1) {
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
             $remoteIp = trim($remoteIp);
             if ($remoteIp === '') {
                 $remoteIp = null;
-            } elseif (@inet_pton($remoteIp) === false) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            } elseif (filter_var($remoteIp, FILTER_VALIDATE_IP) === false) {
+                // The strict validator, not inet_pton: the platform's
+                // inet_pton accepts some non-canonical IPv4 spellings
+                // (leading-zero forms among them).
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
         }
 
@@ -423,10 +461,10 @@ final class SiteVerifyController
         // attacker-controlled shapes).
         if ($idempotencyKey !== null) {
             if (!\preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $idempotencyKey)) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($this->idempotencyStore === null) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
         }
 
@@ -440,10 +478,16 @@ final class SiteVerifyController
         if (!\is_string($secret) || $secret === '') {
             $this->noteInvalidSecret('missing', $this->logGateKey());
 
-            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-secret']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['missing-input-secret']]);
         }
         foreach ($this->siteverifySecrets as $configuredSecret => $scope) {
-            if (hash_equals($configuredSecret, $secret)) {
+            // The configured secret is cast to string before the
+            // constant-time comparison: a canonical-decimal secret key is
+            // coerced to an integer array key by PHP itself, and
+            // hash_equals(int, string) is a TypeError under strict_types
+            // that would fail every request with a 500. The cast never
+            // weakens the comparison — the bytes are identical.
+            if (hash_equals((string) $configuredSecret, $secret)) {
                 $expectedScope = $scope;
                 break;
             }
@@ -451,7 +495,7 @@ final class SiteVerifyController
         if ($expectedScope === null) {
             $this->noteInvalidSecret('invalid', $this->logGateKey());
 
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
 
         // The security-policy epoch is refreshed at the start of every
@@ -489,7 +533,11 @@ final class SiteVerifyController
         // the idempotency namespace instead of returning the historical
         // answer, exactly as the native hard-security verdicts dominate
         // even a same-operation retry.
-        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch.'|'.$this->securityContextDigest);
+        // The backend namespace id is keyed (HMAC), never a raw hash of
+        // secret-prefixed data: the secret is the HMAC key, so the
+        // digest carries no length-extension structure and cannot be
+        // recomputed by anyone who learns the namespace inputs alone.
+        $backendId = hash_hmac('sha256', $expectedScope.'|'.$effectiveEpoch.'|'.$this->securityContextDigest, $secret);
 
         // The authoritative transaction binding, resolved before any
         // claim or verification: when a request-binding authority is
@@ -531,7 +579,7 @@ final class SiteVerifyController
             try {
                 $resolved = $this->bindingAuthority->resolve($request, $expectedScope, $presentedBinding);
             } catch (\InvalidArgumentException) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             } catch (\Throwable) {
                 return $this->internalErrorResponse();
             }
@@ -541,7 +589,7 @@ final class SiteVerifyController
             // outside it is refused at the trust boundary, never allowed
             // into the idempotency fingerprint/store.
             if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $resolved) !== 1) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             $canonicalBinding = $resolved;
         } else {
@@ -557,7 +605,7 @@ final class SiteVerifyController
             // secret is the authentication gate; a browser cannot reach
             // this path).
             if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/', $presentedBinding) !== 1) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             $canonicalBinding = $presentedBinding;
         }
@@ -578,6 +626,14 @@ final class SiteVerifyController
         // when the record's identity equals this claim's fingerprint,
         // written atomically with the state flip.
         $operationFingerprint = hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprint($remoteIp)."\0".($canonicalBinding ?? "\0no-binding"));
+        // The operation identity every idempotency transition and every
+        // operation-bound acceptance read must be bound to: computed once
+        // per request, so a later stored-result read re-proves exactly
+        // what the claim proved and can never accept a reused key that
+        // now belongs to a different operation (an ABA).
+        $idempotencyResponseHash = hash('sha256', $response);
+        $idempotencyFingerprint = $this->remoteipFingerprint($remoteIp);
+        $idempotencyBindingDigest = $this->idempotencyBinding($canonicalBinding) ?? '';
 
         // The token is decoded before the claim so a malformed token is a
         // deterministic failure: the claiming request finalizes it, so a
@@ -618,7 +674,7 @@ final class SiteVerifyController
             $claimOwner = null;
             if ($idempotencyKey !== null && $this->idempotencyStore !== null) {
                 try {
-                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
+                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, $idempotencyResponseHash, 300, $idempotencyFingerprint, null, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     // The malformed-token claim is a raw store operation:
                     // nothing has been consumed (the decode failed), so a
@@ -628,22 +684,30 @@ final class SiteVerifyController
                 }
             }
             if ($claim === IdempotencyClaim::Conflict) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($claim === IdempotencyClaim::CompleteSame) {
+                // The acceptance is operation-bound: a key that expired
+                // and was reused by a different operation reads as
+                // Changed, never as this request's cached result.
                 try {
-                    $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
-                } catch (SiteVerifyIdempotencyCorruptException $e) {
-                    // Corrupt security state is never "nothing here": the
-                    // typed fail-closed 503, never a fresh claim.
-                    error_log(sprintf('kiwicaptcha: corrupt siteverify idempotency record: %s', $e->getMessage()));
-
-                    return $this->internalErrorResponse();
+                    $lookup = $this->idempotencyStore->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
+                if ($lookup->kind === StoredLookupKind::CompleteSame && $lookup->result !== null) {
+                    return $this->privateJson($this->canonicalizeResponse($lookup->result));
+                }
+                if ($lookup->kind === StoredLookupKind::Changed || $lookup->kind === StoredLookupKind::Corrupt) {
+                    // Corrupt security state is never "nothing here", and
+                    // a reused key is never this operation's result: the
+                    // typed fail-closed 503 in both cases.
+                    $this->logGate('kiwicaptcha: operation-bound siteverify read refused: {message}', ['message' => $lookup->kind->value]);
 
-                return new JsonResponse($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+                    return $this->internalErrorResponse();
+                }
+
+                return $this->privateJson(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             $canonical = $this->canonicalizeResponse([
                 'success' => false,
@@ -658,7 +722,7 @@ final class SiteVerifyController
                 }
             }
 
-            return new JsonResponse($canonical);
+            return $this->privateJson($canonical);
         }
 
         // Provider-style verification idempotency. The claim is atomic;
@@ -683,7 +747,7 @@ final class SiteVerifyController
         if ($idempotencyKey !== null) {
             $idempotent = true;
             try {
-                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
+                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, $idempotencyResponseHash, 300, $idempotencyFingerprint, null, $idempotencyBindingDigest);
             } catch (\Throwable) {
                 // The claim is a raw store operation (a Redis outage):
                 // nothing has been consumed yet, so a same-key retry is
@@ -692,29 +756,33 @@ final class SiteVerifyController
                 return $this->internalErrorResponse();
             }
             if ($claim === IdempotencyClaim::Conflict) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($claim === IdempotencyClaim::CompleteSame) {
+                // The acceptance is operation-bound: a key that expired
+                // and was reused by a different operation reads as
+                // Changed, never as this request's cached result.
                 try {
-                    $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
-                } catch (SiteVerifyIdempotencyCorruptException $e) {
-                    // Corrupt security state is never "nothing here": the
-                    // typed fail-closed 503, never a fresh claim.
-                    error_log(sprintf('kiwicaptcha: corrupt siteverify idempotency record: %s', $e->getMessage()));
-
-                    return $this->internalErrorResponse();
+                    $lookup = $this->idempotencyStore->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
-                if ($stored !== null) {
-                    if (($stored['success'] ?? false) === true) {
-                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                if ($lookup->kind === StoredLookupKind::CompleteSame && $lookup->result !== null) {
+                    if (($lookup->result['success'] ?? false) === true) {
+                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($lookup->result));
                     }
 
-                    return new JsonResponse($this->canonicalizeResponse($stored));
+                    return $this->privateJson($this->canonicalizeResponse($lookup->result));
+                }
+                if ($lookup->kind === StoredLookupKind::Changed || $lookup->kind === StoredLookupKind::Corrupt) {
+                    // A reused key (ABA) or corrupt state: the typed
+                    // fail-closed 503, never the new operation's result.
+                    $this->logGate('kiwicaptcha: operation-bound siteverify read refused: {message}', ['message' => $lookup->kind->value]);
+
+                    return $this->internalErrorResponse();
                 }
 
-                return new JsonResponse(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+                return $this->privateJson(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             if ($claim === IdempotencyClaim::Claimed) {
                 $claimedAt = microtime(true);
@@ -753,8 +821,13 @@ final class SiteVerifyController
             $leaseProbed = false;
             $takeoverArmed = false;
             while (true) {
+                // Every poll is operation-bound: it re-proves the exact
+                // response hash, remoteip fingerprint and binding digest
+                // that produced the PendingSame, so a key that expired and
+                // was reused by a different operation can never hand this
+                // waiter the new operation's result.
                 try {
-                    $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+                    $lookup = $this->idempotencyStore->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     // The wait-loop reads are raw store operations: a
                     // failure maps to the retryable provider error (the
@@ -762,8 +835,16 @@ final class SiteVerifyController
                     // 500.
                     return $this->internalErrorResponse();
                 }
-                if ($stored !== null) {
+                if ($lookup->kind === StoredLookupKind::CompleteSame) {
+                    $stored = $lookup->result;
                     break;
+                }
+                if ($lookup->kind === StoredLookupKind::Changed || $lookup->kind === StoredLookupKind::Corrupt) {
+                    // The key was reused by a different operation (an ABA)
+                    // or the record is corrupt: the waiter refuses with
+                    // the retryable provider error, never with the new
+                    // operation's result.
+                    return $this->internalErrorResponse();
                 }
                 if (microtime(true) >= $waitDeadline) {
                     // Hard bound without ownership: no stored result and
@@ -825,7 +906,7 @@ final class SiteVerifyController
                     return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
                 }
 
-                return new JsonResponse($this->canonicalizeResponse($stored));
+                return $this->privateJson($this->canonicalizeResponse($stored));
             }
         }
 
@@ -925,7 +1006,7 @@ final class SiteVerifyController
                 return $this->releaseAndJsonResponse($resumeOutcome->nonce(), $canonical);
             }
 
-            return new JsonResponse($canonical);
+            return $this->privateJson($canonical);
         }
 
         // The same atomic verifier as the native path, with the expected
@@ -977,15 +1058,23 @@ final class SiteVerifyController
         // SolveSuccess repays the issuance debt only, and the failure
         // classes enrich the model. The measured solve duration rides
         // along (null-safe through the core's additive solve-duration
-        // surface, see RiskGateway::solveDurationMsOf()).
-        $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error, null, \BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway::solveDurationMsOf($outcome));
+        // surface, see RiskGateway::solveDurationMsOf()). Evidence only:
+        // the token is already consumed at this point, so a risk-Redis
+        // outage must never turn a valid proof into the retryable
+        // provider error (an idempotency-less caller would retry a
+        // consumed token and get timeout-or-duplicate).
+        try {
+            $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error, null, \BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway::solveDurationMsOf($outcome));
+        } catch (\Throwable) {
+            // Evidence only.
+        }
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
             // the core's IP canonicalization cannot throw here. An
             // unexpected InvalidArgumentException maps to the provider
             // bad-request JSON; exceptions must not cross the HTTP
             // compatibility boundary.
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         } catch (\Throwable) {
             // Hardened boundary tail: anything else escaping the verifier
             // (a storage failure past its own internal handling) maps to
@@ -1009,17 +1098,21 @@ final class SiteVerifyController
                 // expired mid-verification): the local result is not
                 // authoritative. Return the stored authoritative result,
                 // or a retryable provider error when none exists yet.
+                // The recovery read is operation-bound too: it accepts
+                // only this operation's completed result, so a reused key
+                // (an ABA) maps to the retryable provider error instead of
+                // crossing the results of two logical operations.
                 try {
-                    $stored = $this->idempotencyStore?->stored($backendId, $idempotencyKey);
+                    $lookup = $this->idempotencyStore?->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
-                if ($stored !== null) {
-                    if (($stored['success'] ?? false) === true) {
-                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                if ($lookup !== null && $lookup->kind === StoredLookupKind::CompleteSame && $lookup->result !== null) {
+                    if (($lookup->result['success'] ?? false) === true) {
+                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($lookup->result));
                     }
 
-                    return new JsonResponse($this->canonicalizeResponse($stored));
+                    return $this->privateJson($this->canonicalizeResponse($lookup->result));
                 }
 
                 return $this->internalErrorResponse();
@@ -1105,7 +1198,7 @@ final class SiteVerifyController
             }
         }
 
-        return new JsonResponse($canonical);
+        return $this->privateJson($canonical);
     }
 
     /**
@@ -1169,7 +1262,46 @@ final class SiteVerifyController
      */
     private function internalErrorResponse(): JsonResponse
     {
-        return new JsonResponse(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
+        return $this->privateJson(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    /**
+     * The gate-path diagnostic channel: the backend exception detail
+     * reaches the injected logger (structured, PSR-3 context), never the
+     * provider response and never the raw SAPI log stream. A raising or
+     * absent logger must never turn a guarded failure into a 500.
+     *
+     * @param array<string, string> $context
+     */
+    private function logGate(string $message, array $context = []): void
+    {
+        try {
+            $this->logger?->warning($message, $context);
+        } catch (\Throwable) {
+            // A raising logger must never break the guarded path.
+        }
+    }
+
+    /**
+     * Every SiteVerify response shares the private-document headers of
+     * the native endpoints, {@see ChallengeController::privateJson()}:
+     * Cache-Control no-store/private, Pragma no-cache, Referrer-Policy
+     * no-referrer and X-Content-Type-Options nosniff. Verification
+     * outcomes and the error-code vocabulary (which narrows the cause of
+     * a refusal) are therefore never cached, mirrored or sniffed by an
+     * intermediary.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function privateJson(array $data, int $status = Response::HTTP_OK): JsonResponse
+    {
+        $response = new JsonResponse($data, $status);
+        $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
+        $response->headers->set('Pragma', 'no-cache');
+        $response->headers->set('Referrer-Policy', 'no-referrer');
+        $response->headers->set('X-Content-Type-Options', 'nosniff');
+
+        return $response;
     }
 
     /**
@@ -1290,7 +1422,7 @@ final class SiteVerifyController
     {
         $this->outstanding?->solved($nonce);
 
-        return new JsonResponse($canonical);
+        return $this->privateJson($canonical);
     }
 
     private function outcomeToCanonical(VerifyOutcome $outcome): array|JsonResponse
@@ -1326,7 +1458,10 @@ final class SiteVerifyController
                 $record = $this->storage->find($outcome->nonce());
                 if ($record !== null) {
                     $issuedAt = $record->issuedAt;
-                    $hostname = $record->hostname;
+                    // The hostname is record metadata outside the signed
+                    // canonical: echoed only when its server-state MAC
+                    // verifies, never a storage writer's rewrite.
+                    $hostname = $this->verifier->authenticatedHostname($record, $this->secretKey);
                 }
             }
             $action = null;
@@ -1466,6 +1601,10 @@ LUA;
      * chunked body is refused by the caller's length check without ever
      * being materialized in full. When Symfony hands back a buffered
      * stream (tests, already-consumed input), the read is still bounded.
+     * When no stream resource is available at all, the fallback is the
+     * empty string — never the unbounded buffered content — so the
+     * caller's strict decoder refuses the request instead of
+     * materializing a body the byte cap never measured.
      */
     private function readBoundedBody(Request $request): string
     {
@@ -1474,7 +1613,7 @@ LUA;
             return (string) stream_get_contents($stream, self::MAX_BODY_BYTES + 1);
         }
 
-        return (string) $request->getContent();
+        return '';
     }
 
     /**
@@ -1566,7 +1705,18 @@ LUA;
         if ($request->query->count() > 0) {
             return null;
         }
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $rawContentType = (string) $request->headers->get('Content-Type', '');
+        // A raw control byte is not optional whitespace: reject it before
+        // the split and trim below can launder a padded value into a
+        // valid media type. A comma is the collapsed-duplicate marker
+        // (two occurrences folded into one field value): the split on
+        // ';' below would otherwise accept "application/json; c=1,
+        // text/plain" as application/json while another layer reads a
+        // two-type list. No accepted media type uses a comma parameter.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1 || str_contains($rawContentType, ',')) {
+            return null;
+        }
+        $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
         if ($contentType === 'application/json') {
             // The shared raw-document duplicate-key scanner:
             // {"secret":"A","secret":"B"} is refused, never silently

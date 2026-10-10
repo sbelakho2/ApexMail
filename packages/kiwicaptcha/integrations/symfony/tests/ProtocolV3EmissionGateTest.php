@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\LoggerSpy;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
@@ -24,7 +25,6 @@ use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
-use Psr\Log\LoggerInterface;
 
 /**
  * The protocol-v3/v4 two-phase rollout gate: the challenge
@@ -74,8 +74,8 @@ final class ProtocolV3EmissionGateTest extends TestCase
             $classifier = new CidrNetworkClassifier([]);
             $policy = RiskPolicy::fromConfig([
                 'version' => RiskPolicy::CONTRACT_VERSION,
-                'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+                'weights' => [],
                 'scopes' => [
                     1 => ['base_risk' => 100, 'minimum' => $minimum, 'post_solve_check' => false, 'degraded' => 'allow'],
                 ],
@@ -448,57 +448,5 @@ final class ProtocolV3EmissionGateTest extends TestCase
         self::assertSame(3, $record->protocolVersion);
         self::assertNull($record->executionProgram);
         self::assertSame([], $stack['logger']->warnings, 'the off gate needs no warning');
-    }
-}
-
-/**
- * Minimal PSR-3 logger spy: records warnings and infos in-process so the
- * gate tests can assert the once-per-process warning without a real
- * logger backend.
- */
-final class LoggerSpy implements LoggerInterface
-{
-    /** @var list<string> */
-    public array $warnings = [];
-
-    /** @var list<string> */
-    public array $infos = [];
-
-    public function warning(string|\Stringable $message, array $context = []): void
-    {
-        $this->warnings[] = (string) $message;
-    }
-
-    public function info(string|\Stringable $message, array $context = []): void
-    {
-        $this->infos[] = (string) $message;
-    }
-
-    public function emergency(string|\Stringable $message, array $context = []): void
-    {
-    }
-
-    public function alert(string|\Stringable $message, array $context = []): void
-    {
-    }
-
-    public function critical(string|\Stringable $message, array $context = []): void
-    {
-    }
-
-    public function error(string|\Stringable $message, array $context = []): void
-    {
-    }
-
-    public function notice(string|\Stringable $message, array $context = []): void
-    {
-    }
-
-    public function debug(string|\Stringable $message, array $context = []): void
-    {
-    }
-
-    public function log($level, string|\Stringable $message, array $context = []): void
-    {
     }
 }

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RollbackFakeRedis;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
@@ -60,6 +62,9 @@ use Symfony\Component\Validator\Validation;
  */
 final class ChainedChallengeTest extends TestCase
 {
+    /** The widget solver's hash cap: a counter at or beyond it is not a legitimate solution. */
+    private const SOLVER_CAP = 5_000_000;
+
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
     /** The ExecutionChallengeV1 keyed-PRF key of the execution tests. */
@@ -128,6 +133,7 @@ final class ChainedChallengeTest extends TestCase
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
         $policyConfig = [
             'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'weights' => [],
             'scopes' => [],
         ];
@@ -260,12 +266,16 @@ final class ChainedChallengeTest extends TestCase
      *
      * @param array<string, mixed> $challenge
      */
-    private function winningCounter(array $challenge): int
+    private function winningCounter(array $challenge): ?int
     {
+        // Bounded by the widget solver's hash cap: a counter at or
+        // beyond it is not a legitimate solution (the token codec
+        // refuses it), so the solver reports the honestly unsolvable
+        // draw as null instead of searching past the wire contract.
         $saltBytes = base64_decode($challenge['salt'], true);
         $counter = 0;
-        if (($challenge['algorithm'] ?? 'sha256') === 'argon2id') {
-            do {
+        while ($counter < self::SOLVER_CAP) {
+            if (($challenge['algorithm'] ?? 'sha256') === 'argon2id') {
                 $hash = sodium_crypto_pwhash(
                     32,
                     $challenge['prefix'].$counter,
@@ -274,16 +284,16 @@ final class ChainedChallengeTest extends TestCase
                     $challenge['mKib'] * 1024,
                     SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
                 );
-                $counter++;
-            } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
-        } else {
-            do {
+            } else {
                 $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
-                $counter++;
-            } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+            }
+            if (Verifier::leadingZeroBits($hash) >= $challenge['targetBits']) {
+                return $counter;
+            }
+            ++$counter;
         }
 
-        return $counter - 1;
+        return null;
     }
 
     /**
@@ -303,6 +313,11 @@ final class ChainedChallengeTest extends TestCase
         $digest = \KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($challenge['execution_program'], $challenge['nonce'], $trace);
         self::assertNotNull($digest, 'the digest over the canonical trace must compute');
         $counter = $this->winningCounter($challenge);
+        // The chained ladder's issued difficulties keep a draw's winning
+        // counter far inside the solver cap; the guard makes the
+        // astronomically rare beyond-cap draw a clear failure instead of
+        // a codec error.
+        self::assertNotNull($counter, 'the issued challenge carries no in-cap counter (a beyond-cap draw at these difficulties is not a plausible event)');
         usleep(((int) $challenge['minDurationMs'] + 10) * 1000);
 
         return \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [], $digest, base64_encode($trace))->encode();
@@ -425,6 +440,57 @@ final class ChainedChallengeTest extends TestCase
     }
 
     // ── Stage-1 verification opens the obligation-anchored chain ───────
+
+    public function testATicketlessFloodPerformsNoObligationReadsBeforeTheRateLimiterDenies(): void
+    {
+        // The admission ordering of the chain gate: a presented signed
+        // ticket is validated before the limiter (cheap, local crypto,
+        // and its one chain-record read is gated by possession of a
+        // server-signed one-shot ticket), but the ticketless obligation
+        // lookup runs only after the per-IP rate limiter admits the
+        // request — an unthrottled flood performs zero obligation reads
+        // before the limiter denies it.
+        $storage = new ArrayStorage();
+        $chainStore = new CountingChainStore(new ArrayChainedChallengeStateStore());
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA16_VECTOR), $resolver);
+        $service = $this->chainService($chainStore);
+        $limiter = new IssuanceRateLimiter(2, 60, pepper: 'chain-flood-test');
+
+        // An open obligation exists for the transaction (scope login,
+        // unbound transaction, policy epoch 1): every ticketless request
+        // of this transaction auto-resumes at stage 2 when admitted.
+        $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
+
+        $controller = new ChallengeController(
+            $this->issuer($storage),
+            $limiter,
+            true,
+            $risk['gateway'],
+            new ContinuityCookie(),
+            storage: $storage,
+            chainTickets: $service,
+            policyVersion: 1,
+        );
+
+        $obligationReadsBefore = $chainStore->obligationChainIdReads;
+        self::assertSame(0, $obligationReadsBefore, 'precondition: creating the obligation through the service is not a controller read');
+
+        // Flood: 5 ticketless requests from one source; the limiter
+        // admits 2 and denies 3.
+        $statuses = [];
+        for ($i = 0; $i < 5; $i++) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+            $statuses[] = $response->getStatusCode();
+        }
+        $denied = \count(array_filter($statuses, static fn (int $s): bool => $s === 429));
+        self::assertSame(3, $denied, 'the per-IP limiter denies the requests beyond the 2-per-window cap: '.implode(',', $statuses));
+
+        // Only the admitted requests read the obligation: the denied
+        // requests performed zero obligation reads before the limiter
+        // refused them.
+        self::assertSame(2, $chainStore->obligationChainIdReads, 'exactly the admitted requests perform the ticketless obligation lookup (never the denied ones)');
+    }
 
     public function testStage1VerifyIssuesChainTicketAndCreatesTheTransactionObligation(): void
     {
@@ -2588,7 +2654,7 @@ final class ChainedChallengeTest extends TestCase
         // The fixed-envelope Argon ladder is flattened to [1, 2, 3] so
         // the stage-2 Argon challenge solves fast in the test (the
         // strength ladder itself is covered elsewhere).
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 2, 3]);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 2, 3]);
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
 
         // Stage 1: solve + chain_required ticket (the reassessment
@@ -4945,5 +5011,102 @@ final class AbortAwareFakeRedis extends \Predis\Client
         }
 
         throw new \LogicException('unexpected script');
+    }
+}
+
+/**
+ * A transactional chain-state store that counts the obligation-read
+ * entry point (obligationChainId, the lookup behind the controller's
+ * ticketless auto-resume), so the admission-ordering test can assert
+ * exactly which requests performed the read.
+ */
+final class CountingChainStore implements TransactionalChainedChallengeStateStore
+{
+    public int $obligationChainIdReads = 0;
+
+    public function __construct(private readonly TransactionalChainedChallengeStateStore $inner)
+    {
+    }
+
+    public function obligationChainId(string $obligationId): ?string
+    {
+        $this->obligationChainIdReads++;
+
+        return $this->inner->obligationChainId($obligationId);
+    }
+
+    public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
+    {
+        return $this->inner->createOrGetObligation($obligationId, $chainId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $requiredRank, $policyVersion, $expiresAt, $ttlSecs);
+    }
+
+    public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
+    {
+        $this->inner->createWithObligation($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $ttlSecs);
+    }
+
+    public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
+    {
+        return $this->inner->reserve($chainId, $ownerToken, $leaseSecs);
+    }
+
+    public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
+    {
+        return $this->inner->markIssued($chainId, $ownerToken, $stage2Nonce);
+    }
+
+    public function markVerified(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markVerified($chainId, $stage2Nonce);
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markDenied($chainId, $stage2Nonce);
+    }
+
+    public function markTransactionDenied(string $chainId, string $obligationId): string
+    {
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
+    }
+
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
+    {
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
+    }
+
+    public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
+    {
+        return $this->inner->rearmIssued($chainId, $expectedStage2Nonce);
+    }
+
+    public function deleteObligation(string $chainId, string $obligationId): void
+    {
+        $this->inner->deleteObligation($chainId, $obligationId);
+    }
+
+    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
+    {
+        $this->inner->create($chainId, $stage1Nonce, $scope, $ttlSecs, $requestBinding, $requiredAction, $policyVersion);
+    }
+
+    public function read(string $chainId): ?array
+    {
+        return $this->inner->read($chainId);
+    }
+
+    public function release(string $chainId, string $ownerToken): void
+    {
+        $this->inner->release($chainId, $ownerToken);
+    }
+
+    public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
+    {
+        return $this->inner->complete($chainId, $ownerToken, $stage2Nonce);
     }
 }

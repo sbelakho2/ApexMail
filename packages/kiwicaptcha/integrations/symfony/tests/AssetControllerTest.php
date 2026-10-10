@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
+use BelConsulting\KiwiCaptchaBundle\Asset\AssetDigestIndex;
 use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -91,6 +92,62 @@ final class AssetControllerTest extends TestCase
     {
         $this->expectException(NotFoundHttpException::class);
         $this->controller()->asset(new Request(), 'logo', str_repeat('0', 64), 'js');
+    }
+
+    public function testIfNoneMatchMatchesWeakenedAndListValidators(): void
+    {
+        [$name, $hash, $full] = $this->assetFixture('runtime', 'kiwicaptcha-wasm.js', 'js');
+        foreach (['W/"'.$full.'"', '"other", "'.$full.'"', 'W/"other", W/"'.$full.'"'] as $header) {
+            $request = new Request();
+            $request->headers->set('If-None-Match', $header);
+            $response = $this->controller()->asset($request, $name, $hash, 'js');
+            self::assertSame(304, $response->getStatusCode(), $header.' must revalidate to 304 (RFC 7232 weak comparison and list forms)');
+        }
+    }
+
+    public function testTheDigestIndexServesTheSameBytesWithoutHashing(): void
+    {
+        $index = new AssetDigestIndex(self::ASSETS_DIR, sys_get_temp_dir().'/kiwi-asset-index-test-'.getmypid().'.php');
+        $controller = new AssetController(self::ASSETS_DIR, [], $index);
+        $body = (string) file_get_contents(self::ASSETS_DIR.'/widget-locales.js');
+        $hash = (string) $index->digest('widget-locales.js');
+        self::assertSame(hash('sha256', $body), $hash, 'the index digest is the exact file sha256');
+
+        $response = $controller->asset(new Request(), 'locales', $hash, 'js');
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame($body, $response->getContent());
+    }
+
+    public function testRollingDeployFallbackDirectoryServesPreviousReleaseBytes(): void
+    {
+        // The active node has new bytes; a page from the previous release
+        // still asks for the earlier content hash. The fallback directory
+        // (the previous release's Resources/public) answers instead of a
+        // 404, so lazy modules keep loading during the rollout.
+        $fallback = sys_get_temp_dir().'/kiwi-asset-fallback-'.getmypid();
+        @mkdir($fallback, 0o755, true);
+        $oldBytes = (string) file_get_contents(self::ASSETS_DIR.'/widget-driver.js')."
+// previous release
+";
+        file_put_contents($fallback.'/widget-driver.js', $oldBytes);
+        $oldHash = hash('sha256', $oldBytes);
+
+        $controller = new AssetController(self::ASSETS_DIR, [$fallback]);
+        $response = $controller->asset(new Request(), 'driver', $oldHash, 'js');
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame($oldBytes, $response->getContent(), 'the previous release bytes are served byte-exactly');
+
+        // Without the fallback the same request is a 404 (the documented
+        // degraded state).
+        try {
+            (new AssetController(self::ASSETS_DIR))->asset(new Request(), 'driver', $oldHash, 'js');
+            self::fail('an unknown hash without fallbacks must 404');
+        } catch (NotFoundHttpException) {
+            // Expected.
+        } finally {
+            @unlink($fallback.'/widget-driver.js');
+            @rmdir($fallback);
+        }
     }
 
     public function testIfNoneMatchReturns304(): void

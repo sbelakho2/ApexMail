@@ -75,6 +75,9 @@ class KiwiCaptchaType extends AbstractType
         // SRI digests. The 'inline' fallback when no runtime is wired
         // keeps the theme self-contained (it can emit no asset tags).
         $view->vars['asset_mode'] = $this->runtime?->assetMode() ?? 'inline';
+        // Once per page: the shared inline assets are emitted by the
+        // first widget only (the runtime claims them per request).
+        $view->vars['emit_assets'] = $this->runtime?->claimInlineAssets() ?? true;
         $view->vars['asset_tags'] = $this->runtime?->assetTags($options['nonce']) ?? '';
         $view->vars['runtime_src'] = $this->runtime?->runtimeSrc() ?? '';
         $view->vars['runtime_integrity'] = $this->runtime?->runtimeIntegrity() ?? '';

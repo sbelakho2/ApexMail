@@ -1,0 +1,234 @@
+{
+ "protocol": "risk-v2",
+ "contract": "kiwicaptcha.identity-v2/1",
+ "note": "The shared cross-language identity-vector corpus of change.md 3.1.1: canonical inputs (plain v4 and v6, the v4-mapped and deprecated v4-compatible v6 spellings, an unlisted v4 and v6 bucket), Unicode normalization-tricky targets, the boundary epochs 0, 1 and 4294967295 of the rotated dimensions, and absent optional dimensions. Each expected vector is the seven-dimension output both cores must reproduce byte for byte: the PHP reader test (tests/IdentityVectorsParityTest.php, RISK_IDENTITY_VECTORS_PATH override) and the Rust reader test (tests/identity_vectors.rs) derive from the identical inputs and compare every field, null for null.",
+ "master_key": "0123456789abcdef0123456789abcdef",
+ "asn_dataset": {
+  "relative_path": "../asn/sample-asn.tsv",
+  "sha256": "230cad5a0240996537420add32356c15482f7b6088faecd296edb12e8754fc5b"
+ },
+ "vectors": [
+  {
+   "name": "canonical_ipv4_all_dimensions",
+   "now_unix_secs": 1700000000,
+   "client_ip": "203.0.113.27",
+   "expected_asn_bucket": "a64500",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "principal_id": "principal-42",
+   "agent_key_id": "agent-key-7",
+   "target_raw": "A..B+tag@GoogleMail.com",
+   "target_normalized": "ab@gmail.com",
+   "expected": {
+    "source": "7c657eb27b23887860ca892ebb04fc3d",
+    "subnet": "7f3bdb915045b1b35a314f859332f3f3",
+    "asn": "13878f725e1738bbde27e45a395104cc",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": "83df3fc18cbcb30a3dca26d12ee95b05",
+    "target": "056b81ade2ce7ca686257d5837e96f79a068bfc0cd39e49f0fe2d1ea1c9674ed",
+    "agent": "2504e48ec6517e65dca09323aae4dcb2"
+   }
+  },
+  {
+   "name": "v4_mapped_v6_spelling",
+   "now_unix_secs": 1700000000,
+   "client_ip": "::ffff:203.0.113.27",
+   "expected_asn_bucket": "a64500",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "principal_id": "principal-42",
+   "agent_key_id": "agent-key-7",
+   "target_raw": "A..B+tag@GoogleMail.com",
+   "target_normalized": "ab@gmail.com",
+   "note": "The v4-mapped spelling derives the identical vector to canonical_ipv4_all_dimensions.",
+   "expected": {
+    "source": "7c657eb27b23887860ca892ebb04fc3d",
+    "subnet": "7f3bdb915045b1b35a314f859332f3f3",
+    "asn": "13878f725e1738bbde27e45a395104cc",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": "83df3fc18cbcb30a3dca26d12ee95b05",
+    "target": "056b81ade2ce7ca686257d5837e96f79a068bfc0cd39e49f0fe2d1ea1c9674ed",
+    "agent": "2504e48ec6517e65dca09323aae4dcb2"
+   }
+  },
+  {
+   "name": "plain_ipv6_unicode_target",
+   "now_unix_secs": 1700000000,
+   "client_ip": "2001:db8:1:2::99",
+   "expected_asn_bucket": "a64502",
+   "target_raw": "Straße",
+   "target_normalized": "straße",
+   "expected": {
+    "source": "29dc87dedf69ae0d3b869b30eedf6dc6",
+    "subnet": "06ea4b579ec489ca5e6f2aa02577fffd",
+    "asn": "460df80cf57b461b3fcda7d300368374",
+    "session": null,
+    "principal": null,
+    "target": "82adf56dd08c9ed56a685db69e367e78650d933154452fed369e00382e87ec32",
+    "agent": null
+   }
+  },
+  {
+   "name": "v6_sibling_same_64",
+   "now_unix_secs": 1700000000,
+   "client_ip": "2001:db8:1:2:ffff::1",
+   "expected_asn_bucket": "a64502",
+   "note": "A sibling host in the same /64 shares the source, subnet and asn pseudonyms with plain_ipv6_unicode_target.",
+   "expected": {
+    "source": "29dc87dedf69ae0d3b869b30eedf6dc6",
+    "subnet": "06ea4b579ec489ca5e6f2aa02577fffd",
+    "asn": "460df80cf57b461b3fcda7d300368374",
+    "session": null,
+    "principal": null,
+    "target": null,
+    "agent": null
+   }
+  },
+  {
+   "name": "boundary_epoch_zero",
+   "now_unix_secs": 0,
+   "client_ip": "192.0.2.44",
+   "expected_asn_bucket": "a64496",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "principal_id": "principal-42",
+   "agent_key_id": "agent-key-7",
+   "target_raw": "İstanbul",
+   "target_normalized": "i̇stanbul",
+   "expected": {
+    "source": "13c3f5e4d675252c39ad8316c25c84d3",
+    "subnet": "0000851e152dccada4c5526ea71d34a8",
+    "asn": "99449d579ecce28cdd0e7b646fd2f1ab",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": "83df3fc18cbcb30a3dca26d12ee95b05",
+    "target": "eaec964a7a3a9843f5dff29709d7b433dd87d4ef2e6b97ea58dd554bdee74526",
+    "agent": "2504e48ec6517e65dca09323aae4dcb2"
+   }
+  },
+  {
+   "name": "boundary_epoch_zero_late_in_window",
+   "now_unix_secs": 899,
+   "client_ip": "192.0.2.44",
+   "expected_asn_bucket": "a64496",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "principal_id": "principal-42",
+   "agent_key_id": "agent-key-7",
+   "target_raw": "İstanbul",
+   "target_normalized": "i̇stanbul",
+   "note": "Second 899 stays in epoch 0: the identical vector to boundary_epoch_zero.",
+   "expected": {
+    "source": "13c3f5e4d675252c39ad8316c25c84d3",
+    "subnet": "0000851e152dccada4c5526ea71d34a8",
+    "asn": "99449d579ecce28cdd0e7b646fd2f1ab",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": "83df3fc18cbcb30a3dca26d12ee95b05",
+    "target": "eaec964a7a3a9843f5dff29709d7b433dd87d4ef2e6b97ea58dd554bdee74526",
+    "agent": "2504e48ec6517e65dca09323aae4dcb2"
+   }
+  },
+  {
+   "name": "boundary_epoch_one",
+   "now_unix_secs": 900,
+   "client_ip": "192.0.2.44",
+   "expected_asn_bucket": "a64496",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "principal_id": "principal-42",
+   "agent_key_id": "agent-key-7",
+   "target_raw": "İstanbul",
+   "target_normalized": "i̇stanbul",
+   "expected": {
+    "source": "fa08c478537d80620939278025875a5b",
+    "subnet": "43b6b5dc82f6990bdced4cecfe39270c",
+    "asn": "99449d579ecce28cdd0e7b646fd2f1ab",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": "83df3fc18cbcb30a3dca26d12ee95b05",
+    "target": "eaec964a7a3a9843f5dff29709d7b433dd87d4ef2e6b97ea58dd554bdee74526",
+    "agent": "2504e48ec6517e65dca09323aae4dcb2"
+   }
+  },
+  {
+   "name": "boundary_epoch_u32_max",
+   "now_unix_secs": 3865470565500,
+   "client_ip": "198.51.100.200",
+   "expected_asn_bucket": "a64498",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "note": "The source and subnet epochs reach 4294967295 (2^32-1); the asn epoch reaches 178958822 under its six-hour window.",
+   "expected": {
+    "source": "1c13fc06e080da5a396753fb2052f4ed",
+    "subnet": "25d5cad6e98b4fea1234d8178f051560",
+    "asn": "eb39446eda1345d45f04fa71ef1139d4",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": null,
+    "target": null,
+    "agent": null
+   }
+  },
+  {
+   "name": "unlisted_v4_bucket",
+   "now_unix_secs": 1700000000,
+   "client_ip": "203.0.113.150",
+   "expected_asn_bucket": "u4/51968",
+   "agent_key_id": "agent-key-9",
+   "expected": {
+    "source": "e945ae7c4688083d8471cc820a94706b",
+    "subnet": "7f3bdb915045b1b35a314f859332f3f3",
+    "asn": "fb98b89f38c69f050a52ecff0f39ebc2",
+    "session": null,
+    "principal": null,
+    "target": null,
+    "agent": "8a910d370c9fb2ae24d12636bce88f59"
+   }
+  },
+  {
+   "name": "unlisted_v6_bucket_fullwidth_target",
+   "now_unix_secs": 1700000000,
+   "client_ip": "2620:fe::fe:ff",
+   "expected_asn_bucket": "u6/262000fe",
+   "session_cookie_hex": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+   "target_raw": "Ｕｓｅｒ＠Ｅｘａｍｐｌｅ．ｃｏｍ",
+   "target_normalized": "user@example.com",
+   "expected": {
+    "source": "82cd0fd233490982eadad19fb1881bfd",
+    "subnet": "7196478e9a6b2fb89a86303f4a5a79b7",
+    "asn": "bc1312d6b3376a98422d247bb9287f49",
+    "session": "536319028df4de0d1990c0c508d72766",
+    "principal": null,
+    "target": "be6ea96aee74c7ab4fcc9a7b0068619e72e0ea37b329e09c9c0282bd6941fbea",
+    "agent": null
+   }
+  },
+  {
+   "name": "v4_compatible_spelling",
+   "now_unix_secs": 0,
+   "client_ip": "::192.0.2.44",
+   "expected_asn_bucket": "a64496",
+   "session_cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+   "principal_id": "principal-42",
+   "agent_key_id": "agent-key-7",
+   "target_raw": "İstanbul",
+   "target_normalized": "i̇stanbul",
+   "note": "The deprecated v4-compatible spelling derives the identical vector to boundary_epoch_zero.",
+   "expected": {
+    "source": "13c3f5e4d675252c39ad8316c25c84d3",
+    "subnet": "0000851e152dccada4c5526ea71d34a8",
+    "asn": "99449d579ecce28cdd0e7b646fd2f1ab",
+    "session": "43248f0c5a95b9f183940f7af43f5161",
+    "principal": "83df3fc18cbcb30a3dca26d12ee95b05",
+    "target": "eaec964a7a3a9843f5dff29709d7b433dd87d4ef2e6b97ea58dd554bdee74526",
+    "agent": "2504e48ec6517e65dca09323aae4dcb2"
+   }
+  },
+  {
+   "name": "all_optional_absent",
+   "now_unix_secs": 1700000000,
+   "client_ip": "198.51.100.10",
+   "expected_asn_bucket": "a64498",
+   "expected": {
+    "source": "2eb9d22078c12a399da940c4b0677556",
+    "subnet": "5683c6a8f7280ea02ada19d26014f724",
+    "asn": "e31c343d2f3dd509dcbc0ac83903eb93",
+    "session": null,
+    "principal": null,
+    "target": null,
+    "agent": null
+   }
+  }
+ ]
+}

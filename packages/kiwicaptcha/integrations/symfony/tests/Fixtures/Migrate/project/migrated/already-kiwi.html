@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head>
+  <title>Acme sign in (migrated)</title>
+</head>
+<body>
+  <form method="post" action="/login" data-kiwi-scope="login">
+    <input type="hidden" name="kiwi__token" data-kiwi-token value="">
+    <script src="/kiwi-captcha/api.js?compat=recaptcha" defer></script>
+    <script src="/kiwi-captcha/widget-shims.js" data-kiwi-scope-map='{"login-key":"login"}' defer></script>
+    <textarea name="g-recaptcha-response" data-kiwi-response-alias style="display:none"></textarea>
+    <div class="kiwi-widget" data-kiwi-widget data-kiwi-started="1" data-state="idle" role="group"></div>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

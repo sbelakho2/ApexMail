@@ -1,0 +1,232 @@
+{
+    "version": 1,
+    "namespace": "d",
+    "handles": {
+        "principal": "9f1c4a7e2b8d63f05a1e9c4d7b2e6f18",
+        "target": "5e2a9b4c1d7f38e6a0b5c9d2e4f6a813",
+        "session": "c7b3e1f9a5d24708b6e0c8a2f4d69123",
+        "agent": "backfill-bot",
+        "decision": "d4e5f60718293a4b5c6d7e8f90a1b2c3",
+        "nonce": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+    },
+    "vectors": [
+        {
+            "outcome": "confirmedLegitimate",
+            "handle": {"dimension": "decisionId", "id": "d4e5f60718293a4b5c6d7e8f90a1b2c3"},
+            "accepted": true,
+            "channel_value": 12,
+            "ledger_action": "L",
+            "mark_kind": null,
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": true,
+            "writes_abuse_mark": false
+        },
+        {
+            "outcome": "confirmedLegitimate",
+            "handle": {"dimension": "principal", "id": "9f1c4a7e2b8d63f05a1e9c4d7b2e6f18"},
+            "accepted": true,
+            "channel_value": 12,
+            "ledger_action": "L",
+            "mark_kind": null,
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": true,
+            "writes_abuse_mark": false
+        },
+        {
+            "outcome": "confirmedLegitimate",
+            "handle": {"dimension": "nonce", "id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"},
+            "accepted": true,
+            "channel_value": 12,
+            "ledger_action": "L",
+            "mark_kind": null,
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": true,
+            "writes_abuse_mark": false
+        },
+        {
+            "outcome": "stepUpCompleted",
+            "handle": {"dimension": "principal", "id": "9f1c4a7e2b8d63f05a1e9c4d7b2e6f18"},
+            "accepted": true,
+            "channel_value": 8,
+            "ledger_action": null,
+            "mark_kind": null,
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": true,
+            "writes_abuse_mark": false
+        },
+        {
+            "outcome": "stepUpCompleted",
+            "handle": {"dimension": "decisionId", "id": "d4e5f60718293a4b5c6d7e8f90a1b2c3"},
+            "accepted": false,
+            "reject": "handle"
+        },
+        {
+            "outcome": "authenticationSuccess",
+            "handle": {"dimension": "session", "id": "c7b3e1f9a5d24708b6e0c8a2f4d69123"},
+            "accepted": true,
+            "channel_value": 10,
+            "ledger_action": null,
+            "mark_kind": null,
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": true,
+            "writes_abuse_mark": false
+        },
+        {
+            "outcome": "authenticationFailure",
+            "handle": {"dimension": "agent", "id": "backfill-bot"},
+            "accepted": true,
+            "channel_value": 11,
+            "ledger_action": null,
+            "mark_kind": null,
+            "mark_key": null,
+            "server_confirmed": false,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": false
+        },
+        {
+            "outcome": "authenticationFailure",
+            "handle": {"dimension": "nonce", "id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"},
+            "accepted": false,
+            "reject": "handle"
+        },
+        {
+            "outcome": "spamReported",
+            "handle": {"dimension": "target", "id": "5e2a9b4c1d7f38e6a0b5c9d2e4f6a813"},
+            "accepted": true,
+            "channel_value": 9,
+            "ledger_action": null,
+            "mark_kind": "spamReported",
+            "mark_key": "mark:{kiwi:d}:target:5e2a9b4c1d7f38e6a0b5c9d2e4f6a813",
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "spamReported",
+            "handle": {"dimension": "decisionId", "id": "d4e5f60718293a4b5c6d7e8f90a1b2c3"},
+            "accepted": false,
+            "reject": "handle"
+        },
+        {
+            "outcome": "chargeback",
+            "handle": {"dimension": "principal", "id": "9f1c4a7e2b8d63f05a1e9c4d7b2e6f18"},
+            "accepted": true,
+            "channel_value": 13,
+            "ledger_action": "A",
+            "mark_kind": "chargeback",
+            "mark_key": "mark:{kiwi:d}:principal:9f1c4a7e2b8d63f05a1e9c4d7b2e6f18",
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "chargeback",
+            "handle": {"dimension": "nonce", "id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"},
+            "accepted": true,
+            "channel_value": 13,
+            "ledger_action": "A",
+            "mark_kind": "chargeback",
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "accountBanned",
+            "handle": {"dimension": "session", "id": "c7b3e1f9a5d24708b6e0c8a2f4d69123"},
+            "accepted": true,
+            "channel_value": 13,
+            "ledger_action": "A",
+            "mark_kind": "accountBanned",
+            "mark_key": "mark:{kiwi:d}:session:c7b3e1f9a5d24708b6e0c8a2f4d69123",
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "accountBanned",
+            "handle": {"dimension": "decisionId", "id": "d4e5f60718293a4b5c6d7e8f90a1b2c3"},
+            "accepted": true,
+            "channel_value": 13,
+            "ledger_action": "A",
+            "mark_kind": "accountBanned",
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "fraudConfirmed",
+            "handle": {"dimension": "agent", "id": "backfill-bot"},
+            "accepted": true,
+            "channel_value": 13,
+            "ledger_action": "A",
+            "mark_kind": "fraudConfirmed",
+            "mark_key": "mark:{kiwi:d}:agent:backfill-bot",
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "fraudConfirmed",
+            "handle": {"dimension": "decisionId", "id": "d4e5f60718293a4b5c6d7e8f90a1b2c3"},
+            "accepted": true,
+            "channel_value": 13,
+            "ledger_action": "A",
+            "mark_kind": "fraudConfirmed",
+            "mark_key": null,
+            "server_confirmed": true,
+            "may_subtract_risk": false,
+            "writes_abuse_mark": true
+        },
+        {
+            "outcome": "chargeback",
+            "handle": {"dimension": "principal", "id": "user@example.com"},
+            "accepted": false,
+            "reject": "identifier"
+        },
+        {
+            "outcome": "spamReported",
+            "handle": {"dimension": "target", "id": "acct-2024-11"},
+            "accepted": false,
+            "reject": "identifier"
+        },
+        {
+            "outcome": "authenticationSuccess",
+            "handle": {"dimension": "session", "id": "short"},
+            "accepted": false,
+            "reject": "identifier"
+        },
+        {
+            "outcome": "fraudConfirmed",
+            "handle": {"dimension": "agent", "id": "agent:two"},
+            "accepted": false,
+            "reject": "identifier"
+        },
+        {
+            "outcome": "confirmedLegitimate",
+            "handle": {"dimension": "nonce", "id": ""},
+            "accepted": false,
+            "reject": "identifier"
+        }
+    ],
+    "store_marks": [
+        {
+            "dimension": "asn",
+            "id": "64496",
+            "kind": "fraudConfirmed",
+            "key": "mark:{kiwi:d}:asn:64496"
+        },
+        {
+            "dimension": "principal",
+            "id": "9f1c4a7e2b8d63f05a1e9c4d7b2e6f18",
+            "kind": "spamReported",
+            "key": "mark:{kiwi:d}:principal:9f1c4a7e2b8d63f05a1e9c4d7b2e6f18"
+        }
+    ]
+}

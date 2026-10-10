@@ -1,0 +1,94 @@
+{
+  "schema": "kiwicaptcha.autofill-qualification/1",
+  "note": "Machine-readable qualification matrix for the real autofill, password-manager and screen-reader surfaces. The surface ids and the required/advisory split are authoritative in tests/browser/qualification/surfaces.json (schema kiwicaptcha.autofill-surfaces/1); docs/autofill-qualification-protocol.md refers to the same ids. Every row must be executed on the listed surface with the exact version, and the decoy invariant must hold (legitimate fill never writes a value under the authenticated decoy name). Status values: manual_pending (no real qualification has happened), pass (the surface qualified with an exact version within the record window), fail, blocked. tested_at is the strict ISO-8601 date of the qualification run for a pass row; version is the exact tested surface version, and 'CURRENT' is a placeholder that may only ride a non-pass row. Nothing here is marked pass: no real qualification has happened yet, so the validator refuses this matrix as the release gate stands (fail-closed).",
+  "rows": [
+    {
+      "surface": "chrome-builtin-autofill",
+      "product": "Chrome built-in autofill",
+      "version": "CURRENT",
+      "platform": "desktop",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "edge-native-autofill",
+      "product": "Edge",
+      "version": "CURRENT",
+      "platform": "windows",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "firefox-native-autofill",
+      "product": "Firefox",
+      "version": "CURRENT",
+      "platform": "desktop",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "safari-autofill",
+      "product": "Safari",
+      "version": "CURRENT",
+      "platform": "macos",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "ios-safari",
+      "product": "iOS Safari",
+      "version": "CURRENT",
+      "platform": "ios",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "android-chrome",
+      "product": "Android Chrome",
+      "version": "CURRENT",
+      "platform": "android",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "icloud-keychain",
+      "product": "iCloud Keychain",
+      "version": "CURRENT",
+      "platform": "macos",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "1password",
+      "product": "1Password",
+      "version": "CURRENT",
+      "platform": "desktop",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "bitwarden",
+      "product": "Bitwarden",
+      "version": "CURRENT",
+      "platform": "desktop",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "voiceover-macos",
+      "product": "VoiceOver",
+      "version": "CURRENT",
+      "platform": "macos",
+      "status": "manual_pending",
+      "tested_at": null
+    },
+    {
+      "surface": "nvda-windows",
+      "product": "NVDA",
+      "version": "CURRENT",
+      "platform": "windows",
+      "status": "manual_pending",
+      "tested_at": null
+    }
+  ]
+}

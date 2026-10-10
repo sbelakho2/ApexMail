@@ -1,0 +1,23 @@
+diff --git a/services/mail-server/crates/api-server/src/routes/auth.rs b/services/mail-server/crates/api-server/src/routes/auth.rs
+index f58cc852..e7530f21 100644
+--- a/services/mail-server/crates/api-server/src/routes/auth.rs
++++ b/services/mail-server/crates/api-server/src/routes/auth.rs
+@@ -4144,7 +4144,6 @@ pub(crate) async fn verify_email_token(
+         "SELECT id, tenant_id, metadata->>'verification_expires' AS verification_expires
+          FROM users
+          WHERE metadata->>'verification_token_hash' = $1
+-           AND email_verified = false
+          LIMIT 1
+          FOR UPDATE",
+     )
+@@ -4197,10 +4196,8 @@ pub(crate) async fn verify_email_token(
+     // replay — including one that raced the SELECT — affects zero rows.
+     let consumed = sqlx::query(
+         "UPDATE users SET email_verified = true,
+-            metadata = metadata - 'verification_token_hash' - 'verification_token' - 'verification_expires',
+          updated_at = NOW()
+          WHERE id = $1
+-           AND email_verified = false
+            AND metadata->>'verification_token_hash' = $2",
+     )
+     .bind(user_id)

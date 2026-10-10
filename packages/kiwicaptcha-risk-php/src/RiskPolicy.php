@@ -20,10 +20,8 @@ namespace KiwiCaptcha\Risk;
  *        ],
  *     ].
  *     'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
- *     every level 0..4 declared exactly once; index 0 = 'allow'. A
- *     missing, partial or duplicated level is refused (the Rust
- *     reference parser's grammar; defaults are never substituted for an
- *     operator-omitted level).
+ *     with index 0 = 'allow' and levels 1..4 valid actions. Missing
+ *     levels 1..4 default from the built-in default floors.
  *
  * The `hash` is sha256 of the canonical JSON of the config (recursively
  * key-sorted, with unescaped slashes and unescaped unicode).
@@ -57,6 +55,7 @@ final class RiskPolicy
         public readonly string $hash,
         public readonly RiskWeights $weights,
         public readonly array $scopes,
+        public readonly array $defaultScope,
         public readonly array $globalFloors,
     ) {
     }
@@ -64,13 +63,43 @@ final class RiskPolicy
     /**
      * Parses and validates a policy config. Rejects: a version that does
      * not match the requested (default: contract) version, base_risk
-     * outside 0..1000, scope ids outside 1..4294967295, and global_floors
-     * that are not the five canonical levels 0..4 (index 0 = Allow,
-     * each level declared exactly once). Enforced in the parser itself,
-     * not only in the Symfony config layer, and identical to the Rust
-     * reference parser's acceptance set — a policy config one engine
-     * accepts is never refused (or silently re-defaulted) by the other.
+     * outside 0..1000, and scope ids outside 1..4294967295. Also
+     * rejected: a missing / short / malformed global_floors (exactly 5
+     * entries required, index 0 = Allow, entries 1..4 valid actions —
+     * fail-closed, identical to the Rust parser). Enforced in the
+     * parser itself, not only in the Symfony config layer.
      */
+    /**
+     * The unconfigured-scope row (`default_scope`): shaped exactly like a
+     * scope row and validated the same way. The built-in default is
+     * deliberately NOT Allow on any axis (100 / sha20 / false / sha20):
+     * a scope the operator forgot to list must not be the weakest hole in
+     * the policy.
+     *
+     * @return array{base_risk:int, minimum:RiskAction, post_solve_check:bool, degraded:RiskAction}
+     */
+    private static function parseDefaultScope(mixed $spec): array
+    {
+        if (!\is_array($spec)
+            || !isset($spec['base_risk'], $spec['minimum'], $spec['degraded'])
+            || !array_key_exists('post_solve_check', $spec)) {
+            throw new \InvalidArgumentException('default_scope requires base_risk, minimum, post_solve_check and degraded');
+        }
+        if (!\is_int($spec['base_risk']) || $spec['base_risk'] < 0 || $spec['base_risk'] > 1000) {
+            throw new \InvalidArgumentException('default_scope base_risk must be an int within 0..1000');
+        }
+        if (!\is_bool($spec['post_solve_check'])) {
+            throw new \InvalidArgumentException('default_scope post_solve_check must be a bool');
+        }
+
+        return [
+            'base_risk' => $spec['base_risk'],
+            'minimum' => RiskAction::from((string) $spec['minimum']),
+            'post_solve_check' => $spec['post_solve_check'],
+            'degraded' => RiskAction::from((string) $spec['degraded']),
+        ];
+    }
+
     public static function fromConfig(array $config, int $version = self::CONTRACT_VERSION): self
     {
         if (!isset($config['version']) || !is_int($config['version'])) {
@@ -92,7 +121,17 @@ final class RiskPolicy
 
         $scopes = [];
         foreach ($config['scopes'] as $scope => $spec) {
-            $scope = (int) $scope;
+            // The scope key is a canonical u32 and nothing else: a
+            // non-integer key (or a non-canonical decimal string) is a
+            // configuration error, never coerced — `(int)` casting
+            // would collapse "1admin" and "01" onto scope 1, silently
+            // overwriting policy rows (the rust parser rejects both
+            // under the same grammar).
+            if (!\is_int($scope)) {
+                throw new \InvalidArgumentException(
+                    sprintf('Scope id must be a canonical integer u32 (got %s); non-canonical keys like "1admin" or "01" are rejected, never coerced', var_export($scope, true))
+                );
+            }
             if ($scope < 1 || $scope > 4294967295) {
                 throw new \InvalidArgumentException(
                     sprintf('Scope id %d must be within 1..4294967295', $scope)
@@ -112,84 +151,78 @@ final class RiskPolicy
             $scopes[$scope] = [
                 'base_risk' => $baseRisk,
                 'minimum' => RiskAction::from((string) $spec['minimum']),
-                'post_solve_check' => (bool) $spec['post_solve_check'],
+                'post_solve_check' => self::requireBool($spec['post_solve_check'], $scope, 'post_solve_check'),
                 'degraded' => RiskAction::from((string) $spec['degraded']),
             ];
         }
 
-        // global_floors: exactly the five canonical levels 0..4, each
-        // declared exactly once, index 0 = Allow — the EXACT grammar the
-        // Rust reference parser enforces. A missing or partial set is a
-        // configuration error, never silently defaulted: defaulting a
-        // level an operator omitted would silently substitute a weaker
-        // (or unintended) floor, and it made PHP accept policy configs
-        // the Rust engine refuses to load — a mixed-fleet divergence.
+        // global_floors: required with exactly 5 entries (levels 0..4) —
+        // the strict fail-closed semantics of the Rust parser (missing,
+        // short or malformed floors reject the config instead of silently
+        // defaulting). Index 0 must be Allow; entries 1..4 are valid
+        // actions; keys outside 0..4 are rejected.
         if (!isset($config['global_floors']) || !is_array($config['global_floors'])) {
-            throw new \InvalidArgumentException(
-                'Policy config requires a "global_floors" array of the five canonical levels 0..4'
-            );
+            throw new \InvalidArgumentException('Policy config requires a "global_floors" array');
+        }
+        if (count($config['global_floors']) !== 5) {
+            throw new \InvalidArgumentException(sprintf(
+                'global_floors requires exactly 5 entries (levels 0..4), got %d',
+                count($config['global_floors'])
+            ));
         }
         $floors = [];
         foreach ($config['global_floors'] as $level => $action) {
-            // The canonical key grammar: a level key is one of the
-            // five literal spellings 0..4. A non-integer spelling
-            // ('01', '+1', '04') must never be parsed onto a logical
-            // level — the Rust parser's literal-level grammar rejects
-            // the identical forms, and one shared acceptance set is
-            // what keeps the two policy readers in agreement.
             if (!is_int($level) || $level < 0 || $level > 4) {
-                throw new \InvalidArgumentException(
-                    sprintf(
-                        'Global floor level %s must be within 0..4',
-                        is_int($level) ? (string) $level : gettype($level),
-                    )
-                );
+                throw new \InvalidArgumentException(sprintf(
+                    'Global floor level %s must be within 0..4',
+                    is_int($level) ? (string) $level : gettype($level)
+                ));
             }
-            if (isset($floors[$level])) {
-                throw new \InvalidArgumentException(
-                    sprintf('Global floor level %d is declared more than once', $level)
-                );
+            // The action value is one of the literal action strings: a
+            // non-string value (integer, boolean, array, object) is a
+            // configuration error here exactly like the Rust parser's
+            // `parse_action` JSON-string requirement, never a value that
+            // travels deeper and fails at a call site.
+            if (!is_string($action)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Global floor level %d action must be a string, got %s',
+                    $level,
+                    gettype($action),
+                ));
             }
-            $parsed = is_string($action)
-                ? RiskAction::from($action)
-                : $action;
-            if (!$parsed instanceof RiskAction) {
-                throw new \InvalidArgumentException('Global floor actions must be valid action names');
-            }
+            $parsed = RiskAction::from($action);
             if ($level === 0 && $parsed !== RiskAction::Allow) {
                 throw new \InvalidArgumentException('Global floor level 0 must be "allow"');
             }
             $floors[$level] = $parsed;
         }
         ksort($floors);
-        if (count($floors) !== 5) {
-            throw new \InvalidArgumentException(
-                'global_floors must declare every level 0..4 exactly once (the Rust reference parser enforces the same total grammar)'
-            );
-        }
 
         return new self(
             version: (int) $config['version'],
             hash: hash('sha256', self::canonicalJson($config)),
             weights: RiskWeights::fromArray($config['weights']),
             scopes: $scopes,
+            defaultScope: isset($config['default_scope'])
+                ? self::parseDefaultScope($config['default_scope'])
+                : ['base_risk' => 100, 'minimum' => RiskAction::Sha20, 'post_solve_check' => false, 'degraded' => RiskAction::Sha20],
             globalFloors: $floors,
         );
     }
 
     public function baseRisk(int $scope): int
     {
-        return $this->scopes[$scope]['base_risk'] ?? 100;
+        return $this->scopes[$scope]['base_risk'] ?? $this->defaultScope['base_risk'];
     }
 
     public function minimum(int $scope): RiskAction
     {
-        return $this->scopes[$scope]['minimum'] ?? RiskAction::Allow;
+        return $this->scopes[$scope]['minimum'] ?? $this->defaultScope['minimum'];
     }
 
     /**
      * Full decision: band action (with enter/exit hysteresis when the
-     * engine's per-process scope map is passed), clamped to the scope
+     * engine's per-client map is passed), clamped to the scope
      * minimum and the global floor, then hard overrides with reasons.
      *
      * Argon re-escalation ordering: ladder → strongest(minimum, floor) →
@@ -198,13 +231,14 @@ final class RiskPolicy
      * action with argonCapacity < 300 escalates to StepUp.
      *
      * Hysteresis: with $hysteresis the band selection uses the
-     * scope's previous action — escalate to the next band only at its
-     * enter threshold (upper + 10), de-escalate only below its exit
-     * threshold (lower − 10). Fresh scopes and StepUp/Deny use the
-     * plain mapping. The map stores the score-selected action, so hard
-     * overrides never poison the profile. Passing null (the default)
-     * keeps the plain band mapping, byte-identical with the previous
-     * behavior.
+     * (scope, clientKey) entry — the session pseudonym when present, else
+     * the source pseudonym. The selection escalates to the next band only
+     * at its enter threshold (upper + 10), de-escalates only below its
+     * exit threshold (lower − 10), and jumps straight to the plain action
+     * when the score clears the target band margin. Fresh keys and
+     * StepUp/Deny use the plain mapping. The map stores the score-selected
+     * action, so hard overrides never poison the profile. Passing null (the
+     * default) keeps the plain band mapping.
      *
      * Reasons: policy override reasons first, then the top signal
      * contributors, contribution = (v * w) / 1000, sorted by
@@ -218,7 +252,14 @@ final class RiskPolicy
      *                                registers the outcome atomically with
      *                                the observation, so the returned
      *                                decision carries the same id); null
-     *                                draws a fresh random id
+     *                                draws a fresh random id.
+     *
+     * @param string $clientKey hysteresis client key: the session
+     *                          pseudonym when present, else the source
+     *                          pseudonym; required (non-empty) when
+     *                          $hysteresis is set — an empty key would
+     *                          collapse every client of the scope into
+     *                          one shared entry
      */
     public function decide(
         int $scope,
@@ -230,15 +271,20 @@ final class RiskPolicy
         int $cooldownUntilMs = 0,
         ?ScopeActionHysteresis $hysteresis = null,
         ?string $decisionId = null,
+        string $clientKey = '',
     ): RiskDecision {
+        if ($hysteresis !== null && $clientKey === '') {
+            throw new \InvalidArgumentException('a non-empty clientKey is required when a ScopeActionHysteresis is supplied: an empty key would key every client of the scope to one shared entry');
+        }
         $plain = RiskAction::actionForScore($score);
-        $bandAction = $hysteresis !== null ? $hysteresis->select($scope, $score, $plain, $nowMs) : $plain;
+        $bandAction = $hysteresis !== null ? $hysteresis->select($scope, $clientKey, $score, $plain, $nowMs) : $plain;
         $minimum = $this->minimum($scope);
         $floor = $this->globalFloors[min(4, max(0, $globalLevel))] ?? RiskAction::Allow;
         $action = $this->strongest($bandAction, $minimum, $floor);
 
         $reasons = [];
         $deny = false;
+        $velocityFloor = null;
 
         if ($s->replay >= 700) {
             $reasons[] = RiskReason::ReplayTraffic;
@@ -250,7 +296,20 @@ final class RiskPolicy
         }
         if ($s->sourceFast >= 950) {
             $reasons[] = RiskReason::HardRateLimit;
-            $deny = true;
+            // Velocity alone must not hard-deny: a shared IPv4 address
+            // (cgnat, an office, a campus) can exceed the saturation from
+            // legitimate volume, and the history is shed with the /64
+            // source identity so a single abusive host cannot speak for
+            // the aggregate. Deny only when another hard signal
+            // corroborates the source; otherwise floor the action at
+            // Argon32 (the strongest non-interactive band) and let the
+            // score/capacity logic decide — the argon-capacity check
+            // below still re-escalates a saturated backend to StepUp.
+            if ($s->badProof >= 300 || $s->malformed >= 300 || $s->replay >= 300) {
+                $deny = true;
+            } else {
+                $velocityFloor = RiskAction::Argon32;
+            }
         }
         if ($r->issuanceCapacity < 100) {
             $reasons[] = RiskReason::CapacityPressure;
@@ -270,12 +329,19 @@ final class RiskPolicy
         if ($cooldownUntilMs > 0 && $nowMs < $cooldownUntilMs && $globalLevel >= 4) {
             $reasons[] = RiskReason::Cooldown;
             $deny = true;
-            $retryAfterMs = $cooldownUntilMs - $nowMs;
+            // The retry hint is the u32 wire field: saturate instead of
+            // emitting an unbounded value (the Rust mirror saturates the
+            // same way), so a long hold never leaks a wrapped, much
+            // earlier retry.
+            $retryAfterMs = min(4294967295, $cooldownUntilMs - $nowMs);
         }
 
         if ($deny) {
             $action = RiskAction::Deny;
         } else {
+            if ($velocityFloor !== null) {
+                $action = $this->strongest($action, $velocityFloor);
+            }
             $action = $this->strongest($action, $minimum, $floor);
         }
 
@@ -313,7 +379,7 @@ final class RiskPolicy
     public function degradedDecision(int $scope, int $globalLevel = 0): RiskDecision
     {
         $spec = $this->scopes[$scope] ?? null;
-        $degraded = $spec['degraded'] ?? RiskAction::Allow;
+        $degraded = $spec['degraded'] ?? $this->defaultScope['degraded'];
         $floor = $this->globalFloors[min(4, max(0, $globalLevel))] ?? RiskAction::Allow;
         $action = $this->strongest($degraded, $this->minimum($scope), $floor);
 
@@ -388,5 +454,22 @@ final class RiskPolicy
                 self::sortRecursive($v);
             }
         }
+    }
+
+    /**
+     * A literal boolean, never a coerced truthiness: `(bool) "false"`
+     * is true, so a string flag would silently arm the post-solve
+     * check the rust parser (JSON as_bool) rejects under the same
+     * contract.
+     */
+    private static function requireBool(mixed $value, int $scope, string $field): bool
+    {
+        if (!\is_bool($value)) {
+            throw new \InvalidArgumentException(
+                sprintf('Scope %d field "%s" must be a literal boolean (got %s); coerced truthiness is rejected', $scope, $field, get_debug_type($value))
+            );
+        }
+
+        return $value;
     }
 }

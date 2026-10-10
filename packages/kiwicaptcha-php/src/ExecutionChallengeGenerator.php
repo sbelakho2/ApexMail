@@ -50,7 +50,15 @@ namespace KiwiCaptcha;
  * Version 5 adds the causal object-graph ops: fragment append, clone,
  * reparent, attribute reflection, event phase, URL canonicalization,
  * text mutation and select-depth descent. The version-5 integer
- * entries flow through the u8 cells of the causal array.
+ * entries flow through the u8 cells of the causal array. Version 6 is
+ * the real-platform rung: five probe opcodes (computed-style geometry,
+ * MutationObserver delivery order, the full capture/target/bubble
+ * event path, Range/Selection over a constructed text graph and
+ * IntersectionObserver thresholds) whose observations a pure
+ * reimplementation cannot predict without a real layout engine. The
+ * verifier checks each v6 entry against an envelope derived from the
+ * program operands and calibrated by the cross-engine qualification
+ * matrix, see docs/execution-v6-design.md.
  *
  * String literals are printable ASCII (0x20..0x7E); ids and class
  * names come from fixed 64-char alphabets; u32 literals are raw
@@ -106,6 +114,21 @@ namespace KiwiCaptcha;
  * the sole acceptance boundary. The PoW proof and the record state
  * machinery still gate, and an armed challenge without a valid digest
  * fails with the deterministic ExecutionMismatch outcome.
+ *
+ * The evidence class is rung-scoped and uniformly non-attesting. Every
+ * version's trace is reproducible by a pure implementation of the
+ * public semantics plus the published acceptance envelopes. Versions
+ * 1-5 need only the interpreter semantics (the forgeability oracle
+ * pins that on purpose). Version 6 additionally checks entries against
+ * operand-derived envelopes — which are deterministic functions of the
+ * operands that ship with the program and are published in this class.
+ * A full-knowledge forger who reads the source reimplements those five
+ * functions and emits passing traces without any browser (the white-box
+ * forger, WhiteBoxEnvelopeForger, measures a 100 percent pass rate).
+ * Version 6 therefore costs an attacker one reading of the source, the
+ * same class as versions 1-5. It is supplementary evidence, NOT a
+ * browser boundary. The naive oracle's rejection on version 6 is real
+ * only for forgers who never implemented the envelopes.
  */
 final class ExecutionChallengeGenerator
 {
@@ -126,9 +149,13 @@ final class ExecutionChallengeGenerator
      * observed URL-canon digest and the text-mutation serialization
      * readback. The integer entries flow through the u8 cells, see the
      * version-5 arms of simulateOp and the design record
-     * docs/execution-v5-design.md.
+     * docs/execution-v5-design.md. Version 6 adds the five real-platform
+     * probes whose entries the verifier checks against operand-derived
+     * envelopes (computed style over real layout, mutation delivery
+     * order, full event phases, Range line boxes and Selection state,
+     * intersection thresholds), see docs/execution-v6-design.md.
      */
-    public const MAX_EXECUTION_VERSION = 5;
+    public const MAX_EXECUTION_VERSION = 6;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -192,6 +219,17 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_SERIALIZE_REAL = 32;
     public const OP_DOM_OBSERVE = 33;
     public const OP_DOM_SIBLING_INDEX = 34;
+
+    /**
+     * The number of elements the srcdoc body holds before the
+     * program's own nodes. The harness template always carries exactly
+     * one `<script>` element, the interpreter bootstrap, so a
+     * program-built node's browser sibling index is its append rank
+     * plus this constant. Mirrors the Rust
+     * `SRCDOC_PREEXISTING_BODY_ELEMENTS` so the cores agree on the
+     * template shape.
+     */
+    public const SRCDOC_PREEXISTING_BODY_ELEMENTS = 1;
     public const OP_DOM_CHILD = 35;
     public const OP_DOM_DEPTH = 36;
     /** Version-5 ops: moves the current node (with its subtree) into a detached fragment slot; terminal only. */
@@ -206,11 +244,49 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_EVENT_PHASE = 41;
     /** Version-5 ops: canonicalizes and hashes the sandboxed document URL (the one browser-observed entry). */
     public const OP_DOM_URL_CANON = 42;
+
+    /**
+     * The SHA-256 hex of the canonical sandboxed document URL the
+     * widget execution sandbox always has: `about:srcdoc`. The
+     * version-5 URL-canon probe reports this value, and the trace walker
+     * pins it by exact equality. Environment evidence is a constant, so
+     * any other digest is fabricated. Mirrors the Rust
+     * `SRCDOC_URL_DIGEST` byte for byte.
+     */
+    public const SRCDOC_URL_DIGEST = '4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2';
     /** Version-5 ops: sets the current node's textContent to the value operand. */
     public const OP_DOM_TEXT_MUTATE = 43;
     /** Version-5 ops: descends by the three child-index bytes; the entry is the number of descents completed. */
     public const OP_DOM_SELECT_DEP = 44;
-    public const OP_COUNT = 45;
+    /**
+     * Version-6 ops: the real-platform probes. Each carries the probed
+     * constructed id (the construction proof), a randomized seed/churn
+     * operand and a u8 cell for its quantized observation. The probes
+     * run on self-removed anonymous nodes, so the deterministic document
+     * model of the simulation is unchanged and every entry is validated
+     * against its operand-derived envelope (see verifyExecutedTrace and
+     * docs/execution-v6-design.md).
+     */
+    public const OP_CSS_GEOM = 45;
+    public const OP_MUT_ORDER = 46;
+    public const OP_EV_PHASE_FULL = 47;
+    public const OP_RANGE_ORDER = 48;
+    public const OP_INT_OBS = 49;
+    public const OP_COUNT = 50;
+
+    /**
+     * The probe word vocabulary of OP_CSS_GEOM: the seed picks the word
+     * whose wrapped line boxes the layout engine measures. Mirrors the
+     * interpreter asset and the Rust crate byte for byte.
+     */
+    public const CSS_WORDS = ['kiwicaptcha', 'execution', 'boundary'];
+
+    /**
+     * The span vocabulary of OP_RANGE_ORDER: three consecutive words
+     * (from the drawn index) form the constructed text graph the Range
+     * crosses. Mirrors the interpreter asset and the Rust crate.
+     */
+    public const RANGE_WORDS = ['alpha', 'beta', 'gamma', 'delta'];
 
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
@@ -224,6 +300,7 @@ final class ExecutionChallengeGenerator
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
         'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
         'dfrag', 'dclone', 'drepar', 'dreflec', 'dphase', 'durlc', 'dmutate', 'dsdep',
+        'dcsgeom', 'dmutord', 'devphf', 'drange', 'dintobs',
     ];
 
     private function __construct()
@@ -256,7 +333,7 @@ final class ExecutionChallengeGenerator
         if ($version < 1 || $version > self::MAX_EXECUTION_VERSION) {
             throw new \InvalidArgumentException(
                 'execution version must be 1..'.self::MAX_EXECUTION_VERSION
-                .' (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe; 5 the causal object-graph grammar)'
+                .' (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe; 5 the causal object-graph grammar; 6 the real-platform probes)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
@@ -290,14 +367,18 @@ final class ExecutionChallengeGenerator
         // reparent cell, URL canon, text mutate, serialize real): its
         // fixed 21-op skeleton plus up to three drawn extra probes
         // would reach 24, the grammar cap, so the count byte only
-        // adds 0..3 slots (21 + byte % 4). Every stamped count always
-        // fits its emitted records and the grammar bounds 8..24 stay
-        // unchanged.
+        // adds 0..3 slots (21 + byte % 4). Version 6 replaces the
+        // causal spine with the five-op real-platform block over the
+        // version-4 skeleton: its fixed 20-op skeleton plus the drawn
+        // 0..3 extra probes needs floor 20 (20 + byte % 4). Every
+        // stamped count always fits its emitted records and the
+        // grammar bounds 8..24 stay unchanged.
         $opCount = match ($version) {
             2 => 11 + (self::nextByte($stream) % 14),
             3 => 15 + (self::nextByte($stream) % 10),
             4 => 18 + (self::nextByte($stream) % 7),
             5 => 21 + (self::nextByte($stream) % 4),
+            6 => 20 + (self::nextByte($stream) % 4),
             default => 8 + (self::nextByte($stream) % 17),
         };
         $program .= \chr($opCount);
@@ -386,7 +467,7 @@ final class ExecutionChallengeGenerator
             // derives from the construction order.
             $ops[] = [self::OP_DOM_DEPTH, $depthOperand];
         }
-        if ($version >= 5) {
+        if ($version === 5) {
             // The version-5 causal spine, emitted in the fixed order:
             // DOM_CLONE, DOM_REPARENT, U8_READ of the reparent cell,
             // DOM_URL_CANON, DOM_TEXT_MUTATE, DOM_SERIALIZE_REAL. The
@@ -420,12 +501,39 @@ final class ExecutionChallengeGenerator
             ];
             $ops[] = [self::OP_DOM_SERIALIZE_REAL, ''];
         }
+        if ($version >= 6) {
+            // The version-6 real-platform block, emitted in the fixed
+            // order: OP_CSS_GEOM, OP_MUT_ORDER, OP_EV_PHASE_FULL,
+            // OP_RANGE_ORDER, OP_INT_OBS. Each probe targets a constructed node (the real
+            // construction proof), draws its randomized seed and churn
+            // bytes from the stream and writes its quantized observation
+            // into a cell drawn modulo the live u8 length, so the
+            // verifier replays every observation exactly like the
+            // version-5 cells. The browser probes run on self-removed
+            // anonymous nodes, so the deterministic document model is
+            // unchanged and the entries validate against their
+            // operand-derived envelopes (see verifyExecutedTrace).
+            // The probe ids stay on the two appended body children
+            // (the constructed id and the sibling id): the dchild
+            // created nodes never enter the appended-id set, so a
+            // probe naming one could only ever read 'none'.
+            $ops[] = [self::OP_CSS_GEOM, $idOperand.self::drawBytes($stream, 1).\chr(self::nextByte($stream) % $u8Len)];
+            $ops[] = [self::OP_MUT_ORDER, $siblingOperand.self::drawBytes($stream, 2).\chr(self::nextByte($stream) % $u8Len)];
+            $ops[] = [self::OP_EV_PHASE_FULL, $idOperand.\chr(self::nextByte($stream) % $u8Len)];
+            $ops[] = [self::OP_RANGE_ORDER, $siblingOperand.self::drawBytes($stream, 2).\chr(self::nextByte($stream) % $u8Len)];
+            $ops[] = [self::OP_INT_OBS, $siblingOperand.self::drawBytes($stream, 1).\chr(self::nextByte($stream) % $u8Len)];
+        }
         $extraProbes = 1 + (self::nextByte($stream) % 3);
-        if ($version >= 5) {
+        if ($version === 5) {
             // The version-5 emission cap: the stamped count is 21..24,
             // so at most opCount - 21 extra probes fit (a stamped
             // count of 21 carries the fixed skeleton only).
             $extraProbes = min($extraProbes, $opCount - 21);
+        }
+        if ($version >= 6) {
+            // The version-6 emission cap: the fixed skeleton is 20 ops,
+            // so at most opCount - 20 extra probes fit.
+            $extraProbes = min($extraProbes, $opCount - 20);
         }
         $probePool = match ($version) {
             2 => 5,
@@ -434,7 +542,23 @@ final class ExecutionChallengeGenerator
             default => 5,
         };
         for ($i = 0; $i < $extraProbes; $i++) {
-            if ($version >= 5) {
+            if ($version >= 6) {
+                // The version-6 extra-slot pool extends to the read-only
+                // real probes of the earlier rungs plus the five
+                // real-platform probes (all self-contained and
+                // idempotent over the drawn operands). Query real and
+                // the topology mutators stay out of the extra slots
+                // exactly as the child op maps away in version 4.
+                $v6Pool = [
+                    self::OP_DOM_GEOMETRY, self::OP_DOM_POINT, self::OP_DOM_EVENT_REAL,
+                    self::OP_DOM_SERIALIZE_REAL, self::OP_DOM_OBSERVE, self::OP_DOM_SIBLING_INDEX,
+                    self::OP_DOM_DEPTH, self::OP_DOM_ATTR_REFLECT, self::OP_DOM_EVENT_PHASE,
+                    self::OP_DOM_URL_CANON, self::OP_DOM_SELECT_DEP,
+                    self::OP_CSS_GEOM, self::OP_MUT_ORDER, self::OP_EV_PHASE_FULL,
+                    self::OP_RANGE_ORDER, self::OP_INT_OBS,
+                ];
+                $probe = $v6Pool[self::nextByte($stream) % 16];
+            } elseif ($version === 5) {
                 // The version-5 extra-slot pool extends to the read-only
                 // real probes of the rung: geometry, point, event real,
                 // serialize real, observe, sibling, depth, reflect,
@@ -473,6 +597,16 @@ final class ExecutionChallengeGenerator
                 self::OP_DOM_ATTR_REFLECT => self::drawBytes($stream, 1),
                 self::OP_DOM_EVENT_PHASE => \chr(self::nextByte($stream) % $u8Len),
                 self::OP_DOM_SELECT_DEP => self::drawBytes($stream, 3),
+                // The version-6 platform probes reuse the skeleton's
+                // appended-id mapping (the first node for the style and
+                // event probes, the sibling for the churn, range and
+                // intersection probes) plus their raw seed/churn bytes
+                // and the cell drawn modulo the live u8 length.
+                self::OP_CSS_GEOM => $idOperand.self::drawBytes($stream, 1).\chr(self::nextByte($stream) % $u8Len),
+                self::OP_MUT_ORDER => $siblingOperand.self::drawBytes($stream, 2).\chr(self::nextByte($stream) % $u8Len),
+                self::OP_EV_PHASE_FULL => $idOperand.\chr(self::nextByte($stream) % $u8Len),
+                self::OP_RANGE_ORDER => $siblingOperand.self::drawBytes($stream, 2).\chr(self::nextByte($stream) % $u8Len),
+                self::OP_INT_OBS => $siblingOperand.self::drawBytes($stream, 1).\chr(self::nextByte($stream) % $u8Len),
                 default => '',
             };
             $ops[] = [$probe, $probeOperand];
@@ -501,12 +635,49 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * Parse a program blob into its canonical structure, or null when the
-     * blob is malformed.
+     * Per-process memo of parsed programs, keyed by the program's base64
+     * wire string (decode is a pure function of that string, so a memoized
+     * entry can never go stale). One verification parses the same program
+     * several times — the structural validation, the trace walk of
+     * {@see self::verifyExecutedTrace()} and the digest derivation of
+     * {@see self::digestOverTrace()} decode independently. The
+     * execution-binding check runs in both the cheap phase and the replay
+     * gate. The memo is bounded: a caller presenting many distinct
+     * programs resets it instead of growing unboundedly, degrading to a
+     * fresh parse per call.
      *
-     * @return array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>}|null
+     * @var array<string, array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}}>|null>
+     */
+    private static array $decodeMemo = [];
+
+    private const DECODE_MEMO_LIMIT = 8;
+
+    /**
+     * Parse a program blob into its canonical structure, or null when the
+     * blob is malformed. Memoized per program string.
+     *
+     * @return array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}}}|null
      */
     public static function decode(string $programB64): ?array
+    {
+        if (\array_key_exists($programB64, self::$decodeMemo)) {
+            return self::$decodeMemo[$programB64];
+        }
+        $decoded = self::decodeProgram($programB64);
+        if (\count(self::$decodeMemo) >= self::DECODE_MEMO_LIMIT) {
+            self::$decodeMemo = [];
+        }
+        self::$decodeMemo[$programB64] = $decoded;
+
+        return $decoded;
+    }
+
+    /**
+     * The un-memoized parse behind {@see self::decode()}.
+     *
+     * @return array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}}}|null
+     */
+    private static function decodeProgram(string $programB64): ?array
     {
         if (\strlen($programB64) > self::MAX_PROGRAM_BASE64) {
             return null;
@@ -577,7 +748,8 @@ final class ExecutionChallengeGenerator
             // Older-version programs never carry newer opcodes (the
             // version-2 observe opcode 33, the version-3 sibling-index
             // opcode 34, the version-4 child and depth opcodes 35 and
-            // 36, the version-5 object-graph opcodes 37-44): the
+            // 36, the version-5 object-graph opcodes 37-44, the
+            // version-6 real-platform opcodes 45-49): the
             // interpreter of a mixed fleet must be able to reject a
             // newer grammar by the declared version byte alone.
             $maxOpcode = match (\ord($opVersion)) {
@@ -585,6 +757,7 @@ final class ExecutionChallengeGenerator
                 2 => 34,
                 3 => 35,
                 4 => 37,
+                5 => 45,
                 default => self::OP_COUNT,
             };
             if ($opcode >= $maxOpcode) {
@@ -726,7 +899,7 @@ final class ExecutionChallengeGenerator
                 // one (deterministic across engines).
                 if ($expectedRank === null
                     || preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1
-                    || (int) $m[1] !== $expectedRank + 1) {
+                    || (int) $m[1] !== $expectedRank + self::SRCDOC_PREEXISTING_BODY_ELEMENTS) {
                     return null;
                 }
                 $pos += \strlen($m[0]);
@@ -766,14 +939,130 @@ final class ExecutionChallengeGenerator
                 $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_URL_CANON) {
                 // The URL-canon entry is the one browser-observed value
-                // of the version-5 rung: the canonical sim emits the
-                // placeholder and the walker validates the shape (64
-                // lowercase hex, the SHA-256 digest of the canonicalized
-                // sandboxed document URL) and replays the reported
-                // value as the entry. The op draws no cell byte, so no
-                // u8 write follows the obs replay rule.
-                if (preg_match('/\G([0-9a-f]{64})\)/', $trace, $m, 0, $pos) !== 1) {
+                // of the version-5 rung: it is pinned to the SHA-256 of
+                // the canonical sandboxed document URL
+                // (self::SRCDOC_URL_DIGEST, the constant `about:srcdoc`),
+                // so any other digest is fabricated. The op draws no
+                // cell byte, so no u8 write follows the obs replay rule.
+                if (substr($trace, $pos, 64) !== self::SRCDOC_URL_DIGEST
+                    || substr($trace, $pos + 64, 1) !== ')') {
                     return null;
+                }
+                $pos += 65;
+            } elseif ($op === self::OP_CSS_GEOM) {
+                // The computed-geometry envelope: the computed font size
+                // must equal the drawn declaration exactly (every real
+                // engine resolves the inline font-size used value), and
+                // the laid-out height must land inside the operand-
+                // derived box-model interval (wrapped line boxes of the
+                // drawn probe word). A host without layout reports 0
+                // and falls below the interval floor.
+                if (!isset($docIds[$operands['id']])) {
+                    return null;
+                }
+                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                $fs = (int) $m[1];
+                $height = (int) $m[2];
+                [$fsLo, $fsHi, $hLo, $hHi] = self::cssGeomEnvelope((int) $operands['seed']);
+                if ($fs < $fsLo || $fs > $fsHi || $height < $hLo || $height > $hHi) {
+                    return null;
+                }
+                if ($operands['cell'] < \count($u8)) {
+                    $u8[$operands['cell']] = $height;
+                }
+                $pos += \strlen($m[0]);
+            } elseif ($op === self::OP_MUT_ORDER) {
+                // The mutation delivery-order envelope: the exact
+                // record-type sequence (attributes, then the childList
+                // records, then the characterData churn, then the
+                // post-churn promise marker 7) the churn operands draw.
+                // A host that delivers records out of order, late (a
+                // task-queued observer) or not at all cannot produce it.
+                if (!isset($docIds[$operands['id']])) {
+                    return null;
+                }
+                if (preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                [$expected, $records] = self::mutOrderEnvelope((int) $operands['b0'], (int) $operands['b1']);
+                if ($m[1] !== $expected) {
+                    return null;
+                }
+                if ($operands['cell'] < \count($u8)) {
+                    $u8[$operands['cell']] = $records;
+                }
+                $pos += \strlen($m[0]);
+            } elseif ($op === self::OP_EV_PHASE_FULL) {
+                // The full-phase envelope: capture 1, target-phase
+                // registration order 2 then 3, bubble 4, and the bubble
+                // listener's dataset side effect read back as "3".
+                if (!isset($docIds[$operands['id']])) {
+                    return null;
+                }
+                if (preg_match('/\G(\d+):(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                if ($m[1] !== '1234' || $m[2] !== '3') {
+                    return null;
+                }
+                if ($operands['cell'] < \count($u8)) {
+                    $u8[$operands['cell']] = 4;
+                }
+                $pos += \strlen($m[0]);
+            } elseif ($op === self::OP_RANGE_ORDER) {
+                // The Range/Selection envelope: the range string length
+                // is derived exactly from the drawn text graph, the
+                // line-box fragment count must land inside the
+                // qualification interval (three span fragments at the
+                // drawn wrap width), and the Selection must hold the
+                // added range.
+                if (!isset($docIds[$operands['id']])) {
+                    return null;
+                }
+                if (preg_match('/\G(\d+),(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                [$tExact, $rectsLo, $rectsHi] = self::rangeOrderEnvelope((int) $operands['b0'], (int) $operands['b1']);
+                $t = (int) $m[1];
+                $rects = (int) $m[2];
+                $selCount = (int) $m[3];
+                if ($t !== $tExact || $rects < $rectsLo || $rects > $rectsHi || $selCount !== 1) {
+                    return null;
+                }
+                if ($operands['cell'] < \count($u8)) {
+                    $u8[$operands['cell']] = $rects;
+                }
+                $pos += \strlen($m[0]);
+            } elseif ($op === self::OP_INT_OBS) {
+                // The intersection envelope: the observer must have
+                // delivered its initial entry, the quantized ratio must
+                // land inside the geometry-derived interval (the target
+                // offset against the drawn root box), and isIntersecting
+                // must agree with the ratio against the drawn threshold
+                // (a +/-2 percent band absorbs engine rounding).
+                if (!isset($docIds[$operands['id']])) {
+                    return null;
+                }
+                if (preg_match('/\G(\d+),(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                $fired = (int) $m[1];
+                $q = (int) $m[2];
+                $isInt = (int) $m[3];
+                [$qLo, $qHi, $t0Pct] = self::intObsEnvelope((int) $operands['seed']);
+                if ($fired !== 1 || $q < $qLo || $q > $qHi) {
+                    return null;
+                }
+                if ($q >= $t0Pct + 2 && $isInt !== 1) {
+                    return null;
+                }
+                if ($q <= $t0Pct - 2 && $isInt !== 0) {
+                    return null;
+                }
+                if ($operands['cell'] < \count($u8)) {
+                    $u8[$operands['cell']] = $q;
                 }
                 $pos += \strlen($m[0]);
             } else {
@@ -795,6 +1084,98 @@ final class ExecutionChallengeGenerator
         }
 
         return $trace;
+    }
+
+    /**
+     * The OP_CSS_GEOM acceptance envelope, derived from the style
+     * seed exactly as the interpreter derives the inline declaration.
+     * The computed font size must equal the drawn px value
+     * (fsLo = fsHi). The laid-out height must fall inside the
+     * wrapped-line-box interval the drawn two-word probe and border
+     * produce. The interval bounds are the cross-engine qualification
+     * envelope: monospace advance 0.45..0.80 em, normal line-height
+     * 1.0..2.0 em across the matrix engines, one..linesMax line
+     * boxes. A host without layout reports height 0 and always falls
+     * below the floor.
+     *
+     * @return array{0: int, 1: int, 2: int, 3: int} [fsLo, fsHi, hLo, hHi]
+     */
+    private static function cssGeomEnvelope(int $seed): array
+    {
+        $fs = 10 + (($seed >> 5) % 5);
+        $brd = 1 + (($seed >> 3) % 3);
+        $count = \count(self::CSS_WORDS);
+        // The probe text is the seed word plus the next word joined by
+        // a space (the break opportunity), so the wrapped line count
+        // spans the interval below.
+        $textLen = \strlen(self::CSS_WORDS[$seed % $count]) + 1 + \strlen(self::CSS_WORDS[($seed + 1) % $count]);
+        // Exact integer ceiling (4/5 em advance over the 64px probe
+        // width), so the PHP and Rust envelopes agree on every operand
+        // without any float rounding.
+        $linesMax = max(1, intdiv($textLen * $fs * 4 + 319, 320) + 1);
+
+        return [$fs, $fs, $fs + 2 * $brd, $linesMax * 2 * $fs + 2 * $brd + 2];
+    }
+
+    /**
+     * The OP_MUT_ORDER acceptance envelope: the exact record-type code
+     * sequence the churn operands draw (one attributes record, then
+     * 2..3 childList records, then the optional characterData record,
+     * then the post-churn promise marker 7) and the record count the
+     * cell replay carries.
+     *
+     * @return array{0: string, 1: int} [expectedCodeString, recordCount]
+     */
+    private static function mutOrderEnvelope(int $b0, int $b1): array
+    {
+        $kids = 1 + ($b0 % 2);
+        $expected = '1'.str_repeat('2', $kids + 1).(($b1 & 1) === 1 ? '3' : '').'7';
+        $records = $kids + 2 + (($b1 & 1) === 1 ? 1 : 0);
+
+        return [$expected, $records];
+    }
+
+    /**
+     * The OP_RANGE_ORDER acceptance envelope: the exact range string
+     * length over the drawn three-word text graph, plus the line-box
+     * fragment interval. The string length is the tail of the first
+     * word, the whole second word and the drawn prefix of the third.
+     * The fragment interval spans the matrix measurement: engines that
+     * keep one rect per element fragment (Chromium, WebKit) measure
+     * three and more, Firefox merges same-line fragments into one rect
+     * (the measured floor is one, the ceiling 16).
+     *
+     * @return array{0: int, 1: int, 2: int} [tExact, rectsLo, rectsHi]
+     */
+    private static function rangeOrderEnvelope(int $ra, int $rb): array
+    {
+        $w0 = self::RANGE_WORDS[$ra % 4];
+        $w1 = self::RANGE_WORDS[($ra + 1) % 4];
+        $w2 = self::RANGE_WORDS[($ra + 2) % 4];
+        $a = $ra % 5;
+        $e = $rb % (\strlen($w2) + 1);
+        $tExact = (\strlen($w0) - $a) + \strlen($w1) + $e;
+
+        return [$tExact, 1, 16];
+    }
+
+    /**
+     * The OP_INT_OBS acceptance envelope. The target offset the seed
+     * draws (5..40 px) sits against the 40px clipped root box and the
+     * 20px target height, which pins the exact quantized ratio in
+     * steps of five percent (+/-2 percent engine slack). The drawn
+     * threshold in percent drives the isIntersecting band check.
+     *
+     * @return array{0: int, 1: int, 2: int} [qLo, qHi, t0Pct]
+     */
+    private static function intObsEnvelope(int $seed): array
+    {
+        $m = 5 + ($seed % 36);
+        $ih = min(max(40 - $m, 0), 20);
+        $qExp = $ih * 5;
+        $t0Pct = [0, 25, 50, 75][$seed % 4] * 1;
+
+        return [max(0, $qExp - 2), min(100, $qExp + 2), $t0Pct];
     }
 
     /**
@@ -879,9 +1260,9 @@ final class ExecutionChallengeGenerator
 
     private static function validateKey(string $executionKey): void
     {
-        if (\strlen($executionKey) < 16) {
+        if (\strlen($executionKey) < Config::MIN_EXECUTION_KEY_BYTES) {
             throw new \InvalidArgumentException(
-                'KiwiCaptcha execution key must be at least 16 bytes'
+                'KiwiCaptcha execution key must be at least 32 bytes'
             );
         }
     }
@@ -1093,8 +1474,79 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_URL_CANON => [],
             self::OP_DOM_TEXT_MUTATE => self::readTextMutate($read, $readByte, $readValue),
             self::OP_DOM_SELECT_DEP => ['b0' => $readByte() ?? 0, 'b1' => $readByte() ?? 0, 'b2' => $readByte() ?? 0],
+            // The version-6 real-platform probes: the probed id plus
+            // their raw seed/churn bytes and the u8 cell (raw % 64,
+            // exactly like the v5 cell reads; the generator draws the
+            // cell modulo the live array length, so the modulus is
+            // always the identity on issued programs).
+            self::OP_CSS_GEOM => self::readIdSeedCell($read, $readByte, $readIdKeyed),
+            self::OP_MUT_ORDER => self::readIdBytes2Cell($read, $readByte, $readIdKeyed),
+            self::OP_EV_PHASE_FULL => self::readIdCell($read, $readByte, $readIdKeyed),
+            self::OP_RANGE_ORDER => self::readIdBytes2Cell($read, $readByte, $readIdKeyed),
+            self::OP_INT_OBS => self::readIdSeedCell($read, $readByte, $readIdKeyed),
             default => null,
         };
+    }
+
+    /**
+     * The shared reader of the version-6 probes with one raw seed byte
+     * (CSS_GEOM, INT_OBS): id, seed, cell.
+     *
+     * @param callable(int): ?string $read
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array     $readIdKeyed
+     *
+     * @return array{id: string, seed: int, cell: int}|null
+     */
+    private static function readIdSeedCell(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+        $seed = $readByte();
+        if ($seed === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['id' => $id['id'], 'seed' => $seed, 'cell' => $cell % 64];
+    }
+
+    /**
+     * The shared reader of the version-6 probes with two raw bytes
+     * (OP_MUT_ORDER churn, OP_RANGE_ORDER offsets): id, b0/ra,
+     * b1/rb, cell.
+     *
+     * @param callable(int): ?string $read
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array     $readIdKeyed
+     *
+     * @return array{id: string, b0: int, b1: int, cell: int}|null
+     */
+    private static function readIdBytes2Cell(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+        $b0 = $readByte();
+        if ($b0 === null) {
+            return null;
+        }
+        $b1 = $readByte();
+        if ($b1 === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['id' => $id['id'], 'b0' => $b0, 'b1' => $b1, 'cell' => $cell % 64];
     }
 
     /**
@@ -1533,12 +1985,24 @@ final class ExecutionChallengeGenerator
             // walker validates the hex shape (see verifyExecutedTrace).
             self::OP_DOM_FRAGMENT_APPEND => self::opFragAppend($operands, $u8, $cur, $docIds, $ctx),
             self::OP_DOM_CLONE => self::opDomClone($operands, $u8, $cur, $docIds, $ctx),
-            self::OP_DOM_REPARENT => self::opDomReparent($operands, $u8, $cur, $ctx),
+            self::OP_DOM_REPARENT => self::opDomReparent($operands, $u8, $cur, $docIds, $ctx),
             self::OP_DOM_ATTR_REFLECT => self::opAttrReflect($operands, $cur),
             self::OP_DOM_EVENT_PHASE => self::opEventPhase($operands, $u8, $cur, $ctx),
             self::OP_DOM_URL_CANON => 'durlc',
             self::OP_DOM_TEXT_MUTATE => self::opTextMutate($operands, $u8, $cur, $docIds, $ctx),
             self::OP_DOM_SELECT_DEP => self::opSelectDep($operands, $cur, $ctx),
+            // The version-6 real-platform probes are browser-observed:
+            // the pure sim emits the placeholder and touches no model
+            // state (the browser probes run on self-removed anonymous
+            // nodes), and the submitted-trace walker validates every
+            // entry against its operand-derived envelope, replaying the
+            // reported observation into the u8 cell (see
+            // verifyExecutedTrace and docs/execution-v6-design.md).
+            self::OP_CSS_GEOM => 'dcsgeom',
+            self::OP_MUT_ORDER => 'dmutord',
+            self::OP_EV_PHASE_FULL => 'devphf',
+            self::OP_RANGE_ORDER => 'drange',
+            self::OP_INT_OBS => 'dintobs',
             default => '0',
         };
     }
@@ -2025,9 +2489,10 @@ final class ExecutionChallengeGenerator
      * @param array<string, mixed> $operands
      * @param list<int>            $u8
      * @param array|null           $cur
+     * @param array<string, true>  $docIds
      * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
      */
-    private static function opDomReparent(array $operands, array &$u8, ?array &$cur, array &$ctx): string
+    private static function opDomReparent(array $operands, array &$u8, ?array &$cur, array &$docIds, array &$ctx): string
     {
         $entry = 0;
         $targetId = $operands['id'];

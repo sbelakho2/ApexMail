@@ -8,19 +8,26 @@
 //! breakers never bleed state into each other.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::Instant;
 
+/// Monotonic milliseconds since process start. NOT the wall clock: an
+/// NTP step backwards used to make `saturating_sub` return 0, keeping
+/// the breaker open (and every decision degraded) until the clock caught
+/// back up — an hour-long step meant an hour of degraded decisions.
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    static START: OnceLock<Instant> = OnceLock::new();
+    // +1 keeps the value away from the 0 "closed" sentinel: a breaker
+    // that opens within the first millisecond of process start must not
+    // read as closed.
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
 }
 
 /// Consecutive-failure circuit breaker (defaults: 2 failures, 1000 ms open).
 pub struct CircuitBreaker {
     failures: AtomicU32,
-    /// 0 = closed; otherwise the epoch-ms timestamp when the breaker opened.
+    /// 0 = closed; otherwise the monotonic-ms stamp (process-start
+    /// relative) when the breaker opened.
     opened_at_ms: AtomicU64,
     failure_threshold: u32,
     open_ms: u64,

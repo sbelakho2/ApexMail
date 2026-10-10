@@ -2,7 +2,9 @@
 name = "kiwicaptcha-embed-worker"
 version = "0.1.0"
 edition = "2021"
-description = "Generates the KIWI_WORKER_SRC embedded literal in widget-driver.js from assets/kiwi-worker.js"
+description = "Regenerates the glue-embedded worker artifacts: kiwicaptcha-wasm.js workerSource from the kiwi-worker.js solver source, and the kiwi-worker.js glue-embedded head from kiwicaptcha-wasm.js"
 license = "MIT"
 
 [dependencies]
+base64 = "0.22"
+sha2 = "0.10"

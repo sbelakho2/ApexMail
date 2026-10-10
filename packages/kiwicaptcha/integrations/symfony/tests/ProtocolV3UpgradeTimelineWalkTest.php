@@ -147,7 +147,9 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
             self::markTestSkipped('Redis unreachable: '.$e->getMessage());
         }
         $this->client->flushdb();
-        $this->storage = new RedisStorage($this->client, self::PREFIX);
+        // Single-clock walk: no retention margin, so the real Redis TTL
+        // equals the record TTL and the 1 s expiry probe below is exact.
+        $this->storage = new RedisStorage($this->client, self::PREFIX, ttlMarginSecs: 0);
         $this->verifier = new Verifier($this->storage);
         $this->simulator = new ProtocolV2OnlyVerifier($this->verifier, $this->storage);
         $this->ledger = [];
@@ -185,8 +187,8 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $policy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => $minimum, 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
@@ -725,8 +727,8 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $hPolicy = RiskPolicy::fromConfig([
             'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'sha16', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],

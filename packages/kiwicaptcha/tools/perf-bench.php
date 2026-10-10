@@ -176,7 +176,7 @@ function tokenFor($challenge, int $counter): string
     return SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
 }
 
-/** @return array{p50: float, p95: float, n: int} */
+/** @return array{p50: float, p90: float, p95: float, n: int} */
 function runWorkload(callable $issue, callable $solve, callable $verify, int $warmup, int $iterations): array
 {
     $issueSamples = [];
@@ -200,21 +200,23 @@ function runWorkload(callable $issue, callable $solve, callable $verify, int $wa
     }
 
     return [
-        'issue' => ['p50' => percentile($issueSamples, 50), 'p95' => percentile($issueSamples, 95), 'n' => count($issueSamples)],
-        'verify' => ['p50' => percentile($verifySamples, 50), 'p95' => percentile($verifySamples, 95), 'n' => count($verifySamples)],
+        'issue' => ['p50' => percentile($issueSamples, 50), 'p90' => percentile($issueSamples, 90), 'p95' => percentile($issueSamples, 95), 'n' => count($issueSamples)],
+        'verify' => ['p50' => percentile($verifySamples, 50), 'p90' => percentile($verifySamples, 90), 'p95' => percentile($verifySamples, 95), 'n' => count($verifySamples)],
     ];
 }
 
 function report(string $label, array $r, float $bIssueP95, float $bVerifyP95): bool
 {
     printf(
-        "perf-bench: %s issuance p50 %.3f ms p95 %.3f ms (n=%d); verification p50 %.3f ms p95 %.3f ms (n=%d)\n",
+        "perf-bench: %s issuance p50 %.3f ms p95 %.3f ms p90 %.3f ms (n=%d); verification p50 %.3f ms p95 %.3f ms p90 %.3f ms (n=%d)\n",
         $label,
         $r['issue']['p50'],
         $r['issue']['p95'],
+        $r['issue']['p90'],
         $r['issue']['n'],
         $r['verify']['p50'],
         $r['verify']['p95'],
+        $r['verify']['p90'],
         $r['verify']['n'],
     );
     if ($bIssueP95 <= 0.0 || $bVerifyP95 <= 0.0) {
@@ -250,7 +252,7 @@ foreach ($argv as $i => $arg) {
 
 $allOk = true;
 $record = [];
-$phaseFmt = static fn (array $p): array => ['p50_ms' => $p['p50'], 'p95_ms' => $p['p95'], 'n' => $p['n']];
+$phaseFmt = static fn (array $p): array => ['p50_ms' => $p['p50'], 'p90_ms' => $p['p90'], 'p95_ms' => $p['p95'], 'n' => $p['n']];
 $baselineFile = $baselineOut ?? __DIR__.'/perf-baselines.json';
 
 if ($modeArray) {

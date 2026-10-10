@@ -90,6 +90,7 @@ final class VerifierGateTest extends TestCase
         $targetBits = (int) ($overrides['targetBits'] ?? 8);
         $minDurationMs = (int) ($overrides['minDurationMs'] ?? 0);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             $scope,
             $bindingTag,
@@ -104,6 +105,7 @@ final class VerifierGateTest extends TestCase
             $minDurationMs,
         );
         $challenge = base64_encode($canonical).'.'.Issuer::signPayloadV2($canonical, Vectors::SECRET);
+        $issuedAtNs = (int) ($overrides['issuedAtNs'] ?? $issuedAt * 1_000_000);
 
         return new ChallengeRecord(
             nonce: $nonce,
@@ -120,8 +122,9 @@ final class VerifierGateTest extends TestCase
             prefix: $challenge.'|'.$salt.'|',
             challenge: $challenge,
             minDurationMs: $minDurationMs,
-            issuedAtNs: (int) ($overrides['issuedAtNs'] ?? $issuedAt * 1_000_000),
+            issuedAtNs: $issuedAtNs,
             protocolVersion: (int) ($overrides['protocolVersion'] ?? 2),
+            serverMac: \KiwiCaptcha\ServerStateMac::recordMeta(\KiwiCaptcha\ServerStateMac::key(Vectors::SECRET, null), $challenge, $issuedAtNs, null),
         );
     }
 
@@ -141,6 +144,7 @@ final class VerifierGateTest extends TestCase
         $targetBits = (int) ($overrides['targetBits'] ?? 4);
         $t = (int) ($overrides['t'] ?? 3);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             $scope,
             $bindingTag,
@@ -414,7 +418,7 @@ final class VerifierGateTest extends TestCase
         $token = $this->tokenFor($record->nonce, $counter);
         $identity = 'op-'.hash('sha256', 'terminal-replay');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
         $gate = $this->countingGate(1, $counters);
@@ -550,7 +554,7 @@ final class VerifierGateTest extends TestCase
     public function testCancelledArgonRecordInProcessEndToEndNeverAcquiresAdmission(): void
     {
         // The in-process (ArrayStorage) variant of the cancelled-Argon
-        // admission fix: a real issued-and-solved Argon challenge
+        // admission rule: a real issued-and-solved Argon challenge
         // cancelled through the cancellation endpoint resolves to
         // RecordNotFound without ever touching the Argon admission
         // gate.
@@ -1082,13 +1086,16 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        // Canonical v2 layout: the field order with
+        // Revision-4 canonical layout: the canonical tag, the signed
+        // protocol version 2, then the field order with
         // region/request_binding/issuer as empty segments, policy_version
-        // 1, and the final kid segment 1.
-        $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
+        // 1, and the final kid segment 1. This is byte-identical to the
+        // Rust shared fixture vector.
+        $canonicalV2 = 'v4|2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
         self::assertSame(
             $canonicalV2,
             Issuer::canonicalPayload(
+                2,
                 $nonce,
                 $scope,
                 $bindingTag,
@@ -1105,7 +1112,34 @@ final class VerifierGateTest extends TestCase
             'canonicalPayload must produce the exact shared vector'
         );
 
+        // The signed m=1 vector, byte-identical to the Rust shared
+        // fixture: the same base canonical plus the marker, and the
+        // marker parser accepts only that challenge shape.
+        $canonicalV2Mac = $canonicalV2.'|m=1';
+        self::assertSame(
+            $canonicalV2Mac,
+            Issuer::canonicalPayload(
+                2,
+                $nonce,
+                $scope,
+                $bindingTag,
+                $issuedAt,
+                $expiresAt,
+                PoWAlgorithm::Sha256,
+                0,
+                1,
+                1,
+                8,
+                $salt,
+                0,
+                serverMacCommitted: true,
+            ),
+            'canonicalPayload must produce the exact signed-marker shared vector'
+        );
+        $macChallenge = base64_encode($canonicalV2Mac).'.'.Issuer::signPayloadV2($canonicalV2Mac, $secret);
+        self::assertTrue(Issuer::signedCanonicalCommitsRecordMeta($macChallenge));
         $challenge = base64_encode($canonicalV2).'.'.Issuer::signPayloadV2($canonicalV2, $secret);
+        self::assertFalse(Issuer::signedCanonicalCommitsRecordMeta($challenge));
         $prefix = $challenge.'|'.$salt.'|';
         $record = new ChallengeRecord(
             nonce: $nonce,

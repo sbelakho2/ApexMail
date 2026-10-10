@@ -14,31 +14,24 @@ namespace KiwiCaptcha;
  *   binding_tag = HMAC-SHA256 over the canonical IP, see
  *                {@see self::bindingTag()}; nonce-bound, so the stored
  *                binding is never a stable IP-derived identifier.
- *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
- *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
- *                {min_duration_ms}|{region}|{policy_version}|
-  *                {request_binding}|{issuer}|{kid}". Region,
- *                request_binding and issuer render as the empty segment
- *                when unset; policy_version as the configured
+ *   canonical  = "v4|{protocol_version}|{nonce}|{scope}|{binding_tag}|
+ *                {issued_at}|{expires_at}|{algorithm}|{m_kib}|{t}|{p}|
+ *                {target_bits}|{salt}|{min_duration_ms}|{region}|
+ *                {policy_version}|{request_binding}|{issuer}|{kid}".
+ *                Region, request_binding and issuer render as the empty
+ *                segment when unset; policy_version as the configured
  *                security-policy epoch; kid as the configured signing
- *                key id, the final canonical field. Protocol v3 is the
- *                decoy-capable canonical: when a decoy (honeypot) field
- *                is armed, see {@see self::issueWithDecoyField()},
- *                exactly one more segment is appended after the kid,
- *                ...|{issuer}|{kid}|{decoy_field}, and the stored
- *                record's protocol_version is 3 — see
- *                {@see self::canonicalPayload()}. Unarmed issuance
- *                stays protocol v2, byte-identical to the pre-decoy
- *                format. Protocol v4 is the execution-capable
- *                canonical: when the ExecutionChallengeV1 dimension is
- *                armed, see {@see self::issueWithExecutionField()}, the
- *                execution commitment segments are appended after the
- *                decoy segment (or after the kid when no decoy is
- *                armed).
- *                Then the canonical ends
- *                ...|{kid}|{decoy_field}|
- *                {execution_version}|{execution_commitment}, and the
- *                stored record's protocol_version is 4.
+ *                key id, the final base field. The protocol version is
+ *                signed, and every armed extension is appended tagged:
+ *                d={decoy_field} (protocol v3+), e={version},
+ *                {commitment} (protocol v4+), r={modulus_sha256}
+ *                (protocol v5), m=1 (the record-metadata MAC marker,
+ *                revision 4). The tags make the encoding injective.
+ *                The m=1 marker commits the sealed server_mac, so
+ *                stripping the MAC breaks the signature. A stored
+ *                version flip or extension swap always breaks the
+ *                signature. Unarmed issuance stays protocol v2 with
+ *                the same revision-4 base shape.
  *                The commitment is the hex SHA-256 of the program's
  *                base64 wire string, so the signed canonical is the
  *                exact mirror of the stored program. Stripping,
@@ -141,6 +134,17 @@ final class Issuer
         'form',
     ];
 
+    /**
+     * The authenticated rsw trapdoor identity: the canonical
+     * {@see RswModulusIdentity::fingerprint()} — lowercase-hex SHA-256 of
+     * the decoded 256-byte modulus. This is exactly the
+     * `rsw_modulus_n_sha256` the shipped rsw-keygen prints.
+     */
+    public static function rswModulusSha256(string $modulusNBase64): string
+    {
+        return RswModulusIdentity::fingerprint($modulusNBase64);
+    }
+
     public function __construct(
         private readonly Config $config,
         private readonly StorageInterface $storage,
@@ -155,17 +159,103 @@ final class Issuer
          * identifier alphabet, at most 64 bytes of [A-Za-z0-9._:-].
          */
         private readonly ?string $region = null,
+        /**
+         * The optional rsw trapdoor rotation keyring: a map of the
+         * modulus SHA-256 (the authenticated rsw_modulus_sha256 riding
+         * each issued record) to that trapdoor's {modulus_n, lambda}
+         * pair. Reconstruction (responseFromRecord) resolves a record's
+         * authenticated identity here, so a rotated or mixed-node
+         * deployment still re-emits the modulus the challenge was
+         * issued under instead of the newly active one.
+         *
+         * @var array<string, array{modulus_n: string, lambda: string}>
+         */
+        private readonly array $rswVerificationKeys = [],
+        /**
+         * The bounded legacy rsw identity migration mode (default false):
+         * while enabled, the historical base64-text identity alias stays
+         * accepted for identity-bearing records below protocol v5 and as
+         * a keyring key. Enable it only while pre-v5 identity-bearing
+         * records drain (the maximum challenge TTL plus clock skew), then
+         * leave it off: a drained deployment must refuse the temporary
+         * grammar fail-closed.
+         */
+        private readonly bool $allowLegacyRswIdentity = false,
     ) {
         if ($region !== null && !Config::isValidIdentifier($region, 64)) {
             throw new \InvalidArgumentException(
                 'region must be 1-64 characters of [A-Za-z0-9._:-] when set'
             );
         }
+        foreach ($rswVerificationKeys as $hash => $pair) {
+            if (!\is_string($hash) || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $hash) !== 1
+                || !\is_array($pair)
+                || !\is_string($pair['modulus_n'] ?? null) || $pair['modulus_n'] === ''
+            ) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys must map a 64-hex modulus SHA-256 to a {modulus_n, lambda} pair'
+                );
+            }
+            // The keyring key must be an identity form of the paired
+            // modulus under THE active mode: the canonical fingerprint
+            // (the keygen's rsw_modulus_n_sha256) always, the legacy
+            // base64-text alias only while the migration mode is enabled.
+            if (!RswModulusIdentity::matches($hash, $pair['modulus_n'], $this->allowLegacyRswIdentity)) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n'
+                    .' (or its legacy base64-text alias while allowLegacyRswIdentity is enabled)'
+                );
+            }
+            // The accepted identity forms resolve to the pair, so a
+            // legacy identity-bearing record (in the migration window)
+            // and a canonical v5 record resolve against the same keyring
+            // entry.
+            $forms = $this->allowLegacyRswIdentity
+                ? RswModulusIdentity::allFingerprints($pair['modulus_n'])
+                : [RswModulusIdentity::fingerprint($pair['modulus_n'])];
+            foreach ($forms as $identity) {
+                $this->rswModuliByHash[$identity] = $pair['modulus_n'];
+            }
+            $this->rswModuliByHash[$hash] = $pair['modulus_n'];
+        }
     }
+
+    /**
+     * Whether `$identity` is an accepted identity form of `$modulusNBase64`
+     * for the record's protocol version: the canonical fingerprint always,
+     * the legacy base64-text alias only on a pre-v5 identity-bearing
+     * record.
+     */
+    public static function isRswIdentityOfModulus(string $identity, string $modulusNBase64, bool $allowLegacyAlias = true): bool
+    {
+        return RswModulusIdentity::matches($identity, $modulusNBase64, $allowLegacyAlias);
+    }
+
+    /**
+     * The rsw trapdoor rotation keyring (modulus identity -> modulus),
+     * see the constructor parameter.
+     *
+     * @var array<string, string>
+     */
+    private array $rswModuliByHash = [];
 
     public function config(): Config
     {
         return $this->config;
+    }
+
+    /**
+     * An issuer with the given Config, every constructor field of
+     * this one carried over directly: storage, the clock override,
+     * region, the rsw trapdoor rotation keyring and the legacy-identity
+     * migration mode.
+     *
+     * No reflection: the constructor is the one authoritative copy of
+     * the issuer's deployment state.
+     */
+    public function withConfig(Config $config): self
+    {
+        return new self($config, $this->storage, $this->now, $this->region, $this->rswVerificationKeys, $this->allowLegacyRswIdentity);
     }
 
     /**
@@ -176,32 +266,18 @@ final class Issuer
      */
     public function withTtl(int $ttlSecs): self
     {
-        $c = $this->config;
-        $clone = new Config(
-            secretKey: $c->secretKey,
-            algorithm: $c->algorithm,
-            mKib: $c->mKib,
-            t: $c->t,
-            p: $c->p,
-            targetBits: $c->targetBits,
-            argon2TargetBits: $c->argon2TargetBits,
-            ttlSecs: $ttlSecs,
-            minDurationMs: $c->minDurationMs,
-            solverMaxHashes: $c->solverMaxHashes,
-            bindingMode: $c->bindingMode,
-            policyVersion: $c->policyVersion,
-            issuer: $c->issuer,
-            kid: $c->kid,
-            executionKey: $c->executionKey,
-            rswModulusN: $c->rswModulusN,
-            rswLambda: $c->rswLambda,
-            rswT: $c->rswT,
-        );
-
-        return new self($clone, $this->storage, $this->now, $this->region);
+        // Every constructor field is carried over, including the rsw
+        // trapdoor rotation keyring: a TTL-variant issuer must resolve
+        // the same outstanding records as its source.
+        return $this->withConfig($this->config->withOverrides(ttlSecs: $ttlSecs));
     }
 
     /**
+     * `$maxProtocolVersionToEmit` is the confirmed write capability
+     * ceiling, documented on {@see self::issueWithDecoyField()}. This
+     * entry point issues the capability-free base shape, so its default
+     * is {@see ChallengeRecord::BASE_PROTOCOL_VERSION}.
+     *
      * @throws \InvalidArgumentException when the scope is empty, longer than
      *                                   128 bytes, or outside the identifier
      *                                   alphabet [A-Za-z0-9._:-];
@@ -209,9 +285,14 @@ final class Issuer
      *                                   than 128 bytes or outside the same
      *                                   alphabet
      */
-    public function issue(string $scope, string $clientIp, ?string $requestBinding = null, ?string $hostname = null): Challenge
-    {
-        return $this->issueChallenge($scope, $clientIp, $requestBinding, $hostname, null);
+    public function issue(
+        string $scope,
+        string $clientIp,
+        ?string $requestBinding = null,
+        ?string $hostname = null,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
+    ): Challenge {
+        return $this->issueChallenge($scope, $clientIp, $requestBinding, $hostname, null, false, null, 1, $maxProtocolVersionToEmit);
     }
 
     /**
@@ -251,6 +332,27 @@ final class Issuer
      * generator's live maximum), passed as an int — never a string that
      * is cast.
      *
+     * `$maxProtocolVersionToEmit` is the confirmed write capability
+     * ceiling: the highest challenge protocol version this writer's
+     * fleet has been confirmed to read. It is a real authority over
+     * every protocol extension, not a hint. Arming the decoy requires a
+     * ceiling of at least {@see ChallengeRecord::DECOY_PROTOCOL_VERSION},
+     * and arming the execution program requires at least
+     * {@see ChallengeRecord::EXECUTION_PROTOCOL_VERSION}. A request
+     * beyond the confirmed ceiling fails issuance with
+     * {@see EmissionCapabilityExceededException} instead of silently
+     * downgrading, and a ceiling below
+     * {@see ChallengeRecord::BASE_PROTOCOL_VERSION} is rejected
+     * outright.
+     *
+     * The one documented fallback is the rsw modulus identity. It is
+     * emitted only at {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}
+     * and otherwise falls back to the identityless legacy base shape.
+     * The identity is additive signing metadata with a defined
+     * backward-compatible form. This entry point arms the decoy by
+     * default, so its default ceiling is the decoy version; pass the
+     * confirmed central floor explicitly for a real rollout ceiling.
+     *
      * @throws \InvalidArgumentException when `$decoyNameOverride` is set
      *                                   but not a valid decoy field name
      */
@@ -264,6 +366,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
+        int $maxProtocolVersionToEmit = ChallengeRecord::DECOY_PROTOCOL_VERSION,
     ): Challenge {
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
             throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
@@ -278,6 +381,7 @@ final class Issuer
             $armExecution,
             $executionAction,
             $executionVersion,
+            $maxProtocolVersionToEmit,
         );
     }
 
@@ -311,8 +415,8 @@ final class Issuer
      * An armed issuance writes protocol v4: the stored record carries
      * `execution_program` plus the authenticated `execution_version`
      * and `execution_commitment` (hex SHA-256 of the program) signed
-     * into the canonical payload as the final
-     * `|execution_version|execution_commitment` segments.
+     * into the canonical payload as the tagged
+     * `|e=execution_version,execution_commitment` segment.
      * Stripping, substituting or injecting a program always breaks the
      * signature.
      *
@@ -331,6 +435,7 @@ final class Issuer
         bool $armDecoyField = false,
         ?string $decoyNameOverride = null,
         ?ChallengeProfile $profile = null,
+        int $maxProtocolVersionToEmit = ChallengeRecord::EXECUTION_PROTOCOL_VERSION,
     ): Challenge {
         if ($profile !== null) {
             return $this->issueWithProfile(
@@ -343,6 +448,7 @@ final class Issuer
                 armExecution: $armExecution,
                 executionAction: $executionAction,
                 executionVersion: $executionVersion,
+                maxProtocolVersionToEmit: $maxProtocolVersionToEmit,
             );
         }
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
@@ -358,6 +464,7 @@ final class Issuer
             $armExecution,
             $executionAction,
             $executionVersion,
+            $maxProtocolVersionToEmit,
         );
     }
 
@@ -499,6 +606,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
     ): Challenge {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -514,6 +622,20 @@ final class Issuer
         if ($requestBinding !== null && !Config::isValidIdentifier($requestBinding, 128)) {
             throw new \InvalidArgumentException('request binding must be 1-128 characters of [A-Za-z0-9._:-]');
         }
+        // The emission ceiling is a real protocol authority: a value below
+        // the base protocol cannot describe any readable fleet, and every
+        // requested extension is checked against it below.
+        if ($maxProtocolVersionToEmit < ChallengeRecord::BASE_PROTOCOL_VERSION) {
+            throw new \InvalidArgumentException(
+                'maxProtocolVersionToEmit must be at least the base protocol version ('.ChallengeRecord::BASE_PROTOCOL_VERSION.')'
+            );
+        }
+        if ($decoyField !== null && $maxProtocolVersionToEmit < ChallengeRecord::DECOY_PROTOCOL_VERSION) {
+            throw new EmissionCapabilityExceededException(
+                'the decoy field requires an emission ceiling of at least '.ChallengeRecord::DECOY_PROTOCOL_VERSION
+                .'; the confirmed ceiling is '.$maxProtocolVersionToEmit
+            );
+        }
         $now = $this->nowUnix();
 
         $nonce = base64_encode(random_bytes(32));
@@ -524,7 +646,7 @@ final class Issuer
         // verifier skips the binding check for empty tags.
         $bindingTag = $this->config->bindingMode === \KiwiCaptcha\BindingMode::None
             ? ''
-            : self::bindingTag($nonce, $clientIp, $this->config->secretKey);
+            : self::bindingTag($nonce, $clientIp, $this->config->secretKey, $this->config->tenantId);
         $algorithm = $this->config->algorithm;
         $targetBits = $this->effectiveTargetBits();
 
@@ -565,6 +687,12 @@ final class Issuer
                     'execution challenges are armed but no execution_key is configured'
                 );
             }
+            if ($maxProtocolVersionToEmit < ChallengeRecord::EXECUTION_PROTOCOL_VERSION) {
+                throw new EmissionCapabilityExceededException(
+                    'the execution program requires an emission ceiling of at least '.ChallengeRecord::EXECUTION_PROTOCOL_VERSION
+                    .'; the confirmed ceiling is '.$maxProtocolVersionToEmit
+                );
+            }
             $executionProgram = ExecutionChallengeGenerator::generate(
                 $this->config->executionKey,
                 $nonce,
@@ -579,7 +707,29 @@ final class Issuer
         $executionCommitment = $executionProgram !== null
             ? self::executionCommitment($executionProgram)
             : null;
+        // The authenticated rsw trapdoor identity (protocol v5): the
+        // canonical-byte modulus fingerprint, signed as the tagged `r=`
+        // segment. It may compose with the decoy/execution
+        // segments (their own signed segments stay authoritative); the
+        // identity is appended before the m= marker, see
+        // {@see self::canonicalPayload()}.
+        $rswIdentity = null;
+        if ($isRsw
+            && $this->config->rswModulusN !== null
+            && $maxProtocolVersionToEmit >= ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION
+        ) {
+            $rswIdentity = self::rswModulusSha256($this->config->rswModulusN);
+        }
+        // The protocol version is part of the signed canonical (revision
+        // 4): a stored version flip must break the signature. Compute it
+        // before signing and reuse the exact value in the stored record.
+        $issuedProtocolVersion = $rswIdentity !== null
+            ? ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION
+            : ($executionProgram !== null
+                ? ChallengeRecord::EXECUTION_PROTOCOL_VERSION
+                : ($decoyField !== null ? ChallengeRecord::DECOY_PROTOCOL_VERSION : ChallengeRecord::BASE_PROTOCOL_VERSION));
         $payload = self::canonicalPayload(
+            $issuedProtocolVersion,
             $nonce,
             $scope,
             $bindingTag,
@@ -605,11 +755,32 @@ final class Issuer
             // segment.
             $executionProgram !== null ? $executionVersion : null,
             $executionCommitment,
+            // The rsw trapdoor identity: only an identity-armed rsw
+            // issuance carries it.
+            $rswIdentity,
+            // Every issuance seals a record-metadata MAC below, so the
+            // signed canonical commits the m=1 marker.
+            true,
         );
-        $signature = self::signPayloadV2($payload, $this->config->secretKey);
+        $signature = self::signPayloadV2($payload, $this->config->secretKey, $this->config->tenantId);
 
         $challenge = base64_encode($payload).'.'.$signature;
         $prefix = $challenge.'|'.$salt.'|';
+        // issuedAtNs = epoch microseconds since Unix epoch (wall clock;
+        // hrtime(true) is monotonic and per-host, so it must never be
+        // persisted to shared storage). The name/JSON key stay
+        // issuedAtNs for ChallengeRecord serialization stability. The
+        // value and the hostname are not part of the signed canonical
+        // fields, so the record-metadata MAC authenticates them under
+        // the server-state purpose key; the signed m=1 marker commits
+        // that the MAC exists.
+        $issuedAtNs = (int) (microtime(true) * 1_000_000);
+        $serverMac = ServerStateMac::recordMeta(
+            ServerStateMac::key($this->config->secretKey, $this->config->tenantId),
+            $challenge,
+            $issuedAtNs,
+            $hostname,
+        );
 
         $record = new ChallengeRecord(
             nonce: $nonce,
@@ -626,20 +797,20 @@ final class Issuer
             prefix: $prefix,
             challenge: $challenge,
             minDurationMs: $minDurationMs,
-            // issuedAtNs = epoch microseconds since Unix epoch (wall clock;
-            // hrtime(true) is monotonic and per-host, so it must never be
-            // persisted to shared storage). The name/JSON key stay
-            // issuedAtNs for ChallengeRecord serialization stability.
-            issuedAtNs: (int) (microtime(true) * 1_000_000),
-            // Protocol version by arm: an execution-armed record carries
-            // the execution-capable canonical (the
-            // `|execution_version|execution_commitment` segments after
-            // the decoy/kid), so it is protocol v4; a decoy-only record
-            // carries the decoy-capable canonical (the `|decoy_field`
-            // segment after the kid), so it is protocol v3; an unarmed
-            // record keeps protocol v2 with the byte-identical 18-field
-            // canonical.
-            protocolVersion: $executionProgram !== null ? 4 : ($decoyField !== null ? 3 : 2),
+            issuedAtNs: $issuedAtNs,
+            // Protocol version by arm: an identity-armed rsw record
+            // carries the identity-capable v5 canonical (the tagged
+            // `r=` segment before the m= marker), so it is protocol v5 — a
+            // pre-v5 verifier rejects the unknown version instead of
+            // silently ignoring the identity; an execution-armed record
+            // carries the execution-capable canonical (the
+            // `e=version,commitment` segments after the decoy/kid), so it
+            // is protocol v4; a decoy-only record
+            // carries the decoy-capable canonical (the `d=` segment
+            // after the kid), so it is protocol v3; an unarmed
+            // record keeps protocol v2 with the plain base
+            // canonical and the trailing m= marker.
+            protocolVersion: $issuedProtocolVersion,
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
@@ -655,6 +826,8 @@ final class Issuer
             // byte-for-byte through storage round-trips.
             executionVersion: $executionProgram !== null ? $executionVersion : null,
             executionCommitment: $executionCommitment,
+            rswModulusSha256: $rswIdentity,
+            serverMac: $serverMac,
         );
         $this->storage->store($record);
 
@@ -675,6 +848,74 @@ final class Issuer
             // The rsw modulus rides the client-facing response (the
             // solver squares modulo n); lambda never leaves the server.
             rswModulus: $isRsw ? $this->config->rswModulusN : null,
+        );
+    }
+
+    /**
+     * Reconstruct the client-facing challenge response from a stored
+     * record: the canonical inverse of the issue path, used by
+     * integrations that hand the record back to the client (fresh
+     * issuance handoff, issued-stage-2 recovery, lost-response
+     * reconstruction).
+     *
+     * The record itself carries every algorithm-independent field; the
+     * algorithm-specific public material comes from this issuer's
+     * Config, so an rsw deployment re-emits the exact configured
+     * modulus. A record the configured algorithm cannot serve (a
+     * different algorithm family, a malformed rsw record) returns null:
+     * the caller must fail closed rather than hand out a challenge the
+     * client cannot solve.
+     */
+    public function responseFromRecord(\KiwiCaptcha\ChallengeRecord $record): ?Challenge
+    {
+        $rswModulus = null;
+        if ($record->algorithm === PoWAlgorithm::Rsw) {
+            // Only the trapdoor owner can reconstruct an rsw challenge;
+            // lambda never leaves the server. The modulus is selected by
+            // the record's authenticated identity, never by whatever pair
+            // is currently active: the keyring (a rotation or mixed-node
+            // record) first, then the active pair, including a legacy
+            // record that predates the identity. The legacy base64-text
+            // alias resolves only a pre-v5 identity; a v5 record resolves
+            // its canonical fingerprint exactly. An identity in neither
+            // fails closed. SHA and Argon records are self-contained
+            // (Argon carries its full parameter set on the record), so a
+            // risk-escalated Argon challenge issued by a SHA-configured
+            // deployment reconstructs without the rsw material.
+            if ($record->rswModulusSha256 !== null) {
+                $allowLegacyAlias = $this->allowLegacyRswIdentity && $record->protocolVersion <= 4;
+                $rswModulus = $this->rswModuliByHash[$record->rswModulusSha256] ?? null;
+                if ($rswModulus !== null && !self::isRswIdentityOfModulus($record->rswModulusSha256, $rswModulus, $allowLegacyAlias)) {
+                    $rswModulus = null;
+                }
+                if ($rswModulus === null && $this->config->rswModulusN !== null
+                    && self::isRswIdentityOfModulus($record->rswModulusSha256, $this->config->rswModulusN, $allowLegacyAlias)
+                ) {
+                    $rswModulus = $this->config->rswModulusN;
+                }
+            } elseif ($this->config->algorithm === PoWAlgorithm::Rsw) {
+                $rswModulus = $this->config->rswModulusN;
+            }
+            if ($rswModulus === null) {
+                return null;
+            }
+        }
+
+        return new Challenge(
+            nonce: $record->nonce,
+            challenge: $record->challenge,
+            salt: $record->salt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            ttlSecs: max(0, $record->expiresAt - $record->issuedAt),
+            minDurationMs: $record->minDurationMs,
+            prefix: $record->prefix,
+            decoyField: $record->decoyField,
+            executionProgram: $record->executionProgram,
+            rswModulus: $rswModulus,
         );
     }
 
@@ -713,6 +954,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
+        int $maxProtocolVersionToEmit = ChallengeRecord::EXECUTION_PROTOCOL_VERSION,
     ): Challenge {
         $profile->validate();
 
@@ -767,13 +1009,16 @@ final class Issuer
             rswModulusN: $this->config->rswModulusN,
             rswLambda: $this->config->rswLambda,
             rswT: $this->config->rswT,
+            tenantId: $this->config->tenantId,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
         // The hostname (server-owned issuance metadata) must
-        // survive the profile path.
-        return (new self($config, $this->storage, $nowFn, $this->region))
-            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion);
+        // survive the profile path, and every constructor field is
+        // carried — including the rsw trapdoor rotation keyring, so the
+        // profile clone resolves the same outstanding records.
+        return (new self($config, $this->storage, $nowFn, $this->region, $this->rswVerificationKeys, $this->allowLegacyRswIdentity))
+            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion, $maxProtocolVersionToEmit);
     }
 
     /**
@@ -785,8 +1030,13 @@ final class Issuer
      * the challenge nonce. The stored binding is unique per challenge and
      * never a stable identifier that follows the client across requests.
      * IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are normalized to
-     * their 4-byte IPv4 form so both spellings of the same address
-     * produce the same tag.
+     * their 4-byte IPv4 form. The deprecated IPv4-compatible forms
+     * (`::a.b.c.d`, excluding `::` and `::1`) are normalized the same
+     * way. Every spelling of the same address therefore produces one tag,
+     * in agreement with the risk identity layer and the Rust core. A non-null $tenantId derives K_ip_bind under
+     * the per-tenant root, so tenants of a shared master secret cannot
+     * forge each other's binding tags; null (the default) keeps the
+     * global key, byte-identical to the tenantless tag.
      *
      * Message layout:
      *   "kiwicaptcha/ip-bind/v2\0" . nonce . "\0" . family . canonical_bytes
@@ -796,35 +1046,54 @@ final class Issuer
      * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
      *                                   IPv6 address
      */
-    public static function bindingTag(string $nonce, string $ip, string $secret): string
+    public static function bindingTag(string $nonce, string $ip, string $secret, ?string $tenantId = null): string
     {
         $family = self::canonicalIpFamily($ip);
         $message = "kiwicaptcha/ip-bind/v2\0".$nonce."\0".$family;
 
-        return hash_hmac('sha256', $message, DerivedKeys::fromMaster($secret)->ipBindKey());
+        return hash_hmac('sha256', $message, DerivedKeys::fromMaster($secret, $tenantId)->ipBindKey());
     }
 
     /**
      * Canonical family byte + packed bytes for an IP: inet_pton() output
-     * (4 or 16 bytes) with IPv4-mapped IPv6 (::ffff:a.b.c.d) normalized to
-     * the 4-byte IPv4 form. Two textual spellings of the same address (e.g.
-     * "2001:db8::1" and "2001:0db8:0:0:0:0:0:1") therefore produce the same
-     * bytes — used by the challenge binding tag AND the rate-limiter
-     * pseudonym so identity is exact.
+     * (4 or 16 bytes) with IPv4-mapped IPv6 (::ffff:a.b.c.d) AND the
+     * deprecated IPv4-compatible IPv6 form (::a.b.c.d, excluding :: and
+     * ::1) normalized to the 4-byte IPv4 form. Two textual spellings of
+     * the same address (e.g. "2001:db8::1" and "2001:0db8:0:0:0:0:0:1")
+     * therefore produce the same bytes — used by the challenge binding
+     * tag AND the rate-limiter pseudonym so identity is exact. This
+     * mirrors the risk identity layer's `RiskIdentityFactory::canonicalIp`
+     * and the Rust core `canonical_ip` byte-for-byte, so the issuance
+     * tag, the siteverify remoteip path and the risk source/subnet
+     * identity always agree on exactly one canonical family per address.
      *
      * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
      *                                   IPv6 address
      */
     public static function canonicalIpFamily(string $ip): string
     {
+        // The strict validator is the grammar gate: the platform's
+        // inet_pton accepts some non-canonical IPv4 spellings
+        // (leading-zero forms among them) and normalizes them
+        // inconsistently.
+        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            throw new \InvalidArgumentException('Invalid IP address');
+        }
         $canonical = inet_pton($ip);
         if ($canonical === false) {
             throw new \InvalidArgumentException('Invalid IP address');
         }
         $len = \strlen($canonical);
-        if ($len === 16 && str_starts_with($canonical, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
-            $canonical = substr($canonical, 12);
-            $len = 4;
+        if ($len === 16) {
+            $low = substr($canonical, 12);
+            $mapped = substr($canonical, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff";
+            $compatible = substr($canonical, 0, 12) === str_repeat("\x00", 12)
+                && $low !== "\x00\x00\x00\x00"
+                && $low !== "\x00\x00\x00\x01";
+            if ($mapped || $compatible) {
+                $canonical = $low;
+                $len = 4;
+            }
         }
         if ($len !== 4 && $len !== 16) {
             throw new \InvalidArgumentException('Invalid IP address');
@@ -834,103 +1103,98 @@ final class Issuer
     }
 
     /**
-     * Canonical protocol v2 payload: the exact byte string that is signed
-     * and base64-encoded into the challenge. Shared with the verifier so
-     * issuance and verification can never drift apart.
+     * The source identity shared by every abuse-tracking layer (the
+     * issuance/cancellation limiter budget, OutstandingChallenges, the
+     * risk source pseudonym, the siteverify idempotency source and the
+     * client-IP budget): the canonical family bytes with IPv6 masked to
+     * its /64. A host controls at least a /64, so a /128-keyed source
+     * lets it rotate addresses and take a fresh identity on every
+     * request. The /64 bucket matches the Rust risk core, where
+     * `source_id_for_epoch` masks with `masked_network(ip, 32, 64)`:
+     * full IPv4, /64 IPv6. The challenge binding tag keeps the full
+     * /128 via
+     * {@see self::canonicalIpFamily()}.
      *
-     * The v2 layout is byte-identical to the Rust crate's
-     * `canonical_signing_input_v2`:
+     * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
+     *                                   IPv6 address
+     */
+    public static function canonicalSourceFamily(string $ip): string
+    {
+        $identity = self::canonicalIpFamily($ip);
+        $family = $identity[0];
+        $bytes = substr($identity, 1);
+        $prefix = $family === "\x04" ? 32 : 64;
+        $masked = '';
+        $remaining = $prefix;
+        foreach (str_split($bytes) as $byte) {
+            if ($remaining >= 8) {
+                $masked .= $byte;
+                $remaining -= 8;
+            } elseif ($remaining > 0) {
+                $masked .= chr(ord($byte) & (0xFF << (8 - $remaining) & 0xFF));
+                $remaining = 0;
+            } else {
+                $masked .= "\x00";
+            }
+        }
+
+        return $family.$masked;
+    }
+
+    /**
+     * Canonical payload (revision 4): the exact byte string that is
+     * signed and base64-encoded into the challenge. Shared with the
+     * verifier so issuance and verification can never drift apart.
      *
-     *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
-     *       p|target_bits|salt|min_duration_ms|region|policy_version|
-     *       request_binding|issuer|kid
+     * Byte-identical to the Rust `canonical_signing_input_v2`:
      *
-     * `region`, `request_binding` and `issuer` render as the empty segment
-     * when unset. A null region + policy 1 + null binding + null issuer +
-     * kid 1 ends the canonical with `|0||1|||1`. `kid` is the final
-     * field, appended after `issuer`; it is always present (the
-     * configured signing key id, default 1).
+     *     v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|
+     *       algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|
+     *       policy_version|request_binding|issuer|kid
      *
-     * # The decoy-field extension (protocol v3)
+     * `region`, `request_binding` and `issuer` render as the empty
+     * segment when unset; `kid` is the final base field (always present,
+     * the configured signing key id, default 1).
      *
-     * When the issuer arms a decoy (honeypot) form field, the field
-     * name is appended as one extra final segment after the `kid`; see
-     * {@see self::issueWithDecoyField()}. Armed records are protocol
-     * v3; unarmed records stay protocol v2, byte-identical to the
-     * pre-decoy format.
+     * # Armed extensions (tagged)
      *
-     * ```text
-     * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
-     *   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-     *   issuer|kid|decoy_field
-     * ```
+     * Each armed extension is appended after the base with an explicit
+     * tag, in capability order:
      *
-     * - `decoy_field` is the literal armed decoy name: a grammar prefix
-     * plus the 16-hex `CSPRNG` suffix (e.g.
-     * `billing_address_line_a3f9c21d8e5b7401`), see
-     * {@see self::composeDecoyName()}, so it can never contain
-     * the `|` separator (the alphabet is `[a-z_0-9]`; validation
-     * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-     * - The segment is appended only when a decoy is armed, and the
-     * protocol-vs-decoy grammar is total: v2 => no decoy, v3 => decoy
-     * present. `null` renders
-     * nothing extra, so the canonical string is byte-identical to the
-     * pre-extension format. Outstanding unarmed challenges and
-     * cross-language records keep verifying unchanged across the
-     * upgrade, and the extension is invisible until a deployment opts
-     * in. The exact recipe: build the same 18-field base string, then
-     * append `'|' . $decoyField` if and only if the record carries a
-     * non-null `decoy_field`; sign/HMAC-verify the result with the
-     * `HKDF`-derived challenge key (`K_challenge`) exactly as before.
-     * The stored record JSON carries the optional string key
-     * `decoy_field` (absent when null — not a JSON `null` key); the
-     * client-facing challenge response carries the optional key
-     * `decoy_field` with the same value.
-     * - Wire compatibility: unarmed records are byte-identical in both
-     * directions; armed records are protocol v3 and require a
-     * v3-capable verifier (an old verifier rejects version 3 as
-     * unknown — the capability becomes inferable from
-     * protocol_version, which is the point). The grammar is enforced on
-     * both acceptance surfaces: a v2 record carrying `decoy_field` is
-     * malformed, and a v3 record without one is malformed too. The
-     * decoy is mandatory on v3, so a stored version flip can never
-     * change the effective protocol.
+     *     ...|kid|d={decoy_field}|e={version},{commitment}|r={modulus_sha256}|m=1
      *
-     * # The execution-commitment extension (protocol v4)
+     * - `d=` (protocol v3): the armed decoy name, see
+     *   {@see self::issueWithDecoyField()}. `null` renders no segment.
+     * - `e=` (protocol v4): the ExecutionChallengeV1 version and the hex
+     *   SHA-256 of the program's base64 wire string, see
+     *   {@see self::issueWithExecutionField()}. They are always present
+     *   together; the signed commitment is the exact mirror of the stored
+     *   program, and the verifier additionally checks
+     *   SHA256(stored program) == commitment.
+     * - `r=` (protocol v5): the canonical-byte rsw modulus fingerprint.
+     * - `m=1` (revision 4): the record-metadata MAC marker, appended last
+     *   whenever the record carries a `server_mac`. The marker is what
+     *   makes stripping the MAC break the signature and lets the verifier
+     *   require a valid MAC without trusting the stored MAC presence.
      *
-     * When the issuer arms the ExecutionChallengeV1 dimension, the
-     * execution version and the program commitment are appended as two
-     * more final segments after the decoy segment (or after the `kid`
-     * when no decoy is armed).
-     * See {@see self::issueWithExecutionField()}.
-     * Execution-armed records are protocol v4.
+     * # Why the tags and the signed version
      *
-     * ```text
-     * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
-     *   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-     *   issuer|kid[|decoy_field]|execution_version|execution_commitment
-     * ```
-     *
-     * - `execution_version` is the canonical numeric byte carrying the
-     *   execution grammar version, 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}
-     *   when armed (decimal on the wire; never `|`-capable).
-     * - `execution_commitment` is the hex SHA-256 of the stored
-     *   program's base64 wire string: 64 lowercase hex characters,
-     *   never `|`-capable.
-     * - The segments are appended only when the record carries an
-     *   execution program, and the protocol-vs-execution grammar is
-     *   total: v2/v3 => no execution, v4 => execution present. The
-     *   signed commitment is therefore the exact mirror of the stored
-     *   program: a stored/tampered record cannot strip, substitute or
-     *   inject a program without breaking the signature (the
-     *   equivalence is additionally enforced by the verifier's
-     *   SHA256(stored program) == commitment check).
-     * - Wire compatibility: unarmed and decoy-only records are
-     *   byte-identical in both directions; execution-armed records are
-     *   protocol v4 and require a v4-capable verifier (an old verifier
-     *   rejects version 4 as unknown).
+     * Revision 2 signed `v2|...` for every protocol version and appended
+     * the extensions as bare positional segments, so the encoding was
+     * not injective. A v5 rsw record with identity `H` and no decoy
+     * signed the same bytes as a v3 record with decoy `H`. A v4
+     * execution pair signed the same bytes as a v5 decoy plus identity
+     * pair. An attacker who can write challenge storage could therefore
+     * reshape a record while keeping a valid signature, for example
+     * downgrading v5 to v3 and stripping the rsw identity pinning.
+     * Revision 3 signs `protocol_version` and tags every extension, so
+     * distinct capability shapes can never collide. Revision 4 adds the
+     * signed `m=1` marker. Supporting both layouts by version would keep
+     * the attack alive for stored records, so the current revision is a
+     * hard cutover.
      */
     public static function canonicalPayload(
+        int $protocolVersion,
         string $nonce,
         string $scope,
         string $bindingTag,
@@ -951,9 +1215,12 @@ final class Issuer
         ?string $decoyField = null,
         ?int $executionVersion = null,
         ?string $executionCommitment = null,
+        ?string $rswModulusSha256 = null,
+        bool $serverMacCommitted = false,
     ): string {
         $base = sprintf(
-            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
+            'v4|%d|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
+            $protocolVersion,
             $nonce,
             $scope,
             $bindingTag,
@@ -974,10 +1241,11 @@ final class Issuer
         );
 
         // The decoy segment is appended only when armed: null renders
-        // nothing extra, so the unarmed canonical stays byte-identical to
-        // the legacy 18-field format.
+        // nothing extra, so the unarmed base keeps the plain field set.
+        // The m= marker is appended separately when the record carries
+        // a server_mac.
         if ($decoyField !== null) {
-            $base .= '|'.$decoyField;
+            $base .= '|d='.$decoyField;
         }
         // The execution commitment segments are appended only when the
         // record carries an execution program — and only as the exact
@@ -990,17 +1258,54 @@ final class Issuer
                     'execution_version and execution_commitment must be passed together'
                 );
             }
-            $base .= '|'.$executionVersion.'|'.$executionCommitment;
+            $base .= '|e='.$executionVersion.','.$executionCommitment;
+        }
+        // The rsw trapdoor identity is appended only when the record
+        // carries it: a legacy rsw record (bound before the identity
+        // existed) signs the canonical it always signed, and a
+        // post-binding record authenticates its modulus.
+        if ($rswModulusSha256 !== null) {
+            $base .= '|r='.$rswModulusSha256;
+        }
+        // The record-metadata MAC marker is appended last whenever the
+        // signed record carries a server_mac: stripping the MAC then
+        // changes the signed bytes.
+        if ($serverMacCommitted) {
+            $base .= '|m=1';
         }
 
         return $base;
     }
 
     /**
+     * True when the challenge's signed canonical carries the
+     * record-metadata MAC marker (`m=1`). The marker is parsed from the
+     * base64 canonical embedded in the challenge string, never inferred
+     * from the stored `server_mac` presence. A record whose signature
+     * covers `m=1` must carry a valid MAC, while a record signed without
+     * the marker accepts an absent MAC. A malformed challenge decodes to
+     * false. Mirrors the Rust `signed_canonical_commits_record_meta`.
+     */
+    public static function signedCanonicalCommitsRecordMeta(string $challenge): bool
+    {
+        $pos = strrpos($challenge, '.');
+        if ($pos === false) {
+            return false;
+        }
+        $canonical = base64_decode(substr($challenge, 0, $pos), true);
+        if ($canonical === false) {
+            return false;
+        }
+
+        return str_starts_with($canonical, 'v4|') && str_ends_with($canonical, '|m=1');
+    }
+
+    /**
      * The authenticated execution commitment of a stored program: hex
      * SHA-256 of the program's base64 wire string, 64 lowercase hex
      * characters. This is the value signed into the protocol v4
-     * canonical (the final `|execution_commitment` segment), so the
+     * canonical (the second element of the tagged `|e=execution_version,
+     * execution_commitment` segment), so the
      * verifier's constant-time equivalence check
      * `SHA256(stored program) == signed commitment` is byte-exact in
      * both languages. Mirrors the Rust `execution_commitment` helper.
@@ -1036,12 +1341,16 @@ final class Issuer
      * Protocol v2 signature: hex HMAC-SHA256 of the canonical v2 payload
      * keyed by the `HKDF`-derived challenge-signing purpose key
      * (K_challenge). See {@see DerivedKeys}. The master secret is never
-     * used directly as the signing key. Byte-identical to the Rust
+     * used directly as the signing key. A non-null $tenantId derives
+     * K_challenge under the per-tenant root ("kiwi/v2/tenant/" + tenant
+     * id), so tenants of a shared master secret cannot sign each other's
+     * challenges. Null (the default) keeps the global key,
+     * byte-identical to the tenantless signature and to the Rust
      * crate's `sign_canonical_v2`.
      */
-    public static function signPayloadV2(string $canonicalPayload, string $secretKey): string
+    public static function signPayloadV2(string $canonicalPayload, string $secretKey, ?string $tenantId = null): string
     {
-        return hash_hmac('sha256', $canonicalPayload, DerivedKeys::fromMaster($secretKey)->challengeKey());
+        return hash_hmac('sha256', $canonicalPayload, DerivedKeys::fromMaster($secretKey, $tenantId)->challengeKey());
     }
 
     private function effectiveTargetBits(): int

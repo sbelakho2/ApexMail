@@ -86,6 +86,8 @@ final class ChainV2SchemaParityTest extends TestCase
             'stage2Nonce' => null,
             'requestBinding' => self::VALID_BINDING,
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ], $overrides);
     }
 
@@ -96,7 +98,9 @@ final class ChainV2SchemaParityTest extends TestCase
     private function corpus(): array
     {
         $records = [['valid-available', $this->validRecord()]];
-        $records[] = ['valid-reserved', $this->validRecord(['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30])];
+        $records[] = ['valid-reserved', $this->validRecord(['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30, 'reservedRequirementGeneration' => 1])];
+        $records[] = ['valid-generation-raised', $this->validRecord(['requirementGeneration' => 4])];
+        $records[] = ['valid-reserved-generation-raised', $this->validRecord(['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30, 'requirementGeneration' => 3, 'reservedRequirementGeneration' => 2])];
         $records[] = ['valid-issued', $this->validRecord(['state' => 'issued', 'stage2Nonce' => self::VALID_NONCE])];
         $records[] = ['valid-verified', $this->validRecord(['state' => 'verified', 'stage2Nonce' => self::VALID_NONCE])];
         $records[] = ['valid-completed', $this->validRecord(['state' => 'completed', 'stage2Nonce' => self::VALID_NONCE])];
@@ -122,6 +126,17 @@ final class ChainV2SchemaParityTest extends TestCase
             ['chainDepth-wrong', ['chainDepth' => 3]],
             ['chainDepth-null', ['chainDepth' => null]],
             ['chainDepth-missing', ['chainDepth' => 'REMOVE']],
+            ['generation-zero', ['requirementGeneration' => 0]],
+            ['generation-negative', ['requirementGeneration' => -1]],
+            ['generation-string', ['requirementGeneration' => '1']],
+            ['generation-float', ['requirementGeneration' => 1.5]],
+            ['generation-null', ['requirementGeneration' => null]],
+            ['generation-missing', ['requirementGeneration' => 'REMOVE']],
+            ['reserved-generation-null-in-reserved', ['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30, 'reservedRequirementGeneration' => null]],
+            ['reserved-generation-missing-in-reserved', ['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30, 'reservedRequirementGeneration' => 'REMOVE']],
+            ['reserved-generation-string', ['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30, 'reservedRequirementGeneration' => '1']],
+            ['reserved-generation-set-outside-reserved', ['reservedRequirementGeneration' => 1]],
+            ['reserved-generation-zero', ['state' => 'reserved', 'owner' => 'owner-a', 'leaseUntil' => time() + 30, 'reservedRequirementGeneration' => 0]],
             ['nonce-short', ['stage1Nonce' => 'abc']],
             ['nonce-long', ['stage1Nonce' => str_repeat('a', 45)]],
             ['nonce-no-pad', ['stage1Nonce' => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX01']],

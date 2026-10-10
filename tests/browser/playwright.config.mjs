@@ -9,12 +9,7 @@ export default defineConfig({
   use: { baseURL: 'http://127.0.0.1:8085' },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   webServer: {
-    // The unique KIWI_FIXTURE_RUN_ID namespaces the fixture's chain
-    // state per server start (one fresh php -S per run), so a run never
-    // inherits the half-expired chain obligations of an earlier run —
-    // see chainStateFile() in router.php.
-    command:
-      'KIWI_FIXTURE_RUN_ID="run-$(date +%s)-$$" php -d opcache.jit=off -S 127.0.0.1:8085 router.php',
+    command: 'php -d opcache.jit=off -S 127.0.0.1:8085 router.php',
     url: 'http://127.0.0.1:8085/',
     reuseExistingServer: false,
     timeout: 30_000,

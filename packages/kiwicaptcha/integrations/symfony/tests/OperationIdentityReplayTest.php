@@ -234,7 +234,7 @@ final class OperationIdentityReplayTest extends TestCase
      */
     public function testPostedOperationIdNeverAuthorizesTheReplay(): void
     {
-        // Sequence A, the audit's exact attack: the attacker submits a
+        // Sequence A, the canonical attack: the attacker submits a
         // valid token with a client-chosen POST kiwi_operation_id, then
         // resubmits the same token with the same id. The POST field is
         // ignored (server-owned identity only), so the second request

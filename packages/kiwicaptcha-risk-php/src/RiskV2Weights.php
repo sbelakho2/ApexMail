@@ -19,11 +19,17 @@ final class RiskV2Weights
     public const DEFAULT_SESSION_INCONSISTENCY = 120;
     /** Weight of the trusted-edge TLS inconsistency signal (a changed TLS classification tag raises the aggregate; a consistent or absent tag is neutral). */
     public const DEFAULT_TLS = 80;
+    /** Weight of the target-account failure pressure (a stuffed target raises the score before the marks stage escalates). */
+    public const DEFAULT_TARGET_FAILURE_PRESSURE = 160;
+    /** Weight of the target-account source+asn spread. */
+    public const DEFAULT_TARGET_SPREAD = 100;
 
     public function __construct(
         public readonly int $honeypot = self::DEFAULT_HONEYPOT,
         public readonly int $sessionInconsistency = self::DEFAULT_SESSION_INCONSISTENCY,
         public readonly int $tls = self::DEFAULT_TLS,
+        public readonly int $targetFailurePressure = self::DEFAULT_TARGET_FAILURE_PRESSURE,
+        public readonly int $targetSpread = self::DEFAULT_TARGET_SPREAD,
     ) {
         foreach (get_object_vars($this) as $value) {
             if ($value < 0 || $value > 1000) {
@@ -41,6 +47,8 @@ final class RiskV2Weights
             'honeypot' => $this->honeypot,
             'session_inconsistency' => $this->sessionInconsistency,
             'tls' => $this->tls,
+            'target_failure_pressure' => $this->targetFailurePressure,
+            'target_spread' => $this->targetSpread,
         ];
     }
 }

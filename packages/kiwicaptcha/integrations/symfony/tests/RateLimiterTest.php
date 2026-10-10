@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Storage\ArrayStorage;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
@@ -24,6 +25,16 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class RateLimiterTest extends TestCase
 {
+    /**
+     * The derived Redis tag of a raw namespace (mirrors
+     * RedisNamespace::derive under the default legacy key version, the
+     * version these limiter instances are built with).
+     */
+    private static function tag(string $ns): string
+    {
+        return RedisNamespace::derive($ns);
+    }
+
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
     private function controller(?IssuanceRateLimiter $limiter = null): ChallengeController
@@ -153,6 +164,38 @@ final class RateLimiterTest extends TestCase
         $pool->clear();
         $limiter->allow('192.168.1.5');
         self::assertSame($mapped, array_keys($pool->getValues()), 'IPv4-mapped IPv6 must equal the plain IPv4 pseudonym');
+    }
+
+    public function testIpv6PerClientBudgetIsKeyedByThe64Prefix(): void
+    {
+        // A host controls at least a /64, so a /128-keyed budget is free
+        // to rotate through. Two addresses in one /64 share one budget;
+        // different /64s do not.
+        $pool = new ArrayAdapter();
+        $limiter = new IssuanceRateLimiter(1, 60, $pool, null, 'pepper');
+
+        self::assertSame(1, $limiter->check('2001:db8:1:2::1'), 'the first address in the /64 is inside budget');
+        self::assertSame(0, $limiter->check('2001:db8:1:2::2'), 'a sibling address in the same /64 shares the exhausted budget');
+
+        $pool->clear();
+        self::assertSame(1, $limiter->check('2001:db8:1:3::1'));
+        self::assertSame(1, $limiter->check('2001:db8:1:4::1'), 'different /64s are different clients');
+    }
+
+    public function testDisabledGlobalCapWritesNoGlobalMembers(): void
+    {
+        // globalMax = 0 disables the deployment-wide window: the Lua
+        // script must not `ZADD` a global member, or the "cardinality is
+        // bounded by the global cap" contract fails and the set grows
+        // with deployment traffic per window.
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(5, 60, redis: $client, globalMax: 0, namespace: 'no-global', pepper: 'p');
+        self::assertSame(1, $limiter->check('203.0.113.9'));
+
+        self::assertNotSame([], $client->zsets, 'the per-client window is still written');
+        foreach (array_keys($client->zsets) as $key) {
+            self::assertStringNotContainsString(':global', (string) $key, 'a disabled global cap must not grow the global ZSET');
+        }
     }
 
     public function testGlobalOnlyModeCreatesNoClientKeys(): void
@@ -401,10 +444,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // The two deployments never shared an item: each wrote its own
         // global item and its own per-client items; the key families are
         // disjoint (and neither ever touches the legacy `kr_global`).
-        // The namespace segment is PSR-6-safe ('-' folds to '_').
+        // The namespace segment is a hex digest of the whole namespace.
+        $segA = substr(hash('sha256', 'deployment-a'), 0, 24);
+        $segB = substr(hash('sha256', 'deployment-b'), 0, 24);
         $keys = array_keys($pool->getValues());
-        self::assertContains('kr_global_deployment_a', $keys, 'deployment A has its own dedicated global item');
-        self::assertContains('kr_global_deployment_b', $keys, 'deployment B has its own dedicated global item');
+        self::assertContains('kr_global_'.$segA, $keys, 'deployment A has its own dedicated global item');
+        self::assertContains('kr_global_'.$segB, $keys, 'deployment B has its own dedicated global item');
         self::assertNotContains('kr_global', $keys, 'a namespaced deployment never touches the legacy literal item');
         foreach ($keys as $key) {
             self::assertMatchesRegularExpression('/^kr_(global_)?[A-Za-z0-9_.]+(_[0-9a-f]+)?$/', (string) $key, 'every PSR-6 key stays within the PSR-6 guaranteed character set');
@@ -427,6 +472,67 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // The budget separation is real state, not key cosmetics: A is
         // still saturated after B's admissions.
         self::assertSame(-1, $a->check('198.51.100.4'));
+    }
+
+    public function testPsr6NamespacesThatASanitizedTruncationWouldFoldStayIndependent(): void
+    {
+        // The digest segment distinguishes inputs a sanitized truncation
+        // merges: '-' and '_' fold onto one sanitized segment, and any
+        // two namespaces sharing their first twenty bytes fold onto one
+        // prefix budget. Both collision classes keep fully independent
+        // per-client and global budgets over one shared pool.
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $now = static function () use (&$clock): float {
+            return $clock;
+        };
+        $dash = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, 'deployment-a');
+        $underscore = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, 'deployment_a');
+
+        self::assertSame(1, $dash->check('198.51.100.1'));
+        self::assertSame(1, $dash->check('198.51.100.2'));
+        self::assertSame(-1, $dash->check('198.51.100.3'), 'the dash deployment hits its own global cap');
+        self::assertSame(1, $underscore->check('198.51.100.1'), 'the underscore deployment keeps its own budget: the folded-segment collision is gone');
+        self::assertSame(1, $underscore->check('198.51.100.2'));
+        self::assertSame(-1, $underscore->check('198.51.100.3'), 'the underscore deployment now hits its own cap');
+        self::assertSame(-1, $dash->check('198.51.100.4'), 'the dash deployment is still saturated: the state never merged');
+
+        $segDash = substr(hash('sha256', 'deployment-a'), 0, 24);
+        $segUnderscore = substr(hash('sha256', 'deployment_a'), 0, 24);
+        self::assertNotSame($segDash, $segUnderscore, 'the folded pair derives distinct segments');
+        $keys = array_keys($pool->getValues());
+        self::assertContains('kr_global_'.$segDash, $keys);
+        self::assertContains('kr_global_'.$segUnderscore, $keys);
+    }
+
+    public function testPsr6NamespacesSharingTheirFirstTwentyBytesStayIndependent(): void
+    {
+        // The prefix-budget collision: two namespaces identical through
+        // byte twenty and differing after it. A truncated segment merged
+        // them; the digest keeps every byte significant.
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $now = static function () use (&$clock): float {
+            return $clock;
+        };
+        $nsA = 'abcdefghijklmnopqrst-A';
+        $nsB = 'abcdefghijklmnopqrst-B';
+        $a = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $nsA);
+        $b = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $nsB);
+
+        self::assertSame(1, $a->check('198.51.100.1'));
+        self::assertSame(1, $a->check('198.51.100.2'));
+        self::assertSame(-1, $a->check('198.51.100.3'), 'the A deployment hits its own global cap');
+        self::assertSame(1, $b->check('198.51.100.1'), 'the B deployment keeps its own budget: the shared-prefix collision is gone');
+        self::assertSame(1, $b->check('198.51.100.2'));
+        self::assertSame(-1, $b->check('198.51.100.3'), 'the B deployment now hits its own cap');
+        self::assertSame(-1, $a->check('198.51.100.4'), 'the A deployment is still saturated: the state never merged');
+
+        // The per-client windows never merged either: the same client
+        // identity under the same pepper wrote distinct items.
+        $stateful = array_keys(array_filter($pool->getValues(), static fn ($v): bool => $v !== null));
+        $clientKeys = array_values(array_filter($stateful, static fn (string $k): bool => !str_starts_with($k, 'kr_global')));
+        self::assertCount(4, array_unique($clientKeys), 'each deployment keeps its own two admitted client windows');
     }
 
     public function testPsr6EmptyNamespaceKeepsTheLegacyKeyShapes(): void
@@ -1267,8 +1373,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // (inet_pton with IPv4-mapped normalization) — the same
         // canonicalization used for challenge binding.
         $identity = hash_hmac('sha256', \KiwiCaptcha\Issuer::canonicalIpFamily('198.51.100.7'), $pepper);
-        self::assertArrayHasKey('{kiwi:rl:deployment-x}:client:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced canonical-HMAC key');
-        self::assertArrayHasKey('{kiwi:rl:deployment-x}:global', $client->zsets);
+        self::assertArrayHasKey('{kiwi:rl:'.self::tag('deployment-x').'}:client:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced canonical-HMAC key');
+        self::assertArrayHasKey('{kiwi:rl:'.self::tag('deployment-x').'}:global', $client->zsets);
 
         foreach (array_keys($client->zsets) as $key) {
             self::assertStringNotContainsString('198.51.100.7', (string) $key, 'raw IPs must never appear in Redis keys');
@@ -1315,7 +1421,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         }
 
-        $globalKey = '{kiwi:rl:bounded-global}:global';
+        $globalKey = '{kiwi:rl:'.self::tag('bounded-global').'}:global';
         self::assertArrayHasKey($globalKey, $client->zsets, 'the global key must exist');
         self::assertSame(1000, $allowed, 'exactly the cap\'s worth of admissions are allowed');
         self::assertSame(1000, $client->zcard($globalKey), 'the global ZSET never exceeds the cap — one exact-time member per admission');
@@ -1348,7 +1454,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             now: static fn (): float => $t0Ms / 1000,
         );
         self::assertSame(1, $limiter->check('198.51.100.7'), 'the first admission fills the global cap');
-        $globalKey = '{kiwi:rl:exact-boundary-global}:global';
+        $globalKey = '{kiwi:rl:'.self::tag('exact-boundary-global').'}:global';
         self::assertCount(1, $client->zsets[$globalKey], 'exactly one member exists after the first admission');
         $member = array_key_first($client->zsets[$globalKey]);
         self::assertSame($t0Ms, $client->zsets[$globalKey][$member], 'the member is scored at its exact admission ms');
@@ -1358,7 +1464,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // itself never disturbs the state under test: it only observes
         // whether the T request still counts toward the cap.
         $probe = static function (float $atMs, string $namespace, int $expected, string $why) use ($client, $member, $t0Ms): void {
-            $key = '{kiwi:rl:'.$namespace.'}:global';
+            $key = '{kiwi:rl:'.self::tag($namespace).'}:global';
             $client->zsets[$key] = [$member => $t0Ms];
             $client->setTimeMs($atMs);
             $probeLimiter = new IssuanceRateLimiter(
@@ -1408,7 +1514,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             pepper: 'pepper',
             now: static fn (): float => $clock,
         );
-        $globalKey = '{kiwi:rl:exact-burst}:global';
+        $globalKey = '{kiwi:rl:'.self::tag('exact-burst').'}:global';
         self::assertSame(1, $limiter->check('198.51.100.1'));
         self::assertSame(1, $limiter->check('198.51.100.2'));
         self::assertSame(2, $client->zcard($globalKey), 'two admissions = two exact-time members');

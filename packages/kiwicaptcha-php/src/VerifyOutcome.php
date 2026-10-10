@@ -20,10 +20,11 @@ namespace KiwiCaptcha;
  * application transaction.
  *
  * A valid outcome additionally exposes the server-measured solve
- * duration via {@see self::solveDurationMs()}: the span between the
- * record's signed issuance clock (issued_at_ns) and the verification
- * receipt, computed without trusting any client-reported timing, the
- * token's durationMs is forgeable and never consulted. The value is
+ * duration via {@see self::solveDurationMs()}. It is the span between
+ * the record's server-written issuance clock and the verification
+ * receipt. The clock is `issued_at_ns`, authenticated server-side
+ * metadata (see {@see ChallengeRecord}). No client-reported timing is
+ * trusted: the token's durationMs is forgeable and never consulted. The value is
  * computed only for a fresh derivation, a first redemption or a fresh
  * resultless-resume derivation, where the receipt clock is the span's
  * true endpoint. On an identity-proven stored-result replay,
@@ -136,7 +137,7 @@ final class VerifyOutcome
      * The exact server-issued name the challenge response carried, taken
      * from the verified record: the consuming validator must compare the
      * submitted form field against this authenticated name and never
-     * reconstruct it from the nonce (the audit's "no second nonce-hash
+     * reconstruct it from the nonce (the "no second nonce-hash
      * scheme"). Populated on fresh derivations and stored-result replays
      * alike. Null when no decoy was armed (the surface disabled) and on
      * every non-valid outcome.

@@ -67,6 +67,7 @@ final class ExecutionTraceFixture
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
         'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
         'dfrag', 'dclone', 'drepar', 'dreflec', 'dphase', 'durlc', 'dmutate', 'dsdep',
+        'dcsgeom', 'dmutord', 'devphf', 'drange', 'dintobs',
     ];
 
     /**
@@ -77,7 +78,7 @@ final class ExecutionTraceFixture
      * uses this fixed hex reference value exactly like the fixed
      * observed height above, a fabricated reference value.
      */
-    private const FABRICATED_URL_DIGEST = 'e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7';
+    private const FABRICATED_URL_DIGEST = '4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2';
 
     private function __construct()
     {
@@ -122,13 +123,37 @@ final class ExecutionTraceFixture
     }
 
     /**
+     * The white-box forge entry: the browser-equivalent state machine
+     * with the version-6 probe entries synthesized inside the published
+     * operand-derived envelopes (see WhiteBoxEnvelopeForger) instead of
+     * the pure-sim placeholders. Every reported observation is written
+     * through into the u8 state exactly as the verifier replays it, so
+     * later checksum/read entries stay coherent. This is the
+     * full-knowledge forger's trace; the naive oracle's placeholder
+     * trace stays on {@see self::executedTraceForWithObservedHeight()}.
+     *
+     * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
+     */
+    public static function executedTraceForWhiteBox(array $program, int $observedHeight): string
+    {
+        if ($observedHeight < 1 || $observedHeight > 255) {
+            throw new \InvalidArgumentException('the fabricated observed height must stay within 1..255');
+        }
+
+        return self::buildTrace($program, $observedHeight, true);
+    }
+
+    /**
      * The single state-machine trace builder: the observed height is a
      * parameter so the fixture's fixed reference choice and the
      * solver's explicit choice share one behavior-exact simulation.
      * A version-5 program replays over the object-graph state exactly
-     * like the generator's canonical simulation.
+     * like the generator's canonical simulation. The whiteBox flag
+     * switches the five version-6 probe entries from pure-sim
+     * placeholders to envelope-satisfying forgeries (the cells those
+     * probes report are written through into the u8 state).
      */
-    private static function buildTrace(array $program, int $observedHeight): string
+    private static function buildTrace(array $program, int $observedHeight, bool $whiteBox = false): string
     {
         $u8 = [];
         $cur = null; // ['id', 'attrs' map, 'dataset' map, 'classes' set, 'appended' bool]
@@ -203,6 +228,65 @@ final class ExecutionTraceFixture
                 $entries[] = self::TRACE_NAMES[$op].'('.$idx.','.$observedHeight.')';
                 if ($idx < \count($u8)) {
                     $u8[$idx] = $observedHeight;
+                }
+            } elseif ($whiteBox && $op === ExecutionChallengeGenerator::OP_CSS_GEOM) {
+                // White-box: the computed-geometry envelope is a pure
+                // function of the drawn seed. Emit the exact font size
+                // and the interval floor as the height — no layout ran.
+                [$fsLo, $fsHi, $hLo, $hHi] = WhiteBoxEnvelopeForger::cssGeomEnvelope((int) $record['operands']['seed']);
+                $entries[] = self::TRACE_NAMES[$op].'('.$fsLo.','.$hLo.')';
+                $cell = $record['operands']['cell'];
+                if ($cell < \count($u8)) {
+                    $u8[$cell] = $hLo;
+                }
+            } elseif ($whiteBox && $op === ExecutionChallengeGenerator::OP_MUT_ORDER) {
+                // White-box: the mutation record-type string is fully
+                // determined by the churn operands.
+                [$expected, $records] = WhiteBoxEnvelopeForger::mutOrderEnvelope(
+                    (int) $record['operands']['b0'],
+                    (int) $record['operands']['b1'],
+                );
+                $entries[] = self::TRACE_NAMES[$op].'('.$expected.')';
+                $cell = $record['operands']['cell'];
+                if ($cell < \count($u8)) {
+                    $u8[$cell] = $records;
+                }
+            } elseif ($whiteBox && $op === ExecutionChallengeGenerator::OP_EV_PHASE_FULL) {
+                // White-box: the full-phase body is the published
+                // constant "1234:3" for every program.
+                $entries[] = self::TRACE_NAMES[$op].'('.WhiteBoxEnvelopeForger::evPhaseFullBody().')';
+                $cell = $record['operands']['cell'];
+                if ($cell < \count($u8)) {
+                    $u8[$cell] = 4;
+                }
+            } elseif ($whiteBox && $op === ExecutionChallengeGenerator::OP_RANGE_ORDER) {
+                // White-box: the range string length is exact and the
+                // fragment count band admits the floor.
+                [$tExact, $rectsLo, $rectsHi] = WhiteBoxEnvelopeForger::rangeOrderEnvelope(
+                    (int) $record['operands']['b0'],
+                    (int) $record['operands']['b1'],
+                );
+                $entries[] = self::TRACE_NAMES[$op].'('.$tExact.','.$rectsLo.',1)';
+                $cell = $record['operands']['cell'];
+                if ($cell < \count($u8)) {
+                    $u8[$cell] = $rectsLo;
+                }
+            } elseif ($whiteBox && $op === ExecutionChallengeGenerator::OP_INT_OBS) {
+                // White-box: the intersection band is seed-derived; the
+                // isIntersecting flag is chosen against the drawn
+                // threshold inside the walker's two-percent slack.
+                [$qLo, $qHi, $t0Pct] = WhiteBoxEnvelopeForger::intObsEnvelope((int) $record['operands']['seed']);
+                // The geometry-explicit ratio (steps of five percent)
+                // always lands inside the band the envelope admits.
+                $seed = (int) $record['operands']['seed'];
+                $m = 5 + ($seed % 36);
+                $q = min(max(40 - $m, 0), 20) * 5;
+                $q = max($qLo, min($qHi, $q));
+                $isInt = $q >= $t0Pct + 2 ? 1 : ($q <= $t0Pct - 2 ? 0 : ($q >= $t0Pct ? 1 : 0));
+                $entries[] = self::TRACE_NAMES[$op].'(1,'.$q.','.$isInt.')';
+                $cell = $record['operands']['cell'];
+                if ($cell < \count($u8)) {
+                    $u8[$cell] = $q;
                 }
             } else {
                 $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $record['operands'], $u8, $cur, $docIds, $ctx).')';
@@ -332,6 +416,19 @@ final class ExecutionTraceFixture
             ExecutionChallengeGenerator::OP_DOM_URL_CANON => 'durlc',
             ExecutionChallengeGenerator::OP_DOM_TEXT_MUTATE => self::opTextMutate($operands, $u8, $cur, $docIds, $ctx),
             ExecutionChallengeGenerator::OP_DOM_SELECT_DEP => self::opSelectDep($operands, $cur, $ctx),
+            // The version-6 real-platform probes: the pure sim emits
+            // placeholders and touches no model state (the probes run
+            // on self-removed anonymous nodes). The naive synthesizer's
+            // placeholders are rejected by the envelope walker; the
+            // white-box synthesizer (executedTraceForWhiteBox) emits
+            // envelope-satisfying entries and passes every program —
+            // the envelopes are public functions of the shipped
+            // operands, so version 6 is not a browser boundary.
+            ExecutionChallengeGenerator::OP_CSS_GEOM => 'dcsgeom',
+            ExecutionChallengeGenerator::OP_MUT_ORDER => 'dmutord',
+            ExecutionChallengeGenerator::OP_EV_PHASE_FULL => 'devphf',
+            ExecutionChallengeGenerator::OP_RANGE_ORDER => 'drange',
+            ExecutionChallengeGenerator::OP_INT_OBS => 'dintobs',
             default => '0',
         };
     }

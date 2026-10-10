@@ -1,0 +1,86 @@
+{
+  "protocol": "risk-v2",
+  "contract": "kiwicaptcha.identity-v2/1",
+  "note": "The identity-vector contract of change.md 3.1.1: the seven dimensions of change.md 1.1, each an HMAC pseudonym derived by the shared framing below. Both cores (packages/kiwicaptcha-risk and packages/kiwicaptcha-risk-php) assert their compiled derivations against this file in tests/identity_vectors.rs and tests/IdentityVectorsParityTest.php, which serve as the CI check: the repo's manifest lane (tools/ci/protocol-manifest-check.sh) is specific to the execution-v1 opcode register and is not trivially extensible to this shape, so the two reader tests are the enforced surface. The cardinality_bound of a dimension is the number of live pseudonyms one underlying identity can hold at once: ceil(longest ttl / epoch window) for rotated dimensions, 1 for fixed ones. Raw values never leave process memory.",
+  "pseudonym": {
+    "algorithm": "hmac-sha256",
+    "framing": "\"kiwi-risk-id-v1\\0\" || hmac_context || \"\\0\" || epoch_as_u64_big_endian_8_bytes || material",
+    "key_derivation": "hash_hkdf('sha256', master, 32, hkdf_info, 'kiwicaptcha-risk-v1')",
+    "epoch_encoding": "8-byte big-endian unsigned (two's-complement reinterpretation of a negative epoch)",
+    "output_bytes": 16,
+    "output_encoding": "lowercase hex"
+  },
+  "dimension_order": ["source", "subnet", "asn", "session", "principal", "target", "agent"],
+  "dimensions": {
+    "source": {
+      "hkdf_info": "source",
+      "hmac_context": "src",
+      "input": "client ip",
+      "granularity": { "ipv4_prefix": 32, "ipv6_prefix": 64 },
+      "epoch_policy": { "mode": "rotated", "window_secs": 900, "derivation": "floor(now_unix_secs / 900)" },
+      "ttl_secs": { "fast": 1800, "slow": 86400 },
+      "cardinality_bound": 96,
+      "output_bytes": 16
+    },
+    "subnet": {
+      "hkdf_info": "subnet",
+      "hmac_context": "net",
+      "input": "client ip",
+      "granularity": { "ipv4_prefix": 24, "ipv6_prefix": 56 },
+      "epoch_policy": { "mode": "rotated", "window_secs": 900, "derivation": "floor(now_unix_secs / 900)" },
+      "ttl_secs": { "fast": 1800 },
+      "cardinality_bound": 2,
+      "output_bytes": 16
+    },
+    "asn": {
+      "hkdf_info": "subnet",
+      "hmac_context": "asn",
+      "input": "client ip resolved to its asn bucket id by the free dataset",
+      "granularity": { "bucket_grammar": "a<asn 1..4294967294> | u4/<decimal /16 prefix> | u6/<8 lowercase hex of the /32 prefix>" },
+      "epoch_policy": { "mode": "rotated", "window_secs": 21600, "derivation": "floor(now_unix_secs / 21600)" },
+      "ttl_secs": { "fast": 21600 },
+      "cardinality_bound": 1,
+      "output_bytes": 16
+    },
+    "session": {
+      "hkdf_info": "session",
+      "hmac_context": "sess",
+      "input": "16-byte continuity cookie id (32 lowercase hex chars on the wire)",
+      "granularity": { "cookie_bytes": 16 },
+      "epoch_policy": { "mode": "fixed", "derivation": "epoch slot is the constant 0" },
+      "ttl_secs": { "fast": 1800 },
+      "cardinality_bound": 1,
+      "output_bytes": 16
+    },
+    "principal": {
+      "hkdf_info": "principal",
+      "hmac_context": "prin",
+      "input": "app-supplied authenticated user id",
+      "granularity": { "unit": "one app principal id" },
+      "epoch_policy": { "mode": "fixed", "derivation": "epoch slot is the constant 0" },
+      "ttl_secs": { "fast": 86400 },
+      "cardinality_bound": 1,
+      "output_bytes": 16
+    },
+    "target": {
+      "hkdf_info": "target",
+      "hmac_context": "tgt",
+      "input": "pre-auth claimed id, already normalized by the versioned target pipeline",
+      "granularity": { "unit": "one normalized identifier" },
+      "epoch_policy": { "mode": "fixed", "derivation": "epoch slot carries the target pipeline version (currently 1), never a time" },
+      "ttl_secs": { "fast": 86400 },
+      "cardinality_bound": 1,
+      "output_bytes": 32
+    },
+    "agent": {
+      "hkdf_info": "principal",
+      "hmac_context": "agent",
+      "input": "verified-agent key id from deployment config",
+      "granularity": { "unit": "one configured agent key id" },
+      "epoch_policy": { "mode": "fixed", "derivation": "epoch slot is the constant 0" },
+      "ttl_secs": null,
+      "cardinality_bound": 1,
+      "output_bytes": 16
+    }
+  }
+}

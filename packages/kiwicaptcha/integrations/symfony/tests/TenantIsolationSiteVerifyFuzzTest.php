@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -153,12 +154,12 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
 
     private function backendId(string $secret, string $scope, int $epoch, ?string $digest): string
     {
-        return hash('sha256', $secret.'|'.$scope.'|'.$epoch.'|'.($digest ?? ''));
+        return hash_hmac('sha256', $scope.'|'.$epoch.'|'.($digest ?? ''), $secret);
     }
 
     private function idempotencyKeys(string $idempotencyKey): array
     {
-        return $this->client->keys('{'.self::NS.'}:siteverify-idem:*:'.$idempotencyKey);
+        return $this->client->keys('{kiwi:'.self::NS.'}:siteverify-idem:*:'.$idempotencyKey);
     }
 
     public function testCrossSecretSameKeyNeverSharesIdempotencyState(): void
@@ -216,11 +217,11 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
         self::assertNotSame($idA, $idB, 'the backend identity must differ across secrets');
 
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
-        [$claimA, $ownerA] = $this->store->claim($idA, $uuid, hash('sha256', 'response-A'), 300, 'fp');
+        [$claimA, $ownerA] = $this->store->claim($idA, $uuid, hash('sha256', 'response-A'), 300, hash('sha256', 'fp'));
         self::assertSame(IdempotencyClaim::Claimed, $claimA, 'the A namespace must claim the key');
         self::assertIsString($ownerA);
 
-        [$claimB, $ownerB] = $this->store->claim($idB, $uuid, hash('sha256', 'response-B'), 300, 'fp');
+        [$claimB, $ownerB] = $this->store->claim($idB, $uuid, hash('sha256', 'response-B'), 300, hash('sha256', 'fp'));
         self::assertSame(
             IdempotencyClaim::Claimed,
             $claimB,
@@ -229,11 +230,17 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
         self::assertIsString($ownerB);
 
         self::assertTrue(
-            $this->store->finalize($idA, $uuid, hash('sha256', 'response-A'), $ownerA, ['success' => true]),
+            $this->store->finalize($idA, $uuid, hash('sha256', 'response-A'), $ownerA, ['success' => true, 'challenge_ts' => null, 'hostname' => null]),
             'the A owner must finalize its own namespace',
         );
-        self::assertIsArray($this->store->stored($idA, $uuid), 'the A namespace must hold the finalized record');
-        self::assertNull($this->store->stored($idB, $uuid), 'the B namespace must remain untouched');
+        self::assertNotNull(
+            SiteVerifyStoreAssert::completed($this->store->storedForOperation($idA, $uuid, hash('sha256', 'response-A'), hash('sha256', 'fp'), '')),
+            'the A namespace must hold the finalized record',
+        );
+        self::assertNull(
+            SiteVerifyStoreAssert::completed($this->store->storedForOperation($idB, $uuid, hash('sha256', 'response-A'), hash('sha256', 'fp'), '')),
+            'the B namespace must remain untouched',
+        );
 
         $keys = $this->idempotencyKeys($uuid);
         self::assertCount(2, $keys, 'each backend namespace must own its literal key');
@@ -278,18 +285,21 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
         $idEpoch2 = $this->backendId(self::SECRET_A, self::SCOPE_A, 2, null);
         self::assertNotSame($idEpoch0, $idEpoch2, 'the backend identity must differ across policy epochs');
 
-        [$claim0, $owner0] = $this->store->claim($idEpoch0, $uuid, hash('sha256', 'epoch-0'), 300, 'fp');
+        [$claim0, $owner0] = $this->store->claim($idEpoch0, $uuid, hash('sha256', 'epoch-0'), 300, hash('sha256', 'fp'));
         self::assertSame(IdempotencyClaim::Claimed, $claim0);
-        self::assertTrue($this->store->finalize($idEpoch0, $uuid, hash('sha256', 'epoch-0'), $owner0, ['success' => true]));
+        self::assertTrue($this->store->finalize($idEpoch0, $uuid, hash('sha256', 'epoch-0'), $owner0, ['success' => true, 'challenge_ts' => null, 'hostname' => null]));
 
-        [$claim2, $owner2] = $this->store->claim($idEpoch2, $uuid, hash('sha256', 'epoch-2'), 300, 'fp');
+        [$claim2, $owner2] = $this->store->claim($idEpoch2, $uuid, hash('sha256', 'epoch-2'), 300, hash('sha256', 'fp'));
         self::assertSame(
             IdempotencyClaim::Claimed,
             $claim2,
             'a policy-epoch bump must start a fresh logical operation for the same key',
         );
         self::assertIsString($owner2);
-        self::assertNull($this->store->stored($idEpoch2, $uuid), 'the new epoch namespace must be untouched');
+        self::assertNull(
+            SiteVerifyStoreAssert::completed($this->store->storedForOperation($idEpoch2, $uuid, hash('sha256', 'epoch-2'), hash('sha256', 'fp'), '')),
+            'the new epoch namespace must be untouched',
+        );
 
         $keys = $this->idempotencyKeys($uuid);
         self::assertCount(2, $keys, 'each epoch must own its literal key');

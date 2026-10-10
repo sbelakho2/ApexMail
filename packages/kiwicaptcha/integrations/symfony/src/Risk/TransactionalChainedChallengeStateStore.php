@@ -59,10 +59,12 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      *  - The obligation exists -> return the existing chain id. When the
      *    existing record's requiredRank is lower than the new reassessment
      *    it is raised (with the required action, never lowered).
-     *  - The obligation points at a missing or corrupt chain record ->
-     *    compare-delete the stale mapping and create the chain fresh in
-     *    the same script, so a stale mapping can never block a
-     *    transaction.
+     *  - The obligation points at a missing or signed-expired chain
+     *    record -> compare-delete the stale mapping and create the chain
+     *    fresh in the same script, so a stale mapping can never block a
+     *    transaction. A pointed-at corrupt record is never healed: the
+     *    call fails closed with
+     *    {@see MalformedChainedChallengeStateException} and zero writes.
      *
      * @param string $obligationId the bounded pseudonymous transaction
      *                             obligation id (exact 64 lowercase hex).
@@ -99,7 +101,11 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
 
     /**
      * The chain id behind a transaction obligation, or null when the
-     * obligation is absent/expired.
+     * obligation is absent or its pointed-at chain record is stale
+     * (missing or signed-expired). The pointed-at record is validated:
+     * a corrupt record fails closed with
+     * {@see MalformedChainedChallengeStateException} — the mapping is
+     * never silently followed to corrupt state.
      */
     public function obligationChainId(string $obligationId): ?string;
 
@@ -108,9 +114,10 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      * min(reservation-lease, the record's own remaining TTL) computed
      * from the server clock (redis TIME on the Redis side, the explicit
      * clock on the array side). The lease can never outlive the chain. A
-     * chain record without an expiry is corrupted state and answers
-     * 'missing' (fail closed; never manufacture a lifetime from the
-     * configured TTL).
+     * corrupt record — one that violates the strict schema, including a
+     * record whose key lifetime was stripped on the Redis side — fails
+     * closed with {@see MalformedChainedChallengeStateException} (never
+     * 'missing'; never manufacture a lifetime from the configured TTL).
      *
      * Outcome values: 'available' | 'retry' | 'busy' | 'taken_over' |
      * 'issued' | 'verified' | 'step_up_required' | 'denied' | 'missing',

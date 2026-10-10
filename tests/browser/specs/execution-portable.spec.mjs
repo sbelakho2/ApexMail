@@ -88,4 +88,37 @@ test.describe('ExecutionChallengeV1 (portable three-engine corpus)', () => {
       }
     }
   });
+
+  test('a version-5 armed lifecycle (the causal object-graph grammar) mints and verifies on every engine', async ({ page }) => {
+    // The ?exec_cap=5 fixture knob raises the simulated deployment cap,
+    // so the driver's Kiwi-Execution-Max-Version 5 advertisement makes
+    // the fixture issue the version-5 grammar: the fixed causal spine
+    // (clone, reparent, URL canon, text mutate, serialization) over the
+    // version-4 skeleton. The srcdoc document URL canonicalizes to
+    // 'about:srcdoc' on every engine, so the URL-canon digest is
+    // deterministic across the lane, and the solve still verifies
+    // server-side (the fixture replays the browser-observed entries).
+    await page.goto('/?assets=files&execution=1&exec_cap=5');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 120_000,
+    });
+    const origin = await fixtureOrigin(page);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the version-5 armed solve must mint a token').toBeGreaterThan(0);
+    const plain = Buffer.from(token, 'base64').toString('utf8');
+    const parts = plain.split('.');
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    const standard = evidence[1].replace(/-/g, '+').replace(/_/g, '/');
+    const trace = Buffer.from(standard, 'base64').toString('utf8');
+    for (const marker of ['dclone(', 'drepar(', 'durlc(', 'dmutate(', 'sreal(']) {
+      expect(trace.includes(marker), `the v5 spine entry ${marker} must be present on every engine`).toBe(true);
+    }
+    const result = await verifyToken(page, origin, token);
+    expect(
+      result.body.ok,
+      `the version-5 solve must verify end to end on every engine (got ${result.body.code})`
+    ).toBe(true);
+  });
 });

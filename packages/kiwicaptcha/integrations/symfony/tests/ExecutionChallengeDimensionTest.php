@@ -33,6 +33,9 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class ExecutionChallengeDimensionTest extends TestCase
 {
+    /** The widget solver's hash cap: a counter at or beyond it is not a legitimate solution. */
+    private const SOLVER_CAP = 5_000_000;
+
     private const SECRET = '0123456789abcdef0123456789abcdef';
     private const EXECUTION_KEY = 'fedcba9876543210fedcba9876543210';
 
@@ -212,53 +215,44 @@ final class ExecutionChallengeDimensionTest extends TestCase
 
         // Verify: correct digest+trace -> valid; wrong digest -> the
         // deterministic execution_mismatch; missing digest -> mismatch.
-        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
-        self::assertNotNull($program);
-        $trace = ExecutionTraceFixture::executedTraceFor($program);
-        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
-        self::assertNotNull($expected);
-
         // The risk engine escalates the issued difficulty above the
-        // configured floor, so the solver must match the bits the
-        // response actually carries; the winning counter is a pure
-        // function of the challenge, so it is computed once and reused
-        // for every token.
-        $counter = $this->winningCounter($payload);
+        // configured floor, so the solver matches the bits the
+        // response actually carries. The draw is taken through the
+        // solvable-draw helper: at the escalated rung a legitimate
+        // issuance occasionally carries no in-cap counter, and the
+        // issuance then repeats exactly as a widget would after expiry.
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use ($controller, $request, $storage): array {
+            $response = $controller->challenge($request);
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertIsArray($payload);
+            self::assertArrayHasKey('execution_program', $payload, 'an armed issuance must carry the execution program');
+            self::assertTrue(ExecutionChallengeGenerator::isValidProgram($payload['execution_program']));
+            self::assertNotNull($storage->find($payload['nonce']));
 
-        // The solve is computed from the client-facing payload; the
-        // verifier reads the stored record. The two are the same
-        // challenge by construction (the response serializer emits the
-        // record), so a divergence here — e.g., a re-mint overwriting
-        // the record under the same nonce — would surface only as a
-        // mystifying proof failure. Assert the identity directly: the
-        // named assertion is the diagnosis.
-        self::assertSame($record->prefix, $payload['prefix'], 'the payload prefix must be the stored record prefix');
-        self::assertSame($record->salt, $payload['salt'], 'the payload salt must be the stored record salt');
-        self::assertSame($record->targetBits, $payload['targetBits'], 'the payload target bits must be the stored record target bits');
+            return $payload;
+        });
+        self::assertSame($payload['execution_program'], $storage->find($payload['nonce'])->executionProgram, 'the stored record carries the same program');
 
         $verifier = new Verifier($storage, now: static fn (): int => time());
 
+        // The receipt instant is pinned sixty seconds past issuance:
+        // comfortably above any minimum-duration floor the escalated
+        // difficulty mints, comfortably inside the TTL, and identical
+        // on every host speed (a real-clock receipt races the floor on
+        // a fast runner, where the whole round trip lands inside the
+        // server-measured minimum).
+        $receiptNs = $record->issuedAtNs + 60_000_000;
+
         $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
-        $outcome = $verifier->verify($good, self::SECRET, 'login', '127.0.0.1');
-        self::assertTrue(
-            $outcome->isOk(),
-            'the armed solve must verify; got '.$outcome->code()
-            .($outcome->detail !== null ? ' ('.$outcome->detail.')' : '')
-            .sprintf(
-                ' [record: algorithm %s, targetBits %d, protocol v%s, execution v%s, minDurationMs %d]',
-                $record->algorithm->value,
-                $record->targetBits,
-                $record->protocolVersion,
-                $record->executionVersion ?? 0,
-                $record->minDurationMs,
-            ),
-        );
+        $goodOutcome = $verifier->verify($good, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs);
+        self::assertTrue($goodOutcome->isOk(), 'the armed good verify failed: '.($goodOutcome->error?->value ?? 'unknown').' (bits '.$payload['targetBits'].', program '.$payload['execution_program'].', trace '.base64_encode($trace).')');
 
         $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();
-        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1')->error);
+        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->error);
 
         $missing = SolutionToken::create($payload['nonce'], $counter, 5000, [])->encode();
-        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($missing, self::SECRET, 'login', '127.0.0.1')->error);
+        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($missing, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->error);
     }
 
     /**
@@ -287,6 +281,25 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $pos += 1 + \ord($blob[$pos]);
 
         return \ord($blob[$pos]);
+    }
+
+    public function testPrincipalSaturationReachesTheStoreDefinition(): void
+    {
+        // Every one of the eleven contract saturations is tunable: the
+        // config tree exposes the principal channel too, and a non-default
+        // value lands in the store definition's script argv.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'saturations' => ['principal' => 12345],
+            ],
+        ]]);
+        $saturations = $container->getDefinition('kiwi_captcha.risk.store')->getArgument('$saturations');
+        self::assertSame(12345, $saturations['principal']);
+        self::assertSame(10000, $saturations['trust'], 'the untouched channels keep their contract defaults');
     }
 
     /**
@@ -339,17 +352,8 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $record = $storage->find($nonce);
         self::assertNotNull($record, 'the stored record must exist for the solve to verify');
         $verifier = new Verifier($storage, now: static fn (): int => time());
-        // A deterministic receipt clock past the server-measured minimum
-        // duration: the floor at 8 difficulty bits is 5 ms from the
-        // record's issuance timestamp, and relying on the wall-clock gap
-        // between issuance and this call made the assertion a timing
-        // flake under load (observed once in a full-suite run). Fixing the
-        // receipt 10 ms after issuance pins the intended semantics — the
-        // proof verdict, not the timing heuristic.
-        $receiptNs = (int) (microtime(true) * 1_000_000) + 10_000_000;
-        self::assertGreaterThan($record->issuedAtNs, $receiptNs);
 
-        return $verifier->verify($token, self::SECRET, 'login', '127.0.0.1', $receiptNs)->isOk();
+        return $verifier->verify($token, self::SECRET, 'login', '127.0.0.1')->isOk();
     }
 
     public function testVersion2GrammarIsIssuedOnlyWhenClientConfigAndFloorAllConfirm(): void
@@ -361,11 +365,20 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // central min_execution_version floor is >= 2. All three hold
         // here; the request body is the bare closed field set, so the
         // header alone carries the capability.
-        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '2');
-        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
-        $payload = json_decode((string) $response->getContent(), true);
-        self::assertIsArray($payload);
-        self::assertArrayHasKey('execution_program', $payload, 'an armed issuance must carry the execution program');
+        // The issuance repeats through the solvable-draw helper until
+        // the escalated difficulty carries an in-cap counter, exactly
+        // as a widget re-requests after expiry.
+        $storage = null;
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use (&$storage): array {
+            [$response, $store] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '2');
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $storage = $store;
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertIsArray($payload);
+            self::assertArrayHasKey('execution_program', $payload, 'an armed issuance must carry the execution program');
+
+            return $payload;
+        });
         self::assertSame(2, $this->programVersion($payload['execution_program']), 'the version-2 causal grammar is issued to a capable client');
         // The client-facing surface never carries the stored-record
         // canonical fields.
@@ -376,16 +389,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertNotNull($record);
         self::assertSame($payload['execution_program'], $record->executionProgram, 'the response program is the stored program');
         self::assertSame(2, $record->executionVersion, 'the stored record stamps the emitted grammar version');
-
-        // The program's deterministic trace carries the causal observe
-        // entry, and the full solve verifies end to end.
-        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
-        self::assertNotNull($program);
-        $trace = ExecutionTraceFixture::executedTraceFor($program);
         self::assertStringContainsString('obs(', $trace, 'the version-2 grammar writes the causal observe entry');
-        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
-        self::assertNotNull($expected);
-        $counter = $this->winningCounter($payload);
         $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the version-2 solve must verify');
     }
@@ -413,17 +417,17 @@ final class ExecutionChallengeDimensionTest extends TestCase
     {
         // A capable client under the required tier still receives the
         // version-2 grammar and the full solve verifies end to end.
-        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '2', 2);
-        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
-        $payload = json_decode((string) $response->getContent(), true);
-        self::assertArrayHasKey('execution_program', $payload);
+        $storage = null;
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use (&$storage): array {
+            [$response, $store] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '2', 2);
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $storage = $store;
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertArrayHasKey('execution_program', $payload);
+
+            return $payload;
+        });
         self::assertSame(2, $this->programVersion($payload['execution_program']), 'the required tier issues version 2 to a capable client');
-        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
-        self::assertNotNull($program);
-        $trace = ExecutionTraceFixture::executedTraceFor($program);
-        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
-        self::assertNotNull($expected);
-        $counter = $this->winningCounter($payload);
         $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-2 solve must verify');
     }
@@ -479,18 +483,18 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // A client that advertises version 3 under the same required
         // tier receives the version-3 grammar (the sibling-index
         // traversal) and the full solve verifies end to end.
-        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '3', 3, 3);
-        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
-        $payload = json_decode((string) $response->getContent(), true);
-        self::assertArrayHasKey('execution_program', $payload);
+        $storage = null;
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use (&$storage): array {
+            [$response, $store] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '3', 3, 3);
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $storage = $store;
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertArrayHasKey('execution_program', $payload);
+
+            return $payload;
+        });
         self::assertSame(3, $this->programVersion($payload['execution_program']), 'the required tier issues version 3 to a capable client');
-        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
-        self::assertNotNull($program);
-        $trace = ExecutionTraceFixture::executedTraceFor($program);
         self::assertStringContainsString('dsib(', $trace, 'the version-3 grammar carries the sibling-index traversal entry');
-        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
-        self::assertNotNull($expected);
-        $counter = $this->winningCounter($payload);
         $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-3 solve must verify');
     }
@@ -549,6 +553,50 @@ final class ExecutionChallengeDimensionTest extends TestCase
         }
     }
 
+    public function testRequiredExecutionVersionFiveIssuesVersionFiveToCapableClients(): void
+    {
+        // The ladder's current maximum: a client that advertises v5
+        // under the required tier 5, with the node cap 5 and the
+        // confirmed central floor 5, receives the v5 causal
+        // object-graph grammar, the record stamps version 5, and the
+        // full solve verifies end to end.
+        $storage = null;
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use (&$storage): array {
+            [$response, $store] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '5', 5, 5);
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $storage = $store;
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertArrayHasKey('execution_program', $payload);
+
+            return $payload;
+        });
+        self::assertSame(5, $this->programVersion($payload['execution_program']), 'the required tier issues version 5 to a capable client');
+        self::assertMatchesRegularExpression(
+            '/d(frag|clone|repar|reflec|phase|urlc|mutate|sdep)\(/',
+            $trace,
+            'the version-5 grammar carries a causal object-graph arm',
+        );
+        $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
+        self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-5 solve must verify');
+    }
+
+    public function testRequiredExecutionVersionFiveRefusesAClientAdvertisingFour(): void
+    {
+        // The converse capability case: required 5 with a client that
+        // advertises 4 (or less) is refused with the deterministic
+        // client-unsupported outcome, never downgraded to v4 and never
+        // issued an unarmed challenge.
+        foreach (['4', '3', null] as $capability) {
+            [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', $capability, 5, 5);
+            $label = 'client capability '.var_export($capability, true);
+            self::assertSame(422, $response->getStatusCode(), $label.' must be refused');
+            $body = json_decode((string) $response->getContent(), true);
+            self::assertSame('CLIENT_EXECUTION_VERSION_UNSUPPORTED', $body['error']['code'] ?? null, $label.' refusal code');
+            self::assertArrayNotHasKey('execution_program', $body, $label.' receives no weaker grammar');
+            self::assertArrayNotHasKey('challenge', $body, $label.' receives no challenge');
+        }
+    }
+
     public function testVersion3GrammarIsIssuedWhenClientConfigAndFloorAllReachThree(): void
     {
         // The version ladder reaches 3 (the sibling-index traversal
@@ -570,18 +618,16 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $redis->hset($monitor->policyKey(), 'min_protocol_version', '4');
         $redis->hset($monitor->policyKey(), 'min_execution_version', '3');
         $server = ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1', 'HTTP_ORIGIN' => 'http://localhost', 'HTTP_Kiwi_Execution_Max_Version' => '3'];
-        $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, '{"scope":"login","action":"login-action"}'));
-        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
-        $payload = json_decode((string) $response->getContent(), true);
-        self::assertArrayHasKey('execution_program', $payload);
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use ($controller, $server): array {
+            $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, '{"scope":"login","action":"login-action"}'));
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertArrayHasKey('execution_program', $payload);
+
+            return $payload;
+        });
         self::assertSame(3, $this->programVersion($payload['execution_program']), 'the version-3 grammar is issued when all three rungs reach 3');
-        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
-        self::assertNotNull($program);
-        $trace = ExecutionTraceFixture::executedTraceFor($program);
         self::assertStringContainsString('dsib(', $trace, 'the version-3 grammar carries the sibling-index traversal entry');
-        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
-        self::assertNotNull($expected);
-        $counter = $this->winningCounter($payload);
         $storage = $container->get('kiwi_captcha.storage.array');
         $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the version-3 solve must verify');
@@ -736,22 +782,58 @@ final class ExecutionChallengeDimensionTest extends TestCase
     /**
      * Brute-force a counter whose SHA-256(prefix || counter || salt)
      * meets the issued target bits — the same derivation the browser
-     * solver performs. Unbounded like the repository's other solver
-     * helpers: the risk engine may escalate the issued difficulty, so
-     * the search matches the response's bits and terminates with
-     * probability 1.
+     * solver performs, bounded by the widget's solver cap of five
+     * million hashes. The risk engine escalates these issuances to the
+     * sha20 rung, where a legitimate draw's winning counter sits
+     * beyond the cap roughly once in every hundred and seventeen
+     * issuances. Such a challenge is honestly unsolvable within the
+     * wire contract: the token codec refuses an over-cap counter. The
+     * caller re-issues, exactly as a widget would after expiry.
      *
      * @param array<string, mixed> $challenge
      */
-    private function winningCounter(array $challenge): int
+    private function winningCounter(array $challenge): ?int
     {
         $salt = base64_decode($challenge['salt'], true);
         $counter = 0;
-        do {
+        while ($counter < self::SOLVER_CAP) {
             $hash = hash('sha256', $challenge['prefix'].$counter.$salt, true);
-            $counter++;
-        } while (\KiwiCaptcha\Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+            if (\KiwiCaptcha\Verifier::leadingZeroBits($hash) >= $challenge['targetBits']) {
+                return $counter;
+            }
+            ++$counter;
+        }
 
-        return $counter - 1;
+        return null;
+    }
+
+    /**
+     * One armed issuance whose winning counter lands inside the solver
+     * cap: the issuance closure runs again when a draw is honestly
+     * unsolvable, so every verification below runs against a challenge
+     * a real widget could solve. Sixty attempts hold the combined miss
+     * probability far below any plausible flake.
+     *
+     * @param callable(): array<string, mixed> $issue one armed issuance, returning the response payload
+     *
+     * @return array{0: array<string, mixed>, 1: string, 2: string, 3: int} payload, trace, digest, counter
+     */
+    private function solvableArmedDraw(callable $issue): array
+    {
+        for ($attempt = 0; $attempt < 60; ++$attempt) {
+            $payload = $issue();
+            $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+            self::assertNotNull($program, 'the armed issuance must carry a decodable program');
+            $trace = ExecutionTraceFixture::executedTraceFor($program);
+            $digest = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
+            self::assertNotNull($digest);
+            $counter = $this->winningCounter($payload);
+            if ($counter !== null) {
+                return [$payload, $trace, $digest, $counter];
+            }
+        }
+        self::fail('no in-cap solvable armed draw within sixty issuances (probability below any flake bound)');
+
+        throw new \LogicException('unreachable');
     }
 }

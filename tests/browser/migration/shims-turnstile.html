@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Turnstile shims fixture</title>
+  <script src="/kiwi-captcha/api.js" defer></script>
+  <script src="/kiwi-captcha/widget-shims.js" defer></script>
+</head>
+<body>
+  <form id="reg" action="/submit" method="post">
+    <div id="shim-box" data-kiwi-scope="login"></div>
+    <button type="submit">Submit</button>
+  </form>
+  <p id="out"></p>
+  <script>
+    function onShimToken(token) {
+      document.getElementById('out').textContent = 'cb:' + String(token).slice(0, 8);
+    }
+  </script>
+</body>
+</html>

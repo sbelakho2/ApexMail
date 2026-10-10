@@ -5,20 +5,27 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 use KiwiCaptcha\ChallengeProfile;
+use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
 use KiwiCaptcha\Risk\Calibration\CalibrationStore;
+use KiwiCaptcha\Risk\DecisionExplanation;
 use KiwiCaptcha\Risk\EventReceipt;
+use KiwiCaptcha\Risk\Evidence\DecoyEscalationStore;
+use KiwiCaptcha\Risk\ExplainedDecision;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\ResourcePressure;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskContext;
 use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskEventKind;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\Risk\RiskV2Context;
 use KiwiCaptcha\Risk\RiskV2Weights;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
+use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\VerifyError;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -101,10 +108,18 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * {@see resolveDecisionForNonce()}. The mapping carries only the decision
  * id, no IP and no identity.
  */
-final class RiskGateway
+final class RiskGateway implements LoginDecisionGate
 {
     /** Request attribute holding the current request's decision id. */
     private const DECISION_ATTRIBUTE = '_kiwi_risk_decision_id';
+
+    /**
+     * Request attribute holding the current request's decision
+     * explanation (the serialized names-only object, change.md 3.8.3).
+     * Attached beside the decision id when the gateway is wired with
+     * risk.explain; read back via {@see currentDecisionExplanation()}.
+     */
+    private const EXPLANATION_ATTRIBUTE = '_kiwi_risk_decision_explanation';
 
     /**
      * @param array<string, int>                  $scopeIds         application scope string => risk-v1 int scope.
@@ -148,9 +163,99 @@ final class RiskGateway
          * argument on preIssue/postSolveDecisionV2 always wins.
          */
         private readonly ?RiskV2Weights $v2Weights = null,
+        /**
+         * The names-only explanation surface (risk.explain, wired by the
+         * extension; on by default under the abuse profiles). When true,
+         * every pre-issue assessment also carries a DecisionExplanation
+         * (top reasons, identity dimension names, chosen action, priced
+         * rung when pricing is composed), request-scoped beside the
+         * decision id. The explanation type accepts dimension names
+         * only, so no pseudonym value can reach the wire.
+         */
+        private readonly bool $explain = false,
+        /**
+         * The decoy-escalation store (change.md 3.2.2, wired by the
+         * extension): the write side of the one-rung session escalation
+         * after a server-confirmed decoy hit. The engine holds the
+         * reader seam ({@see AdaptiveRiskEngine} constructor's
+         * decoyEscalationReader); the gateway exposes the confirmed-hit
+         * record call, see {@see recordConfirmedDecoyHit()}. Null keeps
+         * the escalation surface absent (the compatibility posture).
+         */
+        private readonly ?DecoyEscalationStore $decoyEscalation = null,
+        /**
+         * The engine's identity factory (the same wired instance): the
+         * confirmed-hit record call derives the keyed session pseudonym
+         * through it, so the record key matches the session identity the
+         * engine's own decoy-escalation read consults.
+         */
+        private readonly ?RiskIdentityFactory $identityFactory = null,
     ) {
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
+        }
+        // One policy authority for every mode: the optional
+        // gateway-level policy is only the degraded-decision surface,
+        // so a divergent object would answer degraded lookups from a
+        // table the engine never consults — weakening a configured
+        // degraded floor in any mode, not only minimum.
+        if ($policy !== null && $policy !== $engine->policy()) {
+            throw new \InvalidArgumentException('the gateway policy must be the engine policy: two divergent policy objects would decide from different tables');
+        }
+        // The application-scope id map is validated in full: every id
+        // is a u32, no two scopes share one id (they would silently
+        // couple their risk state and policy row), and every id names
+        // a row in exactly the policy the engine consults.
+        $seenIds = [];
+        foreach ($this->scopeIds as $scopeName => $scopeId) {
+            if (!\is_int($scopeId) || $scopeId < 1 || $scopeId > 0xFFFFFFFF) {
+                throw new \InvalidArgumentException(sprintf('scope id for "%s" must be an integer u32 (got %s)', $scopeName, var_export($scopeId, true)));
+            }
+            if (isset($seenIds[$scopeId])) {
+                throw new \InvalidArgumentException(sprintf('scope ids must be unique: "%s" and "%s" both map to %d', $seenIds[$scopeId], $scopeName, $scopeId));
+            }
+            $seenIds[$scopeId] = $scopeName;
+            if (!isset($engine->policy()->scopes[$scopeId])) {
+                throw new \InvalidArgumentException(sprintf('scope id %d for "%s" names no policy scope row: the engine policy must carry a row for every mapped scope', $scopeId, $scopeName));
+            }
+        }
+        if ($unknownScopeMode === 'minimum') {
+            // The synthetic policy and its id are one configuration
+            // unit: 'minimum' mode promises every unknown scope the
+            // shared sha20-floored policy, and that promise is only
+            // real when the id names the policy row that carries the
+            // floor. A derived id (a checksum of the scope string)
+            // would name no policy row at all, silently degrading the
+            // promised floor to the engine's fallback (allow), and
+            // could collide with an unrelated configured scope id.
+            if ($unknownScopeId === null) {
+                throw new \InvalidArgumentException('unknownScopeId is required when unknownScopeMode=minimum: it names the synthetic policy row whose sha20 floor the mode promises');
+            }
+            if ($unknownScopeId < 1 || $unknownScopeId > 0xFFFFFFFF) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId must be a u32 (got %d)', $unknownScopeId));
+            }
+            if (\in_array($unknownScopeId, $this->scopeIds, true)) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d collides with a configured risk scope id', $unknownScopeId));
+            }
+            // The row must exist in exactly the policy the engine
+            // consults, with the floors the mode promises: a legal id
+            // pointing at no row (or at a row floored below sha20)
+            // would silently answer unknown scopes with the engine's
+            // allow fallback instead of the documented minimum.
+            $enginePolicy = $engine->policy();
+            if (!isset($enginePolicy->scopes[$unknownScopeId])) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d names no policy scope row: the engine policy must carry the synthetic row (base_risk 100, minimum sha20, degraded sha20) under that id', $unknownScopeId));
+            }
+            if ($enginePolicy->minimum($unknownScopeId)->rank() < RiskAction::Sha20->rank()) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a minimum below sha20: the mode promises at least the sha20 floor', $unknownScopeId));
+            }
+            $row = $enginePolicy->scopes[$unknownScopeId];
+            if ($row['degraded']->rank() < RiskAction::Sha20->rank()) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a degraded action below sha20: the mode promises at least the sha20 floor on the degraded path too', $unknownScopeId));
+            }
+            if (($row['base_risk'] ?? 0) < 100) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a base_risk below 100: the synthetic row must be assessed, not whitelisted', $unknownScopeId));
+            }
         }
     }
 
@@ -191,8 +296,9 @@ final class RiskGateway
         if ($this->unknownScopeMode === 'minimum') {
             // 'minimum' mode: every unknown scope is assessed under the
             // shared synthetic policy (base_risk 100, minimum/degraded
-            // sha20).
-            return $this->unknownScopeId ?? (crc32($scope) & 0x7fffffff);
+            // sha20). The id is constructor-mandatory here, so the
+            // shared row is always the one the mode promised.
+            return $this->unknownScopeId;
         }
 
         // 'reject' and 'baseline' modes: the adaptive engine declines to
@@ -281,13 +387,103 @@ final class RiskGateway
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
         );
-        $decision = $v2 !== null
-            ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey, $v2Weights ?? $this->v2Weights)
-            : $this->engine->assessPreIssue($context, $idempotencyKey);
+        $explained = $this->explain && $v2 === null
+            ? $this->engine->assessPreIssueWithExplanation($context, $idempotencyKey)
+            : null;
+        $decision = $explained !== null
+            ? $explained->decision
+            : ($v2 !== null
+                ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey, $v2Weights ?? $this->v2Weights)
+                : $this->engine->assessPreIssue($context, $idempotencyKey));
         $this->setCurrentDecisionId($decision->decisionId);
+        if ($this->explain) {
+            // The explanation rides the same engine call on the plain
+            // path; the risk-v2 path wraps the identical decision with
+            // the names the context carries (the engine's own explained
+            // entry point has no v2 variant yet, so the wrap keeps the
+            // surface uniform). Names only, never a pseudonym value.
+            $explanation = $explained !== null
+                ? $explained->explanation
+                : ExplainedDecision::wrap($decision, $this->contextDimensionNames($context))->explanation;
+            $this->setCurrentDecisionExplanation($explanation);
+        }
         $this->logDecision($scope, $decision);
 
         return $decision;
+    }
+
+    /**
+     * The serialized explanation of the current request's decision, or
+     * null when the gateway is wired without risk.explain or no
+     * assessment ran in this request. Request-local like the decision
+     * id: the explanation lives on the same request attribute, so a
+     * long-running worker never leaks one request's explanation into
+     * the next. The shape is the DecisionExplanation wire form: action,
+     * reason names, dimension names, priced rung; every field is a
+     * name, never a pseudonym.
+     */
+    public function currentDecisionExplanation(): ?array
+    {
+        $explanation = $this->requestStack?->getMainRequest()?->attributes->get(self::EXPLANATION_ATTRIBUTE);
+
+        return \is_array($explanation) ? $explanation : null;
+    }
+
+    /**
+     * The target pseudonym of one submitted field set, through the
+     * engine's target resolver over the per-scope risk.scopes.<name>.
+     * target_field map: the versioned normalization pipeline followed
+     * by the keyed digest. The raw value and the normalized form
+     * never leave this boundary, so a caller can only ever observe the
+     * pseudonym. Null when the scope carries no target field, the field
+     * is absent or the value normalizes to the empty string.
+     *
+     * @param array<string, string> $fields the request's submitted form
+     *                                      field values keyed by field
+     *                                      name
+     *
+     * @throws UnknownScopeException when the scope is unknown in
+     *                               'reject'/'baseline' mode.
+     */
+    public function targetPseudonym(string $scope, array $fields): ?string
+    {
+        return $this->engine->resolveTargetId($this->scopeId($scope), $fields);
+    }
+
+    /**
+     * Stores the current request's explanation on the request-local
+     * attribute (no-op without a request in scope, like the decision
+     * id).
+     */
+    private function setCurrentDecisionExplanation(DecisionExplanation $explanation): void
+    {
+        $this->requestStack?->getMainRequest()?->attributes->set(
+            self::EXPLANATION_ATTRIBUTE,
+            $explanation->jsonSerialize(),
+        );
+    }
+
+    /**
+     * The identity dimension names the given context carries: the
+     * engine's own explanation base (source and subnet always, the
+     * session and principal names when the context carries those
+     * identities). The target name is appended by the engine itself on
+     * the plain explained path; this helper serves the v2 wrap, where
+     * the engine's explained entry point is not in the call chain.
+     *
+     * @return list<string>
+     */
+    private function contextDimensionNames(RiskContext $context): array
+    {
+        $names = ['source', 'subnet'];
+        if ($context->sessionId !== null) {
+            $names[] = 'session';
+        }
+        if ($context->principalId !== null) {
+            $names[] = 'principal';
+        }
+
+        return $names;
     }
 
     /**
@@ -322,6 +518,37 @@ final class RiskGateway
             sessionId: $session,
             principalId: $principal ?? $this->resolvePrincipal($scope),
             event: RiskEventKind::SolveSuccess,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+        );
+        $decision = $this->engine->reassess($context, $idempotencyKey);
+        $this->setCurrentDecisionId($decision->decisionId);
+        $this->logDecision($scope, $decision);
+
+        return $decision;
+    }
+
+    /**
+     * Post-credential, pre-session decision: a fresh assessment with the
+     * AuthenticationSuccess event and the resolved principal id. This is
+     * the first-attempt stuffing gate (P0-1): the engine's
+     * firstAttemptEvidence (novel network, breached credential, scope
+     * pressure) only runs inside the pipeline, so the login path must
+     * reach it here — the feedback paths never do. A StepUp decision
+     * means the caller must NOT grant the session yet.
+     */
+    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+    {
+        $scopeId = $this->tryScopeId($scope);
+        if ($scopeId === null) {
+            return null;
+        }
+        $context = new RiskContext(
+            scope: $scopeId,
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $principal,
+            event: RiskEventKind::AuthenticationSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
         );
@@ -398,13 +625,46 @@ final class RiskGateway
      * tag (coarse, server-attested by trusted proxy/CDN infrastructure).
      * The engine only ever stores the ephemeral classification as the
      * session's first-seen record, never a raw fingerprint database.
+     *
+     * The verify path additionally carries the evidence-stage inputs of
+     * the verified token. The raw telemetry-v1 payload text is the
+     * token's telemetry segment, parsed by the engine per the published
+     * schema. The measured duration is the server-measured
+     * issuance-to-verify milliseconds, never the client-reported figure.
+     * The solve facts ride with the solved challenge's client-performance
+     * rung key. The three inputs are optional parts of the same additive
+     * context; an over-bound payload text is the caller's responsibility
+     * to bound (see
+     * {@see KiwiCaptcha\Risk\RiskV2Context::MAX_TELEMETRY_PAYLOAD_BYTES}).
+     *
      * Returns null when the request carries no risk-v2 evidence at all
      * (the assessment then stays on the pure risk-v1 path).
      */
-    public function clientContextV2(bool $honeypotHit, ?string $session, ?string $descriptor, ?string $tlsTag = null): ?RiskV2Context
-    {
+    public function clientContextV2(
+        bool $honeypotHit,
+        ?string $session,
+        ?string $descriptor,
+        ?string $tlsTag = null,
+        ?string $telemetryPayload = null,
+        ?int $solveMs = null,
+        ?string $solveRung = null,
+    ): ?RiskV2Context {
+        // The solve facts ride together or not at all: a half-present
+        // pair rejects the whole assessment input up front (the engine's
+        // contract), so the gateway drops an unmapped half to the
+        // neutral state instead of letting it poison the context.
+        if ($solveMs === null || $solveRung === null || $solveRung === '') {
+            $solveMs = null;
+            $solveRung = null;
+        }
         $tag = $this->clientContextTag($session, $descriptor);
-        if (!$honeypotHit && $tag === null && ($tlsTag === null || $tlsTag === '')) {
+        if (!$honeypotHit
+            && $tag === null
+            && ($tlsTag === null || $tlsTag === '')
+            && ($telemetryPayload === null || $telemetryPayload === '')
+            && $solveMs === null
+            && ($solveRung === null || $solveRung === '')
+        ) {
             return null;
         }
 
@@ -412,7 +672,103 @@ final class RiskGateway
             honeypotHit: $honeypotHit,
             clientContextTag: $tag,
             tlsTag: $tlsTag,
+            telemetryPayload: $telemetryPayload !== null && $telemetryPayload !== '' ? $telemetryPayload : null,
+            solveMs: $solveMs,
+            solveRung: $solveRung !== null && $solveRung !== '' ? $solveRung : null,
         );
+    }
+
+    /**
+     * Server-confirmed decoy hit (change.md 3.2.2): records one hit on
+     * the wired decoy-escalation store under the session's keyed
+     * pseudonym, the same identity the engine's escalation read consults.
+     * The autofill-qualification gate rides into the canonical script per
+     * call, so a closed gate (the committed matrix until the manual
+     * qualification rows land) makes the write a no-op that writes
+     * nothing. Evidence only: a missing store, a missing factory, a
+     * session without a pseudonym shape and a backend failure are all
+     * silent no-ops, never a form-breaking error.
+     */
+    public function recordConfirmedDecoyHit(?string $session): void
+    {
+        if ($this->decoyEscalation === null || $this->identityFactory === null || $session === null || $session === '') {
+            return;
+        }
+        try {
+            $pseudonym = $this->identityFactory->sessionId($session);
+        } catch (\InvalidArgumentException) {
+            // Not a 32-hex continuity cookie: no keyed pseudonym exists,
+            // so there is no identity to record the hit under.
+            return;
+        }
+        try {
+            $this->decoyEscalation->recordConfirmedHit($pseudonym);
+        } catch (\Throwable) {
+            // Evidence only: the store's own safe-key guard and any
+            // backend failure must never break the form submission.
+        }
+    }
+
+    /**
+     * The solved challenge's client-performance rung key, mapped from the
+     * verified record's work profile onto the published per-rung
+     * reference table (protocol/telemetry-v1/client-perf-p1.json): the
+     * sha target bits, the argon target bits and the rsw sequential
+     * squaring counts carry the well-known rung names. Null for every
+     * other profile (e.g. the ordinary 8-bit test difficulty): an
+     * unmapped rung must never fabricate evidence, so the solve-anomaly
+     * signal stays neutral for it.
+     */
+    public static function solveRungOfRecord(ChallengeRecord $record): ?string
+    {
+        return match ($record->algorithm) {
+            PoWAlgorithm::Sha256 => match ($record->targetBits) {
+                16 => 'sha16',
+                18 => 'sha18',
+                20 => 'sha20',
+                default => null,
+            },
+            PoWAlgorithm::Argon2id => match ($record->targetBits) {
+                16 => 'argon16',
+                32 => 'argon32',
+                64 => 'argon64',
+                default => null,
+            },
+            PoWAlgorithm::Rsw => match ($record->t) {
+                75_000 => 'rsw75k',
+                150_000 => 'rsw150k',
+                300_000 => 'rsw300k',
+                default => null,
+            },
+        };
+    }
+
+    /**
+     * The verified token's telemetry segment as the raw payload text the
+     * evidence stage parses. The driver serializes the telemetry-v1
+     * aggregate object into the solution token, so the decoded segment
+     * re-encodes byte-equivalently for the engine's schema parser.
+     *
+     * Null when the token carries no telemetry object, the shape is not
+     * a JSON object or the text exceeds the contract bound. The bound
+     * keeps an over-sized segment in the neutral-unknown state instead
+     * of letting the engine reject the whole assessment input.
+     */
+    public static function telemetryPayloadOfToken(SolutionToken $token): ?string
+    {
+        $telemetry = $token->telemetry ?? null;
+        if (!\is_array($telemetry) || $telemetry === []) {
+            return null;
+        }
+        $json = json_encode($telemetry, JSON_UNESCAPED_SLASHES);
+        if (!\is_string($json) || $json === '') {
+            return null;
+        }
+        if (\strlen($json) > RiskV2Context::MAX_TELEMETRY_PAYLOAD_BYTES) {
+            return null;
+        }
+
+        return $json;
     }
 
     /**
@@ -959,6 +1315,29 @@ final class RiskGateway
     }
 
     /**
+     * Whether a stored challenge record satisfies an action's strength.
+     * This is the same authority the validator uses for its post-solve
+     * gate, so the controller can refuse to recover or install a
+     * stage-2 nonce whose actual record is weaker than the chain's
+     * current requirement.
+     */
+    public function recordSatisfies(\KiwiCaptcha\ChallengeRecord $record, RiskAction $action): bool
+    {
+        return $this->resolver->recordSatisfies($record, $action);
+    }
+
+    /**
+     * Whether a minted-but-not-yet-stored challenge satisfies an action:
+     * the issuance-time requirement check, backed by the same complete
+     * strength comparison as {@see recordSatisfies()} (algorithm plus
+     * the full memory/time/parallelism/target envelope).
+     */
+    public function challengeSatisfies(ChallengeStrength $strength, RiskAction $action): bool
+    {
+        return $this->resolver->strengthSatisfies($strength, $action);
+    }
+
+    /**
      * The degraded decision for a scope: the policy's degraded action,
      * clamped to the scope minimum, with the global floor at the idle
      * level 0 = Allow since a no-signal fallback consults no store state.
@@ -967,16 +1346,14 @@ final class RiskGateway
      * misconfigured proxy), so the configured degraded floor always
      * applies and issuance can never silently drop below it.
      *
-     * @throws \LogicException when the policy is not wired (the extension
-     *                         wires it automatically).
+     * The decision always comes from the engine's own policy.
      */
     public function degradedDecisionForScope(int $scope): RiskDecision
     {
-        if ($this->policy === null) {
-            throw new \LogicException('degradedDecisionForScope requires the RiskPolicy to be wired into the RiskGateway');
-        }
-
-        return $this->policy->degradedDecision($scope, 0);
+        // The engine's policy is the one authority: the decision can
+        // never come from a table the engine itself never consults,
+        // and no separate wiring is required.
+        return $this->engine->policy()->degradedDecision($scope, 0);
     }
 
     /**
@@ -1168,6 +1545,10 @@ final class RiskGateway
         $context = [
             'scope' => $scope,
             'action' => $decision->action->value,
+            // The quarantine disposition rides the allow action, so the
+            // operators see the held volume as its own label without a
+            // second wire vocabulary.
+            'quarantined' => $decision->quarantined,
             'score' => $decision->score,
             'band' => $decision->band,
             'global_level' => $decision->globalLevel,

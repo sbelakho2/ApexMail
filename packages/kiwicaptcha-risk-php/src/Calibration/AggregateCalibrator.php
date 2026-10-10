@@ -6,7 +6,9 @@ namespace KiwiCaptcha\Risk\Calibration;
 
 use KiwiCaptcha\Risk\DeploymentNamespace;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use Predis\Client;
+use Predis\Response\ServerException;
 
 /**
  * Aggregate calibrator: Redis-backed bounded exact-score calibration.
@@ -20,14 +22,28 @@ use Predis\Client;
  * pruning loops.
  *
  * Bias is derived from the last 24 hourly buckets (calibration.lua,
- * class-normalized exact-score semantics). Below minSamples the target
- * is 0.
- *   fp_mean = legit_score_sum / legit_count        (0 when none).
- *   fn_mean = (abuse_count*1000 - abuse_score_sum) / abuse_count.
+ * boundary-relative class-normalized exact-score semantics). Below
+ * minSamples the target is 0.
+ *   fp_mean = Σ max(0, legit_score - T) / legit_count   (0 when none).
+ *   fn_mean = Σ max(0, T - abuse_score) / abuse_count   (0 when none).
  *   error   = fn_mean * falseNegativeCost - fp_mean * falsePositiveCost.
- *   raw     = trunc(error * 2 / 10), clamped ±maxAdjustment. Class normalization removes
- * label-volume dominance; the fp/fn cost knobs price false positives
- * against false negatives explicitly. The whole read (24 hgetall calls)
+ *   raw     = trunc(error * 2 / 10), clamped ±maxAdjustment.
+ * T = 600 is the decision boundary: the score where the default ladder
+ * leaves sha20 and enters the first Argon band (action.rs/score.rs).
+ * only samples that landed on the wrong side of the boundary the policy
+ * switches on move the bias. The clipped distances are accumulated per
+ * sample at confirmation and reversed/redone by correction
+ * (legit_above_sum / abuse_below_sum). Only a v=2 ledger (the confirmation
+ * wrote the clipped terms) is reversed that way; a legacy ledger without
+ * `v` reverses the count/score sums alone, never the clipped sums. Legacy
+ * buckets without clipped terms contribute 0. Only human- or
+ * support-verified outcomes should feed confirmOutcome,
+ * never an automatic success signal such as any successful login: a
+ * credentialed attacker can otherwise manufacture "legitimate" labels
+ * and pull the bias down. Class normalization removes label-volume
+ * dominance; the
+ * fp/fn cost knobs price false positives against false negatives
+ * explicitly. The whole read (24 hgetall calls)
  * plus the rate-of-change clamp plus the state write runs in one Lua
  * script (single round trip); the clamp is atomic (read prev -> clamp ->
  * write) so concurrent processes never race.
@@ -47,12 +63,20 @@ use Predis\Client;
  *
  * The outcome ledger is always on and independent of calibration.
  * register_decision.lua creates the pending ledger entry
- * ({kiwi:<ns>}:cal:ledger:<decision_id>, JSON {"o":"P","scope","hour","score","w"})
- * atomically with the receipt and denominator. confirm.lua performs the
- * ledger CAS pending -> legitimate/abuse exactly once and, as the
- * downstream observer, records the calibration bucket contribution.
- * correction.lua flips the ledger L <-> A and reverses/redoes the bucket
- * contribution. Confirmed outcomes work identically with or without
+ * ({kiwi:<ns>}:outcome:<decision_id>, JSON
+ * {"o":"P","scope","hour","score","w"}) atomically with the receipt and
+ * denominator. confirm.lua performs the ledger CAS pending ->
+ * legitimate/abuse exactly once, records whether the confirmation
+ * contributed a calibration sample (`c`). It records the clipped-sums
+ * generation (`v` = 2: this confirmation wrote the legit_above_sum /
+ * abuse_below_sum terms) and, as the downstream observer, the
+ * calibration bucket contribution. correction.lua validates its
+ * arguments first, refuses a pending ledger (confirmation is the only
+ * transition out of pending) and flips the ledger L <-> A,
+ * reversing/redoing the bucket contribution only when `c == 1`. The
+ * clipped legs are reversed/redone only when `v == 2`; a legacy ledger
+ * without `v` reverses the count/score sums alone. Confirmed outcomes
+ * work identically with or without
  * calibration; with calibration disabled the store writes the same ledger
  * (outcome_register/outcome_confirm/outcome_correct.lua) under the same
  * key.
@@ -169,7 +193,9 @@ final class AggregateCalibrator implements CalibrationStore
      * (ledger.scope, ledger.hour). Its argv is the new outcome ('L'/'A'),
      * weight (decimal string; validated), bucket TTL (seconds),
      * outcome-ledger TTL (seconds), expected scope and expected
-     * decision_hour. It returns 1 when applied, 0 when
+     * decision_hour. The clipped legs are reversed/redone only when the
+     * ledger carries v == 2; a legacy ledger without `v` reverses the
+     * count/score sums alone. It returns 1 when applied, 0 when
      * unknown/expired/already target.
      *
      * sampling_metrics.lua computes per-scope sampling statistics: keys
@@ -195,7 +221,10 @@ final class AggregateCalibrator implements CalibrationStore
     /** The key-version contract the encoded namespace was derived under. */
     private readonly int $namespaceVersion;
 
-    /** @var array<int, array{bias:int, expiresAt:float}> bounded per-scope cache */
+    /** @var array<string, string> cached sha1 of every static script, keyed by the script content */
+    private array $scriptShas = [];
+
+    /** @var array<int, array{bias:int, expiresAt:float, writtenAt:float}> bounded per-scope cache */
     private array $biasCache = [];
 
     public function __construct(
@@ -219,6 +248,9 @@ final class AggregateCalibrator implements CalibrationStore
         }
         if ($minSamples < 1 || $maxAdjustment < 1 || $maxChangePerMinute < 1 || $receiptTtlSecs < 1 || $outcomeTtlSecs < 1) {
             throw new \InvalidArgumentException('minSamples, maxAdjustment, maxChangePerMinute, receiptTtlSecs and outcomeTtlSecs must be >= 1');
+        }
+        if ($receiptTtlSecs > 2_147_483_647 || $outcomeTtlSecs > 2_147_483_647) {
+            throw new \InvalidArgumentException('receiptTtlSecs and outcomeTtlSecs must be <= 2147483647 (the scripts expire ceiling)');
         }
         if (!in_array($samplingMode, ['complete', 'random_sample', 'weighted'], true)) {
             throw new \InvalidArgumentException('samplingMode must be one of: complete, random_sample, weighted');
@@ -257,6 +289,27 @@ final class AggregateCalibrator implements CalibrationStore
         ]);
     }
 
+    /**
+     * The cross-language decimal spelling of a weight: shortest
+     * round-trip form, integral values without a trailing ".0" (Rust's
+     * f64::to_string). Weights are bounded scoring multipliers, so the
+     * exponent forms json_encode can emit never occur in practice; if
+     * one ever did it would be a configuration error surfaced by the
+     * script's numeric validation.
+     */
+    public static function weightText(float $weight): string
+    {
+        $text = json_encode($weight);
+        if (!\is_string($text)) {
+            throw new \InvalidArgumentException('weight must be a finite number');
+        }
+        if (str_ends_with($text, '.0')) {
+            $text = substr($text, 0, -2);
+        }
+
+        return $text;
+    }
+
     public function namespace(): string
     {
         return $this->namespace;
@@ -276,7 +329,7 @@ final class AggregateCalibrator implements CalibrationStore
 
     /**
      * The always-on outcome ledger key shared with the store:
-     * RedisRiskStateStore::ledgerKey() is {kiwi:<ns>}:cal:ledger:<decisionId>.
+     * RedisRiskStateStore::ledgerKey() is {kiwi:<ns>}:outcome:<decisionId>.
      * With calibration enabled register_decision.lua / confirm.lua /
      * correction.lua own it; with calibration disabled the store's
      * outcome_*.lua scripts write the same key.
@@ -307,6 +360,8 @@ final class AggregateCalibrator implements CalibrationStore
 
     public function ledgerKey(string $decisionId): string
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
+
         return "{kiwi:{$this->namespace}}:outcome:{$decisionId}";
     }
 
@@ -342,32 +397,39 @@ final class AggregateCalibrator implements CalibrationStore
      */
     public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
         $receiptKey = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
         $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$decisionHour}";
         $ledgerKey = $this->ledgerKey($decisionId);
 
-        $result = $this->client->eval(
+        $result = $this->runScript(
             $this->registerDecisionScript,
-            3,
-            $receiptKey,
-            $bucketKey,
-            $ledgerKey,
-            (string) json_encode([
-                'scope' => $scope,
-                'band' => $band,
-                'action' => $action->value,
-                'decision_hour' => $decisionHour,
-                'score' => $score,
-                'sampled' => $sampled ? 1 : 0,
-            ]),
-            (string) $this->receiptTtlSecs,
-            $sampled ? '1' : '0',
-            (string) self::BUCKET_TTL_SECS,
-            (string) $this->outcomeTtlSecs,
-            (string) $scope,
-            (string) $decisionHour,
-            (string) $score,
-            (string) $weight,
+            [$receiptKey, $bucketKey, $ledgerKey],
+            [
+                (string) json_encode([
+                    'scope' => $scope,
+                    'band' => $band,
+                    'action' => $action->value,
+                    'decision_hour' => $decisionHour,
+                    'score' => $score,
+                    'sampled' => $sampled ? 1 : 0,
+                ]),
+                (string) $this->receiptTtlSecs,
+                $sampled ? '1' : '0',
+                (string) self::BUCKET_TTL_SECS,
+                (string) $this->outcomeTtlSecs,
+                (string) $scope,
+                (string) $decisionHour,
+                (string) $score,
+                // The weight is serialized with the shortest round-trip
+                // form (json_encode under serialize_precision=-1), then
+                // integer-valued weights drop the trailing ".0" — the
+                // exact text Rust's f64::to_string emits. A raw
+                // (string) cast uses precision=14, so a weight like
+                // 1/0.3 would write a different `HINCRBYFLOAT` amount
+                // (and a different ledger.w) than the Rust core.
+                self::weightText($weight),
+            ],
         );
         return ((int) $result) === 1;
     }
@@ -397,6 +459,7 @@ final class AggregateCalibrator implements CalibrationStore
      */
     public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
         $receiptKey = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
         $raw = $this->client->get($receiptKey);
         if (!is_string($raw) || $raw === '') {
@@ -423,19 +486,18 @@ final class AggregateCalibrator implements CalibrationStore
             throw new \InvalidArgumentException('weighted mode requires a sampling probability weight');
         }
 
-        $status = (int) $this->client->eval(
+        $status = (int) $this->runScript(
             $this->confirmScript,
-            3,
-            $receiptKey,
-            $bucketKey,
-            $ledgerKey,
-            (string) $mode,
-            (string) ($weight ?? 1.0),
-            $legitimate ? '1' : '0',
-            (string) self::BUCKET_TTL_SECS,
-            (string) $this->outcomeTtlSecs,
-            (string) $scope,
-            (string) $hour,
+            [$receiptKey, $bucketKey, $ledgerKey],
+            [
+                (string) $mode,
+                self::weightText($weight ?? 1.0),
+                $legitimate ? '1' : '0',
+                (string) self::BUCKET_TTL_SECS,
+                (string) $this->outcomeTtlSecs,
+                (string) $scope,
+                (string) $hour,
+            ],
         );
 
         if ($status !== 0) {
@@ -454,6 +516,9 @@ final class AggregateCalibrator implements CalibrationStore
      * the corrected contribution. The decision-time bucket key is derived
      * from the ledger's own scope/hour; the pre-read only derives the key,
      * and the script re-validates ledger.scope/hour atomically. The
+     * clipped legit_above_sum / abuse_below_sum legs are reversed and
+     * redone only for a v=2 ledger; a legacy ledger without `v` reverses
+     * the count/score sums alone. The
      * corrected outcome is authoritative for future events. If the
      * decision-time bucket already expired, the ledger still flips and the
      * prior ephemeral reputation pressure decays naturally.
@@ -480,17 +545,17 @@ final class AggregateCalibrator implements CalibrationStore
         }
         $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$hour}";
 
-        $result = (int) $this->client->eval(
+        $result = (int) $this->runScript(
             $this->correctionScript,
-            2,
-            $ledgerKey,
-            $bucketKey,
-            $legitimate ? 'L' : 'A',
-            (string) ($weight ?? 1.0),
-            (string) self::BUCKET_TTL_SECS,
-            (string) $this->outcomeTtlSecs,
-            (string) $scope,
-            (string) $hour,
+            [$ledgerKey, $bucketKey],
+            [
+                $legitimate ? 'L' : 'A',
+                self::weightText($weight ?? 1.0),
+                (string) self::BUCKET_TTL_SECS,
+                (string) $this->outcomeTtlSecs,
+                (string) $scope,
+                (string) $hour,
+            ],
         );
         if ($result === 1) {
             unset($this->biasCache[$scope]);
@@ -511,7 +576,7 @@ final class AggregateCalibrator implements CalibrationStore
         for ($i = 0; $i < self::WINDOW_HOURS; $i++) {
             $keys[] = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:" . ($hour - $i);
         }
-        $result = $this->client->eval($this->samplingMetricsScript, count($keys), ...$keys);
+        $result = $this->runScript($this->samplingMetricsScript, $keys, [$now]);
         $total = (int) ($result[0] ?? 0);
         $resolved = (int) ($result[1] ?? 0);
         // (float) cast: PHP 8.5 division returns exact INT results. The
@@ -553,10 +618,10 @@ final class AggregateCalibrator implements CalibrationStore
         };
 
         $bias = self::toBoundedBias(
-            $this->client->eval(
+            $this->runScript(
                 $this->calibrationScript,
-                count($keys),
-                ...array_merge($keys, [
+                $keys,
+                [
                     $now,
                     $this->minSamples,
                     $this->maxAdjustment,
@@ -565,17 +630,34 @@ final class AggregateCalibrator implements CalibrationStore
                     $mode,
                     $this->falsePositiveCost,
                     $this->falseNegativeCost,
-                ]),
+                ],
             ),
             $this->maxAdjustment,
         );
 
         if (count($this->biasCache) >= self::CACHE_CAP && !isset($this->biasCache[$scope])) {
-            // Evict the least-recently-used entry (array_shift would renumber the int
-            // keys and corrupt the scope -> entry map, so unset instead).
-            unset($this->biasCache[array_key_first($this->biasCache)]);
+            // Evict the entry with the earliest write timestamp (Rust parity: a refresh re-ages
+            // the entry, so a recently refreshed scope survives eviction
+            // over scopes written earlier — not simply the first-inserted
+            // one; array_shift would renumber the int keys and corrupt the
+            // scope -> entry map).
+            $oldestScope = null;
+            $oldestWrittenAt = null;
+            foreach ($this->biasCache as $cachedScope => $entry) {
+                if ($oldestWrittenAt === null || $entry['writtenAt'] < $oldestWrittenAt) {
+                    $oldestScope = $cachedScope;
+                    $oldestWrittenAt = $entry['writtenAt'];
+                }
+            }
+            if ($oldestScope !== null) {
+                unset($this->biasCache[$oldestScope]);
+            }
         }
-        $this->biasCache[$scope] = ['bias' => $bias, 'expiresAt' => $nowFloat + self::CACHE_TTL_SECS];
+        $this->biasCache[$scope] = [
+            'bias' => $bias,
+            'expiresAt' => $nowFloat + self::CACHE_TTL_SECS,
+            'writtenAt' => $nowFloat,
+        ];
         return $bias;
     }
 
@@ -611,6 +693,60 @@ final class AggregateCalibrator implements CalibrationStore
             $bias = (int) $raw;
         }
         return max(-$maxAdjustment, min($maxAdjustment, $bias));
+    }
+
+    /**
+     * evalsha with the cached-sha + SCRIPT LOAD repair pattern of
+     * RedisRiskStateStore: the script bytes ship to Redis only on a
+     * NOSCRIPT miss (SCRIPT LOAD once per script per process, the sha
+     * cached in memory). Every steady-state call is an EVALSHA of the
+     * 40-char sha — never a full-body EVAL of the multi-kilobyte script.
+     *
+     * @param list<string> $keys
+     * @param list<int|string|float> $args
+     * @return array<int|string>|int|string
+     * @throws \RuntimeException on any redis failure (the calibrator's
+     *         callers degrade silently)
+     */
+    private function runScript(string $script, array $keys, array $args)
+    {
+        $sha = $this->shaOf($script);
+        $numKeys = count($keys);
+        $callArgs = [...$keys, ...$args];
+
+        try {
+            return $this->client->evalsha($sha, $numKeys, ...$callArgs);
+        } catch (ServerException $e) {
+            if (str_contains($e->getMessage(), 'NOSCRIPT')) {
+                try {
+                    $sha = $this->scriptLoad($script);
+                    return $this->client->evalsha($sha, $numKeys, ...$callArgs);
+                } catch (\Predis\Exception\Exception $inner) {
+                    throw new \RuntimeException('Calibration script execution failed: ' . $inner->getMessage(), 0, $inner);
+                }
+            }
+            throw new \RuntimeException('Calibration script execution failed: ' . $e->getMessage(), 0, $e);
+        } catch (\Predis\Exception\Exception $e) {
+            throw new \RuntimeException('Calibration store connection failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /** Cached sha1 of every static script (script load once per script per process). */
+    private function shaOf(string $script): string
+    {
+        if (!isset($this->scriptShas[$script])) {
+            $this->scriptShas[$script] = $this->scriptLoad($script);
+        }
+        return $this->scriptShas[$script];
+    }
+
+    private function scriptLoad(string $script): string
+    {
+        $sha = $this->client->script('LOAD', $script);
+        if (!is_string($sha) || $sha === '') {
+            throw new \RuntimeException('SCRIPT LOAD returned no sha');
+        }
+        return $sha;
     }
 
     private static function loadScript(string $file): string

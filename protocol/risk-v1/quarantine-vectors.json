@@ -1,0 +1,235 @@
+{
+    "version": 1,
+    "namespace": "d",
+    "mark_ttl_ms": 7776000000,
+    "policy": {
+        "version": 3,
+        "weights": {
+            "source_fast": 190, "source_slow": 110, "subnet_fast": 80,
+            "issue_debt": 150, "bad_proof": 220, "malformed": 260,
+            "replay": 320, "action_failure": 120, "scope_switch": 60,
+            "global_pressure": 170, "network_risk": 100,
+            "trust_credit": 130, "principal_credit": 100
+        },
+        "scopes": {
+            "1": { "base_risk": 100, "minimum": "allow", "post_solve_check": true, "degraded": "sha20" },
+            "2": { "base_risk": 150, "minimum": "sha16", "post_solve_check": true, "degraded": "sha20" },
+            "3": { "base_risk": 200, "minimum": "argon32", "post_solve_check": true, "degraded": "argon16" }
+        },
+        "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }
+    },
+    "vectors": [
+        {
+            "why": "a server-confirmed spam session mark with a clean request quarantines on the Allow action",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "the spam principal dimension quarantines identically",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "principal": { "kind": "spamReported", "count": 2, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "the spam asn bucket quarantines identically",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "asn": { "kind": "spamReported", "count": 3, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "the spam agent dimension quarantines identically",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "agent": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "two live spam marks on different dimensions quarantine (spam-only set)",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 },
+                "principal": { "kind": "spamReported", "count": 1, "first_ms": 1700000001000, "last_ms": 1700000001000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "a saturated argon backend never re-escalates the quarantine: no rung is issued",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 0, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "the quarantine hold rides the whole mark TTL: late in the window it still selects",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1707775995000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": true,
+            "expected_retry_after_ms": null, "expected_reasons": ["spam_mark_quarantine"]
+        },
+        {
+            "why": "corroborating evidence beats quarantine: the deny keeps the saturated retry hint",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000001000,
+            "signals": { "bad_proof": 400 }, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "deny", "expected_quarantined": false,
+            "expected_retry_after_ms": 4294967295, "expected_reasons": ["corroborated_abuse", "invalid_proofs"]
+        },
+        {
+            "why": "decoy corroboration without signals beats quarantine too",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "deny", "expected_quarantined": false,
+            "expected_retry_after_ms": 4294967295, "expected_reasons": ["corroborated_abuse"]
+        },
+        {
+            "why": "a plain step-up band outranks quarantine and keeps the marked-identity reason",
+            "scope": 1, "score": 950, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "step_up", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a plain deny band outranks quarantine",
+            "scope": 1, "score": 980, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "deny", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a global-floor escalation above Allow outranks quarantine; a spam mark adds no rung",
+            "scope": 1, "score": 100, "global_level": 3, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "sha20", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a scope minimum above Allow outranks quarantine; a spam mark adds no rung",
+            "scope": 2, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "sha16", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a non-spam mark next to the spam mark wins: the marked-identity rung floor applies",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 },
+                "asn": { "kind": "fraudConfirmed", "count": 1, "first_ms": 1700000002000, "last_ms": 1700000002000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        },
+        {
+            "why": "a target mark beats quarantine: the victim ceiling maps the claimant to step-up",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": { "kind": "accountBanned", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 },
+            "corroborated": false,
+            "expected_action": "step_up", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity", "target_under_attack"]
+        },
+        {
+            "why": "an expired spam mark is inert: the plain decision stands with no quarantine",
+            "scope": 1, "score": 500, "global_level": 0, "now_ms": 1707776060000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "sha20", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": []
+        },
+        {
+            "why": "a corrupt negative last_ms never reads as a live spam mark",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": -1, "last_ms": -1 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "allow", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": []
+        },
+        {
+            "why": "an expired spam mark under corroboration stays inert: the plain evidence decision answers",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1707776060000,
+            "signals": { "bad_proof": 400 }, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "spamReported", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": true,
+            "expected_action": "allow", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["invalid_proofs"]
+        },
+        {
+            "why": "an unreadable marks picture never quarantines: the fail-closed floor is not spam-kind",
+            "scope": 1, "score": 100, "global_level": 0, "now_ms": 1700000000000,
+            "signals": {}, "argon_capacity": 1000, "issuance_capacity": 1000,
+            "own_marks": {
+                "session": { "kind": "unreadable", "count": 1, "first_ms": 1700000000000, "last_ms": 1700000000000 }
+            },
+            "target_mark": null, "corroborated": false,
+            "expected_action": "argon64", "expected_quarantined": false,
+            "expected_retry_after_ms": null, "expected_reasons": ["marked_identity"]
+        }
+    ]
+}
