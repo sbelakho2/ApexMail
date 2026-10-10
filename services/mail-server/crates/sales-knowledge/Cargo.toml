@@ -8,4 +8,3 @@ edition.workspace = true
 platform-catalog = { path = "../platform-catalog" }
 chrono.workspace = true
 serde.workspace = true
-serde_json.workspace = true
