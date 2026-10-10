@@ -6,7 +6,7 @@ expectation is the HONEST behavior — the probe fails when the stack answers
 with a raw 500, with another tenant's data, with a silent success, or with an
 information leak. Run against the compose stack (default 127.0.0.1:8080).
 
-usage: tools/dogfood-live-adversarial.py [--base http://127.0.0.1:8080]
+usage: tools/dogfood-live-adversarial.py [--base http://127.0.0.1:8080] # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
                                         [--host app.apexmail.ee]
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ def call(
         headers["Cookie"] = cookie
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
+        with urllib.request.urlopen(request, timeout=30) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected, python.lang.security.audit.insecure-transport.urllib.insecure-urlopen.insecure-urlopen — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             return response.status, response.read().decode(errors="replace"), dict(response.headers)
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode(errors="replace"), dict(error.headers)
@@ -96,7 +96,7 @@ def mailpit_links(recipient: str, subject_contains: str) -> list[str]:
     import re
     import urllib.parse
 
-    with urllib.request.urlopen("http://127.0.0.1:8025/api/v1/messages?limit=50", timeout=15) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
+    with urllib.request.urlopen("http://127.0.0.1:8025/api/v1/messages?limit=50", timeout=15) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected, python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object, python.lang.security.audit.insecure-transport.urllib.insecure-urlopen.insecure-urlopen — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         listing = json.loads(response.read().decode())
     for message in listing.get("messages", []):
         to = [t.get("Address", "") for t in message.get("To", [])]
@@ -104,8 +104,8 @@ def mailpit_links(recipient: str, subject_contains: str) -> list[str]:
             continue
         if subject_contains.lower() not in (message.get("Subject") or "").lower():
             continue
-        with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
-            f"http://127.0.0.1:8025/api/v1/message/{message['ID']}", timeout=15
+        with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected, python.lang.security.audit.insecure-transport.urllib.insecure-urlopen.insecure-urlopen — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
+            f"http://127.0.0.1:8025/api/v1/message/{message['ID']}", timeout=15 # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
         ) as response:
             body = json.loads(response.read().decode())
         text = body.get("Text") or body.get("HTML") or ""
@@ -245,7 +245,7 @@ def signup(base: str, host: str, prefix: str) -> tuple[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base", default="http://127.0.0.1:8080")
+    parser.add_argument("--base", default="http://127.0.0.1:8080") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     parser.add_argument("--host", default="app.apexmail.ee")
     args = parser.parse_args()
     base, host = args.base, args.host

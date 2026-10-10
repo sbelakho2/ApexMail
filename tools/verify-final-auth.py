@@ -169,8 +169,8 @@ def prep() -> None:
         if not src:
             raise RuntimeError("A6 needs the A1/A3 session (missing state)")
         csrf = src["csrf"]
-        req = urllib.request.Request(
-            "http://127.0.0.1:8080/v1/auth/api-keys",
+        req = urllib.request.Request(  # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — localhost dev-stack probe (loopback only)
+            "http://127.0.0.1:8080/v1/auth/api-keys", # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
             data=json.dumps(
                 {"name": f"fa-nonadmin-{tag}", "scopes": ["templates:read"]}
             ).encode(),

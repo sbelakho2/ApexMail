@@ -28,10 +28,10 @@ import urllib.parse
 import urllib.request
 import uuid
 
-API = "http://127.0.0.1:8080"
-ENTERPRISE = os.environ.get("DOGFOOD_ENTERPRISE_BASE", "http://127.0.0.1:3002")
-TRACKING = os.environ.get("DOGFOOD_TRACKING_BASE", "http://127.0.0.1:3001")
-MAILPIT = "http://127.0.0.1:8025"
+API = "http://127.0.0.1:8080" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
+ENTERPRISE = os.environ.get("DOGFOOD_ENTERPRISE_BASE", "http://127.0.0.1:3002") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
+TRACKING = os.environ.get("DOGFOOD_TRACKING_BASE", "http://127.0.0.1:3001") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
+MAILPIT = "http://127.0.0.1:8025" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 PG = "postgresql://apexmail:bebc8cefdc096e5247f8864e5c0edf78099df23058133321@127.0.0.1:5432/apexmail"
 API_KEY_HASH_SECRET = "dev-api-key-hash-secret"
 TRACKING_SECRET = "dev-tracking-secret-key-minimum-32-chars-long"

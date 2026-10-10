@@ -17,7 +17,7 @@ pub struct Config {
     pub tracking: TrackingConfig,
     pub rate_limit: RateLimitConfig,
     pub metrics: MetricsConfig,
-    pub secret_key: zeroize::Zeroizing<String>,
+    pub secret_key: zeroize::Zeroizing<String>, // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — a Rust field NAME, not a literal secret
     /// RSA public key (PEM) for verifying RS256 JWTs (stream tokens).
     /// SECURITY (SEC-119): All JWTs use RS256 — no HS256.
     pub jwt_public_key_pem: String,
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn load_parses_overrides_and_rejects_unsafe_values() {
-        let secret = "01234567890123456789012345678901";
+        let secret = "01234567890123456789012345678901"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — deterministic test vector in this cfg(test) module
         let base: Vec<(&str, Option<&str>)> = vec![
             ("TRACKING_SECRET_KEY", Some(secret)),
             ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
@@ -571,7 +571,7 @@ mod tests {
     /// and absurd values degrade safely (None / clamped to 100 years).
     #[test]
     fn token_max_age_days_parses_overrides_and_degrades_safely() {
-        let secret = "01234567890123456789012345678901";
+        let secret = "01234567890123456789012345678901"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — deterministic test vector in this cfg(test) module
         let base: Vec<(&str, Option<&str>)> = vec![
             ("TRACKING_SECRET_KEY", Some(secret)),
             ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),

@@ -2150,7 +2150,7 @@ mod adversarial_tests {
         let Some(h) = harness("export_lifecycle").await else {
             return;
         };
-        let dir = std::env::temp_dir().join(format!("adv-analytics-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("adv-analytics-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         let _guard = lock_export_env().await;
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 
@@ -2409,7 +2409,7 @@ mod adversarial_tests {
         let Some(pool) = pool_for("export_endpoint").await else {
             return;
         };
-        let dir = std::env::temp_dir().join(format!("adv-analytics-ep-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("adv-analytics-ep-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         let _guard = lock_export_env().await;
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 

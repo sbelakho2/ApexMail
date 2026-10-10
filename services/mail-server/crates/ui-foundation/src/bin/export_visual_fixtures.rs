@@ -517,7 +517,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             "export_fixtures_{label}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()

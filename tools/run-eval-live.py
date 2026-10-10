@@ -25,7 +25,7 @@ pipeline evidence unavailable) / FAIL / NOT-VERIFIED. The script exits
 non-zero when any case FAILs (`--strict` also fails on DEGRADED).
 
 usage:
-  tools/run-eval-live.py [--base http://127.0.0.1:8080] \\
+  tools/run-eval-live.py [--base http://127.0.0.1:8080] \\ # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
       [--sections chat,reply,mailbot] [--out /tmp/eval-live.json]
 """
 from __future__ import annotations
@@ -480,7 +480,7 @@ def ai_classify(args, tenant: str, body: str, headers: dict) -> tuple[int, dict 
         "wget -q -S -O- --header='Content-Type: application/json' "
         f"--header='x-apexmail-tenant-id: {tenant}' "
         f"--header='x-api-key: {args.internal_token}' "
-        "--post-file=/tmp/eval-req.json http://127.0.0.1:3012/reply/classify"
+        "--post-file=/tmp/eval-req.json http://127.0.0.1:3012/reply/classify" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     )
     proc = subprocess.run(
         ["docker", "exec", "-i", args.ai_container, "sh", "-c", inner],
@@ -900,9 +900,9 @@ def run_mailbot(args, tenant: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", default="http://127.0.0.1:8080")
+    parser.add_argument("--base", default="http://127.0.0.1:8080") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     parser.add_argument("--host", default="app.apexmail.ee")
-    parser.add_argument("--mailpit", default="http://127.0.0.1:8025")
+    parser.add_argument("--mailpit", default="http://127.0.0.1:8025") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     parser.add_argument("--sections", default="chat,reply,mailbot")
     parser.add_argument("--users", type=int, default=3)
     parser.add_argument("--pace", type=float, default=0.0,

@@ -1121,8 +1121,8 @@ mod verify_bimi_wire_tests {
     }
 
     fn trusting_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
+        reqwest::Client::builder() // nosemgrep: rust.lang.security.reqwest-accept-invalid.reqwest-accept-invalid — test helper for a local self-signed TLS server; never a production client
+            .danger_accept_invalid_certs(true) // nosemgrep: rust.lang.security.reqwest-accept-invalid.reqwest-accept-invalid — test helper for a local self-signed TLS server; never a production client
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap()

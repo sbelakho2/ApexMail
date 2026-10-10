@@ -9377,7 +9377,7 @@ mod unit_arms {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
-        let dir = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             "imap_tls_defaults_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -9516,7 +9516,7 @@ mod unit_arms {
         let imap_port = reserve();
         let imaps_port = reserve();
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             "imap_run_tls_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

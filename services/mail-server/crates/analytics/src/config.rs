@@ -485,7 +485,7 @@ mod tests {
         // ladder tests, whose ambient vars are unset).
         std::env::set_var("DATABASE_URL", "postgres://ci-pin@localhost/ci");
         let _snapshot = EnvSnapshot::take(&["DATABASE_URL"]);
-        let dir = std::env::temp_dir().join(format!("apexmail_cfg_env_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("apexmail_cfg_env_{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(dir.join(".env"), "THIS LINE HAS NO EQUALS SIGN\n").expect("bad .env");
         let cwd = std::env::current_dir().expect("cwd");

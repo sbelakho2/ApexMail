@@ -1688,7 +1688,7 @@ pub mod test_support {
         /// truncated, without touching the frozen source tree.
         async fn subset_migrator(upto: i64) -> sqlx::migrate::Migrator {
             let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-            let dir = std::env::temp_dir().join(format!(
+            let dir = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
                 "apexmail_migrator_subset_{upto}_{}",
                 std::process::id()
             ));

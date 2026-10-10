@@ -477,7 +477,7 @@ class DisclosureSuite:
               f"list_leaked={leaked} reject={status_reject} "
               f"pending_after={pending}", flush=True)
         # Cleanup the fixture draft (only if nobody else consumed it).
-        self.db.execute(f"DELETE FROM inbound_messages WHERE id='{draft_id}'")
+        self.db.execute(f"DELETE FROM inbound_messages WHERE id='{draft_id}'") # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (no untrusted input; identifiers from our own fixtures)
 
     # ── mailbot drafted replies ─────────────────────────────────────────
     def mailbot_hostile_inbound(self, tenants: list[dict]) -> None:

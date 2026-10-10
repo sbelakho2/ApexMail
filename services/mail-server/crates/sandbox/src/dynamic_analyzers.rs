@@ -1161,7 +1161,7 @@ mod tests {
     fn clamav_socket_path_validation_refuses_non_sockets() {
         // A regular file is not a Unix socket.
         let path =
-            std::env::temp_dir().join(format!("apex-sandbox-not-a-socket-{}", std::process::id()));
+            std::env::temp_dir().join(format!("apex-sandbox-not-a-socket-{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::write(&path, b"not a socket").expect("temp file");
         let analyzer = ClamAvSocketAnalyzer::new(path.to_string_lossy().to_string());
         let finding = analyzer
@@ -1205,7 +1205,7 @@ mod tests {
         assert!(analyzer.analyze(b"hello", None).is_none());
 
         // Malformed JSON is None, valid JSON creates rules.
-        let path = std::env::temp_dir().join(format!("apex-rules-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("apex-rules-{}.json", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::write(&path, b"{ not json").expect("write");
         assert!(load_external_rules(&path.to_string_lossy()).is_none());
         // Patterns are hex-encoded strings ("68656c6c6f" = "hello").

@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::TlsConnector;
 
-pub(crate) const CERT: &str = r#"-----BEGIN CERTIFICATE-----
+pub(crate) const CERT: &str = r#"-----BEGIN CERTIFICATE----- // nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
 MIIDSTCCAjGgAwIBAgIUVwhxJa9wz86lWTzyVQVC9bHNeXUwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgwOTE5MjIxMVoXDTM2MDgw
 NjE5MjIxMVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
@@ -30,7 +30,7 @@ YzD9bl7yCpnvXHy4p7G0SYXAYkK8DG5FcS/ECTJw/gjMEDsIPLqPHNsC2uaq+C0R
 fwY+YpZkXTmxfHPbSn0EKcbKj1lHFsvSm9ckfUjEJV5vcIk5+TewmU4cEzQloK9v
 MpuYqjOkD826HkH+KCOEK4qVsx1p1MM0ASjES0E=
 -----END CERTIFICATE-----"#;
-pub(crate) const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+pub(crate) const KEY: &str = r#"-----BEGIN PRIVATE KEY----- // nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqqGeESTeTNPwo
 7NRxeFNuyjGdjHvNfBbxQ8VDhuyF7LwSVuTf5wkFvCySeEch5uInxlxo6p3MmT7m
 K/9/IZ8ToEQaf4IRa8Yyn43czdOYSwCGmH2ZiVJ4OXC/SPf7QpQGctr3Izcwi5lg
@@ -78,7 +78,7 @@ fn tokenless_interceptor() -> InternalServiceAuthInterceptor {
 /// Write a file next to the other fixtures (temp dir under std::env::temp_dir)
 /// and return its path. Each call gets a unique name.
 fn temp_fixture(name: &str, contents: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("apexmail_imap_conn_tests_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("apexmail_imap_conn_tests_{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
     std::fs::create_dir_all(&dir).expect("create temp fixture dir");
     let path = dir.join(format!(
         "{name}_{}",

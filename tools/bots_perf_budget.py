@@ -74,7 +74,7 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
 
-DEFAULT_BASE = "http://127.0.0.1:8080"
+DEFAULT_BASE = "http://127.0.0.1:8080" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 DEFAULT_HOST = "app.apexmail.ee"
 DEFAULT_STATE = "/tmp/apexmail-bots-perf-state.json"
 DEFAULT_REPORT = "/tmp/apexmail-bots-perf-report.json"
@@ -82,7 +82,7 @@ DEFAULT_PG_DSN = (
     "postgresql://apexmail:bebc8cefdc096e5247f8864e5c0edf78099df23058133321"
     "@127.0.0.1:5432/apexmail"
 )
-MAILPIT = "http://127.0.0.1:8025"
+MAILPIT = "http://127.0.0.1:8025" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 SMTP_HOST, SMTP_PORT = "127.0.0.1", 25
 PASSWORD = "BotPerf!2026-Correct-Horse-9"
 
@@ -497,7 +497,7 @@ class Provisioner:
             f"SELECT password_hash FROM users WHERE email = '{tenant['email']}'"
         )
         user_id = str(uuid.uuid4())
-        self.db.execute(
+        self.db.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (fixtures only)
             "INSERT INTO users (id, tenant_id, email, name, password_hash, role, "
             "status, mfa_enabled, email_verified, created_at, updated_at) VALUES "
             f"('{user_id}', '{tenant['tenant_id']}', '{email}', 'BotPerf {role}', "
@@ -523,14 +523,14 @@ class Provisioner:
         )
         if status not in (200, 201):
             raise SystemExit(f"domain create failed: {status} {text[:240]}")
-        self.db.execute(
+        self.db.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (fixtures only)
             "UPDATE domains SET status='verified', verified=true, dkim_enabled=true, "
             "dkim_verified=true, spf_verified=true, dmarc_verified=true, "
             "ses_verified=true, dkim_selector=COALESCE(dkim_selector,'apexmail'), "
             "updated_at=NOW() WHERE name = '" + domain + "'"
         )
         mailbox = f"inbox@{domain}"
-        self.db.execute(
+        self.db.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (fixtures only)
             "INSERT INTO mail_accounts (email, domain, password_hash, display_name, "
             "is_active) VALUES ('" + mailbox + "', '" + domain + "', "
             "'!fixture-no-login', 'BotPerf inbox', true) "
@@ -1039,7 +1039,7 @@ def run_mailbot(client: Client, db: Db, results: dict, state: dict, run_id: str,
     domain = lane_tenant["domain"]
     domain_id = lane_tenant["domain_id"]
     lane_prefix = f"perfq{run_id}"
-    db.execute(
+    db.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (fixtures only)
         "INSERT INTO email_queue (from_address, to_addresses, subject, status, tenant_id, "
         "message_id, domain_id, \"to\", text, metadata, attempt, message_category, priority, "
         "created_at, updated_at) "
@@ -1048,7 +1048,7 @@ def run_mailbot(client: Client, db: Db, results: dict, state: dict, run_id: str,
         "'lane-backlog-' || i || '@probe.test', 'body', '{}'::jsonb, 0, 'transactional', 5, "
         "NOW() - make_interval(secs => 600), NOW() FROM generate_series(1, 20) AS i"
     )
-    db.execute(
+    db.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (fixtures only)
         "INSERT INTO email_queue (from_address, to_addresses, subject, status, tenant_id, "
         "message_id, domain_id, \"to\", text, metadata, attempt, message_category, priority, "
         "created_at, updated_at) "
@@ -1116,7 +1116,7 @@ def run_mailbot(client: Client, db: Db, results: dict, state: dict, run_id: str,
 
     # Cleanup the seeded queue rows (fixture) — the deliveries already landed
     # in Mailpit where they can be inspected.
-    db.execute(
+    db.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query, python.lang.security.audit.formatted-sql-query.formatted-sql-query — dev-driver SQL against the local test database (fixtures only)
         f"DELETE FROM email_queue WHERE subject LIKE '{lane_prefix}-lane-%' OR subject = 'lane-backlog'"
     )
 

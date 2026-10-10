@@ -1134,7 +1134,7 @@ mod tests {
     /// `tag`) and return their paths. Uses the configured temp dir, not the
     /// repository, so parallel test runs never collide.
     fn write_tls_fixtures(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir();
+        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         let cert_path = dir.join(format!("emta_cov_cert_{tag}.pem"));
         let key_path = dir.join(format!("emta_cov_key_{tag}.pem"));
         std::fs::write(&cert_path, FIXTURE_CERT_PEM).expect("write cert fixture");
@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn from_config_reports_missing_key_file_and_unparsable_pem() {
-        let dir = std::env::temp_dir();
+        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         let cert_path = dir.join("emta_cov_ok_cert.pem");
         std::fs::write(&cert_path, FIXTURE_CERT_PEM).expect("write cert");
         // Cert exists, key path does not → key read arm.

@@ -1050,7 +1050,7 @@ def exec_mirror(source: str, label: str) -> Any | None:
     module = types.ModuleType(label)
     module.__dict__["__file__"] = label
     try:
-        exec(compile(source, label, "exec"), module.__dict__)
+        exec(compile(source, label, "exec"), module.__dict__) # nosemgrep: python.lang.security.audit.exec-detected.exec-detected — executes tools/lib/pricing.py — our OWN single-source catalog mirror, read from the repo, never external input
     except Exception as error:  # noqa: BLE001 - any failure is a gate failure
         return None
     return module

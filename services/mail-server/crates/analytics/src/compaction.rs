@@ -845,7 +845,7 @@ mod tests {
     /// loudly instead of clobbering (the honest no-clobber guarantee).
     #[test]
     fn write_cold_objects_atomic_no_clobber_no_truncation() {
-        let root = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             "apexmail_compact_write_{}_{}",
             std::process::id(),
             Uuid::new_v4().simple()
@@ -987,7 +987,7 @@ mod gap_tests {
     }
 
     fn storage_root(tag: &str) -> String {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             "apexmail_compaction_gap_{}_{}_{tag}",
             std::process::id(),
             Uuid::new_v4().simple()

@@ -19,7 +19,7 @@ inbound SMTP 127.0.0.1:5525, Postgres via `docker exec apexmail-postgres`):
 Evidence (every API response, DB row and Mailpit lookup) is written to the
 --evidence JSON file; the report is built from it. Unique suffixes everywhere.
 
-usage: tools/dogfood-mailbot-live.py [--base http://127.0.0.1:8080] [--host app.apexmail.ee]
+usage: tools/dogfood-mailbot-live.py [--base http://127.0.0.1:8080] [--host app.apexmail.ee] # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
                                      [--evidence /tmp/mailbot-live-evidence.json] all
 """
 from __future__ import annotations
@@ -178,7 +178,7 @@ def cp_call(base: str, method: str, path: str, body=None, key: str | None = None
 
 def mailpit_messages(limit: int = 200) -> list[dict]:
     with urllib.request.urlopen( # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
-        f"http://127.0.0.1:8025/api/v1/messages?limit={limit}", timeout=15
+        f"http://127.0.0.1:8025/api/v1/messages?limit={limit}", timeout=15 # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     ) as response:
         return json.loads(response.read().decode()).get("messages", [])
 
@@ -1366,7 +1366,7 @@ def run_disclosure(base: str, host: str, state: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base", default="http://127.0.0.1:8080")
+    parser.add_argument("--base", default="http://127.0.0.1:8080") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     parser.add_argument("--host", default="app.apexmail.ee")
     parser.add_argument("--evidence", default="/tmp/mailbot-live-evidence.json")
     parser.add_argument("stage", choices=[

@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_BROWSER = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
-DEFAULT_BASE_URL = "http://127.0.0.1:3000"
+DEFAULT_BASE_URL = "http://127.0.0.1:3000" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 DEFAULT_ARTIFACT_DIR = "reports/visual-parity/live-browser-smoke"
 DEFAULT_BROWSER_ENV = "BROWSER_TEST_BROWSER"
 DEFAULT_BASE_URL_ENV = "BROWSER_TEST_BASE_URL"
@@ -336,7 +336,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             f"Base URL for the live Rust-served app "
             f"(default: {DEFAULT_BASE_URL}, env: {DEFAULT_BASE_URL_ENV}). "
-            "Against the compose stack use http://127.0.0.1:8080 — the default "
+            "Against the compose stack use http://127.0.0.1:8080 — the default " # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
             "3000 is the legacy dev port and nothing answers there."
         ),
     )

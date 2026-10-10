@@ -35,11 +35,11 @@ EVIDENCE_DIR = ROOT / "docs/audit/dogfood-2026-10-06/evidence-live-console"
 EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
 EVIDENCE_FILE = EVIDENCE_DIR / "probes.jsonl"
 
-BASE = os.environ.get("DOGFOOD_BASE", "http://127.0.0.1:8080")
+BASE = os.environ.get("DOGFOOD_BASE", "http://127.0.0.1:8080") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 WEB_HOST = "127.0.0.1"
 CP_HOST = "admin.localhost"
 MARKETING_HOST = "marketing.localhost"
-MAILPIT = "http://127.0.0.1:8025"
+MAILPIT = "http://127.0.0.1:8025" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 PSQL = "/opt/homebrew/bin/psql"
 PGPASSWORD = "bebc8cefdc096e5247f8864e5c0edf78099df23058133321"
 PGURL = f"postgresql://apexmail:{PGPASSWORD}@127.0.0.1:5432/apexmail"
@@ -216,7 +216,7 @@ def mailpit_message(mid: str) -> dict:
 
 
 def mailpit_delete_all() -> None:
-    req = urllib.request.Request(f"{MAILPIT}/api/v1/messages", method="DELETE")
+    req = urllib.request.Request(f"{MAILPIT}/api/v1/messages", method="DELETE")  # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — local Mailpit on loopback (operator tooling)
     try:
         urllib.request.urlopen(req, timeout=10) # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
     except Exception:  # noqa: BLE001
@@ -344,8 +344,8 @@ def totp(secret: str) -> str:
     return f"{code:06d}"
 
 
-def signup(section: str, email: str, *, company: str = "Dogfood Co", plan: str = "free",
-           password: str = PASSWORD, skip_if_limited: bool = False) -> tuple[Session, tuple[int, str]]:
+def signup(section: str, email: str, *, company: str = "Dogfood Co", plan: str = "free",  # nosemgrep: python.lang.security.audit.hardcoded-password-default-argument.hardcoded-password-default-argument — PASSWORD is the dev stack's public test credential
+           password: str = PASSWORD, skip_if_limited: bool = False) -> tuple[Session, tuple[int, str]]:  # nosemgrep: python.lang.security.audit.hardcoded-password-default-argument.hardcoded-password-default-argument — PASSWORD is the dev stack's public test credential (compose default), not a secret
     """Full documented lifecycle: signup → Mailpit verify link → login →
     MFA setup (first login) → session. Returns (session, (signup_status, signup_body))."""
     s = Session(email)
@@ -1001,7 +1001,7 @@ def ensure_sender_domain(o: Session) -> str:
     zones[f"_dmarc.{name}"] = [["TXT", "v=DMARC1; p=none;"]]
     zones[name] = [["TXT", "v=spf1 include:apexmail.ee ~all"]]
     zones_path.write_text(json.dumps(zones, indent=1))
-    o.post(f"/v1/domains/{did}/verify", {}, base="http://127.0.0.1:8181")
+    o.post(f"/v1/domains/{did}/verify", {}, base="http://127.0.0.1:8181") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     verified = db_one(f"SELECT verified::text FROM domains WHERE id='{did}';")
     if verified in ("t", "true"):
         return f"noreply@{name}"
@@ -1450,7 +1450,7 @@ def section_4_campaigns(args) -> None:
 
 # ─── Section 5: domains ──────────────────────────────────────────────────────
 
-DNS_BASE = "http://127.0.0.1:8181"
+DNS_BASE = "http://127.0.0.1:8181" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
 
 
 def section_5_domains(args) -> None:
@@ -1547,13 +1547,13 @@ def section_5_domains(args) -> None:
                 m2 = re.search(r"/(?:t/)?c/([A-Za-z0-9_\-]+)", blob)
                 click_token = m2.group(1) if m2 else ""
             if click_token:
-                st, text, h = http("GET", f"/c/{click_token}", host=tr_name, base="http://127.0.0.1:3001")
+                st, text, h = http("GET", f"/c/{click_token}", host=tr_name, base="http://127.0.0.1:3001") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
                 loc = h.get("location", "")
                 ok(S, "a REAL click link serves on the custom tracking host (302 to the target)",
                    st in (301, 302, 307) and "example.com" in loc,
                    f"status={st} host={tr_name} location={loc[:80]} token={click_token[:12]}…",
                    response=text[:120])
-                st_p, text_p, h_p = http("GET", f"/c/{click_token}", host="127.0.0.1", base="http://127.0.0.1:3001")
+                st_p, text_p, h_p = http("GET", f"/c/{click_token}", host="127.0.0.1", base="http://127.0.0.1:3001") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
                 ok(S, "the same link still serves on the platform host",
                    st_p in (301, 302, 307), f"status={st_p} location={h_p.get('location','')[:60]}")
             else:
@@ -1561,7 +1561,7 @@ def section_5_domains(args) -> None:
                        "UNREACHABLE", "no tracked click token found in the delivered mail",
                        response=(blob[:200] if got else "no mail"))
             # a FOREIGN host must not be served
-            st, text, h = http("GET", f"/c/{click_token or 'unknown-token'}", host=f"evil-{tag}.example.com", base="http://127.0.0.1:3001")
+            st, text, h = http("GET", f"/c/{click_token or 'unknown-token'}", host=f"evil-{tag}.example.com", base="http://127.0.0.1:3001") # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
             ok(S, "unknown tracking host is refused by name", st in (400, 403, 404, 410, 421),
                f"status={st} body={text[:150]}")
 
@@ -1826,7 +1826,7 @@ def section_7_settings(args) -> None:
     SinkHandler.mode = "ok"
     SinkHandler.hits.clear()
     hook_path = f"/hook-{tag}"
-    hook_url = f"http://127.0.0.1:8791{hook_path}"
+    hook_url = f"http://127.0.0.1:8791{hook_path}" # nosemgrep: python.lang.security.audit.insecure-transport.urllib.insecure-request-object.insecure-request-object — operator-run tooling against the LOCAL dev stack on loopback (no transport to protect; never a user-supplied URL)
     st, text, _ = o.post("/v1/webhooks", {"url": hook_url,
                                           "events": ["campaign.started", "campaign.completed", "message.delivered"]})
     body = json.loads(text) if text.startswith("{") else {}

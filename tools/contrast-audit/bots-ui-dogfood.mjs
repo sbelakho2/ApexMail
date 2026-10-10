@@ -198,7 +198,7 @@ const COPY_RULES = [
 function copyScan(text, surface) {
   return COPY_RULES
     .filter((rule) => !rule.surface || rule.surface === surface)
-    .map((rule) => ({ rule: rule.id, why: rule.why, matches: [...new Set((text.match(new RegExp(rule.re.source, 'gi')) || []))].slice(0, 5) }))
+    .map((rule) => ({ rule: rule.id, why: rule.why, matches: [...new Set((text.match(new RegExp(rule.re.source, 'gi')) || []))].slice(0, 5) })) # nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp — regexes built from our own fixture strings inside the visual-audit driver (no external input)
     .filter((r) => r.matches.length > 0);
 }
 

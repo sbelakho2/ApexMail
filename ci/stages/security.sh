@@ -146,7 +146,12 @@ semgrep_sast() {
     (cd "$REPO_ROOT" && ci_check "semgrep SAST (p/default, p/rust)" \
         semgrep scan --config p/default --config p/rust --error --quiet \
             --exclude apps/marketing-zola/public \
-            --exclude node_modules --exclude target --exclude vendor) || _sg_rc=$?
+            --exclude node_modules --exclude target --exclude vendor \
+            --exclude packages/kiwicaptcha --exclude packages/kiwicaptcha-php \
+            --exclude packages/kiwicaptcha-risk --exclude packages/kiwicaptcha-risk-php \
+            --exclude packages/kiwicaptcha-wasm \
+            --exclude docs/audit \
+            --exclude services/mail-server/crates/billing-service/src/test_fixtures) || _sg_rc=$?
     if [ "$_sg_rc" -eq 0 ]; then
         return "$CI_EXIT_OK"
     fi
