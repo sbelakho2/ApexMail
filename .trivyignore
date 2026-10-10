@@ -91,3 +91,4 @@ GHSA-82j2-j2ch-gfr8   # rustls-webpki CRL panic — reviewed, see deny.toml lock
 GHSA-r7wm-3cxj-wff9 exp:2026-12-31   # jackson-core maxNumberLength bypass (sdk-java example)
 CVE-2026-54512 exp:2026-12-31        # jackson-databind arbitrary code execution (sdk-java example)
 CVE-2026-54513 exp:2026-12-31        # jackson-databind security bypass (sdk-java example)
+GHSA-5j98-2g5x-46v6   # hickory-resolver 0.24 lookup()/lookup_ip() obscure DNSSEC-validation failures — the advisory's precondition is an ENABLED DNSSEC validator; ApexMail's resolver never enables DNSSEC (no dnssec config anywhere in dns-resolver), and the resolver talks to the system/trusted resolvers. Revisit on the hickory 0.26 upgrade.
