@@ -70,6 +70,13 @@ vast_instance_id.txt
 # and its cipher list is pure ECDHE (see deploy/nginx/ssl/README.md).
 # All .pem files (real cert material) are excluded below.
 *.pem
+# Test-only key/cert fixtures compiled in by #[cfg(test)] code via
+# include_str! — the blanket *.pem rule above made every FRESH checkout (the
+# deploy host) unable to build its test targets while dev trees kept the
+# ignored files (found by the production deploy, 2026-10-10).
+!services/mail-server/crates/enterprise/tests/keys/*.pem
+!services/mail-server/crates/tracking-service/tests/fixtures/*.pem
+!services/mail-server/crates/billing-service/src/test_fixtures/*.pem
 *.key
 secrets/
 **/secrets/

@@ -40,6 +40,44 @@ description = "Global allowlist for ApexMail"
 #     scripts. Narrowed to the exact reviewed files (see the 2026-09-30
 #     block below); every OTHER file in those trees is scanned again.
 paths = [
+    #
+    # 2026-10-10 triage (73 findings; every hit reviewed — all are
+    # dev-stack/test/audit-fixture values, no production material; the
+    # production secrets are generated on the deploy host and never commit):
+    #
+    # Audit evidence trees: the live dogfood/verification campaigns capture
+    # session cookies, dev API keys and CSRF secrets from the LOCAL dev stack
+    # BY DESIGN (that is the evidence). Dated trees, bounded to the campaign
+    # output directories — not a blanket docs/ exemption.
+    "(^|/)docs/audit/dogfood-2026-10-06/",
+    "(^|/)docs/audit/kiwicaptcha-integration-2026-10-09/",
+    # New adversarial suites carry deterministic literal test secrets
+    # (csrf_secret/placement_encryption_secret fixtures).
+    "(^|/)crates/integration-tests/tests/adversarial_commercial_contract[.]rs$",
+    "(^|/)crates/integration-tests/tests/adversarial_security_contract[.]rs$",
+    "(^|/)crates/integration-tests/tests/concurrency_tests[.]rs$",
+    "(^|/)crates/compliance/tests/gdpr_lifecycle_adversarial_tests[.]rs$",
+    # KiwiCaptcha-mirrored browser suites: the upstream repo's canonical test
+    # vectors (mirror bytes; consumed as-is).
+    "(^|/)tests/browser/execution-v6/",
+    "(^|/)tests/browser/pentest/lifecycle-teardown[.]html$",
+    "(^|/)tests/browser/specs/compat-observer[.]spec[.]mjs$",
+    "(^|/)packages/kiwicaptcha-risk/tests/pentest[.]rs$",
+    # Protocol register fixtures (canonical cross-language test vectors).
+    "(^|/)protocol/risk-v1/[^/]+[.]json$",
+    "(^|/)protocol/risk-v2/identity-fixtures[.]json$",
+    # The dogfood harnesses' deterministic dev fixtures.
+    "(^|/)tools/dogfood-v2/harness/fixture[.]py$",
+    "(^|/)tools/dogfood-live-console[.]py$",
+    # Four historical-commit hits re-triaged 2026-10-10 (all fake):
+    #   * a canned Go-SDK response fixture ("am_live_0123456789abcdef"),
+    #   * the same fake key as a docs response EXAMPLE,
+    #   * a sales analysis doc example,
+    #   * a #[cfg(test)] at-rest round-trip fixture ("whsec_roundtrip_…").
+    "(^|/)packages/sdk-go/apexmail_resources_test[.]go$",
+    "(^|/)docs/api/endpoints/auth[.]md$",
+    "(^|/)docs/analysis/salescloser-gap-analysis-2026-10-05[.]md$",
+    "(^|/)crates/apexmail-db/src/repos/webhooks[.]rs$",
     # Rust test fixture directories (e.g. crates/mta/tests/fixtures TLS material)
     "(^|/)tests/fixtures/",
     # Benchmark corpora
