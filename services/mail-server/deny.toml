@@ -28,6 +28,15 @@ yanked = "deny"
 #   2. A fix is planned or the advisory doesn't affect ApexMail's use case
 #   3. Each entry is annotated with a justification comment
 ignore = [
+    # ── lopdf (RUSTSEC-2026-0187, high 7.5) ──────────────────────────────
+    # Stack overflow via deeply nested PDF objects. lopdf 0.34 arrives ONLY
+    # through pdf-extract, a DEV-dependency of pdf-renderer (the independent
+    # text-extraction verification): `cargo tree -e normal` shows no path, so
+    # no production image links it, and the dev path only parses PDFs this
+    # repository generated itself. Unreachable in deployed code; revisit when
+    # pdf-extract lifts its lopdf range (>= 0.42 fixes it).
+    "RUSTSEC-2026-0187",
+
     # ── hickory-proto (RUSTSEC-2026-0119) ────────────────────────────────
     # Hickory-proto 0.24.x is pulled in by hickory-resolver for DNS. The
     # O(n²) name compression CPU exhaustion only affects malicious DNS
