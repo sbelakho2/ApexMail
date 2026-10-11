@@ -346,6 +346,14 @@ pub mod test_support {
     /// `clone-connect: database "…" does not exist`. The advisory lock held
     /// by the caller serializes same-name provisioning, so the retry
     /// converges.
+    ///
+    /// The acquire timeout is deliberately generous: the first connect to a
+    /// fresh clone queues behind every other clone's filesystem copy under a
+    /// full-suite parallel run, and 5s occasionally expired mid-copy with no
+    /// server-side error at all (`clone-connect: pool timed out`, 2026-10-11)
+    /// — a pure I/O-queue artifact, not a provisioning fault. The retry loop
+    /// still fails closed on a genuinely absent database (an immediate
+    /// server refusal, unaffected by this bound).
     async fn connect_clone_with_recreate(
         admin: &PgPool,
         server_part: &str,
@@ -357,7 +365,7 @@ pub mod test_support {
         for attempt in 0..5 {
             match PgPoolOptions::new()
                 .max_connections(4)
-                .acquire_timeout(Duration::from_secs(5))
+                .acquire_timeout(Duration::from_secs(60))
                 .connect(&format!("{server_part}/{db_name}"))
                 .await
             {
@@ -390,6 +398,11 @@ pub mod test_support {
 
     /// Connect to a freshly created (non-clone) database, mapping a failure
     /// to the named provisioning stage.
+    ///
+    /// Generous acquire timeout for the same reason as
+    /// [`connect_clone_with_recreate`]: the first connect can queue behind a
+    /// full suite's clone-copy I/O with no server-side error, and 5s expired
+    /// mid-queue (2026-10-11).
     async fn connect_provisioned_db(
         server_part: &str,
         db_name: &str,
@@ -397,7 +410,7 @@ pub mod test_support {
     ) -> Result<PgPool, ProvisionError> {
         PgPoolOptions::new()
             .max_connections(4)
-            .acquire_timeout(Duration::from_secs(5))
+            .acquire_timeout(Duration::from_secs(60))
             .connect(&format!("{server_part}/{db_name}"))
             .await
             .map_err(|error| ProvisionError::new(stage, format!("connect {db_name}: {error}")))
@@ -1511,9 +1524,14 @@ pub mod test_support {
         if exists {
             // Reuse only a database whose ledger is the complete pinned
             // chain; a partial/foreign leftover is replaced.
+            //
+            // The probe window is generous for the same I/O-starvation reason
+            // as the pool below: a genuine failure (absent/recovering ledger)
+            // is an immediate refusal, so widening the timeout only prevents
+            // starvation-induced needless re-clones of a healthy database.
             let healthy = match PgPoolOptions::new()
                 .max_connections(1)
-                .acquire_timeout(Duration::from_secs(10))
+                .acquire_timeout(Duration::from_secs(60))
                 .connect(&format!("{server_part}/{db_name}"))
                 .await
             {
@@ -1528,7 +1546,13 @@ pub mod test_support {
                 admin.close().await; // releases the advisory lock
                 let pool = PgPoolOptions::new()
                     .max_connections(4)
-                    .acquire_timeout(Duration::from_secs(5))
+                    // Test-facing pool: tests hold connections for their whole
+                    // body, and under a full-suite parallel run connection
+                    // handshakes queue behind clone-copy I/O — the deploy host
+                    // showed starvation windows beyond a minute (2026-10-11),
+                    // so a 5s acquire turned infrastructure queueing into
+                    // `pool acquire: PoolTimedOut` test failures.
+                    .acquire_timeout(Duration::from_secs(120))
                     .connect(&format!("{server_part}/{db_name}"))
                     .await
                     .map_err(|error| shared_connect_error(db_name, error))?;
