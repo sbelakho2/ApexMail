@@ -1243,60 +1243,13 @@ mod tests {
     /// while reads and recovery endpoints still work.
     #[test]
     fn test_fenced_node_refuses_mutating_requests() {
-        // Ephemeral redis-server; skip when unavailable.
-        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
-            Ok(l) => l,
-            Err(_) => {
-                eprintln!("skipping: cannot allocate port");
-                return;
-            }
-        };
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let mut child = match std::process::Command::new("redis-server")
-            .args([
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--daemonize",
-                "no",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => {
-                eprintln!("skipping: redis-server not available");
-                return;
-            }
-        };
-        // Wait for readiness.
-        let mut ready = false;
-        for _ in 0..50 {
-            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
-                if let Ok(mut conn) = client.get_connection() {
-                    if redis::cmd("PING")
-                        .query::<String>(&mut conn)
-                        .map(|r| r == "PONG")
-                        .unwrap_or(false)
-                    {
-                        ready = true;
-                        break;
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        if !ready {
-            let _ = child.kill();
-            let _ = child.wait();
-            eprintln!("skipping: redis-server did not become ready");
-            return;
-        }
+        // A private throwaway Redis for this test: the `redis-server`
+        // binary when available, else a throwaway container (the deploy
+        // host ships Redis as an image only, so the old binary-only spawn
+        // silently skipped this test there — deploy 2026-10-11). The guard
+        // kills the server at scope end, including on panic.
+        let mut redis_server = migrator::test_support::spawn_isolated_redis();
+        let port = redis_server.port();
 
         test_runtime().block_on(async move {
             let mut config = Config::from_env().expect("HA config must load in development");
@@ -1375,8 +1328,7 @@ mod tests {
             assert_ne!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         });
 
-        let _ = child.kill();
-        let _ = child.wait();
+        redis_server.kill();
     }
 
     // ── SM10 F11: destructive routes require the ADMIN key ─────────────

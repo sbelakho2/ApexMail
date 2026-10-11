@@ -4613,21 +4613,26 @@ mod coverage_wave_routes {
     ///
     /// batch: system-tenant restriction — every `/enrich` caller shares the
     /// ONE system tenant, so the limiter key would be shared with concurrent
-    /// enrich tests; this proof therefore runs on a dedicated logical Redis
-    /// db (db 1), keeping the exact 30/31 window deterministic.
+    /// enrich tests; this proof therefore runs on a dedicated PRIVATE Redis
+    /// server, keeping the exact 30/31 window deterministic.
     #[tokio::test]
     async fn enrichment_rate_limit_429s_the_thirty_first_request_via_redis() {
-        const ISOLATED_REDIS_URL: &str = "redis://127.0.0.1:6379/1";
+        // A private throwaway Redis (binary when available, else a throwaway
+        // container): the old hardcoded 127.0.0.1:6379 aims at the dev redis
+        // and was connection-refused on the deploy host, which runs none
+        // (deploy 2026-10-11). The guard keeps it alive for the test body.
+        let isolated_redis = migrator::test_support::spawn_isolated_redis();
+        let isolated_redis_url = isolated_redis.url();
         let config = crate::config::SalesConfig::default();
         let Some(app) =
-            canonical_app_with_redis_url("routes_wave_rate_limit", config, ISOLATED_REDIS_URL)
+            canonical_app_with_redis_url("routes_wave_rate_limit", config, &isolated_redis_url)
                 .await
         else {
             return;
         };
         // Determinism hygiene: back-to-back suite runs must start from an
         // empty 60-second window on the shared logical db.
-        let purge_pool = deadpool_redis::Config::from_url(ISOLATED_REDIS_URL)
+        let purge_pool = deadpool_redis::Config::from_url(&isolated_redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("isolated redis pool");
         let mut purge_conn = purge_pool

@@ -20,62 +20,29 @@ use std::collections::HashSet;
 
 struct EphemeralRedis {
     port: u16,
-    child: std::process::Child,
+    server: migrator::test_support::IsolatedRedisServer,
 }
 
 impl EphemeralRedis {
+    /// A private throwaway Redis. The server comes from
+    /// `migrator::test_support::spawn_isolated_redis` (the `redis-server`
+    /// binary when present, else a throwaway container): the deploy host
+    /// ships Redis as an image only, and the old binary-only spawn skipped
+    /// these assertions there (deploy 2026-10-11). The `Option` keeps the
+    /// existing call sites; the spawner panics when no provider exists, so
+    /// `None` is unreachable.
     fn start() -> Option<Self> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let child = std::process::Command::new("redis-server")
-            .args([
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--daemonize",
-                "no",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        let mut ready = false;
-        for _ in 0..50 {
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                use std::io::{Read, Write};
-                let _ = stream.write_all(b"PING\r\n");
-                let mut buf = [0u8; 16];
-                if let Ok(n) = stream.read(&mut buf) {
-                    if &buf[..n.min(7)] == b"+PONG\r\n" {
-                        ready = true;
-                        break;
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        if !ready {
-            drop(child);
-            return None;
-        }
-        Some(Self { port, child })
+        let server = migrator::test_support::spawn_isolated_redis();
+        Some(Self {
+            port: server.port(),
+            server,
+        })
     }
 
     fn pool(&self) -> deadpool_redis::Pool {
         let cfg = deadpool_redis::Config::from_url(format!("redis://127.0.0.1:{}", self.port));
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("redis pool")
-    }
-}
-
-impl Drop for EphemeralRedis {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 

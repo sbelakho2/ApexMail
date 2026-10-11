@@ -69,3 +69,6 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# Test infra shared by the workspace (throwaway-Redis spawner): see
+# migrator::test_support — used by src/test_support.rs unit tests.
+migrator = { path = "../migrator" }

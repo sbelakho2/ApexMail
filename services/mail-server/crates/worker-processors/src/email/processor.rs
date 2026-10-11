@@ -6067,41 +6067,26 @@ mod tests {
     /// crate (std::env is process-global; see `crate::test_support`).
     use crate::test_support::ENV_LOCK;
 
-    /// Audit-2 helper: an ephemeral in-process redis-server on a random
-    /// port, skipped (None) when redis-server is unavailable. The child is
-    /// leaked intentionally — it dies with the test process.
-    async fn ephemeral_redis() -> Option<RedisPool> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let mut child = spawn_redis_server(port)?;
-        redis_ready(&mut child, port, 50, Duration::from_millis(100)).await
-    }
-
-    /// Spawn a private `redis-server` bound to `port` (no persistence).
-    /// Split from [`ephemeral_redis`] so the readiness loop is injectable.
-    pub(crate) fn spawn_redis_server(port: u16) -> Option<std::process::Child> {
-        std::process::Command::new("redis-server")
-            .args([
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--daemonize",
-                "no",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()
+    /// Audit-2 helper: a private throwaway Redis on a random port. The
+    /// returned guard keeps it alive for the test body and kills it on
+    /// drop — including on panic. The server comes from
+    /// `migrator::test_support::spawn_isolated_redis` (the `redis-server`
+    /// binary when present, else a throwaway container): the deploy host
+    /// ships Redis as an image only, and the old binary-only spawn silently
+    /// skipped these assertions there (deploy 2026-10-11).
+    async fn ephemeral_redis() -> Option<(RedisPool, migrator::test_support::IsolatedRedisServer)> {
+        let server = migrator::test_support::spawn_isolated_redis();
+        let pool = deadpool_redis::Config::from_url(server.url())
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        Some((pool, server))
     }
 
     /// Poll PING until the server answers, then return its pool. The
     /// attempt count and per-attempt backoff are parameters so a test can
     /// prove the exhausted path (child killed, `None`) without waiting out
-    /// the production budget.
+    /// the production budget. The child is any never-answering process —
+    /// the helper is about the bounded poll, not about redis-server.
     pub(crate) async fn redis_ready(
         child: &mut std::process::Child,
         port: u16,
@@ -6127,7 +6112,7 @@ mod tests {
         }
         let _ = child.kill();
         let _ = child.wait();
-        eprintln!("skipping: redis-server did not become ready");
+        eprintln!("redis_ready: no PING within the bounded window — child killed");
         None
     }
 
@@ -7194,7 +7179,7 @@ mod tests {
     async fn send_admission_bucket_exhausts_then_refills() -> Result<(), Box<dyn std::error::Error>>
     {
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
 
         let keys = send_admission_keys(&tracking_gate_job(), TransportKind::SesShared);
         let t0 = 1_000_000i64;
@@ -7229,7 +7214,7 @@ mod tests {
     async fn send_admission_buckets_are_per_tenant_and_per_domain(
     ) -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
 
         let mut job = tracking_gate_job();
         job.tenant_id = "tenant-rl".into();
@@ -7267,7 +7252,7 @@ mod tests {
     async fn shared_and_dedicated_rate_buckets_are_independent(
     ) -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
         let job = tracking_gate_job();
         let shared = send_admission_keys(&job, TransportKind::SesShared);
         let dedicated = send_admission_keys(&job, TransportKind::Dedicated);
@@ -7337,7 +7322,7 @@ mod tests {
         );
 
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
         let db = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost/unused")
@@ -7791,7 +7776,7 @@ mod tests {
     async fn warmup_selection_reads_the_cap_but_consumes_nothing(
     ) -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
 
         let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
             .expect("candidate pool");
@@ -7886,7 +7871,7 @@ mod tests {
     async fn aggregate_selection_prefers_the_least_utilised_ip(
     ) -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
         let now = Utc::now();
         let pool = select_delivery_ip(
             now,
@@ -7990,7 +7975,7 @@ mod tests {
     async fn exhausted_warming_pool_spills_to_an_active_ip(
     ) -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
         let now = Utc::now();
         let mut pool = select_delivery_ip(
             now,
@@ -9317,7 +9302,7 @@ mod tests {
         use std::sync::Arc as StdArc;
 
         #[rustfmt::skip]
-        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
+        let Some((redis, _redis_server)) = ephemeral_redis().await else { return Ok(()) };
         let job = tracking_gate_job();
         let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "127.0.0.1", true, 3)])
             .expect("candidate pool");
@@ -17182,11 +17167,17 @@ mod residual_arms_db_tests {
     }
 
     /// The readiness helper's exhausted path: a child that can never answer
-    /// PING (`--port 0` disables the TCP listener entirely, so every
-    /// connection is refused immediately) is killed and reports `None`.
+    /// PING (any long-lived process on a closed port does — the deploy host
+    /// carries no redis-server binary, deploy 2026-10-11) is killed and
+    /// reports `None`.
     #[tokio::test]
     async fn redis_ready_exhaustion_kills_the_child() {
-        let mut child = super::tests::spawn_redis_server(0).expect("spawn");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a never-answering child");
         let pool = super::tests::redis_ready(&mut child, 0, 2, Duration::from_millis(1)).await;
         assert!(
             pool.is_none(),

@@ -256,70 +256,36 @@ pub(crate) fn dead_redis_pool() -> deadpool_redis::Pool {
         .expect("create dead pool")
 }
 
-/// A private, throwaway `redis-server` on an ephemeral LOCAL port. Tests that
-/// poison shared index keys (WRONGTYPE faults, retry-ladder state) get full
-/// isolation from every other test in the binary — the process-local server
-/// is killed on drop.
+/// A private, throwaway Redis on an ephemeral LOCAL port. Tests that poison
+/// shared index keys (WRONGTYPE faults, retry-ladder state) get full
+/// isolation from every other test in the binary — the server is killed on
+/// drop, and `kill()` forces it down early for fault injection.
+///
+/// The server itself comes from
+/// `migrator::test_support::spawn_isolated_redis` (the `redis-server`
+/// binary when present, else a throwaway container): the deploy host ships
+/// Redis as an image only, and the old binary-only spawn failed the suite
+/// there (deploy 2026-10-11).
 pub(crate) struct IsolatedRedis {
     pub pool: deadpool_redis::Pool,
-    child: std::process::Child,
+    pub(crate) server: migrator::test_support::IsolatedRedisServer,
 }
 
 impl IsolatedRedis {
     /// Kill the server behind the pool early (the pool keeps returning
     /// connection-refused): lets a test observe Redis dying mid-suite
-    /// deterministically. `Drop` remains a no-op-safe backstop.
+    /// deterministically.
     pub(crate) fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for IsolatedRedis {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.server.kill();
     }
 }
 
 pub(crate) fn spawn_isolated_redis() -> IsolatedRedis {
-    use std::io::BufRead;
-    // redis-server has no "ephemeral port" mode (--port 0 disables the
-    // listener): reserve a free port via a throwaway TCP bind, then start
-    // the server on it and wait for its readiness banner.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
-        listener.local_addr().expect("local addr").port()
-    };
-    let mut child = std::process::Command::new("redis-server")
-        .args([
-            "--port",
-            &port.to_string(),
-            "--save",
-            "",
-            "--appendonly",
-            "no",
-            "--daemonize",
-            "no",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn local redis-server");
-    let stdout = child.stdout.take().expect("redis stdout");
-    let mut ready = false;
-    for line in std::io::BufReader::new(stdout).lines() {
-        let line = line.expect("redis log line");
-        if line.contains("Ready to accept connections") {
-            ready = true;
-            break;
-        }
-    }
-    assert!(ready, "redis-server never became ready on port {port}");
-    let pool = deadpool_redis::Config::from_url(format!("redis://127.0.0.1:{port}"))
+    let server = migrator::test_support::spawn_isolated_redis();
+    let pool = deadpool_redis::Config::from_url(server.url())
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .expect("isolated redis pool");
-    IsolatedRedis { pool, child }
+    IsolatedRedis { pool, server }
 }
 
 /// Build a real Stripe-style `Stripe-Signature` header over `payload`.

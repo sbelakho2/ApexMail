@@ -1608,6 +1608,231 @@ pub mod test_support {
         Ok(Some(pool))
     }
 
+    // ── Isolated throwaway Redis ────────────────────────────────────────
+    //
+    // Several suites need a PRIVATE Redis they can kill mid-test (fault
+    // injection) or poison without racing siblings. The dev machine has a
+    // `redis-server` binary on PATH; the deploy host and CI runners ship
+    // Redis as a CONTAINER IMAGE only — hardcoded `redis-server` spawns
+    // therefore failed (or silently skipped) the deploy-host suite
+    // (2026-10-11). Prefer the binary, fall back to a throwaway
+    // `redis:7-alpine` container (the same image and flags as
+    // `ci_ephem_redis`). There is deliberately no third path: neither
+    // available is a HARD failure — a test that cannot run must fail, not
+    // skip (audit CI-2).
+
+    /// A private, throwaway Redis on an ephemeral loopback port, killed on
+    /// drop. `kill()` forces it down early so a test can observe Redis
+    /// dying mid-operation deterministically.
+    pub struct IsolatedRedisServer {
+        port: u16,
+        child: Option<std::process::Child>,
+        container: Option<String>,
+    }
+
+    impl IsolatedRedisServer {
+        pub fn port(&self) -> u16 {
+            self.port
+        }
+
+        pub fn url(&self) -> String {
+            format!("redis://127.0.0.1:{}", self.port)
+        }
+
+        pub fn kill(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            if let Some(name) = self.container.take() {
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "-f", &name])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+
+    impl Drop for IsolatedRedisServer {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    /// Start the throwaway Redis and return only once it answers.
+    ///
+    /// Panics when neither `redis-server` nor `docker` can provide one:
+    /// the callers are tests whose whole assertion set depends on a live
+    /// Redis, so a missing provider is an infrastructure failure.
+    pub fn spawn_isolated_redis() -> IsolatedRedisServer {
+        // The binary path reserves a port and binds it milliseconds later;
+        // parallel tests can win that window (the loser exits with a bind
+        // error), so a lost race retries on a fresh port. A missing binary
+        // goes straight to the container path.
+        for _ in 0..3 {
+            // redis-server has no "ephemeral port" mode (--port 0 disables
+            // the listener): reserve a free port via a throwaway TCP bind.
+            let port = {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+                listener.local_addr().expect("local addr").port()
+            };
+            let child = match std::process::Command::new("redis-server")
+                .args([
+                    "--port",
+                    &port.to_string(),
+                    "--save",
+                    "",
+                    "--appendonly",
+                    "no",
+                    "--daemonize",
+                    "no",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return spawn_container_redis();
+                }
+                Err(error) => panic!("spawn local redis-server: {error}"),
+            };
+            if let Some(server) = wait_for_redis_banner(child, port) {
+                return server;
+            }
+        }
+        panic!("redis-server never became ready on three reserved ports");
+    }
+
+    /// Wait for the child's "Ready to accept connections" banner. `None`
+    /// when the child exited first (e.g. it lost the port race) — the caller
+    /// retries; a differently-shaped failure panics.
+    fn wait_for_redis_banner(
+        mut child: std::process::Child,
+        port: u16,
+    ) -> Option<IsolatedRedisServer> {
+        use std::io::BufRead as _;
+        let stdout = child.stdout.take().expect("redis stdout");
+        let mut ready = false;
+        for line in std::io::BufReader::new(stdout).lines() {
+            if line
+                .expect("redis log line")
+                .contains("Ready to accept connections")
+            {
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        Some(IsolatedRedisServer {
+            port,
+            child: Some(child),
+            container: None,
+        })
+    }
+
+    /// The container path: a throwaway `redis:7-alpine` with the same flags
+    /// `ci_ephem_redis` uses. The host port is DOCKER-ASSIGNED
+    /// (`127.0.0.1::6379`) and read back via `docker port`: reserving the
+    /// port first and binding it moments later lost races between parallel
+    /// tests — the loser's `docker run` died with "port is already
+    /// allocated" (deploy 2026-10-11).
+    fn spawn_container_redis() -> IsolatedRedisServer {
+        let name = format!(
+            "apexmail-test-redis-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.subsec_nanos())
+                .unwrap_or(0)
+        );
+        let output = std::process::Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &name,
+                "-p",
+                "127.0.0.1::6379",
+                "redis:7-alpine",
+            ])
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("no redis-server binary on PATH and docker is unavailable: {error}")
+            });
+        assert!(
+            output.status.success(),
+            "throwaway redis container failed to start: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let port = match container_redis_port(&name) {
+            Some(port) => port,
+            None => {
+                let _ = stop_container(&name);
+                panic!("could not read the docker-assigned redis port for {name}");
+            }
+        };
+        // Readiness: the proxy must accept…
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = stop_container(&name);
+                panic!("throwaway redis container never became ready on port {port}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // …and the SERVER inside must answer: a bare TCP accept can come
+        // from a port-forward proxy whose container is already gone, which
+        // surfaced as a mid-test "connection driver unexpectedly terminated".
+        let ping = std::process::Command::new("docker")
+            .args(["exec", &name, "redis-cli", "ping"])
+            .output();
+        let answered = ping
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains("PONG"))
+            .unwrap_or(false);
+        if !answered {
+            let _ = stop_container(&name);
+            panic!("throwaway redis on port {port} started but never answered PING");
+        }
+        IsolatedRedisServer {
+            port,
+            child: None,
+            container: Some(name),
+        }
+    }
+
+    /// The host port docker assigned to the container's 6379/tcp.
+    fn container_redis_port(name: &str) -> Option<u16> {
+        let output = std::process::Command::new("docker")
+            .args(["port", name, "6379/tcp"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.trim()
+            .rsplit(':')
+            .next()
+            .and_then(|port| port.trim().parse().ok())
+    }
+
+    fn stop_container(name: &str) -> std::process::Output {
+        std::process::Command::new("docker")
+            .args(["rm", "-f", name])
+            .output()
+            .unwrap_or_else(|error| panic!("docker rm -f {name}: {error}"))
+    }
+
     /// Adversarial provisioning tests for the private paths of this module:
     /// template build/rebuild, lineage classification, ledger verification,
     /// clone busy-retry and vanished-clone recreate, drop retries, and the

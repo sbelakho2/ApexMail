@@ -1967,55 +1967,29 @@ mod tests {
         Arc::new(cfg)
     }
 
-    /// Ephemeral throwaway `redis-server` on a random port for live fencing /
-    /// claim / lock assertions. Returns None when no binary is available.
+    /// Ephemeral throwaway Redis on a random port for live fencing / claim /
+    /// lock assertions. The server comes from
+    /// `migrator::test_support::spawn_isolated_redis` (the `redis-server`
+    /// binary when present, else a throwaway container): the deploy host
+    /// ships Redis as an image only, and binary-only spawning silently
+    /// skipped these assertions there (deploy 2026-10-11). The `Option`
+    /// return keeps the existing call sites; the spawner panics when no
+    /// provider exists, so the `None` arm is structurally unreachable.
     struct TestRedis {
         port: u16,
-        child: std::process::Child,
+        server: migrator::test_support::IsolatedRedisServer,
     }
     impl Drop for TestRedis {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.server.kill();
         }
     }
     fn spawn_test_redis() -> Option<TestRedis> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-        let port = listener.local_addr().ok()?.port();
-        drop(listener);
-        let mut child = std::process::Command::new("redis-server")
-            .args([
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--daemonize",
-                "no",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        let url = format!("redis://127.0.0.1:{port}");
-        for _ in 0..50 {
-            if let Ok(client) = redis::Client::open(url.as_str()) {
-                if let Ok(mut conn) = client.get_connection() {
-                    if redis::cmd("PING")
-                        .query::<String>(&mut conn)
-                        .map(|r| r == "PONG")
-                        .unwrap_or(false)
-                    {
-                        return Some(TestRedis { port, child });
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        None
+        let server = migrator::test_support::spawn_isolated_redis();
+        Some(TestRedis {
+            port: server.port(),
+            server,
+        })
     }
 
     fn live_redis_config(port: u16) -> Arc<Config> {
