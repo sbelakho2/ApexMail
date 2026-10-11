@@ -77,6 +77,30 @@ async fn main() -> ExitCode {
 
     let dry_run = std::env::args().any(|arg| arg == "--dry-run" || arg == "-n"); // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
     let gc_databases = std::env::args().any(|arg| arg == "--gc-test-databases"); // nosemgrep: rust.lang.security.args.args
+    let ensure_template = std::env::args().any(|arg| arg == "--ensure-canonical-template"); // nosemgrep: rust.lang.security.args.args
+    if ensure_template {
+        // Pre-warm the canonical template for the TEST database server
+        // (creates no test database): the CI test stage runs this before the
+        // parallel suite so the multi-minute cold build never happens inside
+        // a contention window.
+        let test_url = match std::env::var("TEST_DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => {
+                eprintln!("error: TEST_DATABASE_URL is not set — nothing to prepare");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match migrator::test_support::prepare_canonical_template(&test_url).await {
+            Ok(()) => {
+                println!("canonical test template ready");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: canonical test template preparation failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     if dry_run {
         print_migrations();

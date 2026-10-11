@@ -259,6 +259,15 @@ run_cargo_tests() {
         # bounds the clone disk peak while the suite still completes —
         # override with CI_NEXTEST_JOBS on a bigger runner.
         _nx_jobs="${CI_NEXTEST_JOBS:-4}"
+        # Pre-warm the canonical test template ONCE, serially, before the
+        # parallel suite: the first provisioner otherwise builds hundreds of
+        # migrations while holding the cluster advisory lock, and every queued
+        # provisioner pays that window (on a fresh ephemeral Postgres — every
+        # CI run — they timed out at 'template-exists-check', 2026-10-11).
+        # shellcheck disable=SC2086  # _TEST_ENV is an intentional word list
+        (cd "$WS" && env $_TEST_ENV CARGO_TERM_COLOR=never \
+            cargo run --quiet -p migrator --bin migrator -- --ensure-canonical-template) \
+            || ci_warn "canonical-template pre-warm failed — tests will provision it themselves"
         # shellcheck disable=SC2086  # _TEST_ENV/_nx_args are intentional word lists
         if ! (cd "$WS" && _cargo_run_capture "$_nx_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
                 cargo nextest run --workspace --all-targets --test-threads "$_nx_jobs" $_nx_args); then

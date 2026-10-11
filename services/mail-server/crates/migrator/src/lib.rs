@@ -509,6 +509,33 @@ pub mod test_support {
     /// deliberately no direct-apply fallback branch any more: the fallback
     /// was documented but never invoked, and a configured failure must
     /// fail the test (audit F01), not limp through a second slow path.
+    /// Public one-shot pre-warm: materialize the canonical template for the
+    /// server behind `base_url` (NO test database is created). The CI test
+    /// stage calls this BEFORE the parallel suite so no test pays the
+    /// cold-template build (hundreds of migrations, minutes) inside the
+    /// advisory-lock window — fresh ephemeral Postgres instances made every
+    /// suite run pay it, and the queued provisioners timed out
+    /// (`template-exists-check: pool timed out`, deploy 2026-10-11).
+    pub async fn prepare_canonical_template(base_url: &str) -> Result<(), String> {
+        if base_url.trim().is_empty() {
+            return Err("TEST_DATABASE_URL is empty".into());
+        }
+        let (server_part, _) = base_url
+            .rsplit_once('/')
+            .ok_or_else(|| "url without a database segment".to_string())?;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(300))
+            .connect(&format!("{server_part}/postgres"))
+            .await
+            .map_err(|error| format!("admin connect {server_part}: {error}"))?;
+        let result = ensure_template_ready(&admin, server_part)
+            .await
+            .map_err(|error| error.to_string());
+        admin.close().await;
+        result
+    }
+
     async fn ensure_template_ready(
         admin: &PgPool,
         server_part: &str,
@@ -804,7 +831,10 @@ pub mod test_support {
 
         let admin = PgPoolOptions::new()
             .max_connections(1)
-            .acquire_timeout(Duration::from_secs(60))
+            // Generous: under a cold-template run the advisory-lock holder
+            // builds hundreds of migrations before the queued provisioners
+            // can even run their EXISTS probe (deploy 2026-10-11).
+            .acquire_timeout(Duration::from_secs(300))
             .connect(&format!("{server_part}/postgres"))
             .await
             .map_err(|error| admin_connect_error(server_part, error))?;
@@ -1455,7 +1485,10 @@ pub mod test_support {
             .ok_or_else(|| url_without_database_segment(base_url))?;
         let admin = PgPoolOptions::new()
             .max_connections(1)
-            .acquire_timeout(Duration::from_secs(60))
+            // Generous: under a cold-template run the advisory-lock holder
+            // builds hundreds of migrations before the queued provisioners
+            // can even run their EXISTS probe (deploy 2026-10-11).
+            .acquire_timeout(Duration::from_secs(300))
             .connect(&format!("{server_part}/postgres"))
             .await
             .map_err(|error| admin_connect_error(server_part, error))?;
