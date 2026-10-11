@@ -10,7 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::TlsConnector;
 
-pub(crate) const CERT: &str = r#"-----BEGIN CERTIFICATE----- // nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+pub(crate) const CERT: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDSTCCAjGgAwIBAgIUVwhxJa9wz86lWTzyVQVC9bHNeXUwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgwOTE5MjIxMVoXDTM2MDgw
 NjE5MjIxMVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
@@ -30,7 +31,8 @@ YzD9bl7yCpnvXHy4p7G0SYXAYkK8DG5FcS/ECTJw/gjMEDsIPLqPHNsC2uaq+C0R
 fwY+YpZkXTmxfHPbSn0EKcbKj1lHFsvSm9ckfUjEJV5vcIk5+TewmU4cEzQloK9v
 MpuYqjOkD826HkH+KCOEK4qVsx1p1MM0ASjES0E=
 -----END CERTIFICATE-----"#;
-pub(crate) const KEY: &str = r#"-----BEGIN PRIVATE KEY----- // nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key — inline test-only key material for the local IMAP TLS suite
+pub(crate) const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqqGeESTeTNPwo
 7NRxeFNuyjGdjHvNfBbxQ8VDhuyF7LwSVuTf5wkFvCySeEch5uInxlxo6p3MmT7m
 K/9/IZ8ToEQaf4IRa8Yyn43czdOYSwCGmH2ZiVJ4OXC/SPf7QpQGctr3Izcwi5lg
