@@ -824,13 +824,25 @@ async fn run_probe_cycle(state: &AppState) -> ProbeSnapshot {
     snapshot
 }
 
-/// The configured SMTP probe target (MAIL_HOST env, port 25).
+/// The configured SMTP probe target (MAIL_HOST env, MAIL_PORT env — port 25
+/// by default).
+///
+/// The port is configurable because the status tests must pin a target that
+/// refuses instantly on ANY host: a loopback address only guarantees a
+/// closed port if the port is one nothing binds. Port 25 is bound on
+/// 0.0.0.0 by the production MTA on the deploy host, so "127.0.0.2:25 is
+/// free" was silently false there and the probe answered `operational`
+/// (status tests false-failed, deploy 2026-10-11). Production keeps 25.
 fn smtp_probe_target() -> Option<(String, u16)> {
     let host = std::env::var("MAIL_HOST")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "mail.apexmail.ee".to_string());
-    Some((host, 25))
+    let port = std::env::var("MAIL_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(25);
+    Some((host, port))
 }
 
 /// The six database probes. Cheap on the snapshot path: these run once per
@@ -2137,7 +2149,10 @@ mod tests {
     /// the identical sample timestamp — proving no per-request probing.
     #[tokio::test]
     async fn status_handlers_serve_the_cached_snapshot() {
-        std::env::set_var("MAIL_HOST", "127.0.0.2");
+        // Loopback + port 1: nothing binds it on any host (the deploy host
+        // runs the MTA on 0.0.0.0:25, so port 25 is NOT a closed port there).
+        std::env::set_var("MAIL_HOST", "127.0.0.1");
+        std::env::set_var("MAIL_PORT", "1");
         let state = fake_state();
         run_probe_cycle(&state).await;
 
@@ -2166,9 +2181,13 @@ mod tests {
         let Some(pool) = canonical_pool("auth_status_routes").await else {
             return;
         };
-        // Point the SMTP probe at a loopback alias with no listener: the
-        // probe must run for real (no network egress) and report degraded.
-        std::env::set_var("MAIL_HOST", "127.0.0.2");
+        // Point the SMTP probe at a loopback address + a guaranteed-closed
+        // port: the probe must run for real (no network egress) and report
+        // degraded. Loopback + port 1: nothing binds it on any host (the
+        // deploy host runs the MTA on 0.0.0.0:25, so port 25 is NOT a
+        // closed port there).
+        std::env::set_var("MAIL_HOST", "127.0.0.1");
+        std::env::set_var("MAIL_PORT", "1");
         let state = live_state(pool);
 
         // The background sampler is simulated by one explicit cycle.
@@ -2228,6 +2247,42 @@ mod tests {
         let json = response_json(response).await;
         assert_eq!(json["history"], serde_json::json!([]));
         assert!(json["updated"].as_str().unwrap().contains('T'));
+    }
+
+    /// The MAIL_PORT knob must move the probe target: a listener on a chosen
+    /// loopback port flips the SMTP card to `operational`. Without this pin
+    /// the knob could silently rot and the probe would fall back to port 25
+    /// — which refuses everywhere in dev (masking the knob entirely) while
+    /// the deploy host's production MTA answers on 0.0.0.0:25 (the original
+    /// status-test false-failure, 2026-10-11). The knobs are asserted
+    /// end-to-end: refused port ⇒ degraded (sibling tests), listening port
+    /// ⇒ operational (here).
+    #[tokio::test]
+    async fn status_smtp_probe_honors_the_configured_port() {
+        // A real listener on an ephemeral port IS the upstream the probe
+        // dials; hold it for the whole cycle (dropped after the asserts).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        std::env::set_var("MAIL_HOST", "127.0.0.1");
+        std::env::set_var("MAIL_PORT", port.to_string());
+
+        let state = fake_state();
+        run_probe_cycle(&state).await;
+
+        let response = status_api(State(state)).await.into_response();
+        let json = response_json(response).await;
+        let smtp = json["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .find(|s| s["name"] == "Mail Server (SMTP)")
+            .expect("smtp card")
+            .clone();
+        assert_eq!(
+            smtp["status"], "operational",
+            "a listener on MAIL_PORT must read operational: {json}"
+        );
+        drop(listener);
     }
 
     /// PINNED (considered by the 2026-09 privilege-boundary audit): the
@@ -2298,7 +2353,10 @@ mod tests {
     /// overall state is "Service disruption".
     #[tokio::test]
     async fn status_page_reports_total_outage_when_every_probe_fails() {
-        std::env::set_var("MAIL_HOST", "127.0.0.2");
+        // Loopback + port 1: nothing binds it on any host (the deploy host
+        // runs the MTA on 0.0.0.0:25, so port 25 is NOT a closed port there).
+        std::env::set_var("MAIL_HOST", "127.0.0.1");
+        std::env::set_var("MAIL_PORT", "1");
         let state = fake_state();
         run_probe_cycle(&state).await;
 
@@ -2348,7 +2406,8 @@ mod tests {
     /// stacking a second TCP connect, and the permit is released after.
     #[tokio::test]
     async fn smtp_probe_is_capped_at_one_concurrent() {
-        std::env::set_var("MAIL_HOST", "127.0.0.1"); // instant refusal, port 1
+        std::env::set_var("MAIL_HOST", "127.0.0.1"); // instant refusal
+        std::env::set_var("MAIL_PORT", "1"); // nothing binds port 1
         let state = fake_state();
         assert_eq!(
             state.smtp_gate.available_permits(),
