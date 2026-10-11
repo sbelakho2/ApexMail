@@ -1157,7 +1157,14 @@ mod tests {
             max_attempts: 5,
         };
 
-        let now = Utc::now();
+        // Truncate to microseconds: Postgres stores µs while Linux clocks
+        // carry nanoseconds, so the round-tripped value only compares equal
+        // when the source is µs-clean (macOS clocks are µs — this passed on
+        // the dev machine and failed on the deploy host, 2026-10-11).
+        let now = {
+            use chrono::SubsecRound as _;
+            Utc::now().trunc_subsecs(6)
+        };
         let first = ledger
             .claim_submission(submission(), now, Duration::from_secs(60))
             .await

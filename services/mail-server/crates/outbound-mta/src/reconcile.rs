@@ -123,7 +123,14 @@ mod tests {
 
         // The daemon's durable retry accepted the unit (post-DATA 250),
         // recording its evidence on the relay ledger.
-        let now = chrono::Utc::now();
+        //
+        // µs-clean on purpose: Postgres stores µs while Linux clocks carry
+        // nanoseconds, so downstream round-trip equality only holds when the
+        // source has no sub-µs digits (deploy-host failure, 2026-10-11).
+        let now = {
+            use chrono::SubsecRound as _;
+            chrono::Utc::now().trunc_subsecs(6)
+        };
         let claimed = ledger
             .claim_submission(
                 NewSubmission {

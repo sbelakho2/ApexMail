@@ -1420,7 +1420,14 @@ mod tests {
         let other = crate::test_db::unique_test_tenant("sim-b");
         let suffix = &Uuid::new_v4().simple().to_string()[..12];
 
-        let as_of = Utc::now() - Duration::hours(2);
+        // µs-clean on purpose: Postgres stores µs while Linux clocks carry
+        // nanoseconds, so the round-tripped `case.as_of` only compares equal
+        // when the source has no sub-µs digits (deploy-host failure,
+        // 2026-10-11; macOS clocks are µs, which hid it in dev).
+        let as_of = {
+            use chrono::SubsecRound as _;
+            (Utc::now() - Duration::hours(2)).trunc_subsecs(6)
+        };
         let window_end = Utc::now() + Duration::hours(2);
         let window = (as_of - Duration::days(1), window_end);
 
