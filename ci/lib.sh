@@ -422,9 +422,15 @@ ci_ephem_postgres() {
     # full-suite parallel load — Postgres workers then fail to resize DSM
     # segments and segfault into crash-recovery loops (2026-10-07 dogfood;
     # the compose stack carries the same fix as shm_size).
+    # -c max_connections=300: parity with the dev stack, whose postgres runs
+    # 300 (the suite is tuned against that headroom — the workspace-wide
+    # canonical-DB provisioning saturated the 100 default on the deploy host:
+    # "canonical test-database provisioning failed ... pool timed out while
+    # waiting for an open connection", 2026-10-11).
     ci_exec docker run -d --rm --name "$_ep_name" --shm-size=1g \
         -e "POSTGRES_USER=$_ep_user" -e "POSTGRES_PASSWORD=$_ep_pass" -e "POSTGRES_DB=$_ep_db" \
-        -p "127.0.0.1:$_ep_port:5432" "${CI_EPHEM_PG_IMAGE:-postgres:16-alpine}" >/dev/null || return 1
+        -p "127.0.0.1:$_ep_port:5432" "${CI_EPHEM_PG_IMAGE:-postgres:16-alpine}" \
+        -c max_connections=300 >/dev/null || return 1
     ci_ephem_register "$_ep_name"
     [ "${CI_DRY_RUN:-0}" = "1" ] && return "$CI_EXIT_OK"
     _ep_i=0
