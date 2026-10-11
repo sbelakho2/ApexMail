@@ -3135,8 +3135,14 @@ mod adversarial_tests {
             "send without sender/template must be a clean 400, got {incomplete_send:?}"
         );
 
-        // Schedule from draft, then PATCH the draft fields.
-        let due = Utc::now() + chrono::Duration::hours(2);
+        // Schedule from draft, then PATCH the draft fields. The fixture
+        // truncates to MICROSECONDS — Postgres stores timestamptz at µs, and
+        // Utc::now() carries ns on Linux (µs on macOS): untruncated, the
+        // round-tripped string differed only in sub-µs digits on the deploy
+        // host (deploy 2026-10-11).
+        let due = (Utc::now() + chrono::Duration::hours(2))
+            .trunc_subsecs(6);
+        use chrono::SubsecRound as _;
         let Json(scheduled) = schedule_campaign(
             State(state.clone()),
             write.clone(),
