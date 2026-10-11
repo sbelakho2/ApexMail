@@ -3248,11 +3248,15 @@ mod worker_tests {
         )
         .await;
 
-        // Lease 3s -> heartbeat every 1s: two rounds fire well inside the
-        // 3s expiry (the raising trigger aborts the UPDATE, so no round can
-        // extend it), and both hit the database error and keep beating.
-        let (_rx, release, effects, task) = spawn_parked_worker(&queue, action.id, 3).await;
-        wait_at_least(Duration::from_millis(2_300)).await;
+        // Lease 15s -> heartbeat every 5s: two rounds fire well inside the
+        // lease (the raising trigger aborts the UPDATE, so no round can
+        // extend it), and both hit the database error and keep beating. The
+        // deliberately generous remaining window (release at ~10.5s of the
+        // 15s lease) exists because the result write is FENCED by the lease:
+        // the previous 3s lease left ~0.7s for the write and flaked under
+        // the deploy host's parallel suite load (2026-10-11).
+        let (_rx, release, effects, task) = spawn_parked_worker(&queue, action.id, 15).await;
+        wait_at_least(Duration::from_millis(10_500)).await;
         release.notify_waiters();
 
         tokio::time::timeout(Duration::from_secs(15), task)

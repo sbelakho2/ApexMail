@@ -975,20 +975,25 @@ async fn closing_the_pool_mid_flight_reenqueues_and_a_restart_drains_cleanly() {
     pool_a.close().await; // the flush loop now fails every write
     bounded("stop A after pool close", a.stop()).await;
 
-    // The five phase-2 events must still be in the WAL (re-enqueued, not
-    // lost) — unless the close raced AFTER their flush, which the final
-    // count assertion covers either way.
-    if events_count(&db, &message).await < 10 {
-        let pending = redis_list(&redis, WAL_KEY)
-            .await
-            .into_iter()
-            .filter(|e| e.contains(&message))
-            .count();
-        assert_eq!(
-            pending, 5,
-            "mid-flight events must be re-enqueued after the pool closed"
-        );
-    }
+    // Phase-2 accounting: each of the five phase-2 events is either already
+    // in the database (its flush won the race with the pool close) or still
+    // in the WAL awaiting re-enqueue — exactly once, never lost, never
+    // double-counted. The fixed `pending == 5` this replaces assumed no
+    // flush could win that 50ms race; under the deploy host's parallel load
+    // two did (pending 3 of 5) and the assertion misfired (deploy
+    // 2026-10-11).
+    let flushed_phase_two = events_count(&db, &message).await.saturating_sub(5);
+    let pending = redis_list(&redis, WAL_KEY)
+        .await
+        .into_iter()
+        .filter(|e| e.contains(&message))
+        .count() as i64;
+    assert_eq!(
+        pending + flushed_phase_two,
+        5,
+        "mid-flight events must be flushed-or-re-enqueued exactly once \
+         (flushed={flushed_phase_two}, pending={pending})"
+    );
 
     // Start again on a FRESH pool: everything lands, exactly once.
     let b = Arc::new(EventProcessor::with_config(
