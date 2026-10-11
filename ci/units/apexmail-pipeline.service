@@ -32,7 +32,10 @@ ProtectHome=false
 # security/images/migrate/deploy. 2026-10-11: raised 6h → 12h; the previous
 # bound sat below the sum of the per-stage budgets, so a slow-but-healthy
 # line could be SIGTERM'd mid-stage (worst case: inside migrate/deploy).
-TimeoutStartSec=12h
+# 2026-10-11 (second bump): the instrumented coverage pass can add 5-9h on
+# top of the plain suite; 24h leaves the full line — test, security, images —
+# ample headroom.
+TimeoutStartSec=24h
 # Journald keeps stdout/stderr; the runner also writes ci/runs/<ts>/.
 StandardOutput=journal
 StandardError=journal
