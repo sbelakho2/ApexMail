@@ -538,7 +538,12 @@ mod tests {
     fn from_env_development_falls_back_to_the_local_trust_database_url() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _snapshot = EnvSnapshot::take(FROM_ENV_VARS);
-        std::env::remove_var("NODE_ENV");
+        // PIN development (not remove): from_env loads a workspace `.env`,
+        // and dotenvy never overrides an EXISTING var — on the deploy host
+        // /opt/apexmail/.env carries NODE_ENV=production, refilling a
+        // REMOVED var and flipping this test to the production branch
+        // (deploy 2026-10-11). An explicitly pinned var cannot be refilled.
+        std::env::set_var("NODE_ENV", "development");
         // SET empty (not remove) — a workspace .env would refill DATABASE_URL
         // because dotenvy never overrides an existing var.
         std::env::set_var("DATABASE_URL", "");
