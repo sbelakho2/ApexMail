@@ -21,29 +21,100 @@ fn reserve_addr() -> SocketAddr {
         .expect("addr")
 }
 
+/// The suite's Redis coordinates as `(host, port, password)`.
+///
+/// `TEST_REDIS_URL` is the CI/deploy endpoint (an ephemeral Redis on a
+/// random port); 127.0.0.1:6379 is only the local dev default. The deploy
+/// host runs no host-level Redis, so pinned coordinates would silently
+/// disconnect every redis-backed assertion there (deploy 2026-10-11).
+fn test_redis_coordinates() -> (String, String, Option<String>) {
+    let raw = std::env::var("TEST_REDIS_URL").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return ("127.0.0.1".to_string(), "6379".to_string(), None);
+    }
+    let rest = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
+    let (auth, hostport) = match rest.rsplit_once('@') {
+        Some((auth, hostport)) => (Some(auth), hostport),
+        None => (None, rest),
+    };
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.to_string()),
+        None => (hostport.to_string(), "6379".to_string()),
+    };
+    let password = auth
+        .and_then(|auth| auth.split_once(':').map(|(_, password)| password))
+        .filter(|password| !password.is_empty())
+        .map(str::to_string);
+    (host, port, password)
+}
+
+/// The suite's Postgres coordinates parsed out of `TEST_DATABASE_URL`
+/// (`(host, port, name, user, password)`), falling back to the local dev
+/// defaults when the environment provides none.
+fn test_db_coordinates() -> (String, String, String, String, String) {
+    let dev = |value: &str| {
+        (
+            "127.0.0.1".to_string(),
+            "5432".to_string(),
+            "apexmail_scratch_base".to_string(),
+            "apexmail".to_string(),
+            value.to_string(),
+        )
+    };
+    let raw = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return dev("bebc8cefdc096e5247f8864e5c0edf78099df23058133321");
+    }
+    let rest = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
+    let (userinfo, hostpath) = match rest.rsplit_once('@') {
+        Some((userinfo, hostpath)) => (userinfo, hostpath),
+        None => ("", rest),
+    };
+    let (user, password) = match userinfo.split_once(':') {
+        Some((user, password)) => (user.to_string(), password.to_string()),
+        None => (userinfo.to_string(), String::new()),
+    };
+    // Strip any query string, then split host:port from the database name.
+    let hostpath = hostpath.split('?').next().unwrap_or(hostpath);
+    let (hostport, dbname) = match hostpath.split_once('/') {
+        Some((hostport, dbname)) => (hostport, dbname.to_string()),
+        None => (hostpath, "apexmail".to_string()),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.to_string()),
+        None => (hostport.to_string(), "5432".to_string()),
+    };
+    (host, port, dbname, user, password)
+}
+
 /// Spawn the service with a fully explicit environment: no inherited OTEL
 /// endpoint, no host-wide Redis overrides — the child's contract is exactly
 /// what this test states.
 fn spawn_service(health_addr: SocketAddr, extra_env: &[(&str, &str)]) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_observability-service"));
+    let (redis_host, redis_port, redis_password) = test_redis_coordinates();
+    let (db_host, db_port, db_name, db_user, db_password) = test_db_coordinates();
     command
         .env("OBSERVABILITY_PORT", health_addr.port().to_string())
         .env("METRICS_BIND_ADDR", "127.0.0.1")
         .env("INTERNAL_SERVICE_TOKEN", "lifecycle-test-token")
-        .env("REDIS_HOST", "127.0.0.1")
-        .env("REDIS_PORT", "6379")
-        .env("DB_HOST", "127.0.0.1")
-        .env("DB_PORT", "5432")
-        .env("DB_NAME", "apexmail_scratch_base")
-        .env("DB_USER", "apexmail")
-        .env(
-            "DB_PASSWORD",
-            "bebc8cefdc096e5247f8864e5c0edf78099df23058133321",
-        )
+        .env("REDIS_HOST", redis_host)
+        .env("REDIS_PORT", redis_port)
+        .env("DB_HOST", db_host)
+        .env("DB_PORT", db_port)
+        .env("DB_NAME", db_name)
+        .env("DB_USER", db_user)
+        .env("DB_PASSWORD", db_password)
         .env("RUST_LOG", "error")
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(password) = redis_password {
+        command.env("REDIS_PASSWORD", password);
+    }
     for (key, value) in extra_env {
         command.env(key, value);
     }

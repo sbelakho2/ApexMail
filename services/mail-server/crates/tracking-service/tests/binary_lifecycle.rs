@@ -23,27 +23,47 @@ fn child_env() -> Option<Vec<(String, String)>> {
     let redis = std::env::var("TEST_REDIS_URL").ok()?;
     let clickhouse =
         std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
-    // The service composes its Redis URL from REDIS_HOST/PORT/DB/PASSWORD;
-    // empty password ⇒ no auth (matches the local test Redis).
-    let (redis_host, redis_port, redis_db) = {
-        // Parse the DB index out of the workspace TEST_REDIS_URL if present.
-        let db_index = redis
-            .rsplit('/')
-            .next()
-            .and_then(|tail| tail.parse::<u32>().ok())
-            .unwrap_or(0);
-        (
-            "127.0.0.1".to_string(),
-            "6379".to_string(),
-            db_index.to_string(),
-        )
+    // The service composes its Redis URL from REDIS_HOST/PORT/DB/PASSWORD.
+    // Parse ALL of them out of the workspace TEST_REDIS_URL: the CI/deploy
+    // endpoint is an ephemeral Redis on a random port, and hardcoding
+    // 127.0.0.1:6379 pointed the startup connectivity probe at a closed
+    // port on the deploy host (which runs no host-level Redis) — the binary
+    // then refused to start (deploy 2026-10-11).
+    let (redis_host, redis_port, redis_db, redis_password) = {
+        let rest = redis
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(&redis);
+        let (auth, hostport) = match rest.rsplit_once('@') {
+            Some((auth, hostport)) => (Some(auth), hostport),
+            None => (None, rest),
+        };
+        let (hostport, db_index) = match hostport.split_once('/') {
+            Some((hostport, tail)) => (
+                hostport,
+                tail.split('?')
+                    .next()
+                    .and_then(|tail| tail.parse::<u32>().ok())
+                    .unwrap_or(0),
+            ),
+            None => (hostport, 0),
+        };
+        let (host, port) = match hostport.rsplit_once(':') {
+            Some((host, port)) => (host.to_string(), port.to_string()),
+            None => (hostport.to_string(), "6379".to_string()),
+        };
+        let password = auth
+            .and_then(|auth| auth.split_once(':').map(|(_, password)| password))
+            .unwrap_or("")
+            .to_string();
+        (host, port, db_index.to_string(), password)
     };
     Some(vec![
         ("DATABASE_URL".into(), db),
         ("REDIS_HOST".into(), redis_host),
         ("REDIS_PORT".into(), redis_port),
         ("REDIS_DB".into(), redis_db),
-        ("REDIS_PASSWORD".into(), String::new()),
+        ("REDIS_PASSWORD".into(), redis_password),
         ("TRACKING_HOST".into(), "127.0.0.1".into()),
         ("TRACKING_PORT".into(), "0".into()),
         (

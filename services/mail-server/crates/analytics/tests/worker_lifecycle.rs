@@ -24,12 +24,26 @@ fn spawn_worker(database_url: &str, args: &[&str]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_analytics-worker"))
         .args(args)
         .env("DATABASE_URL", database_url)
-        .env("REDIS_URL", "redis://127.0.0.1:6379")
+        // The suite's Redis: TEST_REDIS_URL is the CI/deploy endpoint (an
+        // ephemeral Redis on a random port). 127.0.0.1:6379 is only the
+        // local dev default — the deploy host runs no host-level Redis, so
+        // pinning it made `--health` (Postgres + Redis pools required)
+        // fail there (deploy 2026-10-11).
+        .env("REDIS_URL", test_redis_url())
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the analytics-worker binary")
+}
+
+/// The suite's Redis URL: `TEST_REDIS_URL` when the environment provides
+/// one, else the local dev default.
+fn test_redis_url() -> String {
+    std::env::var("TEST_REDIS_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string())
 }
 
 fn reap(child: &mut Child, deadline: Duration) -> std::process::ExitStatus {

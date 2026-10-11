@@ -62,6 +62,36 @@ fn reserve_addr() -> SocketAddr {
         .expect("addr")
 }
 
+/// The suite's Redis coordinates as `(host, port, password)`.
+///
+/// `TEST_REDIS_URL` is the endpoint the CI/deploy environment provides — an
+/// ephemeral Redis on a random port. 127.0.0.1:6379 is only the local dev
+/// default; pinning it made the readiness assertion false-fail on the
+/// deploy host, which runs no host-level Redis at all (the spawned server
+/// probed a closed port for the whole readiness deadline, 2026-10-11).
+fn test_redis_coordinates() -> (String, String, Option<String>) {
+    let raw = std::env::var("TEST_REDIS_URL").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return ("127.0.0.1".to_string(), "6379".to_string(), None);
+    }
+    let rest = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
+    let (auth, hostport) = match rest.rsplit_once('@') {
+        Some((auth, hostport)) => (Some(auth), hostport),
+        None => (None, rest),
+    };
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.to_string()),
+        None => (hostport.to_string(), "6379".to_string()),
+    };
+    let password = auth
+        .and_then(|auth| auth.split_once(':').map(|(_, password)| password))
+        .filter(|password| !password.is_empty())
+        .map(str::to_string);
+    (host, port, password)
+}
+
 /// Spawn the API server with a fully explicit environment against the local
 /// dependency stack. `extra_env` overrides individual variables; `omit_jwt`
 /// leaves the required JWT private key unset (misconfiguration case).
@@ -85,8 +115,6 @@ fn spawn_api_server(
             "DB_PASSWORD",
             "bebc8cefdc096e5247f8864e5c0edf78099df23058133321",
         )
-        .env("REDIS_HOST", "127.0.0.1")
-        .env("REDIS_PORT", "6379")
         .env("API_KEY_HASH_SECRET", "lifecycle-test-api-key-hash-secret")
         .env(
             "WEBHOOK_SIGNING_SECRET",
@@ -98,6 +126,13 @@ fn spawn_api_server(
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let (redis_host, redis_port, redis_password) = test_redis_coordinates();
+    command
+        .env("REDIS_HOST", redis_host)
+        .env("REDIS_PORT", redis_port);
+    if let Some(password) = redis_password {
+        command.env("REDIS_PASSWORD", password);
+    }
     if !omit_jwt {
         command
             .env("JWT_PRIVATE_KEY_PEM", TEST_JWT_PRIVATE_KEY_PEM)
