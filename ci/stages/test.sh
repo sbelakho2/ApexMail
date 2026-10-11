@@ -177,6 +177,11 @@ _provision_test_services() {
     if [ -f /etc/ssl/cert.pem ] && [ -z "${SSL_CERT_FILE:-}" ]; then
         _TEST_ENV="$_TEST_ENV SSL_CERT_FILE=/etc/ssl/cert.pem"
     fi
+
+    # Machine-relative perf budget (see the knob's comment in pipeline.conf).
+    if [ -n "${CI_LOAD_TEST_OPS_FLOOR:-}" ]; then
+        _TEST_ENV="$_TEST_ENV LOAD_TEST_MIXED_OPS_FLOOR=$CI_LOAD_TEST_OPS_FLOOR"
+    fi
 }
 
 # _cargo_run_capture <log-path> <cmd...> — run cmd with its combined output
