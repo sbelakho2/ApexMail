@@ -74,8 +74,20 @@ impl SessionBehavior {
 
     /// Record a new request
     pub fn record_request(&mut self, endpoint_hash: u64, method: &str, is_error: bool) {
-        let now = Instant::now();
+        self.record_request_at(endpoint_hash, method, is_error, Instant::now());
+    }
 
+    /// [`Self::record_request`] at an EXPLICIT instant: the seam tests use to
+    /// drive deterministic inter-arrival times. Wall-clock sleeps flake the
+    /// timing-regularity floor under a loaded host's scheduler jitter
+    /// (5ms sleeps measured irregular on the deploy host, 2026-10-11).
+    pub fn record_request_at(
+        &mut self,
+        endpoint_hash: u64,
+        method: &str,
+        is_error: bool,
+        now: Instant,
+    ) {
         // Only record inter-arrival time if we've seen a prior request.
         // This avoids polluting timing analysis with the gap between
         // tracker creation and the first actual request.

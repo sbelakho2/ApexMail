@@ -496,12 +496,19 @@ mod bot_attacks {
     fn first_request_does_not_pollute_timing_analysis() {
         let mut behavior = SessionBehavior::new(100);
 
-        // Simulate real bot:requests exactly 50ms apart
-        // With the old code, the first IAT would be (50ms + creation gap),
-        // potentially hundreds of ms, polluting the regularity score.
-        for _ in 0..15 {
-            behavior.record_request(hash_ep("/api/test"), "GET", false);
-            std::thread::sleep(Duration::from_millis(5));
+        // Simulate real bot:requests exactly 5ms apart — via EXPLICIT
+        // timestamps, not sleeps: scheduler jitter under a loaded host made
+        // the wall-clock version measure irregular and flake the 0.7
+        // regularity floor (deploy 2026-10-11). With the old code, the first
+        // IAT would be (5ms + creation gap), polluting the regularity score.
+        let start = std::time::Instant::now();
+        for index in 0..15u64 {
+            behavior.record_request_at(
+                hash_ep("/api/test"),
+                "GET",
+                false,
+                start + Duration::from_millis(5 * index),
+            );
         }
 
         let assessment = behavior.analyze();
