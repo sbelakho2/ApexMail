@@ -433,8 +433,11 @@ ci_ephem_postgres() {
         -c max_connections=300 >/dev/null || return 1
     ci_ephem_register "$_ep_name"
     [ "${CI_DRY_RUN:-0}" = "1" ] && return "$CI_EXIT_OK"
+    # 180s: the FIRST start on a busy host (initdb + fsync of the whole
+    # cluster) measured past the old 90s window once and failed the whole
+    # stage on pure I/O latency (deploy 2026-10-11).
     _ep_i=0
-    while [ "$_ep_i" -lt 45 ]; do
+    while [ "$_ep_i" -lt 90 ]; do
         if docker exec "$_ep_name" pg_isready -U "$_ep_user" -d "$_ep_db" >/dev/null 2>&1; then
             ci_info "ephemeral postgres '$_ep_name' ready on 127.0.0.1:$_ep_port"
             return "$CI_EXIT_OK"
@@ -442,7 +445,7 @@ ci_ephem_postgres() {
         _ep_i=$((_ep_i + 1))
         sleep 2
     done
-    ci_err "ephemeral postgres '$_ep_name' not ready after 90s"
+    ci_err "ephemeral postgres '$_ep_name' not ready after 180s"
     return 1
 }
 
@@ -455,7 +458,7 @@ ci_ephem_redis() {
     ci_ephem_register "$_er_name"
     [ "${CI_DRY_RUN:-0}" = "1" ] && return "$CI_EXIT_OK"
     _er_i=0
-    while [ "$_er_i" -lt 30 ]; do
+    while [ "$_er_i" -lt 90 ]; do
         if docker exec "$_er_name" redis-cli ping 2>/dev/null | grep -q PONG; then
             ci_info "ephemeral redis '$_er_name' ready on 127.0.0.1:$_er_port"
             return "$CI_EXIT_OK"
@@ -463,7 +466,7 @@ ci_ephem_redis() {
         _er_i=$((_er_i + 1))
         sleep 2
     done
-    ci_err "ephemeral redis '$_er_name' not ready after 60s"
+    ci_err "ephemeral redis '$_er_name' not ready after 180s"
     return 1
 }
 
