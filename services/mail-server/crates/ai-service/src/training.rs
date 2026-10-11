@@ -656,13 +656,30 @@ exit 0"#,
         std::fs::create_dir_all(&directory).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root (the deploy host runs the pipeline as root) ignores
+        // permission bits, so a read-only directory only exercises the
+        // write-failure arm for an unprivileged user. Probe the privilege
+        // and shape the failure by SHAPE instead: a regular file where the
+        // job directory must be, which no privilege can write through.
+        let privileged = std::fs::write(directory.join(".write-probe"), b"x").is_ok();
+        if privileged {
+            let _ = std::fs::remove_file(directory.join(".write-probe"));
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_dir_all(&directory).unwrap();
+            std::fs::write(&directory, b"a regular file where the job dir must be").unwrap();
+        }
 
         let result = manager.upsert_job(job);
         assert!(
-            matches!(result, Err(AiError::CheckpointError(ref e)) if e.contains("could not write")),
-            "the temp-file write failure must be reported, got {result:?}"
+            matches!(result, Err(AiError::CheckpointError(ref e))
+                if e.contains("could not write") || e.contains("could not create")),
+            "an unwritable job directory must surface as CheckpointError, got {result:?}"
         );
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            std::fs::remove_file(&directory).unwrap();
+        } else {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     /// A spawn failure (existing file, not executable) fails the job record
