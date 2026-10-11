@@ -46,6 +46,15 @@ impl EphemeralRedis {
     }
 }
 
+impl Drop for EphemeralRedis {
+    fn drop(&mut self) {
+        // The guard owns the throwaway server; killing it explicitly (rather
+        // than relying on the field's own Drop) also marks the field as READ
+        // — clippy -D warnings rejects a Drop-only field as dead code.
+        self.server.kill();
+    }
+}
+
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
     match migrator::test_support::fresh_canonical_pool("analytics_f83", db_suffix).await {
         Ok(pool) => pool,
