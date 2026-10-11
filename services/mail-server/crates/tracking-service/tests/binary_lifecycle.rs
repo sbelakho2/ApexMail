@@ -76,6 +76,13 @@ fn child_env() -> Option<Vec<(String, String)>> {
         // workspace `probe` account makes that probe succeed (Ok arm).
         ("CLICKHOUSE_USER".into(), "probe".into()),
         ("CLICKHOUSE_PASSWORD".into(), "probe".into()),
+        // Config load REQUIRES the RS256 stream-token public key (the child's
+        // dotenv only finds it if the ancestor .env carries one — the deploy
+        // host's does not, and the binary exited before binding: "JWT_PUBLIC_
+        // KEY_PEM environment variable is required", deploy 2026-10-11). A
+        // stub is enough for the boot/lifecycle path (no verification runs);
+        // same value the residual env tests seed.
+        ("JWT_PUBLIC_KEY_PEM".into(), "-----BEGIN PUBLIC KEY-----".into()),
         // Quiet child logs (kept for debugging on failure via RUST_LOG).
         ("RUST_LOG".into(), "warn".into()),
     ])

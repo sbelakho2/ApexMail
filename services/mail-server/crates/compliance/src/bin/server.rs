@@ -595,18 +595,28 @@ mod tests {
             std::env::set_var("COMPLIANCE_AUTH_TOKEN", "bin-test-compliance-token");
         }
         let db_name = format!("apexmail_ci_bin_server_{test_name}");
-        let _pool = match migrator::test_support::fresh_canonical_db(&url, &db_name).await {
+        let clone_pool = match migrator::test_support::fresh_canonical_db(&url, &db_name).await {
             Ok(pool) => pool?,
             Err(error) => panic!("{}", error.panic_message()),
         };
+        // The state (and the fixtures the tests write) must live in the
+        // per-test CLONE — never the raw TEST_DATABASE_URL database, which
+        // every parallel test in the suite shares: the cron-matrix sibling
+        // runs 5ms expiry ticks, and in the shared database they expired
+        // THIS test's fixtures between insert and assertion (host flake,
+        // deploy 2026-10-11).
+        let (server_part, _) = url
+            .rsplit_once('/')
+            .expect("TEST_DATABASE_URL has a db segment");
         let mut config = ComplianceConfig::from_env()
             .expect("compliance config must load in the test environment");
-        config.database_url = url;
+        config.database_url = format!("{server_part}/{db_name}");
         config.redis_url = std::env::var("TEST_REDIS_URL").unwrap_or_default();
         config.auth_token = "bin-test-token".into();
         let (state, _seeds) = compliance::bootstrap::build_state(&config)
             .await
             .expect("boot state");
+        clone_pool.close().await;
         Some((state, config))
     }
 

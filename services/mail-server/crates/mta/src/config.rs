@@ -1579,6 +1579,13 @@ mod adversarial_env_tests {
         set("MTA_ATTACHMENT_SCAN_MODE", "strip");
         set("MTA_IDS_ENABLED", "true");
         set("MTA_IDS_REFUSE", "true");
+        // Pin the mode AFTER clear: `from_env()` runs dotenvy::dotenv(), which
+        // REFILLS a removed var from the ambient .env — on the deploy host
+        // that is the production env file (NODE_ENV=production), which turned
+        // this dev-shaped fixture into a production config whose validation
+        // demands TLS material and a VERP secret (deploy 2026-10-11, the same
+        // trap as the analytics config test).
+        set("NODE_ENV", "development");
 
         let config = MtaConfig::from_env().expect("valid content-security env surface");
         assert!(config.inbound.spam_filter.enabled);

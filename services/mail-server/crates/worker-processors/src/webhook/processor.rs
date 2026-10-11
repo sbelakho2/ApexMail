@@ -1922,7 +1922,15 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn deliver_webhook_refuses_redirects_and_classifies_status_matrix() {
+        // A DELIBERATELY dead pool with a TINY acquire timeout: the delivery
+        // path best-effort-migrates a legacy secret on read (one UPDATE),
+        // and sqlx's default 30s acquire timeout made that write — and with
+        // it every delivery — take 30s per call, four deliveries summing to
+        // the observed 120s and expiring the stub's precomputed Retry-After
+        // date (deploy-host failure, 2026-10-11). 100ms bounds the failed
+        // write on every platform; the delivery still signs and proceeds.
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let proc = processor(pool, test_config());

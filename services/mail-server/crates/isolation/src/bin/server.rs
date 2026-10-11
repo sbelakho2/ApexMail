@@ -382,7 +382,9 @@ mod tests {
 
     // ── run(): process orchestration against the real dependency stack ──
 
-    fn test_database_parts() -> Option<(String, String)> {
+    /// TEST_DATABASE_URL coordinates as
+    /// `(host, port, database, user, password)`.
+    fn test_database_parts() -> Option<(String, u16, String, String, String)> {
         // TEST_DATABASE_URL:
         // postgresql://USER:PASSWORD@HOST:PORT/DATABASE
         migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
@@ -391,14 +393,76 @@ mod tests {
             .strip_prefix("postgresql://")
             .or_else(|| url.strip_prefix("postgres://"))?;
         let (credentials, host_db) = rest.split_once('@')?;
-        let (_user, password) = credentials.split_once(':')?;
-        let (_host, rest) = host_db.split_once(':')?;
+        let (user, password) = credentials.split_once(':')?;
+        let (host, rest) = host_db.split_once(':')?;
         let (port, database) = rest.split_once('/')?;
-        let _ = port;
         Some((
+            host.to_string(),
+            port.parse().ok()?,
             database.trim_end_matches('/').to_string(),
+            user.to_string(),
             password.to_string(),
         ))
+    }
+
+    /// The suite's Redis coordinates from TEST_REDIS_URL as
+    /// `(host, port, password, db)` — the dev defaults when absent.
+    fn test_redis_coordinates() -> (String, u16, Option<String>, u8) {
+        let dev = || ("127.0.0.1".to_string(), 6379u16, None, 3u8);
+        let Ok(url) = std::env::var("TEST_REDIS_URL") else {
+            return dev();
+        };
+        let url = url.trim();
+        if url.is_empty() {
+            return dev();
+        }
+        let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+        let (auth, hostport) = match rest.rsplit_once('@') {
+            Some((auth, hostport)) => (Some(auth), hostport),
+            None => (None, rest),
+        };
+        let (hostport, db) = match hostport.split_once('/') {
+            Some((hostport, tail)) => (
+                hostport,
+                tail.split('?')
+                    .next()
+                    .and_then(|tail| tail.parse::<u8>().ok())
+                    .unwrap_or(3),
+            ),
+            None => (hostport, 3),
+        };
+        let (host, port) = match hostport.rsplit_once(':') {
+            Some((host, port)) => (host.to_string(), port.parse::<u16>().unwrap_or(6379)),
+            None => (hostport.to_string(), 6379),
+        };
+        let password = auth
+            .and_then(|auth| auth.split_once(':').map(|(_, password)| password))
+            .filter(|password| !password.is_empty())
+            .map(str::to_string);
+        (host, port, password, db)
+    }
+
+    /// [`test_config`] overlaid with the SUITE's endpoints (TEST_DATABASE_URL
+    /// / TEST_REDIS_URL): the live lifecycle tests must talk to the ephemeral
+    /// instances the CI/deploy environment provides. Hardcoded 5432/6379 made
+    /// them false-fail on the deploy host, which runs no host-level Postgres
+    /// listener or Redis at all (deploy 2026-10-11). The offline unit tests
+    /// keep the plain [`test_config`] fixture.
+    fn test_config_for_suite() -> Config {
+        let mut config = test_config("unused", "unused");
+        if let Some((host, port, database, user, password)) = test_database_parts() {
+            config.database.host = host;
+            config.database.port = port;
+            config.database.database = database;
+            config.database.user = user;
+            config.database.password = password;
+        }
+        let (host, port, password, db) = test_redis_coordinates();
+        config.redis.host = host;
+        config.redis.port = port;
+        config.redis.password = password;
+        config.redis.db = db;
+        config
     }
 
     fn reserve_port() -> u16 {
@@ -434,12 +498,12 @@ mod tests {
     /// closed) before `run` returns.
     #[tokio::test]
     async fn run_serves_health_and_drains_on_shutdown() {
-        let Some((database, password)) = test_database_parts() else {
+        if test_database_parts().is_none() {
             eprintln!("skipping: set TEST_DATABASE_URL to drive the server against Postgres");
             return;
-        };
+        }
         let port = reserve_port();
-        let config = test_config(&database, &password);
+        let config = test_config_for_suite();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(run(config, Some(port), async move {
             let _ = shutdown_rx.await;
@@ -475,10 +539,10 @@ mod tests {
     /// fail with an error, not half-start.
     #[tokio::test]
     async fn run_refuses_to_start_when_the_port_is_taken() {
-        let Some((database, password)) = test_database_parts() else {
+        if test_database_parts().is_none() {
             eprintln!("skipping: set TEST_DATABASE_URL to drive the server against Postgres");
             return;
-        };
+        }
         let port = reserve_port();
         // Occupy the SAME wildcard address `run` binds: tokio listeners set
         // SO_REUSEADDR, and on macOS that lets a 0.0.0.0 bind succeed even
@@ -488,7 +552,7 @@ mod tests {
         let occupant = tokio::net::TcpListener::bind(("0.0.0.0", port))
             .await
             .expect("occupy the port");
-        let config = test_config(&database, &password);
+        let config = test_config_for_suite();
         let result = run(config, Some(port), std::future::pending()).await;
         let error = result.expect_err("an occupied port must refuse startup");
         assert!(
