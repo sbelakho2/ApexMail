@@ -151,9 +151,28 @@ fn daemon_fails_fast_on_an_unreachable_database() {
     );
 }
 
-/// The `can_connect` helper stays exercised: the local Redis answers.
+/// The `can_connect` helper stays exercised: the suite's Redis answers.
+/// The endpoint comes from TEST_REDIS_URL — the CI stage provides an
+/// ephemeral Redis on a RANDOM port, so a hardcoded 6379 asserted the wrong
+/// thing there (and nothing listens on a bare CI host's 6379). 6379 remains
+/// the dev fallback when the var is unset.
 #[test]
 fn local_redis_is_reachable_for_the_worker() {
-    let addr: SocketAddr = "127.0.0.1:6379".parse().expect("addr");
-    assert!(can_connect(addr), "redis://127.0.0.1:6379 must be up");
+    let raw = std::env::var("TEST_REDIS_URL").unwrap_or_default();
+    let hostport = raw
+        .rsplit('@')
+        .next()
+        .unwrap_or(&raw)
+        .trim_start_matches("redis://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let hostport = if hostport.is_empty() {
+        "127.0.0.1:6379".to_string()
+    } else {
+        hostport
+    };
+    let addr: SocketAddr = hostport.parse().expect("redis host:port");
+    assert!(can_connect(addr), "the suite Redis {addr} must be up");
 }
