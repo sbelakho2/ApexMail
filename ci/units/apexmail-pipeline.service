@@ -27,9 +27,12 @@ NoNewPrivileges=no
 PrivateTmp=true
 ProtectSystem=false
 ProtectHome=false
-# Runs can be long (cargo build + tests); systemd timeout above the sum of
-# stage timeouts is handled per-stage by the runner itself.
-TimeoutStartSec=6h
+# Runs can be long (cargo build + tests); the bound must exceed a REALISTIC
+# full line — the test stage alone runs 3.5-4h at --test-threads 4, plus
+# security/images/migrate/deploy. 2026-10-11: raised 6h → 12h; the previous
+# bound sat below the sum of the per-stage budgets, so a slow-but-healthy
+# line could be SIGTERM'd mid-stage (worst case: inside migrate/deploy).
+TimeoutStartSec=12h
 # Journald keeps stdout/stderr; the runner also writes ci/runs/<ts>/.
 StandardOutput=journal
 StandardError=journal
