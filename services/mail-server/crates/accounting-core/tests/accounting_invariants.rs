@@ -936,10 +936,12 @@ async fn ensure_tenant(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("tenant");
+    // Atomic guard (the WHERE NOT EXISTS form raced two concurrent suites
+    // into a 23505 on uq_billing_addresses_tenant, deploy 2026-10-11).
     sqlx::query(
         "INSERT INTO billing_addresses (tenant_id, company_name, vat_number, country) \
-         SELECT $1, 'Acme OÜ', 'EE999999999', 'EE' \
-         WHERE NOT EXISTS (SELECT 1 FROM billing_addresses WHERE tenant_id = $1)",
+         VALUES ($1, 'Acme OÜ', 'EE999999999', 'EE') \
+         ON CONFLICT (tenant_id) DO NOTHING",
     )
     .bind(TENANT)
     .execute(pool)
