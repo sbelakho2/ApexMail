@@ -82,18 +82,26 @@ struct Seed {
 /// the period label. `make_default` is used by the adapter suite only,
 /// because the production adapters resolve the default entity.
 async fn seed(pool: &PgPool, tag: &str, make_default: bool) -> Seed {
-    let mut conn = pool.acquire().await.expect("pool acquire");
-
     let entity = if make_default {
+        // Serialize probe+create on the cluster advisory lock: the plain
+        // probe raced a sibling caller into the uq_legal_entities_default
+        // partial index (23505, deploy 2026-10-11) — the second caller now
+        // waits, then sees the committed row.
+        let mut tx = pool.begin().await.expect("seed tx");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0xACC0_0001_i64)
+            .execute(&mut *tx)
+            .await
+            .expect("seed lock");
         let existing: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM legal_entities WHERE is_default LIMIT 1")
-                .fetch_optional(&mut *conn)
+                .fetch_optional(&mut *tx)
                 .await
                 .expect("default entity probe");
-        match existing {
+        let entity = match existing {
             Some(entity) => entity,
             None => chart::create_legal_entity(
-                &mut conn,
+                &mut tx,
                 &LegalEntityInput {
                     legal_name: "Test OÜ".to_string(),
                     trading_name: Some("ApexMail Test".to_string()),
@@ -110,8 +118,11 @@ async fn seed(pool: &PgPool, tag: &str, make_default: bool) -> Seed {
             )
             .await
             .expect("create default legal entity"),
-        }
+        };
+        tx.commit().await.expect("seed commit");
+        entity
     } else {
+        let mut conn = pool.acquire().await.expect("pool acquire");
         chart::create_legal_entity(
             &mut conn,
             &LegalEntityInput {
@@ -132,6 +143,7 @@ async fn seed(pool: &PgPool, tag: &str, make_default: bool) -> Seed {
         .expect("create legal entity")
     };
 
+    let mut conn = pool.acquire().await.expect("pool acquire");
     chart::ensure_standard_chart(&mut conn, entity)
         .await
         .expect("chart");
