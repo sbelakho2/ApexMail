@@ -269,8 +269,13 @@ run_cargo_tests() {
             cargo run --quiet -p migrator --bin migrator -- --ensure-canonical-template) \
             || ci_warn "canonical-template pre-warm failed — tests will provision it themselves"
         # shellcheck disable=SC2086  # _TEST_ENV/_nx_args are intentional word lists
+        # --no-fail-fast: the workspace suite takes HOURS on the deploy host
+        # (~12.6k tests); fail-fast cancelled the remaining ~9k tests at the
+        # first failure, turning each hidden failure into its own multi-hour
+        # deploy cycle (2026-10-11). The exit code still fails the stage on
+        # any test failure — only the COLLECTION got broader.
         if ! (cd "$WS" && _cargo_run_capture "$_nx_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
-                cargo nextest run --workspace --all-targets --test-threads "$_nx_jobs" $_nx_args); then
+                cargo nextest run --workspace --all-targets --test-threads "$_nx_jobs" --no-fail-fast $_nx_args); then
             ci_err "cargo nextest run FAILED — see the output above"
             soft_skip_log_gate "$_nx_log" || return "$CI_EXIT_FAIL"
             return "$CI_EXIT_FAIL"
