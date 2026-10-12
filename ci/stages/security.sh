@@ -180,6 +180,7 @@ trivy_fs_scan() {
     (cd "$REPO_ROOT" && ci_check "trivy fs (vuln+secret, $CI_TRIVY_SEVERITY)" \
         trivy fs --severity "$CI_TRIVY_SEVERITY" --scanners vuln,secret \
             --skip-dirs node_modules,target,public,vendor,.git,secrets,certs,backups \
+            --skip-dirs .venv,venv,.tox,__pycache__ \
             --skip-dirs deploy/nginx/ssl,deploy/nginx/ssl-archive \
             --skip-files './.env*' \
             --skip-files './backup-*.dump' \
