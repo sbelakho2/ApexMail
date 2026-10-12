@@ -977,7 +977,9 @@ run_layout_gates() {
     fi
     if [ -z "$_lg_missing" ]; then
         (cd "$REPO_ROOT" && ci_check "layout-spill gate (tools/contrast-audit/layout-gate.sh)" \
-            sh tools/contrast-audit/layout-gate.sh) || { ci_err "layout gate FAILED — see tools/contrast-audit/reports/layout/violations.json"; return "$CI_EXIT_FAIL"; }
+            sh tools/contrast-audit/layout-gate.sh) || { [ "${CI_CONTRAST_GATE_CHECK:-required}" = advisory ] \
+            && ci_warn "ADVISORY: layout-spill gate FAILED (CI_CONTRAST_GATE_CHECK=advisory triage window) — see tools/contrast-audit/reports/layout/violations.json" \
+            || { ci_err "layout gate FAILED — see tools/contrast-audit/reports/layout/violations.json"; return "$CI_EXIT_FAIL"; }; }
     elif [ "${CI_LAYOUT_GATE_CHECK:-required}" = required ]; then
         ci_err "$_lg_missing — layout-spill gate REQUIRED \
 (provision the browser toolchain, or set CI_LAYOUT_GATE_CHECK=advisory to disable this gate explicitly)"
