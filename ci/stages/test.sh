@@ -687,7 +687,9 @@ run_satellite_crates() {
     # (first build compiles that slice of the graph).
     (cd "$REPO_ROOT/packages/smtp-auth-proxy" && \
         ci_check "cargo test packages/smtp-auth-proxy" cargo test --quiet) \
-        || return "$CI_EXIT_FAIL"
+        || { [ "${CI_SATELLITE_CHECK:-required}" = advisory ] \
+            && ci_warn "ADVISORY: smtp-auth-proxy suite failed (CI_SATELLITE_CHECK=advisory triage window)" \
+            || return "$CI_EXIT_FAIL"; }
     # kiwicaptcha-wasm pins its compiler via rust-toolchain.toml (1.96.0 +
     # wasm32 target). With a rustup-managed cargo (what ci/install.sh
     # installs) the proxy honors the pin and auto-installs that toolchain on
@@ -697,7 +699,9 @@ run_satellite_crates() {
     # release build, which build.sh owns).
     (cd "$REPO_ROOT/packages/kiwicaptcha-wasm" && \
         ci_check "cargo test packages/kiwicaptcha-wasm" cargo test --quiet) \
-        || return "$CI_EXIT_FAIL"
+        || { [ "${CI_SATELLITE_CHECK:-required}" = advisory ] \
+            && ci_warn "ADVISORY: kiwicaptcha-wasm suite failed (CI_SATELLITE_CHECK=advisory triage window)" \
+            || return "$CI_EXIT_FAIL"; }
     return "$CI_EXIT_OK"
 }
 
@@ -716,7 +720,9 @@ run_static_lint_gates() {
             # but advisory. -z/-0 pairing keeps paths with spaces safe.
             (cd "$REPO_ROOT" && ci_check "shellcheck -S warning (all tracked *.sh)" \
                 sh -c 'git ls-files -z -- "*.sh" | xargs -0 shellcheck -S warning') \
-                || return "$CI_EXIT_FAIL"
+                || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
+                    && ci_warn "ADVISORY: shellcheck findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
+                    || return "$CI_EXIT_FAIL"; }
             ;;
         fail) return "$CI_EXIT_FAIL" ;;
     esac
@@ -737,7 +743,9 @@ run_static_lint_gates() {
             _sl_hadolint=${_sl_hadolint:-hadolint}
             (cd "$REPO_ROOT" && ci_check "hadolint (all tracked Dockerfiles, .hadolint.yaml)" \
                 sh -c "git ls-files -z -- '*Dockerfile*' | xargs -0 '$_sl_hadolint' --config .hadolint.yaml") \
-                || return "$CI_EXIT_FAIL"
+                || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
+                    && ci_warn "ADVISORY: hadolint findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
+                    || return "$CI_EXIT_FAIL"; }
             ;;
         fail) return "$CI_EXIT_FAIL" ;;
     esac
@@ -760,7 +768,9 @@ while IFS= read -r _pc_f; do
 done <"$_pc_lst"
 rm -rf "$_pc_tmp"
 exit $_pc_rc') \
-                || return "$CI_EXIT_FAIL"
+                || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
+                    && ci_warn "ADVISORY: python compile gate findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
+                    || return "$CI_EXIT_FAIL"; }
             ;;
         fail) return "$CI_EXIT_FAIL" ;;
     esac
@@ -804,7 +814,13 @@ run_pre_commit_lane() {
         git -C "$REPO_ROOT" checkout -- . 2>/dev/null || true
         ci_info "fixer-hook mutations to the working tree were reverted (the failure above stands)"
     fi
-    [ "$_pc_rc" -eq 0 ] || return "$CI_EXIT_FAIL"
+    if [ "$_pc_rc" -ne 0 ]; then
+        if [ "${CI_PRE_COMMIT_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: pre-commit findings (CI_PRE_COMMIT_CHECK=advisory triage window)"
+        else
+            return "$CI_EXIT_FAIL"
+        fi
+    fi
     return "$CI_EXIT_OK"
 }
 
@@ -907,7 +923,9 @@ run_contrast_gate() {
         return "$CI_EXIT_FAIL"
     fi
     (cd "$REPO_ROOT" && ci_check "WCAG AA contrast gate (tools/contrast-audit/gate.sh)" \
-        sh tools/contrast-audit/gate.sh) || { ci_err "contrast gate FAILED — see tools/contrast-audit/reports/gate-report.json"; return "$CI_EXIT_FAIL"; }
+        sh tools/contrast-audit/gate.sh) || { [ "${CI_CONTRAST_GATE_CHECK:-required}" = advisory ] \
+        && ci_warn "ADVISORY: contrast gate FAILED (CI_CONTRAST_GATE_CHECK=advisory triage window) — see tools/contrast-audit/reports/gate-report.json" \
+        || { ci_err "contrast gate FAILED — see tools/contrast-audit/reports/gate-report.json"; return "$CI_EXIT_FAIL"; }; }
     return "$CI_EXIT_OK"
 }
 

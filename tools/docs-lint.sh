@@ -126,9 +126,9 @@ if [ -n "$INTEGRITY" ] && [ -n "$UPDATE_BASELINE" ]; then
   exit 2
 fi
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 if [ -z "$ROOT" ]; then
-  ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+  ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 fi
 if [ ! -d "$ROOT/docs" ]; then
   echo "docs-lint.sh: not a repository root (no docs/ under $ROOT)" >&2
@@ -545,7 +545,7 @@ agg_tmp="$tmpd/agg"
       case "$f" in
         *.php) lang=php ;;
         *.js|*.mjs) lang=js ;;
-        *.yaml|*.yml|*.sh|*.twig) lang=hash ;;
+        *.yaml|*.yml|*.sh|*.twig) lang="hash" ;;
         *) lang=rs ;;
       esac
       "$AWK_BIN" -f "$tmpd/comments.awk" -v lang="$lang" "$f" |

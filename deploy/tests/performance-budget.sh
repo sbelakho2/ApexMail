@@ -120,8 +120,10 @@ run_audit() {
     # internet swings with the path to it (0.55-0.63 s observed on the same
     # page minutes apart, 2026-10-06), which made a healthy page flap. The
     # median still catches a real regression in any of the three samples.
-    local timing ttfb_s size ttfb sample samples=""
-    for sample in 1 2 3; do
+    local timing ttfb_s size ttfb samples=""
+    # Three paced samples; the loop counter itself is only the iteration
+    # count (the median of the collected TTFBs is what gets asserted).
+    for _ in 1 2 3; do
         timing="$(curl -fsSL --max-time 60 -o /dev/null -w '%{time_starttransfer} %{size_download}' "$url" 2>/dev/null || echo "0 0")"
         samples="$samples ${timing%% *}"
     done
