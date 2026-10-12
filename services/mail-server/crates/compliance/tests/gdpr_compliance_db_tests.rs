@@ -3179,12 +3179,14 @@ async fn audit_chain_detects_a_mutated_row_and_honours_time_windows() {
         .await
         .unwrap();
     assert!(after.valid, "window after the tampered row is clean");
+    // Window ends 1µs before the tampered row: it holds EXACTLY the one
+    // earlier entry whatever the seeded inserts' wall-clock spacing. The
+    // previous fixed [ts-1s, ts-1ms) window assumed the sequential seeding
+    // inserts land under a second apart; under the parallel suite they can
+    // exceed it, leaving zero entries and flaking the assertion (deploy
+    // 2026-10-12).
     let before = audit
-        .verify_chain(
-            None,
-            Some(ts - chrono::Duration::seconds(1)),
-            Some(ts - chrono::Duration::milliseconds(1)),
-        )
+        .verify_chain(None, None, Some(ts - chrono::Duration::microseconds(1)))
         .await
         .unwrap();
     assert!(before.valid, "window before the tampered row is clean");
