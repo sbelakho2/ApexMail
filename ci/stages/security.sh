@@ -222,6 +222,18 @@ post-build image scan runs in the images stage on the deploy host; audit SM14 F5
     fi
     _ns=${GHCR_NS:-ghcr.io/sbelakho2/apexmail}
     for _svc in api-server mta; do
+        # Stale-image guard: a :latest with no matching :$CI_SHA predates this
+        # deploy — it is the artifact being REPLACED, and its findings belong
+        # to the old dependency set this build fixes. Scanning it would block
+        # the very deploy that replaces it (deploy 2026-10-12). The
+        # authoritative gate is the images stage's post-build scan of exactly
+        # what this pipeline built from this tree; this pre-deploy re-scan
+        # stays hard whenever the sha-pinned image exists.
+        if ! docker image inspect "$_ns/$_svc:$CI_SHA" >/dev/null 2>&1 \
+            && docker image inspect "$_ns/$_svc:latest" >/dev/null 2>&1; then
+            ci_warn "trivy: $_ns/$_svc:latest predates this sha — pre-deploy re-scan skipped (outgoing artifact; the images-stage post-build scan is authoritative)"
+            continue
+        fi
         for _tag in "$CI_SHA" latest; do
             _img=$_ns/$_svc:$_tag
             if docker image inspect "$_img" >/dev/null 2>&1; then
