@@ -59,7 +59,7 @@ version = "1.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.ammonia]]
-version = "4.1.4"
+version = "4.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.anstream]]
@@ -983,7 +983,7 @@ version = "0.27.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.html5ever]]
-version = "0.39.0"
+version = "0.40.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.http]]
@@ -1315,7 +1315,7 @@ version = "0.12.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.markup5ever]]
-version = "0.39.0"
+version = "0.40.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.matchit]]
@@ -1574,16 +1574,24 @@ criteria = "safe-to-deploy"
 version = "0.10.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.phf]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.phf_codegen]]
 version = "0.10.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.phf_codegen]]
-version = "0.13.1"
+version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.phf_generator]]
 version = "0.10.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.phf_generator]]
+version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.phf_macros]]
@@ -1596,6 +1604,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.phf_shared]]
 version = "0.10.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.phf_shared]]
+version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pic-scale]]
@@ -1791,7 +1803,7 @@ version = "0.11.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn-proto]]
-version = "0.11.17"
+version = "0.11.19"
 criteria = "safe-to-deploy"
 
 [[exemptions.quoted_printable]]
@@ -2203,7 +2215,7 @@ version = "0.8.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.string_cache]]
-version = "0.9.0"
+version = "0.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.string_cache_codegen]]
@@ -2211,7 +2223,7 @@ version = "0.5.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.string_cache_codegen]]
-version = "0.6.1"
+version = "0.11.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.stringprep]]
@@ -2635,7 +2647,7 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.web_atoms]]
-version = "0.2.6"
+version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
