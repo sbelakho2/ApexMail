@@ -37,6 +37,15 @@ ignore = [
     # pdf-extract lifts its lopdf range (>= 0.42 fixes it).
     "RUSTSEC-2026-0187",
 
+    # ── unsafe-libyaml (RUSTSEC-2024-0449, unmaintained) ─────────────────
+    # Status advisory only — no known vulnerability; the repository was
+    # archived in 2024. unsafe-libyaml 0.2.11 arrives transitively through
+    # serde_yaml ← hayagriva ← typst-library ← typst, i.e. the pdf-renderer
+    # service's document engine (yaml is reached only by typst's citation
+    # machinery, never parses tenant input). No fixed version exists
+    # (0.2.11 is the last); revisit when typst/hayagriva drop serde_yaml.
+    "RUSTSEC-2024-0449",
+
     # ── hickory-proto (RUSTSEC-2026-0119) ────────────────────────────────
     # Hickory-proto 0.24.x is pulled in by hickory-resolver for DNS. The
     # O(n²) name compression CPU exhaustion only affects malicious DNS
