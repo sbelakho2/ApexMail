@@ -394,9 +394,10 @@ mod tests {
 
     impl ScratchDir {
         fn new(label: &str) -> Self {
-            // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
-            let dir =
-                std::env::temp_dir().join(format!("ai-train-{label}-{}", uuid::Uuid::new_v4()));
+            let dir = {
+                // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+                std::env::temp_dir().join(format!("ai-train-{label}-{}", uuid::Uuid::new_v4()))
+            };
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
