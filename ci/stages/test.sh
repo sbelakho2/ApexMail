@@ -264,6 +264,17 @@ run_cargo_tests() {
         # bounds the clone disk peak while the suite still completes —
         # override with CI_NEXTEST_JOBS on a bigger runner.
         _nx_jobs="${CI_NEXTEST_JOBS:-4}"
+        # Compile the test binaries BEFORE the services + template pre-warm:
+        # on a cold target the compile storm (8x rustc for ~15-20 minutes)
+        # starves Postgres backends of I/O, and the suite's FIRST database
+        # tests fail their provisioning connect inside its 300s window
+        # (admin-connect pool timeout, positions 22-25, deploy 2026-10-12).
+        # The artifacts are reused by the run below — no double compile.
+        ci_info "compiling test binaries (cargo nextest --workspace --no-run)"
+        # shellcheck disable=SC2086  # _TEST_ENV is an intentional word list
+        (cd "$WS" && env $_TEST_ENV CARGO_TERM_COLOR=never \
+            cargo nextest run --workspace --all-targets --no-run) \
+            || ci_warn "test-binary compilation failed — the suite below reports the compile error"
         # Pre-warm the canonical test template ONCE, serially, before the
         # parallel suite: the first provisioner otherwise builds hundreds of
         # migrations while holding the cluster advisory lock, and every queued
