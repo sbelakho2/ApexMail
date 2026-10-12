@@ -481,6 +481,19 @@ apply_test_schema() {
 # testing nothing. Now php+composer are ci_have_tool-gated (fail closed on
 # the deploy host) and composer install provisions vendor/ when missing
 # (one-time ~30 s per package, then cached in the checkout).
+# php_suite_prefix — the suites' chmod-based closed-behavior tests cannot
+# pass for ROOT (root writes to "unwritable" directories), and the pipeline
+# runs as root on the deploy host: drop to an unprivileged identity for the
+# phpunit invocations. Non-root runners (dev machines) execute directly.
+php_suite_prefix() {
+    if [ "$(id -u)" = "0" ] && command -v setpriv >/dev/null 2>&1 \
+        && id nobody >/dev/null 2>&1; then
+        printf 'setpriv --reuid nobody --regid nogroup --clear-groups env HOME=/tmp TMPDIR=/tmp'
+    else
+        printf ''
+    fi
+}
+
 run_php_tests() {
     _pt_st=$(lane_tool_status php php-suites "${CI_PHP_CHECK:-required}")
     case $_pt_st in
@@ -492,6 +505,7 @@ run_php_tests() {
         fail) return "$CI_EXIT_FAIL" ;;
         skip) return "$CI_EXIT_OK" ;;
     esac
+    _php_prefix=$(php_suite_prefix)
     for _pkg in packages/kiwicaptcha-php \
                 packages/kiwicaptcha-risk-php \
                 packages/kiwicaptcha/integrations/symfony; do
@@ -506,12 +520,23 @@ run_php_tests() {
         # own cause. A deterministic regression fails both attempts and
         # still fails the lane; the first attempt's captured output
         # stays in the stage log either way.
-        if ! (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" ./vendor/bin/phpunit); then
+        # shellcheck disable=SC2086  # the privilege-drop prefix word-splits
+        if ! (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" \
+                $_php_prefix ./vendor/bin/phpunit); then
             ci_warn "phpunit $_pkg failed attempt 1 — retrying once (bounded \
 flake policy: a deterministic failure fails both attempts; the first-attempt \
 output above is retained for diagnosis)"
-            (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg (retry)" ./vendor/bin/phpunit) \
-                || return "$CI_EXIT_FAIL"
+            # shellcheck disable=SC2086
+            if (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg (retry)" \
+                    $_php_prefix ./vendor/bin/phpunit); then
+                continue
+            fi
+            if [ "${CI_PHP_CHECK:-required}" = advisory ]; then
+                ci_warn "ADVISORY: phpunit $_pkg failed (CI_PHP_CHECK=advisory \
+triage window) — result recorded, lane continues"
+                continue
+            fi
+            return "$CI_EXIT_FAIL"
         fi
     done
     return "$CI_EXIT_OK"
