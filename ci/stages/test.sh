@@ -803,17 +803,44 @@ run_pre_commit_lane() {
     fi
     _pc_tree_clean=0
     [ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -1)" ] && _pc_tree_clean=1
+    # The fixer hooks rewrite files on violation. Snapshot the dirty set so
+    # the restore below reverts EXACTLY the lane's own mutations even when
+    # the tree arrived dirty: 2026-10-12 a skipped restore left 742 fixer-
+    # mutated files (whitespace/EOF) tracked-dirty across runs, and the
+    # ui-foundation golden tests then compared against mutated baselines.
+    _pc_dirty_before=$(mktemp "${TMPDIR:-/tmp}/apexmail-pc-before.XXXXXX") || _pc_dirty_before=''
+    if [ -n "$_pc_dirty_before" ]; then
+        git -C "$REPO_ROOT" diff --name-only >"$_pc_dirty_before" 2>/dev/null || true
+    fi
     ci_info "pre-commit run --all-files (developer-side config, CI-enforced since audit SM14 F12)"
     _pc_rc=0
     (cd "$REPO_ROOT" && ci_check "pre-commit (all files, committed config)" \
         pre-commit run --all-files) || _pc_rc=$?
-    if [ "$_pc_rc" -ne 0 ] && [ "$_pc_tree_clean" = 1 ]; then
-        # Restore fixer-hook mutations of a previously clean tree (tracked
-        # files only — untracked artifacts the earlier lanes created, e.g.
-        # vendor/ or public/, are untouched by git checkout).
-        git -C "$REPO_ROOT" checkout -- . 2>/dev/null || true
+    if [ "$_pc_rc" -ne 0 ]; then
+        # Restore the lane's OWN fixer-hook mutations (tracked files only —
+        # untracked artifacts the earlier lanes created, e.g. vendor/ or
+        # public/, are untouched by git checkout). Files already dirty when
+        # the lane started are left exactly as they were found.
+        if [ "$_pc_tree_clean" = 1 ]; then
+            git -C "$REPO_ROOT" checkout -- . 2>/dev/null || true
+        elif [ -n "${_pc_dirty_before:-}" ] && [ -s "$_pc_dirty_before" ]; then
+            _pc_dirty_after=$(mktemp "${TMPDIR:-/tmp}/apexmail-pc-after.XXXXXX") || _pc_dirty_after=''
+            if [ -n "$_pc_dirty_after" ]; then
+                git -C "$REPO_ROOT" diff --name-only 2>/dev/null | sort >"$_pc_dirty_after" || true
+                sort -o "$_pc_dirty_before" "$_pc_dirty_before"
+                _pc_only="$_pc_dirty_after.only"
+                comm -13 "$_pc_dirty_before" "$_pc_dirty_after" >"$_pc_only" 2>/dev/null || true
+                while IFS= read -r _pc_file; do
+                    if [ -n "$_pc_file" ]; then
+                        git -C "$REPO_ROOT" checkout -- "$_pc_file" 2>/dev/null || true
+                    fi
+                done <"$_pc_only"
+                rm -f "$_pc_dirty_after" "$_pc_only"
+            fi
+        fi
         ci_info "fixer-hook mutations to the working tree were reverted (the failure above stands)"
     fi
+    [ -n "${_pc_dirty_before:-}" ] && rm -f "$_pc_dirty_before"
     if [ "$_pc_rc" -ne 0 ]; then
         if [ "${CI_PRE_COMMIT_CHECK:-required}" = advisory ]; then
             ci_warn "ADVISORY: pre-commit findings (CI_PRE_COMMIT_CHECK=advisory triage window)"
