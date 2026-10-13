@@ -53,6 +53,15 @@ ARG GO_VERSION=1.23.4
 # tools/contrast-audit/package-lock.json (the executor npm-ci's the WORKSPACE
 # playwright and runs it against the browser binaries baked in below).
 ARG PLAYWRIGHT_VERSION=1.63.0
+# The test stage's browser suite (tests/browser, the mirrored KiwiCaptcha
+# Playwright suite) locks a DIFFERENT playwright minor than contrast-audit;
+# each playwright version demands its own chromium build revision, and the
+# revision directories coexist under ~/.cache/ms-playwright — so the image
+# bakes BOTH. MUST equal the version resolved by the committed
+# tests/browser/package-lock.json; when a mirror advance moves that lock, bump
+# this pin in the same PR (the lane fails closed with the missing-runtime
+# message otherwise).
+ARG PLAYWRIGHT_BROWSER_SUITE_VERSION=1.62.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -158,16 +167,22 @@ RUN cargo install --locked cargo-deny@${DENY_VERSION}
 RUN cargo install --locked cargo-audit@${AUDIT_VERSION}
 RUN cargo install --locked cargo-nextest@${NEXTEST_VERSION}
 
-# Playwright chromium for the contrast/layout pixel gates: provisioned at
-# image build so CI never downloads browsers mid-run. The playwright version
-# MUST equal the committed tools/contrast-audit/package-lock.json pin: the
-# test stage npm-ci's the WORKSPACE playwright (audit SM14 F2) and runs it
-# against THESE browser binaries — a skew makes playwright demand a browser
-# build the image does not carry.
+# Playwright chromium for the contrast/layout pixel gates AND the browser
+# suite: provisioned at image build so CI never downloads browsers mid-run.
+# The playwright versions MUST equal the committed pins they serve:
+# tools/contrast-audit/package-lock.json (the contrast/layout lanes) and
+# tests/browser/package-lock.json (the browser suite) — a skew makes
+# playwright demand a browser build the image does not carry. Two revisions
+# coexist under ~/.cache/ms-playwright, so both installs are cheap after the
+# apt-deps layer the first one pulls.
 WORKDIR /tmp
 RUN npm init -y >/dev/null 2>&1 \
     && npm install "playwright@${PLAYWRIGHT_VERSION}" >/dev/null 2>&1 \
     && npx playwright install --with-deps chromium \
+    && rm -rf /tmp/node_modules /tmp/package*.json \
+    && npm init -y >/dev/null 2>&1 \
+    && npm install "playwright@${PLAYWRIGHT_BROWSER_SUITE_VERSION}" >/dev/null 2>&1 \
+    && npx playwright install chromium \
     && rm -rf /tmp/node_modules /tmp/package*.json
 WORKDIR /
 

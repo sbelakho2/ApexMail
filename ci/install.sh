@@ -25,6 +25,10 @@
 #      branch-protection gate fails closed without it). The GITHUB_TOKEN
 #      itself is an operator secret — see the ACTION REQUIRED line the
 #      installer prints (ci/README.md §13).
+#   2c. playwright chromium for BOTH pinned playwright minors (the
+#       tests/browser suite lock and tools/contrast-audit's lock) under
+#       ~/.cache/ms-playwright — the browser-suite and contrast lanes fail
+#       closed without them (idempotent)
 #   3. /etc/apexmail/pipeline.conf   (host overrides: CI_DEPLOY_DIR, env file)
 #   4. systemd units: apexmail-pipeline.service (oneshot)
 #                     apexmail-pipeline.timer   (every 5 minutes)
@@ -350,6 +354,28 @@ install_zola() {
     rm -rf "$_tmp"
 }
 
+# playwright browsers — the browser suite (tests/browser, the mirrored
+# KiwiCaptcha Playwright suite) and the contrast/layout pixel gates
+# (tools/contrast-audit) pin DIFFERENT playwright minors, so the host must
+# carry the chromium build for BOTH: each `npx playwright@X.Y.Z install
+# chromium` drops its own revision directory under ~/.cache/ms-playwright and
+# the revisions coexist. Idempotent — playwright skips an installed build.
+# The pins mirror ci/ci-image/toolchain-versions.env (the CI image bakes the
+# same two revisions); when a mirror advance moves tests/browser's lock, bump
+# PLAYWRIGHT_BROWSER_SUITE_VERSION there in the same PR.
+install_playwright_browsers() {
+    if ! have npx; then
+        log "npx absent — skipping playwright browser provisioning (the browser-suite and contrast lanes fail closed until node/npm/npx exist)"
+        return 0
+    fi
+    for _pw in "${CI_PLAYWRIGHT_VERSION:-1.63.0}" "${CI_PLAYWRIGHT_BROWSER_SUITE_VERSION:-1.62.1}"; do
+        log "playwright@$_pw: installing chromium (idempotent)"
+        if ! npx --yes "playwright@$_pw" install chromium >/dev/null 2>&1; then
+            log "playwright@$_pw chromium install FAILED — the browser-suite/contrast lanes will fail closed until it succeeds (network + ~/.cache/ms-playwright)"
+        fi
+    done
+}
+
 # --- 3. host config -------------------------------------------------------------------
 install_etc_conf() {
     install -d -m 0755 "$ETC_DIR"
@@ -463,6 +489,15 @@ do_check() {
     done
     # SDK-lane / static-lint toolchains (test stage; REQUIRED lanes, so a
     # gap on the deploy host fails closed — list it loudly here).
+    if [ -d "${HOME:-/root}/.cache/ms-playwright" ]; then
+        _pw_revs=0
+        for _d in "${HOME:-/root}"/.cache/ms-playwright/chromium-*; do
+            [ -d "$_d" ] && _pw_revs=$((_pw_revs + 1))
+        done
+        log "ok: playwright chromium revisions present: $_pw_revs (browser-suite + contrast lanes need 2)"
+    else
+        log "MISSING: ~/.cache/ms-playwright — the browser-suite/contrast lanes fail closed (sudo ci/install.sh provisions both pinned revisions)"
+    fi
     for c in go mvn ruby php composer shellcheck hadolint pre-commit; do
         if have "$c"; then
             log "ok: $c"
@@ -492,6 +527,7 @@ case "${1:-all}" in
         install_semgrep
         install_pre_commit
         install_zola
+        install_playwright_browsers
         install_hadolint
         install_gh
         install_etc_conf

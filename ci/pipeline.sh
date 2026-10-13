@@ -17,6 +17,8 @@
 #   --skip-deploy      shorthand for --skip images,migrate,deploy
 #   --ref REF          git ref the run validates (default CI_REF, i.e. main)
 #   --advisory a,b     treat these stages as advisory for THIS run
+#   --skip-unchanged   end early when HEAD already completed a green run under
+#                      the current pipeline config (the timer's cheap poll)
 #   --dry-run          echo infrastructure actions instead of executing them
 #   --force            proceed even when another run holds the lock
 #   --lock-wait SECS   seconds to wait for the run lock (default 0)
@@ -68,6 +70,8 @@ run options:
   --skip-deploy       shorthand for --skip images,migrate,deploy
   --ref REF           git ref the run validates (default: main)
   --advisory a,b      these stages may fail without failing the run
+  --skip-unchanged    end early when HEAD already passed a green run under the
+                      current pipeline config (the timer's cheap poll)
   --dry-run           echo infrastructure actions instead of executing
   --force             run without the pipeline lock
   --lock-wait SECS    wait up to SECS for the lock (default 0)
@@ -445,9 +449,36 @@ cmd_run() {
 # manifest) with CI_DRY_RUN=1 so no infrastructure is touched, then assert the
 # machinery itself: syntax, shellcheck, contracts, manifest validity, timeout
 # enforcement, lock exclusivity.
+#
+# selftest_contract <step> <total> <label> <script> — run one ci/tests/*.sh
+# synthetic fixture as a numbered selftest step. These fixtures extract the
+# REAL production functions from ci/stages/*.sh and prove their contracts on
+# throwaway fixtures (no network, no host mutation); on failure the fixture's
+# tail is echoed so the failing assertion is visible inline. A missing or
+# non-executable fixture is a selftest FAILURE — an unwired contract is an
+# untested contract. Sets the caller's _sf_fail.
+selftest_contract() {
+    _sct_step=$1 _sct_total=$2 _sct_label=$3 _sct_script=$4
+    ci_info "selftest ($_sct_step/$_sct_total): $_sct_label"
+    if [ ! -x "$_sct_script" ]; then
+        ci_err "ci/tests/$(basename "$_sct_script") missing/not executable — $_sct_label is untested"
+        _sf_fail=1
+        return
+    fi
+    _sct_log=$(mktemp "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
+    if sh "$_sct_script" >"$_sct_log" 2>&1; then
+        ci_info "PASS: $_sct_label"
+    else
+        ci_err "$_sct_label FAILED — re-run: sh $_sct_script"
+        tail -n 12 "$_sct_log" >&2 || true
+        _sf_fail=1
+    fi
+    rm -f "$_sct_log"
+}
+
 cmd_selftest() {
     _sf_fail=0
-    ci_info "selftest (1/11): syntax + shellcheck of every ci/ script"
+    ci_info "selftest (1/15): syntax + shellcheck of every ci/ script"
     for f in "$CI_DIR/pipeline.sh" "$CI_DIR/lib.sh" "$CI_DIR/check-pr.sh" \
              "$CI_DIR/install.sh" "$CI_DIR"/stages/*.sh "$CI_DIR"/units/*.sh; do
         [ -f "$f" ] || continue
@@ -466,14 +497,14 @@ cmd_selftest() {
         ci_warn "shellcheck not installed — syntax-only check"
     fi
 
-    ci_info "selftest (2/11): stage contract (exists, executable, defines stage_main)"
+    ci_info "selftest (2/15): stage contract (exists, executable, defines stage_main)"
     for st in $(printf '%s' "$CI_STAGES" | tr ',' ' '); do
         s="$CI_DIR/stages/$st.sh"
         [ -x "$s" ] || { ci_err "missing/not executable: $s"; _sf_fail=1; }
         grep -q 'stage_main' "$s" 2>/dev/null || { ci_err "no stage_main in $s"; _sf_fail=1; }
     done
 
-    ci_info "selftest (3/11): test-stage lane contract (lanes + flags present)"
+    ci_info "selftest (3/15): test-stage lane contract (lanes + flags present)"
     # The SDK/satellite/static-lint lanes (F-wave enterprise coverage): the
     # lane functions must exist in the test stage and their required-by-
     # default flags in pipeline.conf — checked the same way the stage
@@ -481,11 +512,13 @@ cmd_selftest() {
     _ts="$CI_DIR/stages/test.sh"
     for fn in run_php_tests run_sdk_tests run_satellite_crates run_static_lint_gates \
               run_pre_commit_lane provision_contrast_node_modules \
+              run_dogfood_lane \
               lane_tool_status provision_composer_vendor provision_sdk_python_venv; do
         grep -q "$fn()" "$_ts" 2>/dev/null || { ci_err "test stage lost lane/helper: $fn"; _sf_fail=1; }
     done
     for fl in CI_PHP_CHECK CI_SDK_CHECK CI_SATELLITE_CHECK CI_STATIC_LINT_CHECK CI_SDK_VENV_DIR \
-              CI_PRE_COMMIT_CHECK; do
+              CI_PRE_COMMIT_CHECK CI_CONTRAST_GATE_CHECK CI_BROWSER_SUITE_CHECK \
+              CI_DOGFOOD_CHECK CI_DOGFOOD_LIVE; do
         grep -q "$fl" "$CI_DIR/pipeline.conf" 2>/dev/null \
             || { ci_err "pipeline.conf lost flag: $fl"; _sf_fail=1; }
     done
@@ -495,7 +528,7 @@ cmd_selftest() {
     # 2026-09-10 enterprise lanes: the artifacts the new gates depend on must
     # exist and be well-formed — checked statically so the selftest stays
     # infrastructure-free, exactly like the sections around it.
-    ci_info "selftest (4/11): enterprise-lane artifacts (coverage baseline, migration lint, deny/trivy triage)"
+    ci_info "selftest (4/15): enterprise-lane artifacts (coverage baseline, migration lint, deny/trivy triage)"
     _base=$CI_ROOT/coverage-baseline.txt
     if [ ! -f "$_base" ]; then
         ci_err "missing ci/coverage-baseline.txt (coverage ratchet gate)"
@@ -530,13 +563,13 @@ cmd_selftest() {
         ci_warn "python3 missing — migration-lint selftest skipped"
     fi
 
-    ci_info "selftest (5/11): full dry-run through the real runner"
+    ci_info "selftest (5/15): full dry-run through the real runner"
     if ! "$CI_DIR/pipeline.sh" run --dry-run --stages "$CI_STAGES" --lock-wait 10; then
         ci_err "dry-run pipeline run failed"
         _sf_fail=1
     fi
 
-    ci_info "selftest (6/11): manifest + per-stage logs of the dry run are valid"
+    ci_info "selftest (6/15): manifest + per-stage logs of the dry run are valid"
     _latest=$(cd "$RUNS_DIR" 2>/dev/null && \
         ls -1d [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]* 2>/dev/null \
         | sort -r | head -1 || true)
@@ -554,7 +587,7 @@ cmd_selftest() {
         done
     fi
 
-    ci_info "selftest (7/11): timeout wrapper stops a runaway command"
+    ci_info "selftest (7/15): timeout wrapper stops a runaway command"
     _sf_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
     printf '#!/bin/sh\nsleep 30\n' >"$_sf_tmp/slow.sh"
     chmod +x "$_sf_tmp/slow.sh"
@@ -569,7 +602,7 @@ cmd_selftest() {
     fi
     rm -rf "$_sf_tmp"
 
-    ci_info "selftest (8/11): run lock excludes a concurrent holder"
+    ci_info "selftest (8/15): run lock excludes a concurrent holder"
     if ci_lock_acquire selftest 0; then
         if CI_ROOT="$CI_DIR" sh -c '. "$CI_ROOT/lib.sh"; ci_lock_acquire selftest 1' >/dev/null 2>&1; then
             # With flock both acquires share fd 9 in THIS process; only the
@@ -583,8 +616,8 @@ cmd_selftest() {
         _sf_fail=1
     fi
 
-    ci_info "selftest (9/11): RUSTSEC ledger lockstep (audit SM14 F11)"
-    # pipeline.conf:73-74 contract: CI_CARGO_AUDIT_IGNORES mirrors
+    ci_info "selftest (9/15): RUSTSEC ledger lockstep (audit SM14 F11)"
+    # CI_CARGO_AUDIT_IGNORES (pipeline.conf) mirrors
     # services/mail-server/deny.toml [advisories].ignore EXACTLY. The lists
     # only LOOK equal to a naive grep (pipeline.conf mentions IDs in
     # comments); this assertion parses BOTH and fails on any drift.
@@ -612,7 +645,7 @@ cmd_selftest() {
         else
             ci_err "RUSTSEC ledgers DIVERGED: services/mail-server/deny.toml \
 [advisories].ignore vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT \
-lockstep (pipeline.conf:73-74). '-' = deny.toml, '+' = pipeline.conf:"
+lockstep (CI_CARGO_AUDIT_IGNORES in pipeline.conf). '-' = deny.toml, '+' = pipeline.conf:"
             diff -u "$_sl_a" "$_sl_b" >&2 || true
             _sf_fail=1
         fi
@@ -641,7 +674,7 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
         ci_warn "deny.toml missing — RUSTSEC lockstep selftest skipped"
     fi
 
-    ci_info "selftest (10/11): blessing contract (audit SM14 F3 outcomes + P1 membership)"
+    ci_info "selftest (10/15): blessing contract (audit SM14 F3 outcomes + P1 membership)"
     # A .last-good-sha blessing must require every required stage to have
     # ACTUALLY finished ok: advisory-fail/skip/timeout/fail/not-run can never
     # bless, and passedStages is derived from the real statuses.
@@ -676,16 +709,22 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
         _sf_fail=1
     fi
 
-    ci_info "selftest (11/11): verify-stage rollback contract (synthetic image fixture)"
-    if [ -x "$CI_DIR/tests/rollback-selftest.sh" ]; then
-        if ! sh "$CI_DIR/tests/rollback-selftest.sh" >/dev/null 2>&1; then
-            ci_err "rollback contract selftest FAILED — run: sh ci/tests/rollback-selftest.sh"
-            _sf_fail=1
-        fi
-    else
-        ci_err "ci/tests/rollback-selftest.sh missing/not executable — the auto-rollback contract is untested"
-        _sf_fail=1
-    fi
+    # Synthetic-repository / runtime-policy fixtures (ci/tests/*.selftest.sh):
+    # each one extracts the REAL functions from the stage under test and runs
+    # them against a throwaway fixture. All five are wired below — before
+    # 2026-10-13 only the rollback contract was, and the other four silently
+    # rotted (their HEAD-anchored teeth probes kept comparing against a HEAD
+    # that had meanwhile absorbed the fixes).
+    selftest_contract 11 15 "verify-stage rollback contract (synthetic image fixture)" \
+        "$CI_DIR/tests/rollback-selftest.sh"
+    selftest_contract 12 15 "fetch-stage history + pushed-HEAD contract (synthetic repository fixture)" \
+        "$CI_DIR/tests/fetch-selftest.sh"
+    selftest_contract 13 15 "security-stage gitleaks full-history guard (shallow-clone fixture)" \
+        "$CI_DIR/tests/gitleaks-shallow-selftest.sh"
+    selftest_contract 14 15 "REQUIRED-lane missing-runtime policy (empty-PATH fixture)" \
+        "$CI_DIR/tests/missing-runtime-selftest.sh"
+    selftest_contract 15 15 "validate-stage backup-service coverage (synthetic input fixture)" \
+        "$CI_DIR/tests/validate-coverage-selftest.sh"
 
     if [ "$_sf_fail" -eq 0 ]; then
         ci_info "selftest: ALL OK"

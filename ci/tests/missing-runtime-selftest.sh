@@ -80,8 +80,20 @@ grep -q 'CI_MARKETING_VALIDATION:-required' "$CI_ROOT/stages/validate.sh" \
     || _bad "validate.sh zola gates still warn-skip"
 
 # --- teeth: the pre-fix ui.sh guard returned success without python3 ---------
-if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" cat-file -e HEAD:ci/stages/ui.sh 2>/dev/null; then
-    git -C "$REPO_ROOT" show HEAD:ci/stages/ui.sh > "$_work/old-ui.sh"
+# The fix is committed, so HEAD no longer carries the pre-fix guard — the
+# teeth probe anchors on the PARENT of the commit that introduced the fixed
+# routing (resolved dynamically via -S; no hardcoded sha). A shallow or
+# absent history skips loudly instead of failing on an untestable premise.
+_teeth_rev=''
+if command -v git >/dev/null 2>&1; then
+    _teeth_fix=$(git -C "$REPO_ROOT" log --format=%H -S 'lane_tool_status python3 ui-gates' \
+        -- ci/stages/ui.sh 2>/dev/null | tail -n 1)
+    if [ -n "$_teeth_fix" ]; then
+        _teeth_rev=$(git -C "$REPO_ROOT" rev-parse -q --verify "${_teeth_fix}^" 2>/dev/null) || _teeth_rev=''
+    fi
+fi
+if [ -n "$_teeth_rev" ]; then
+    git -C "$REPO_ROOT" show "${_teeth_rev}:ci/stages/ui.sh" > "$_work/old-ui.sh"
     sed -n '/command -v python3 >\/dev\/null 2>&1 || {/,/^    }$/p' "$_work/old-ui.sh" > "$_work/old-guard-body.sh"
     if [ -s "$_work/old-guard-body.sh" ]; then
         {
@@ -110,10 +122,10 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" cat-file -e HEAD:ci/sta
             _bad "teeth: pre-fix guard produced no skip warning"
         fi
     else
-        _bad "teeth: could not extract the pre-fix ui.sh guard"
+        _bad "teeth: could not extract the pre-fix ui.sh guard (revision $_teeth_rev)"
     fi
 else
-    echo "skip teeth probe: git/HEAD:ci/stages/ui.sh unavailable" >&2
+    echo "skip teeth probe: pre-fix revision not resolvable (shallow or absent history)" >&2
 fi
 
 if [ "$_fail" -eq 0 ]; then

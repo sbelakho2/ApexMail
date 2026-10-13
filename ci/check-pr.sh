@@ -4,8 +4,8 @@
 # =============================================================================
 # GitHub gave every PR a row of required status checks. Without GitHub, the
 # equivalents are:
-#   * THIS script — run the merge-blocking stages (validate + test + security)
-#     against any ref, before merging or pushing:
+#   * THIS script — run the merge-blocking stages (validate + docs + test +
+#     security) against any ref, before merging or pushing:
 #         ci/check-pr.sh              # current HEAD
 #         ci/check-pr.sh feature-xyz  # a branch (validated in a temp worktree)
 #         ci/check-pr.sh <sha>
@@ -16,8 +16,9 @@
 #     REFUSES to deploy when they fail — the real enforcement point.
 #
 # Options:
-#   --skip-security   run validate+test only (faster pre-merge loop)
-#   --fast            validate only (what the pre-push hook uses)
+#   --skip-security   run validate+docs+test only (faster pre-merge loop)
+#   --fast            validate+docs only (what the pre-push hook uses: the
+#                     docs architecture-truth gates are seconds-cheap)
 #   --allow-dirty     do not refuse on a dirty working tree
 #
 # Exit 0 = all requested stages green (exit 75 "skip" counts as green here:

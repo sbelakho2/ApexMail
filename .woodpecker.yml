@@ -35,9 +35,11 @@
 # below carries the REAL digest (pushed 2026-10-03, see the anchor comment);
 # the all-zero placeholder it replaced was a hard failure, not a silent pass.
 #
-# Scope: validate → test → security. The host-only stages (fetch/migrate/
-# deploy/verify/notify) are deliberately NOT here: they act on the deploy host
-# and require its docker/compose and secrets. CI never deploys.
+# Scope: the five stage steps validate → docs → ui → test → security, after
+# the toolchain-assertion step and followed by the two notify-github commit-
+# status steps. The host-only stages (fetch/images/migrate/deploy/verify/
+# notify) are deliberately NOT here: they act on the deploy host and require
+# its docker/compose and secrets. CI never deploys.
 #
 # Databases: postgres + redis are provided as Woodpecker `services`, and the
 # stages run in `service` mode (CI_TEST_DB=service / CI_TEST_REDIS=service), so

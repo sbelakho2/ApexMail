@@ -17,6 +17,9 @@
 #   2. cargo fmt --check
 #   3. cargo clippy --workspace --all-targets -- -D warnings
 #   4. repo python gates (cycles / feature flags / audit coverage)
+#   4b. dogfood ledger + harness self-test (tools/dogfood-v2/run.py;
+#      CI_DOGFOOD_CHECK — the ledger is the 100%-surface-coverage gate; the
+#      live battery stays off unless CI_DOGFOOD_LIVE=1)
 #   5. cargo machete + cargo deny (advisories bans sources licenses) —
 #      REQUIRED via ci_have_tool (fail-closed on the deploy host, warn-skip
 #      on dev machines); licenses gate: inventory-driven deny.toml allow list
@@ -848,20 +851,33 @@ run_satellite_crates() {
 }
 
 # --- 10. static lint gates -----------------------------------------------------------------
-# Runs shellcheck over EVERY tracked *.sh, hadolint over every tracked
-# Dockerfile (repo config .hadolint.yaml: failure-threshold=warning, inline
-# ignores only), and a python compile gate over the audit tooling itself.
-# All three REQUIRED via CI_STATIC_LINT_CHECK; findings are fixed at the
-# source — the repo is clean at `shellcheck -S warning` and `hadolint`
-# today, and these gates keep it that way.
+# Runs shellcheck over EVERY tracked *.sh OUTSIDE the upstream mirror, hadolint
+# over every tracked Dockerfile (repo config .hadolint.yaml:
+# failure-threshold=warning, inline ignores only), and a python compile gate
+# over the audit tooling itself. All three REQUIRED via CI_STATIC_LINT_CHECK;
+# findings in OUR bytes are fixed at the source — our tree is clean at
+# `shellcheck -S warning` and `hadolint` today, and these gates keep it that
+# way.
+#
+# The mirror-surface exclusion is a scope boundary, not a suppression: the
+# KiwiCaptcha mirror (packages/kiwicaptcha/**, tests/browser/**, protocol/**)
+# is synced byte-for-byte from the upstream repo (byte-parity 1257/1257,
+# commit 3c022fb2) and edits here are forbidden — the next advance would
+# clobber any local fix and break the parity proof. Upstream owns their lint
+# policy; the currently-known findings that this exclusion leaves to upstream
+# are six warnings in packages/kiwicaptcha/tools/{check-psr4.sh,
+# docs-lint-one-shot-test.sh, docs-lint.sh, verify-error-code-parity.sh}
+# (SC1007/SC2209; identical at 25f0d05e and 6fdffee0 — pre-existing upstream
+# style, not a regression) and they are listed here so they stay visible
+# rather than silently un-checked.
 run_static_lint_gates() {
     _sl_st=$(lane_tool_status shellcheck shellcheck-gate "${CI_STATIC_LINT_CHECK:-required}")
     case $_sl_st in
         run)
             # -S warning: error+warning findings fail; style/info stay visible
             # but advisory. -z/-0 pairing keeps paths with spaces safe.
-            (cd "$REPO_ROOT" && ci_check "shellcheck -S warning (all tracked *.sh)" \
-                sh -c 'git ls-files -z -- "*.sh" | xargs -0 shellcheck -S warning') \
+            (cd "$REPO_ROOT" && ci_check "shellcheck -S warning (all tracked *.sh, mirror surface excluded — see lane comment)" \
+                sh -c 'git ls-files -z -- "*.sh" ":(exclude)packages/kiwicaptcha/**" ":(exclude)tests/browser/**" ":(exclude)protocol/**" | xargs -0 shellcheck -S warning') \
                 || { [ "${CI_STATIC_LINT_CHECK:-required}" = advisory ] \
                     && ci_warn "ADVISORY: shellcheck findings (CI_STATIC_LINT_CHECK=advisory triage window)" \
                     || return "$CI_EXIT_FAIL"; }
@@ -1338,6 +1354,56 @@ clippy_gate() {
     return "$CI_EXIT_OK"
 }
 
+# --- dogfood ledger + harness self-test (2026-10-13) --------------------------------
+# tools/dogfood-v2/run.py is the whole-repo dogfood harness: the ledger
+# enumerates every controllable surface (api routes, SSR pages, tables, env
+# entries, services, tracking links) and requires each one to map to a real
+# probe. `--ledger-only` is the 100%-coverage CI GATE: it exits 3 while any
+# surface is unprobed (the unprobed list is printed for triage) — fail-closed,
+# because a surface nothing probes is exactly the "implemented but never
+# exercised" class this repo keeps finding by hand. `--self-test` runs the
+# whole battery against the harness's own fixture server (self-hosted on
+# loopback ports, no external network; measured ~2.5 min / 1317 checks) and
+# proves the harness contract itself. Both are pure python3; a missing
+# python3 FAILS the lane closed for a REQUIRED flag (lane_tool_status).
+#
+# CI_DOGFOOD_LIVE=0 by default and deliberately: the live battery drives a
+# RUNNING non-production stack (api-server + web/CP/marketing hosts) and must
+# never point at production (WP A1 / host-load policy). Set CI_DOGFOOD_LIVE=1
+# where a built api-server + docker env exist (see ci/README.md §8c); the
+# mutation battery needs that same stack and stays a manual run.
+run_dogfood_lane() {
+    _df_st=$(lane_tool_status python3 dogfood "${CI_DOGFOOD_CHECK:-required}")
+    case $_df_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    (cd "$REPO_ROOT" && ci_check "dogfood ledger (every enumerated surface probed)" \
+        python3 tools/dogfood-v2/run.py --ledger-only) \
+        || { [ "${CI_DOGFOOD_CHECK:-required}" = advisory ] \
+            && ci_warn "ADVISORY: dogfood ledger reports unprobed surfaces (exit 3 — CI_DOGFOOD_CHECK=advisory triage window); unprobed list above" \
+            || { ci_err "dogfood ledger coverage FAILED — unprobed surface list above (exit 3 = ledger coverage violation)"; return "$CI_EXIT_FAIL"; }; }
+    (cd "$REPO_ROOT" && ci_check "dogfood harness self-test (whole battery vs fixture server)" \
+        python3 tools/dogfood-v2/run.py --self-test) \
+        || { [ "${CI_DOGFOOD_CHECK:-required}" = advisory ] \
+            && ci_warn "ADVISORY: dogfood harness self-test FAILED (CI_DOGFOOD_CHECK=advisory triage window) — the harness contract is unproven" \
+            || return "$CI_EXIT_FAIL"; }
+    if [ "${CI_DOGFOOD_LIVE:-0}" = 1 ]; then
+        _df_base=${CI_DOGFOOD_HOST:-http://127.0.0.1:8080}
+        _df_cp=${CI_DOGFOOD_CP_HOST:-admin.localhost}
+        _df_mkt=${CI_DOGFOOD_MARKETING_HOST:-marketing.localhost}
+        (cd "$REPO_ROOT" && ci_check "dogfood live battery ($_df_base)" \
+            python3 tools/dogfood-v2/run.py --base "$_df_base" --cp-host "$_df_cp" \
+            --marketing-host "$_df_mkt" --json "$RUN_DIR/dogfood-findings.json") \
+            || { [ "${CI_DOGFOOD_CHECK:-required}" = advisory ] \
+                && ci_warn "ADVISORY: dogfood live battery findings (CI_DOGFOOD_CHECK=advisory triage window) — see $RUN_DIR/dogfood-findings.json" \
+                || return "$CI_EXIT_FAIL"; }
+    else
+        ci_info "dogfood live battery skipped: CI_DOGFOOD_LIVE=0 (needs a running NON-production stack; set CI_DOGFOOD_LIVE=1 where a built api-server + docker env exist — ci/README.md §8c)"
+    fi
+    return "$CI_EXIT_OK"
+}
+
 stage_main() {
     ensure_marketing_output
 
@@ -1384,6 +1450,7 @@ stage_main() {
         ;;
     esac
 
+    run_dogfood_lane
     cargo_tool_gates
     run_cargo_tests
     run_coverage_gate

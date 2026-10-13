@@ -157,14 +157,24 @@ assert java     'java -version'
 assert ruby     'ruby --version'
 
 # Playwright browsers: the contrast/layout gates (ci/stages/test.sh F2
-# provisioning) run the WORKSPACE playwright — npm ci of
-# tools/contrast-audit, whose lockfile pin PLAYWRIGHT_VERSION mirrors —
-# against the browser binaries baked in at build time. No chromium in the
-# cache means a silently broken browser layer.
+# provisioning) run the WORKSPACE playwright — npm ci of tools/contrast-audit,
+# whose lockfile pin PLAYWRIGHT_VERSION mirrors — against the browser binaries
+# baked in at build time; the browser suite (tests/browser) does the same with
+# its own lock, mirrored by PLAYWRIGHT_BROWSER_SUITE_VERSION. The two minors
+# contribute two distinct chromium revisions, so the cache must carry at least
+# two chromium-* directories. No chromium in the cache means a silently broken
+# browser layer. (The per-version truth is the lane's own executablePath()
+# probe, which fails closed with the missing-runtime message.)
 _pw_dir=${PLAYWRIGHT_BROWSERS_PATH:-${HOME:-/root}/.cache/ms-playwright}
 # shellcheck disable=SC2010  # chromium-<rev> dirs are the documented layout
-if [ -d "$_pw_dir" ] && ls "$_pw_dir" 2>/dev/null | grep -q '^chromium'; then
-    echo "toolchain: playwright browsers — chromium present in $_pw_dir (pin ${PLAYWRIGHT_VERSION:-?})"
+_pw_chromium=$(ls "$_pw_dir" 2>/dev/null | grep -c '^chromium-' || true)
+if [ -d "$_pw_dir" ] && [ "${_pw_chromium:-0}" -ge 1 ]; then
+    echo "toolchain: playwright browsers — chromium present in $_pw_dir (pins ${PLAYWRIGHT_VERSION:-?} + ${PLAYWRIGHT_BROWSER_SUITE_VERSION:-?})"
+    if [ -n "${PLAYWRIGHT_BROWSER_SUITE_VERSION:-}" ] && [ "${_pw_chromium:-0}" -lt 2 ]; then
+        echo "FAIL toolchain: only ${_pw_chromium} chromium revision(s) under $_pw_dir — the browser \
+suite pin playwright@${PLAYWRIGHT_BROWSER_SUITE_VERSION} demands its own build (Dockerfile browser layer)" >&2
+        fail=$((fail + 1))
+    fi
 else
     echo "FAIL toolchain: no chromium under $_pw_dir — the Dockerfile browser layer \
 (playwright@${PLAYWRIGHT_VERSION:-?}) did not install (audit SM14 F2)" >&2

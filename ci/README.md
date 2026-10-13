@@ -12,7 +12,7 @@ these same stages:
 | Runner | Where | What it runs | Cost |
 |---|---|---|---|
 | `ci/pipeline.sh` | the deploy host (systemd timer + local webhook) | every stage incl. images/migrate/deploy/verify | free (own host) |
-| Woodpecker CI — [`.woodpecker.yml`](../.woodpecker.yml) | any agent you point at it (a container on the deploy host, a spare box, a workstation) | `validate` → `test` → `security` on every push/PR; **never deploys** | free (self-hosted, Apache-2.0) |
+| Woodpecker CI — [`.woodpecker.yml`](../.woodpecker.yml) | any agent you point at it (a container on the deploy host, a spare box, a workstation) | `validate` → `docs` → `ui` → `test` → `security` on every push/PR; **never deploys** | free (self-hosted, Apache-2.0) |
 
 `.woodpecker.yml` is a THIN ADAPTER: each step calls
 `ci/woodpecker/stage.sh <stage>`, which runs the same `ci/stages/<stage>.sh`
@@ -44,7 +44,7 @@ GitHub Actions workflows were removed from the tree (2026-09-13); the
    │               (+ephemeral DB/Redis), coverage ratchet             │
    │               (llvm-cov → baseline), PHP suites (required),       │
    │               five SDK lanes, satellite crates, shellcheck/       │
-   │               hadolint/py-compile                                 │
+   │               hadolint/py-compile, dogfood ledger + self-test     │
    │ 04 security   gitleaks, cargo audit (+RUSTSEC ignores), cargo vet,│
    │               semgrep SAST (REQUIRED), fresh-DB migration         │
    │               validation, Trivy images + Trivy fs (+SBOM)         │
@@ -79,7 +79,8 @@ names are bounded; no unbounded growth anywhere.
 
 ```
 ci/pipeline.sh run [--stages a,b] [--skip a,b] [--skip-deploy] [--ref REF]
-                   [--advisory a,b] [--dry-run] [--force] [--lock-wait S]
+                   [--advisory a,b] [--skip-unchanged] [--dry-run] [--force]
+                   [--lock-wait S]
 ci/pipeline.sh status      # last run manifest, failure marker, containers
 ci/pipeline.sh list        # stages, timeouts, advisory flags
 ci/pipeline.sh selftest    # contract tests + full dry-run (no infrastructure)
@@ -108,7 +109,7 @@ so the coverage of the old CI can still be audited.
 | `rust-check.yml` | **REPLACED** | `test` stage: cargo fmt --check (`CI_FMT_CHECK`, see §9 F7), clippy `--workspace --all-targets -D warnings`, `cargo test --workspace`, dependency-cycle / security-feature-flag / audit-coverage python gates, cargo-machete + cargo-deny `check advisories bans sources licenses` — REQUIRED lanes via `ci_have_tool` since 2026-09-10 (fail-closed on the deploy host, warn-skip on dev machines; the licenses gate runs off the inventory-driven `services/mail-server/deny.toml` allow list). Secret-scan job → `security` stage (gitleaks). Semgrep SAST job → `security` stage, REQUIRED (see §5). |
 | `security-audit.yml` | **REPLACED** | `security` stage: `cargo audit --deny warnings` with the identical 15-entry RUSTSEC ignore list (keep both lists in lockstep — the justifications live in the old workflow and in `ci/pipeline.conf`). `outdated` job → advisory report only, as upstream (`continue-on-error`). Weekly cadence → the timer runs it on every poll; set `--stages security` for a standalone audit. |
 | `cargo-vet.yml` | **REPLACED** | `security` stage (`ci/stages/security.sh:119-127`): `supply-chain/config.toml` is committed and REQUIRED — if it disappears the lane hard-fails (it is no longer optional-by-absence); otherwise `cargo vet --locked` runs. **Assurance note (coverage audit U-10):** since 2026-10-07 the store imports 9 peer audit sets and reports its own split on every run ("Vetting Succeeded (164 fully audited, 16 partially audited, 586 exempted)"). The 586 exemptions are self-assertions, not reviews — a green run is NOT full provenance; quote the split (policy: `services/mail-server/supply-chain/README.md`). |
-| `sqlx-migration-validation.yml` | **REPLACED** | `security` stage: `migrator --dry-run` (embedded set) + `sqlx migrate run` **twice** against a throwaway `postgres:16-alpine` (clean apply + idempotency — the same two assertions). Currently **red**: §9 F1, so the gate runs as `CI_MIGRATION_CHECK=advisory` until migration 109 is fixed. |
+| `sqlx-migration-validation.yml` | **REPLACED** | `security` stage: `migrator --dry-run` (embedded set) + `sqlx migrate run` **twice** against a throwaway `postgres:16-alpine` (clean apply + idempotency — the same two assertions). The chain was broken when this table was written (§9 F1) and the gate ran advisory; the chain is fixed through migration 118 and `CI_MIGRATION_CHECK` is **required** again (a fresh-DB migration failure fails the run). |
 | `deploy.yml` | **REPLACED** | `images` stage builds every canonical target (via `deploy/scripts/deploy.sh --build-only` — the same Dockerfile targets the workflow used), tags `:latest` + `:<sha>` locally (no registry at all). Trivy CRITICAL/HIGH gate on api-server + mta runs post-build in `images` (and pre-deploy in `security` on whatever images exist). Syft SBOM → Trivy SPDX JSON in the run dir (advisory, as upstream). Image-name drift guard job → `validate` stage (ported verbatim). `pr-gate` job (checks API polling) → **cannot replicate without GitHub** — substitute: `ci/check-pr.sh` + the pre-push hook (§4). |
 | `deploy-hetzner.yml` | **REPLACED** | The pipeline runs **on the host itself**, which eliminates the entire SSH/runner layer: env validation (`validate`), the migration gate (`migrate`), `compose up` + nginx reload (`deploy`), the rollout verification incl. SMTP banner + TLS check (`verify`). Secrets stay in `/opt/apexmail/.env` + `secrets/` (0600) — nothing transits a third-party runner. |
 | `rust-panic-paths.yml` | **REPLACED** | `validate` stage: `check_rust_panic_paths.py` + `check_outbound_delivery_contract.py`. |
@@ -178,8 +179,9 @@ via `CI_MARKETING_VALIDATION` (§2a).
 | 1 | fetch | 180 s | 2 s (HTTPS fetch + pushed-HEAD check) |
 | 2 | validate | 1800 s | 45–150 s + ~3 min marketing validation (zola build, pricing/legal gates, then the 9 required site-quality validators; broken-links alone walks 7,370 links in ~70 s) |
 | 2.5 | docs | 300 s | <1 s — documentation architecture-truth gates (`tools/check_docs_architecture_truth.py`, CI_DOCS_TRUTH_CHECK): production runbooks/operational docs must not teach Kubernetes operations (kubectl/helm/k9s/…) — the deployment is a single Hetzner host with Docker Compose; genuinely historical/roadmap docs carry an `ARCHITECTURE-TRUTH:` marker (audit EXT-E #11, 2026-10-02) |
-| 3 | test | 18000 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and first-ever composer installs download deps on first run; see §8b). 2026-10-11: raised 5400 s → 18000 s — the workspace suite is now ~12.6k tests and runs 3.5–4 h at `--test-threads 4` on the deploy host, always to completion (`--no-fail-fast`) || 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
-| 5 | images | 10800 s | host-only (Rust docker build; `deploy.sh --build-only` timing) |
+| 3 | test | 64800 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and first-ever composer installs download deps on first run; see §8b), and the dogfood ledger + self-test add ~1.5 s + ~2.5 min (§8c). 2026-10-11: raised 5400 s → 18000 s → 64800 s (5 h): the workspace suite is now ~12.6k tests and runs 3.5–4 h at `--test-threads 4` on the deploy host, always to completion (`--no-fail-fast`), so 5 h is that worst case with margin |
+| 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
+| 5 | images | 21600 s | host-only (full Rust docker build, cold cache; `deploy.sh --build-only` timing) |
 | 6 | migrate | 600 s | host-only (migrator one-shot, seconds) |
 | 7 | deploy | 1200 s | host-only (up -d + nginx reload, ~30 s) |
 | 8 | verify | 900 s | host-only; remote mode (CI_VERIFY_REMOTE=1) ~5 s incl. the content smoke |
@@ -346,8 +348,14 @@ FAIL CLOSED on the deploy host (`ci_have_tool`).
 
 ## 7b. The 2026-09-10 enterprise coverage expansion
 
-Lanes added / tightened; every one is REQUIRED with an `advisory` escape
-hatch for bounded triage windows (pipeline.conf):
+Lanes added / tightened; each one is REQUIRED by default with an `advisory`
+escape hatch for a bounded triage window (pipeline.conf) — except the
+coverage ratchet, which is explicitly advisory until the first host
+measurement exists (item 4). The WCAG contrast gate named here is REQUIRED
+either way: `deploy/tests/contrast-check.sh` heuristics run inside
+`CI_MARKETING_VALIDATION` (validate), and the pixel-verified
+`tools/contrast-audit/gate.sh` runs under `CI_CONTRAST_GATE_CHECK` (test) —
+both required since the first-host triage window ended (2026-10-13).
 
 1. **cargo-deny licenses** (test stage, `cargo_tool_gates`) — the deny
    invocation is now `check advisories bans sources licenses`. The allow
@@ -382,7 +390,12 @@ hatch for bounded triage windows (pipeline.conf):
    + a nudge to raise the baseline in the same PR. The baseline ships as
    `0.0` — the FIRST HOST RUN seeds the real value; commit it. Requires
    cargo-llvm-cov + the `llvm-tools-preview` rustup component +
-   cargo-nextest (all installed by `ci/install.sh`).
+   cargo-nextest (all installed by `ci/install.sh`). Flag status
+   (2026-10-13): `CI_COVERAGE_CHECK` is **advisory** — the deploy host has
+   never produced a coverage.lcov (the instrumented pass carries a ~150G
+   scratch-tree precondition and has always been skipped ahead of it), so no
+   measured value exists to raise against; the flip to required belongs to
+   the PR that first records a host measurement at/above the baseline.
 5. **Migration SQL lint** (validate stage, `tools/migration_lint.py`) —
    enterprise conventions over the canonical chain: destructive ops
    guarded, idempotent CREATE TABLE/INDEX, `-- Migration N:` headers, no
@@ -397,17 +410,23 @@ hatch for bounded triage windows (pipeline.conf):
 
 ## 8. Test-stage DB/Redis policy
 
-GitHub-parity by default (`CI_TEST_DB=none`, `CI_TEST_REDIS=0`): the
-DB/Redis-gated Rust tests self-skip, exactly as they did on GitHub runners
-(rust-check.yml ran no service containers). Stronger local modes:
+`ephemeral` by default (`CI_TEST_DB=ephemeral`, `CI_TEST_REDIS=1`): the
+pipeline starts its own postgres + redis containers, applies the canonical
+SCHEMA to the database and exports `TEST_DATABASE_URL` / `TEST_REDIS_URL`, so
+the DB/Redis-gated Rust tests RUN for real instead of self-skipping. (This
+was the "defaults that gated nothing" fix — §9 F3/F4 were the real defects
+the skipped suites had been hiding.) The GitHub-parity reproduction mode is
+now the explicit downgrade:
 
 ```
-CI_TEST_DB=ephemeral ci/pipeline.sh run --stages test   # postgres + canonical SCHEMA + TEST_DATABASE_URL
-CI_TEST_REDIS=1      ci/pipeline.sh run --stages test   # redis + TEST_REDIS_URL
+CI_TEST_DB=none CI_TEST_REDIS=0 ci/pipeline.sh run --stages test  # DB/Redis-gated tests self-skip (GitHub parity)
+CI_TEST_DB=service ci/pipeline.sh run --stages test               # consume an executor-provided TEST_DATABASE_URL (Woodpecker §11)
 ```
 
-Both currently surface real defects that GitHub CI never executed (§9 F3,
-F4) — they are opt-in until fixed.
+`service` mode uses the provided `TEST_DATABASE_URL`/`TEST_REDIS_URL`
+verbatim, applies the canonical chain to that database, and FAILS CLOSED
+when the URL is missing (a green pipeline that ran zero DB-gated tests is
+the failure mode this prevents).
 
 ---
 
@@ -458,10 +477,14 @@ build, not by the test lane.
 ### Static lint gates (`CI_STATIC_LINT_CHECK=required`)
 
 * **shellcheck** over every tracked `*.sh` (`git ls-files`), at
-  `-S warning` (error+warning fail; style/info advisory). The whole repo is
-  clean at this level; findings are fixed at the source, and the two
-  justified false-positives carry inline `# shellcheck disable=`
-  comments with reasons (grep `disable=SC` to audit).
+  `-S warning` (error+warning fail; style/info advisory). The repo is clean
+  at this level EXCEPT seven findings (six SC1007 + one SC2209) in the
+  mirrored `packages/kiwicaptcha/tools/*.sh` (introduced by the 2026-10-13
+  mirror advance to upstream 6fdffee0 — the mirror is a separate product, so
+  the fix belongs to its next sync, not to an edit here). Everywhere else
+  findings are fixed at the source, and the two justified false-positives
+  carry inline `# shellcheck disable=` comments with reasons (grep
+  `disable=SC` to audit).
 * **hadolint** over every tracked Dockerfile, configured by the checked-in
   `.hadolint.yaml` (`failure-threshold: warning`, no global rule ignores).
   The only suppressed findings are inline `# hadolint ignore=DL…` comments
@@ -483,6 +506,25 @@ release binary) and `ci/install.sh check` verifies their presence.
 
 ---
 
+## 8c. Dogfood harness — ledger coverage + self-test (test stage)
+
+`tools/dogfood-v2/run.py` is the whole-repo dogfood harness: its ledger
+enumerates every controllable surface (api routes, SSR pages, tables, env
+entries, services, tracking links — 1,733 today) and requires each to map to
+a real probe. The test stage wires it behind two knobs:
+
+| Knob | Default | What the lane does |
+|---|---|---|
+| `CI_DOGFOOD_CHECK` | `required` | `python3 tools/dogfood-v2/run.py --ledger-only` — the 100%-surface-coverage gate: any unprobed surface exits 3 and FAILS the lane with the unprobed list printed. Then `--self-test` runs the whole probe battery against the harness's own fixture server (self-hosted on loopback ports; 1,317 checks, ~2.5 min locally) to prove the harness contract itself. A missing python3 fails the lane closed (lane_tool_status). |
+| `CI_DOGFOOD_LIVE` | `0` (off) | When 1, additionally runs the LIVE battery against a running non-production stack (`--base ${CI_DOGFOOD_HOST:-http://127.0.0.1:8080}`, `--cp-host`, `--marketing-host`; findings JSON into the run dir). Off by default deliberately: the battery drives real surfaces and must never point at production (WP A1 / host-load policy). Enable it on an executor or a dev stack where a built api-server + docker env exist. |
+
+The mutation battery (`--mutation-test`: seeds defects into a scratch
+worktree, builds, requires every seed to be caught) needs that same built
+api-server + docker environment and stays a manual / qualification run — it
+is deliberately NOT wired into any pipeline stage.
+
+---
+
 ## 9. Known pipeline findings (discovered while building this, 2026-08-21)
 
 These are **product defects found by this pipeline**, not pipeline bugs:
@@ -496,9 +538,11 @@ These are **product defects found by this pipeline**, not pipeline bugs:
   the `(account_id, mailbox_id, message_id)` dedup index without the
   partition key. Production survives because the objects pre-exist there;
   a fresh host cannot be provisioned, and the GitHub
-  sqlx-migration-validation workflow would fail identically today. Until
-  fixed, `CI_MIGRATION_CHECK=advisory` downgrades the security-stage check
-  (it then reports instead of blocking).
+  sqlx-migration-validation workflow would have failed identically.
+  **FIXED**: the chain was repaired (fixed through migration 118 and
+  extended since), so `CI_MIGRATION_CHECK` is REQUIRED again in the
+  security stage — a fresh-DB migration failure fails the run. The
+  paragraphs above are the historical record.
 * **F2 — the migrator one-shot crashes on a *completely* fresh database**:
   `applied_count` decodes `SELECT to_regclass(...)::text` as a non-optional
   String; on a fresh DB the row is present with a NULL column and decode
@@ -532,25 +576,27 @@ These are **product defects found by this pipeline**, not pipeline bugs:
   ephemeral containers instead.
 * **F7 — committed formatting drift**: `cargo fmt --check` fails on
   origin/main itself (rust-check.yml never ran fmt; this pipeline adds it —
-  991 files currently need formatting). The fmt gate therefore defaults to
-  `CI_FMT_CHECK=advisory`: the full diff is recorded in the run dir and a
-  warning logged. Run `cargo fmt` in `services/mail-server`, commit, then
-  set `CI_FMT_CHECK=required` in `ci/pipeline.conf`.
+  991 files currently need formatting). **FIXED**: the drift landed and the
+  gate is REQUIRED (`CI_FMT_CHECK=required` in `ci/pipeline.conf`) — a
+  regression fails the run; the full diff is recorded in the run dir and
+  `advisory` exists only as a bounded triage-window override.
 * **F8 — clippy drift against a current toolchain**: `cargo clippy
   --workspace --all-targets -- -D warnings` (exactly rust-check.yml's lane)
   reports 64 errors on current main with rust-clippy 1.96 — a mix of real
   lint (e.g. `named argument 'content' is not used by name` in
   ui-foundation, `empty line after doc comment` in leptos_views) and newer
   lints the GitHub runner's older stable never saw
-  (`unnecessary_first_then_check`). Same treatment: the gate runs on every
-  test stage, records `clippy-check.log` in the run dir, and defaults to
-  `CI_CLIPPY_CHECK=advisory` until the tree is clean — then required.
+  (`unnecessary_first_then_check`). **FIXED**: the tree is clean and the
+  gate is REQUIRED (`CI_CLIPPY_CHECK=required`); it records
+  `clippy-check.log` in the run dir on failure, and `advisory` exists only
+  as a bounded triage-window override.
 * **F9 — the WS-ALL audit-coverage ledger is stale**: `tools/
   check_audit_coverage.py` fails with "audit coverage crate listed but
   missing Cargo.toml: bounce-analytics" — the ledger still lists a crate the
   workspace removed (see deploy/DEPLOYMENT.md "Legacy / removed crates").
-  rust-check.yml ran the same check and would fail identically. Advisory
-  (`CI_AUDIT_COVERAGE_CHECK`) until the ledger row is removed.
+  rust-check.yml ran the same check and would have failed identically.
+  **FIXED**: the ledger row was removed and the gate is REQUIRED
+  (`CI_AUDIT_COVERAGE_CHECK=required`) — a regression fails the run.
 * **F10 — env-mutating tests race under `cargo test` (not under nextest)**:
   `worker-processors::email::tracking::tests::
   encode_without_secret_is_refused_and_html_untouched` removes
@@ -611,13 +657,17 @@ agent).
 
 ### What runs
 
-`.woodpecker.yml` runs three steps on every push, pull request and manual
-trigger, each a thin call into this directory's stages:
+`.woodpecker.yml` runs five stage steps on every push, pull request and
+manual trigger — preceded by a toolchain-assertion step and followed by two
+notify-github commit-status steps — each a thin call into this directory's
+stages:
 
 | Step | Stage | Covers |
 |---|---|---|
 | validate | `ci/stages/validate.sh` | compose/env sanity, pipeline-config invariants, repo gates (kiwi isolation, panic paths, outbound-delivery contract, migration lint, …) |
-| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet, PHP/SDK/satellite/static-lint lanes |
+| docs | `ci/stages/docs.sh` | documentation architecture-truth gates (production runbooks must not teach kubectl/helm/k9s operations; historical/roadmap docs carry an `ARCHITECTURE-TRUTH:` marker) |
+| ui | `ci/stages/ui.sh` | the seven REQUIRED visual-fixture gates (flash copy, form hygiene, a11y, dead links, terminology, strings catalog, marketing token contrast) |
+| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet, PHP/SDK/satellite/static-lint lanes, dogfood ledger + self-test (§8c) |
 | security | `ci/stages/security.sh` | gitleaks (full history), cargo audit, cargo vet, semgrep SAST, fresh-database migration validation, Trivy |
 
 The DB-gated suites really run: the pipeline declares `postgres` + `redis`

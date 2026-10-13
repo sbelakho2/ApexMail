@@ -206,14 +206,25 @@ else
     _bad "rollback: .last-deployed-sha changed during rollback"
 fi
 
-# --- 7. teeth: the PRE-FIX (HEAD) verify.sh fails the same fixture ------------
+# --- 7. teeth: the PRE-FIX verify.sh fails the same fixture -------------------
 # A fixture that passes on the fixed code proves nothing unless it fails on
-# the broken code. HEAD's verify.sh is extracted, the rollback call is
-# injected in place of its stage_main, and the SAME image fixture is run: the
-# old loop must (a) never retag tracking-service and (b) still claim
-# "ROLLBACK COMPLETE" with a canonical image missing.
-if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" cat-file -e "HEAD:ci/stages/verify.sh" 2>/dev/null; then
-    git -C "$REPO_ROOT" show "HEAD:ci/stages/verify.sh" >"$_work/old-verify.sh"
+# the broken code. The fix is committed, so HEAD no longer carries the broken
+# loop — the teeth anchor on the PARENT of the commit that introduced the
+# rollback abort/complete contract (resolved dynamically via -S; no hardcoded
+# sha). That revision's verify.sh is extracted, the rollback call is injected
+# in place of its stage_main, and the SAME image fixture is run: the old loop
+# must (a) never retag tracking-service and (b) still claim "ROLLBACK COMPLETE"
+# with a canonical image missing. A shallow or absent history skips loudly.
+_teeth_rev=''
+if command -v git >/dev/null 2>&1; then
+    _teeth_fix=$(git -C "$REPO_ROOT" log --format=%H -S 'ROLLBACK ABORTED' \
+        -- ci/stages/verify.sh 2>/dev/null | tail -n 1)
+    if [ -n "$_teeth_fix" ]; then
+        _teeth_rev=$(git -C "$REPO_ROOT" rev-parse -q --verify "${_teeth_fix}^" 2>/dev/null) || _teeth_rev=''
+    fi
+fi
+if [ -n "$_teeth_rev" ]; then
+    git -C "$REPO_ROOT" show "${_teeth_rev}:ci/stages/verify.sh" >"$_work/old-verify.sh"
     awk '/^stage_main$/ && !_done { print "rollback_to_previous_sha; exit 0"; _done=1 } { print }' \
         "$_work/old-verify.sh" >"$_work/old-verify-hooked.sh"
     if grep -q 'rollback_to_previous_sha; exit 0' "$_work/old-verify-hooked.sh"; then
@@ -225,14 +236,14 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" cat-file -e "HEAD:ci/st
             CI_ROLLBACK_ON_VERIFY_FAIL=1 EXTRA_ROLLBACK_IMAGES='' \
             sh "$_work/old-verify-hooked.sh" >"$_work/old-out-a.log" 2>&1 || true
         if grep -q "tag ghcr.io/sbelakho2/apexmail/tracking-service:${PREV_SHA}" "$_work/old-log-a"; then
-            _bad "teeth: HEAD verify.sh unexpectedly retagged tracking-service (fixture no longer discriminates)"
+            _bad "teeth: pre-fix verify.sh unexpectedly retagged tracking-service (fixture no longer discriminates)"
         else
-            _ok "teeth: HEAD verify.sh does NOT retag tracking-service (bug reproduced)"
+            _ok "teeth: pre-fix verify.sh does NOT retag tracking-service (bug reproduced)"
         fi
         if grep -q "ROLLBACK COMPLETE" "$_work/old-out-a.log"; then
-            _ok "teeth: HEAD verify.sh claims ROLLBACK COMPLETE with tracking left on the new image"
+            _ok "teeth: pre-fix verify.sh claims ROLLBACK COMPLETE with tracking left on the new image"
         else
-            _bad "teeth: HEAD verify.sh did not reproduce the silent-skip success claim"
+            _bad "teeth: pre-fix verify.sh did not reproduce the silent-skip success claim"
         fi
         _make_images "$PREV_SHA" "mta"
         : >"$_work/old-log-b"
@@ -241,15 +252,15 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" cat-file -e "HEAD:ci/st
             CI_ROLLBACK_ON_VERIFY_FAIL=1 EXTRA_ROLLBACK_IMAGES='' \
             sh "$_work/old-verify-hooked.sh" >"$_work/old-out-b.log" 2>&1 || true
         if grep -q "up -d --remove-orphans" "$_work/old-log-b" && grep -q "ROLLBACK COMPLETE" "$_work/old-out-b.log"; then
-            _ok "teeth: HEAD verify.sh retags a SUBSET and claims COMPLETE (missing canonical not fatal)"
+            _ok "teeth: pre-fix verify.sh retags a SUBSET and claims COMPLETE (missing canonical not fatal)"
         else
-            _bad "teeth: HEAD verify.sh did not reproduce the missing-canonical silent skip"
+            _bad "teeth: pre-fix verify.sh did not reproduce the missing-canonical silent skip"
         fi
     else
-        _bad "teeth: could not inject the rollback probe into HEAD verify.sh"
+        _bad "teeth: could not inject the rollback probe into the pre-fix verify.sh (revision $_teeth_rev)"
     fi
 else
-    echo "skip teeth probe: git/HEAD:ci/stages/verify.sh unavailable" >&2
+    echo "skip teeth probe: pre-fix revision not resolvable (shallow or absent history)" >&2
 fi
 
 if [ "$_fail" -eq 0 ]; then
