@@ -55,6 +55,8 @@ from .kiwi import KiwiSolver
 from .mail import MailpitSource
 
 MUTATION_PORT = 18080
+MUTATION_TRACKING_PORT = 18081
+MUTATION_TRACKING_METRICS_PORT = 19091
 
 ALLOWED_PREFIXES = ("services/mail-server/",)
 FORBIDDEN_SUBSTRINGS = ("kiwicaptcha", "packages/")
@@ -125,12 +127,27 @@ def revert_patch(scratch: Path, patch_path: Path, touched: list[str]) -> list[st
 
 
 def load_manifest(cfg: Config) -> list[dict]:
+    from .registry import PARTITIONS, REGISTRY
+
     raw = json.loads(cfg.mutation_manifest.read_text())
     mutations = raw["mutations"] if isinstance(raw, dict) else raw
     for mutation in mutations:
         patch_path = cfg.mutation_manifest.parent / mutation["patch"]
         if not patch_path.exists():
             raise RuntimeError(f"mutation {mutation['id']}: missing patch {patch_path}")
+        if mutation.get("family") not in PARTITIONS:
+            raise RuntimeError(
+                f"mutation {mutation['id']}: family {mutation.get('family')!r} is not a "
+                f"partition ({list(PARTITIONS)})"
+            )
+        probes = mutation.get("probes") or []
+        if not probes:
+            raise RuntimeError(f"mutation {mutation['id']}: no targeted probes")
+        for probe_id in probes:
+            if probe_id not in REGISTRY.probes:
+                raise RuntimeError(
+                    f"mutation {mutation['id']}: targeted probe {probe_id!r} is not registered"
+                )
         text = patch_path.read_text()
         for line in text.splitlines():
             if line.startswith(("--- ", "+++ ", "diff --git ")):
@@ -155,9 +172,9 @@ def _build(cfg: Config, scratch: Path, log) -> None:
     target = REPO_ROOT / "services/mail-server/target"
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
     started = time.time()
-    log(f"building mutant api-server (incremental, CARGO_TARGET_DIR={target})")
+    log(f"building mutant api-server + tracking-service (incremental, CARGO_TARGET_DIR={target})")
     result = subprocess.run(
-        ["cargo", "build", "-p", "api-server"],
+        ["cargo", "build", "-p", "api-server", "-p", "tracking-service"],
         cwd=scratch / "services/mail-server", env=env,
         capture_output=True, text=True, timeout=1800,
     )
@@ -167,36 +184,52 @@ def _build(cfg: Config, scratch: Path, log) -> None:
     log(f"build ok in {time.time() - started:.0f}s")
 
 
-def _container_env(cfg: Config) -> dict:
-    """The live api-server's own environment (fidelity), plus host overrides:
-    private port and the dedicated test Redis so the shared live stack's
-    limiter/session state is never touched by a mutant."""
-    env: dict[str, str] = {}
-    # JSON form: multi-line values (the JWT PEMs) survive, unlike line-split.
+def _inspect_env(cfg: Config, container: str) -> dict:
+    """A running container's own environment (fidelity baseline for a native
+    mutant). JSON form: multi-line values (the JWT PEMs) survive, unlike
+    line-split."""
     result = subprocess.run(
-        ["docker", "--context", cfg.docker_context, "inspect", "apexmail-api-server-1",
+        ["docker", "--context", cfg.docker_context, "inspect", container,
          "--format", "{{json .Config.Env}}"],
         capture_output=True, text=True, timeout=60,
     )
+    env: dict[str, str] = {}
     try:
         for entry in json.loads(result.stdout or "[]"):
             if isinstance(entry, str) and "=" in entry:
                 key, value = entry.split("=", 1)
                 env[key] = value
     except json.JSONDecodeError as error:
-        raise RuntimeError(f"could not read the api-server container env: {error}") from error
+        raise RuntimeError(f"could not read the {container} env: {error}") from error
+    return env
+
+
+def _container_env(cfg: Config) -> dict:
+    """The live api-server's own environment, plus host overrides:
+    private port and the dedicated test Redis/DB so the shared live stack's
+    limiter/session state is never touched by a mutant."""
+    env = _inspect_env(cfg, "apexmail-api-server-1")
     env.update({
         "PORT": str(MUTATION_PORT),
         "HOST": "127.0.0.1",
         "BASE_URL": f"http://127.0.0.1:{MUTATION_PORT}",
-        "DB_HOST": "127.0.0.1",
-        "DB_PORT": "5432",
-        "REDIS_HOST": "127.0.0.1",
-        "REDIS_PORT": "16379",
+        "DB_HOST": cfg.postgres[0],
+        "DB_PORT": str(cfg.postgres[1]),
+        "REDIS_HOST": cfg.mutation_redis[0],
+        "REDIS_PORT": str(cfg.mutation_redis[1]),
         "METRICS_PORT": "19090",
         "PLACEMENT_SMTP_HOST": "127.0.0.1",
         "PLACEMENT_SMTP_PORT": "5525",
         "ENVIRONMENT": "development",
+        # The native mutant sees every probe request from 127.0.0.1, so the
+        # in-process adaptive DDoS protector — orthogonal to every probe
+        # contract — starts throttling the harness's own volume (the
+        # containerised stack sees a docker-gateway peer and never does).
+        # Raise its documented knobs for the mutant only; the live battery
+        # still exercises the real limiter, and the resource probes' named
+        # rate limiters are separate middlewares (untouched).
+        "DDOS_COST_BUDGET": "1000000000",
+        "DDOS_BLOCK_THRESHOLD": "200",
     })
     env.pop("DB_PASSWORD_FILE", None)
     env.pop("REDIS_PASSWORD_FILE", None)
@@ -205,26 +238,71 @@ def _container_env(cfg: Config) -> dict:
     return env
 
 
+def _tracking_env(cfg: Config) -> dict:
+    """The live tracking-service's own environment, plus host overrides: a
+    private port, the dedicated test Redis, and the host-reachable DB /
+    ClickHouse, so the native tracking mutant is exercised by the tracking
+    probes (which otherwise talk to the shared container)."""
+    env = _inspect_env(cfg, "apexmail-tracking-1")
+    env.pop("DATABASE_URL", None)
+    # The scratch copy carries the repo's .env, which dotenvy would load;
+    # an explicit DATABASE_URL (process env wins over dotenvy) pins the
+    # mutant to the harness's Postgres endpoint.
+    env["DATABASE_URL"] = (
+        f"postgresql://apexmail:{cfg.postgres_password}"
+        f"@{cfg.postgres[0]}:{cfg.postgres[1]}/apexmail"
+    )
+    env.update({
+        "TRACKING_HOST": "127.0.0.1",
+        "TRACKING_PORT": str(MUTATION_TRACKING_PORT),
+        "METRICS_BIND_ADDR": "127.0.0.1",
+        "METRICS_PORT": str(MUTATION_TRACKING_METRICS_PORT),
+        "DB_HOST": cfg.postgres[0],
+        "DB_PORT": str(cfg.postgres[1]),
+        "REDIS_HOST": cfg.mutation_redis[0],
+        "REDIS_PORT": str(cfg.mutation_redis[1]),
+        "CLICKHOUSE_URL": "http://127.0.0.1:8123",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    })
+    env.pop("DB_PASSWORD_FILE", None)
+    env.pop("REDIS_PASSWORD_FILE", None)
+    env.pop("CLICKHOUSE_PASSWORD_FILE", None)
+    env["DB_PASSWORD"] = cfg.postgres_password
+    env["REDIS_PASSWORD"] = cfg.redis_password
+    env["CLICKHOUSE_PASSWORD"] = cfg.clickhouse_password
+    return env
+
+
 class Mutant:
-    def __init__(self, cfg: Config, scratch: Path, log):
+    """One native mutant process (api-server or tracking-service) built from
+    the scratch copy and run against the dedicated test Redis/DB."""
+
+    def __init__(self, cfg: Config, scratch: Path, log, *, name: str, binary: str,
+                 port: int, health_path: str, env_builder, metrics_port: int):
         self.cfg = cfg
         self.scratch = scratch
         self.log = log
+        self.name = name
+        self.binary_name = binary
+        self.port = port
+        self.health_path = health_path
+        self.env_builder = env_builder
+        self.metrics_port = metrics_port
         self.process: subprocess.Popen | None = None
+        self.log_path = cfg.out_dir / f"mutant-{name}.log"
 
     @property
     def binary(self) -> Path:
-        return REPO_ROOT / "services/mail-server/target/debug/api-server"
+        return REPO_ROOT / f"services/mail-server/target/debug/{self.binary_name}"
 
     def start(self) -> None:
         last_error: Exception | None = None
         for attempt in range(3):
             self.stop()
-            self._wait_port_free(MUTATION_PORT)
-            self._wait_port_free(19090)  # the native metrics listener
-            env = _container_env(self.cfg)
-            log_path = self.cfg.out_dir / "mutant-server.log"
-            self._logfile = open(log_path, "w")
+            self._wait_port_free(self.port)
+            self._wait_port_free(self.metrics_port)  # the native metrics listener
+            env = self.env_builder(self.cfg)
+            self._logfile = open(self.log_path, "w")
             self.process = subprocess.Popen(
                 [str(self.binary)], cwd=self.scratch, env=env,
                 stdout=self._logfile, stderr=subprocess.STDOUT,
@@ -237,7 +315,7 @@ class Mutant:
                 last_error = error
                 self.stop()
                 time.sleep(3)
-        raise RuntimeError(f"mutant api-server failed to start: {last_error}")
+        raise RuntimeError(f"mutant {self.name} failed to start: {last_error}")
 
     @staticmethod
     def _wait_port_free(port: int, tries: int = 20) -> None:
@@ -249,22 +327,22 @@ class Mutant:
             time.sleep(1)
 
     def _wait_healthy(self, tries: int = 60) -> None:
-        url = f"http://127.0.0.1:{MUTATION_PORT}/health"
+        url = f"http://127.0.0.1:{self.port}{self.health_path}"
         for _ in range(tries):
             if self.process is not None and self.process.poll() is not None:
                 tail = ""
                 try:
-                    tail = (self.cfg.out_dir / "mutant-server.log").read_text()[-800:]
+                    tail = self.log_path.read_text()[-800:]
                 except OSError:
                     pass
-                raise RuntimeError(f"mutant api-server exited early:\n{tail}")
+                raise RuntimeError(f"mutant {self.name} exited early:\n{tail}")
             try:
                 with urllib.request.urlopen(url, timeout=2) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
                     if response.status == 200:
                         return
             except Exception:  # noqa: BLE001
                 time.sleep(1)
-        raise RuntimeError("mutant api-server did not answer /health within 60s")
+        raise RuntimeError(f"mutant {self.name} did not answer {self.health_path} within 60s")
 
     def stop(self) -> None:
         if self.process is None:
@@ -286,6 +364,18 @@ class Mutant:
             self._logfile = None
 
 
+def api_server_mutant(cfg: Config, scratch: Path, log) -> Mutant:
+    return Mutant(cfg, scratch, log, name="api-server", binary="api-server",
+                  port=MUTATION_PORT, health_path="/health", env_builder=_container_env,
+                  metrics_port=19090)
+
+
+def tracking_mutant(cfg: Config, scratch: Path, log) -> Mutant:
+    return Mutant(cfg, scratch, log, name="tracking-service", binary="tracking-service",
+                  port=MUTATION_TRACKING_PORT, health_path="/health",
+                  env_builder=_tracking_env, metrics_port=MUTATION_TRACKING_METRICS_PORT)
+
+
 # ── probe execution against the mutant ─────────────────────────────────────
 
 def _mutation_context(cfg: Config, ledger, out_dir: Path) -> Context:
@@ -294,6 +384,7 @@ def _mutation_context(cfg: Config, ledger, out_dir: Path) -> Context:
     run_cfg.mode = "mutation"
     run_cfg.base = f"http://127.0.0.1:{MUTATION_PORT}"
     run_cfg.host = "127.0.0.1"
+    run_cfg.tracking = f"http://127.0.0.1:{MUTATION_TRACKING_PORT}"
     run_cfg.out_dir = out_dir
     run_cfg.json_out = out_dir / "findings.json"
     run_cfg.coverage_out = out_dir / "coverage.json"
@@ -304,6 +395,11 @@ def _mutation_context(cfg: Config, ledger, out_dir: Path) -> Context:
         mail=MailpitSource(run_cfg.mailpit), db=PsqlDataPlane(run_cfg), ledger=ledger,
     )
     ctx.kiwi_solver.reset_hook = ctx.clear_rate_keys
+    # The native mutant carries the same in-process adaptive DDoS protector a
+    # container does; the harness's own sweep volume can trip it. The
+    # documented control (clear the limiter buckets + restart the native
+    # mutant, which resets the protector) is wired exactly as in live mode.
+    http.recovery_hook = ctx.ddos_recovery
     return ctx
 
 
@@ -353,6 +449,56 @@ def _run_probe_set(cfg: Config, ledger, probe_ids: list[str], out_dir: Path, log
 
 # ── orchestration ───────────────────────────────────────────────────────────
 
+# ── mutation→partition coverage gate ───────────────────────────────────────
+
+def probe_partitions() -> dict[str, str]:
+    """probe id → partition for every registered probe."""
+    from .registry import REGISTRY
+
+    return {probe.id: probe.partition for probe in REGISTRY.all()}
+
+
+def partition_proof(report: dict, probe_partition: dict[str, str]) -> dict:
+    """Mutation→partition coverage gate (evidence-strict).
+
+    A probe-bearing partition P is PROVEN exactly when some CAUGHT mutation
+    lists a probe of P among its `catching_probes` — i.e. a probe belonging
+    to P actually detected the seeded defect in its own mutant run. The
+    mutation's `family` label is supporting metadata (validated to name a
+    partition by `load_manifest`) but never credits a partition on its own:
+    a label is a declaration, and a declaration is not detection.
+
+    Returns a dict with `ok`, the proven map (partition → mutations/probes
+    that proved it) and the sorted `unproven` list. The caller fails the
+    battery (non-zero) when `ok` is false.
+    """
+    bearing = sorted(set(probe_partition.values()))
+    proofs: dict[str, dict] = {}
+    for mutation in report.get("mutations", []):
+        if not mutation.get("caught"):
+            continue
+        for probe_id in mutation.get("catching_probes") or []:
+            partition = probe_partition.get(probe_id)
+            if partition is None:
+                continue
+            entry = proofs.setdefault(partition, {"mutations": [], "catching_probes": []})
+            if mutation["id"] not in entry["mutations"]:
+                entry["mutations"].append(mutation["id"])
+            if probe_id not in entry["catching_probes"]:
+                entry["catching_probes"].append(probe_id)
+    unproven = [partition for partition in bearing if partition not in proofs]
+    return {
+        "ok": not unproven,
+        "rule": ("every probe-bearing partition must contain at least one probe that "
+                 "caught a seeded mutation (evidence is a caught probe, not a family label)"),
+        "probe_bearing_partitions": bearing,
+        "proven": {partition: proofs[partition] for partition in sorted(proofs)},
+        "unproven": unproven,
+        "proven_count": len(proofs),
+        "partition_count": len(bearing),
+    }
+
+
 def run_mutation_test(cfg: Config, ledger, args) -> int:
     from . import HARNESS_VERSION
     from .findings import write_findings
@@ -389,14 +535,17 @@ def run_mutation_test(cfg: Config, ledger, args) -> int:
                 restored.append(relative)
     if restored:
         log(f"restored {len(restored)} leftover-patched file(s) from the main tree: {restored}")
-    mutant = Mutant(cfg, scratch, log)
+    mutant = api_server_mutant(cfg, scratch, log)
+    tracker = tracking_mutant(cfg, scratch, log)
     report: dict = {"seeded": len(mutations), "caught": 0, "missed": 0, "inconclusive": 0,
-                    "passed": False, "port": MUTATION_PORT, "scratch": str(scratch),
+                    "passed": False, "port": MUTATION_PORT,
+                    "tracking_port": MUTATION_TRACKING_PORT, "scratch": str(scratch),
                     "mutations": [], "control_failures": {}}
     try:
         # ── clean control: every targeted probe must behave ────────────────
         _build(cfg, scratch, log)
         mutant.start()
+        tracker.start()
         log("clean control: running the targeted probe set against the pristine scratch build")
         restart_hook = lambda: (mutant.start(), True)[1]  # noqa: E731
         observations, control_failures, _passed, control_incomplete = _run_probe_set(
@@ -417,6 +566,7 @@ def run_mutation_test(cfg: Config, ledger, args) -> int:
         if control_incomplete:
             log(f"control-incomplete probes (no attribution possible): {sorted(control_incomplete)}")
         mutant.stop()
+        tracker.stop()
 
         # ── per-mutation mutants ───────────────────────────────────────────
         for mutation in mutations:
@@ -447,6 +597,7 @@ def run_mutation_test(cfg: Config, ledger, args) -> int:
                     continue
                 _build(cfg, scratch, log)
                 mutant.start()
+                tracker.start()
                 _, failures, _p, incomplete = _run_probe_set(
                     cfg, ledger, mutation["probes"],
                     cfg.out_dir / "mutation" / mutation["id"], log,
@@ -490,6 +641,7 @@ def run_mutation_test(cfg: Config, ledger, args) -> int:
                         f"control-failing={sorted(set(failures) & set(control_failures))})")
             finally:
                 mutant.stop()
+                tracker.stop()
                 restored = revert_patch(scratch, patch_path, touched)
                 if restored:
                     log(f"{mutation['id']}: reverted by copy-back ({len(restored)} files)")
@@ -498,23 +650,60 @@ def run_mutation_test(cfg: Config, ledger, args) -> int:
         report["inconclusive"] = sum(1 for m in report["mutations"] if m.get("inconclusive"))
         report["missed"] = len(report["mutations"]) - report["caught"]
         report["passed"] = report["missed"] == 0
+        # ── mutation→partition gate (full batteries only) ──────────────────
+        # A partial run (--mutation-only) has no verdict for the partitions
+        # its single mutation does not target; the gate is meaningful only
+        # over the full corpus.
+        if only is None:
+            gate = partition_proof(report, probe_partitions())
+            report["partition_proof"] = gate
+            log(f"partition gate: {gate['proven_count']}/{gate['partition_count']} probe-bearing "
+                f"partitions proven by caught mutations")
+            for partition in gate["probe_bearing_partitions"]:
+                proof = gate["proven"].get(partition)
+                if proof:
+                    log(f"  proven [{partition}] by {', '.join(proof['mutations'])} "
+                        f"via {', '.join(proof['catching_probes'])}")
+                else:
+                    log(f"  UNPROVEN [{partition}] — no caught mutation was caught by a "
+                        f"{partition} probe")
+            if not gate["ok"]:
+                log(f"PARTITION GATE FAILED — probe-bearing partitions without a caught "
+                    f"mutation: {', '.join(gate['unproven'])}")
+        else:
+            report["partition_proof"] = {"ok": None, "skipped": "partial run (--mutation-only)"}
     finally:
         mutant.stop()
+        tracker.stop()
         log("scratch copy verified clean against the main tree after the run")
 
     report_path = cfg.out_dir / "mutation-report.json"
     report_path.write_text(json.dumps(report, indent=1))
+    gate_ok = report.get("partition_proof", {}).get("ok")
     print(json.dumps(
         {k: report[k] for k in ("seeded", "caught", "missed", "inconclusive", "passed")}, indent=1,
     ))
     for item in report["mutations"]:
         mark = "CAUGHT" if item["caught"] else "MISSED"
         print(f"  [{mark}] {item['id']} ({item['family']}) <- {', '.join(item['catching_probes']) or '---'}")
+    if gate_ok is not None:
+        proof = report["partition_proof"]
+        print(f"  partition gate: {proof['proven_count']}/{proof['partition_count']} "
+              f"probe-bearing partitions proven"
+              + ("" if gate_ok else f" — UNPROVEN: {', '.join(proof['unproven'])}"))
     print(f"mutation report: {report_path}", flush=True)
 
+    from .registry import REGISTRY as _registry
     payload = {
         "harness": {"version": HARNESS_VERSION, "lane": "D1", "mode": "mutation-test"},
-        "run": {"base": f"http://127.0.0.1:{MUTATION_PORT}", "partitions": ["mutation"]},
+        "run": {
+            "base": f"http://127.0.0.1:{MUTATION_PORT}",
+            "tracking": f"http://127.0.0.1:{MUTATION_TRACKING_PORT}",
+            "partitions": sorted({
+                _registry.probes[probe_id].partition
+                for probe_id in union if probe_id in _registry.probes
+            }),
+        },
         "summary": {
             "probes_run": len(union), "checks": 0, "checks_failed": 0, "findings": 0,
             "by_severity": {}, "by_partition": {},
@@ -524,4 +713,10 @@ def run_mutation_test(cfg: Config, ledger, args) -> int:
         "mutation_test": report,
     }
     write_findings(cfg.out_dir / "mutation-findings.json", payload)
-    return 0 if report["passed"] else 1
+    if not report["passed"]:
+        return 1
+    if gate_ok is False:
+        print("mutation battery caught every seeded defect, but the partition gate failed: "
+              f"{', '.join(report['partition_proof']['unproven'])}", flush=True)
+        return 1
+    return 0

@@ -1,0 +1,11 @@
+--- a/services/mail-server/crates/api-server/src/routes/health.rs
++++ b/services/mail-server/crates/api-server/src/routes/health.rs
+@@ -21,7 +21,7 @@
+         .route("/", get(liveness))
+         .route("/live", get(liveness))
+         .route("/ready", get(readiness))
+-        .route("/deep", get(deep_check))
++        .route("/deeplink", get(deep_check))
+ }
+ 
+ // ─── Liveness ──────────────────────────────────────────────────

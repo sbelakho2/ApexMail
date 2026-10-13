@@ -804,14 +804,6 @@ def mask_sql_literals(text: str) -> str:
     return "".join(out)
 
 
-def _strip_sql_comments(text: str) -> str:
-    return mask_sql_literals(text)
-
-
-def _strip_sql_strings(text: str) -> str:
-    return text
-
-
 def migration_tables() -> dict[str, list[str]]:
     """Net CREATE/DROP table names across the migration chain, applied in
     migration order (066 drops and recreates `metering_events` as partitioned;

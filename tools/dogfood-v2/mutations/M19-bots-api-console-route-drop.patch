@@ -1,0 +1,21 @@
+--- a/services/mail-server/crates/ui-foundation/src/axum_router.rs
++++ b/services/mail-server/crates/ui-foundation/src/axum_router.rs
+@@ -982,7 +982,7 @@
+             env!("APX_MARKETING_PUBLIC_DIR"),
+             "/terms/index.html"
+         ),)),
+-        "/api-console" => Some(include_str!(concat!(
++        "/api-explorer" => Some(include_str!(concat!(
+             env!("APX_MARKETING_PUBLIC_DIR"),
+             "/api-explorer/index.html"
+         ),)),
+--- a/services/mail-server/crates/ui-foundation/src/axum_router.rs
++++ b/services/mail-server/crates/ui-foundation/src/axum_router.rs
+@@ -2767,7 +2767,6 @@
+         }
+         "/dpa" => leptos_views::marketing_legal_page("Data Processing Agreement", "dpa"),
+         "/sla" => leptos_views::marketing_legal_page("Service Level Agreement", "sla"),
+-        "/api-console" => leptos_views::marketing_api_console_page(),
+         _ => return None,
+     })
+ }

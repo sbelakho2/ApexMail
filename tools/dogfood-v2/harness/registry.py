@@ -6,9 +6,7 @@ A probe is a named unit of adversarial work. It declares:
   * surfaces      explicit ledger surface ids it exercises
   * fn            `fn(ctx) -> list[Observation]`
   * severity      default severity of a failed observation (P0..P3)
-  * live_only     True for probes needing the real stack's SQL/daemon access
-                  (the self-test fixture must answer their named checks, so a
-                  probe is only live_only when it truly needs Docker).
+  * subsumes      surface patterns this probe covers without naming each id
 """
 from __future__ import annotations
 
@@ -33,7 +31,6 @@ PARTITIONS = (
     "invariants", # DB invariants, schema orphans, data scoping
     "infra",      # compose services, env surface, health/deep
     "pipeline",   # e2e enqueue→worker→terminal, webhooks, events
-    "mutation",   # targeted probes used by --mutation-test
 )
 
 
@@ -73,7 +70,6 @@ class Probe:
     fn: object
     surfaces: tuple[str, ...] = ()
     severity: str = "P2"
-    live_only: bool = False
     description: str = ""
     subsumes: tuple[str, ...] = ()   # surface prefixes/patterns this probe covers
 
@@ -104,14 +100,14 @@ class Registry:
 REGISTRY = Registry()
 
 
-def probe(id: str, partition: str, *, surfaces=(), severity="P2", live_only=False,
+def probe(id: str, partition: str, *, surfaces=(), severity="P2",
           description="", subsumes=()):
     """Decorator registering a probe function."""
     def wrap(fn):
         REGISTRY.register(
             Probe(
                 id=id, partition=partition, fn=fn, surfaces=tuple(surfaces),
-                severity=severity, live_only=live_only, description=description,
+                severity=severity, description=description,
                 subsumes=tuple(subsumes),
             )
         )

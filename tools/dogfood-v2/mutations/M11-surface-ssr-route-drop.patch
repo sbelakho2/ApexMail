@@ -1,0 +1,23 @@
+--- a/services/mail-server/crates/ui-foundation/src/axum_router.rs
++++ b/services/mail-server/crates/ui-foundation/src/axum_router.rs
+@@ -326,10 +326,6 @@
+             env!("APX_MARKETING_PUBLIC_DIR"),
+             "/compare/sendgrid/index.html"
+         ),)),
+-        "/compliance" => Some(include_str!(concat!(
+-            env!("APX_MARKETING_PUBLIC_DIR"),
+-            "/compliance/index.html"
+-        ),)),
+         "/contact" => Some(include_str!(concat!(
+             env!("APX_MARKETING_PUBLIC_DIR"),
+             "/contact/index.html"
+--- a/services/mail-server/crates/ui-foundation/src/axum_router.rs
++++ b/services/mail-server/crates/ui-foundation/src/axum_router.rs
+@@ -2745,7 +2745,6 @@
+         "/pricing" => leptos_views::marketing_pricing_page(),
+         "/pricing/calculator" => leptos_views::marketing_pricing_calculator_page(),
+         "/features" => leptos_views::marketing_features_page(),
+-        "/compliance" => leptos_views::marketing_compliance_page(),
+         "/private-cloud" => leptos_views::marketing_private_cloud_page(),
+         "/email-logs" => leptos_views::marketing_forensic_page(),
+         "/status" => leptos_views::marketing_status_page(),

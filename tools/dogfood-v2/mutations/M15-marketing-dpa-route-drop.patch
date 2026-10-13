@@ -1,0 +1,23 @@
+--- a/services/mail-server/crates/ui-foundation/src/axum_router.rs
++++ b/services/mail-server/crates/ui-foundation/src/axum_router.rs
+@@ -550,10 +550,6 @@
+             env!("APX_MARKETING_PUBLIC_DIR"),
+             "/docs/webhooks/index.html"
+         ),)),
+-        "/dpa" => Some(include_str!(concat!(
+-            env!("APX_MARKETING_PUBLIC_DIR"),
+-            "/dpa/index.html"
+-        ),)),
+         "/enterprise" => Some(include_str!(concat!(
+             env!("APX_MARKETING_PUBLIC_DIR"),
+             "/enterprise/index.html"
+--- a/services/mail-server/crates/ui-foundation/src/axum_router.rs
++++ b/services/mail-server/crates/ui-foundation/src/axum_router.rs
+@@ -2765,7 +2765,6 @@
+         "/aup" | "/acceptable-use" => {
+             leptos_views::marketing_legal_page("Acceptable Use Policy", "aup")
+         }
+-        "/dpa" => leptos_views::marketing_legal_page("Data Processing Agreement", "dpa"),
+         "/sla" => leptos_views::marketing_legal_page("Service Level Agreement", "sla"),
+         "/api-console" => leptos_views::marketing_api_console_page(),
+         _ => return None,

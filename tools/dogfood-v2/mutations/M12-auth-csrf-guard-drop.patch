@@ -1,0 +1,28 @@
+--- a/services/mail-server/crates/api-server/src/middleware/auth.rs
++++ b/services/mail-server/crates/api-server/src/middleware/auth.rs
+@@ -178,22 +178,9 @@
+     headers: &HeaderMap,
+     csrf_secret: &str,
+ ) -> Result<(), ApiError> {
+-    let cookie_token = extract_cookie(headers, CSRF_COOKIE_NAME)
+-        .ok_or_else(|| ApiError::Forbidden("missing CSRF cookie".into()))?;
+-    let header_token = headers
+-        .get(CSRF_HEADER_NAME)
+-        .and_then(|value| value.to_str().ok())
+-        .map(str::trim)
+-        .filter(|value| !value.is_empty())
+-        .ok_or_else(|| ApiError::Forbidden("missing X-CSRF-Token header".into()))?;
+-
+-    // Constant-time comparison: a plain `!=` short-circuits on the first
+-    // differing byte, leaking how much of the token an attacker guessed.
+-    if !apexmail_lib::timing_safe_compare(header_token, cookie_token.as_str()) {
+-        return Err(ApiError::Forbidden("CSRF token mismatch".into()));
+-    }
+-
+-    validate_csrf_token(header_token, csrf_secret)
++    // Seeded defect: cookie-session write requests are no longer CSRF-checked.
++    let _ = (headers, csrf_secret);
++    Ok(())
+ }
+ 
+ /// Largest urlencoded body the form-CSRF bridge will buffer to find the

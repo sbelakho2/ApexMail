@@ -1235,6 +1235,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return True
             body = self._body() or {}
             url = str(body.get("url", ""))
+            if url.startswith("http://"):
+                # Documented SSRF policy: webhook endpoints must be HTTPS (the
+                # loopback override is opt-in via APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS).
+                self._err(400, "VALIDATION_ERROR",
+                          "webhook URL must use HTTPS; http:// endpoints are refused")
+                return True
             if not url.startswith("http"):
                 self._err(422, "VALIDATION_ERROR", "url must be an absolute http(s) URL")
                 return True
@@ -1283,8 +1289,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return True
             row = self.state.insert("domains", tenant_id=auth["tenant_id"], name=name, verified=False,
                                     dkim_selector="dgv2", dkim_public_key="MIGfMA0GCSqGSIb3DQEBAQUAA4GN")
-            self._json(201, {"id": row["id"], "name": name, "verified": False,
-                             "dkim_selector": "dgv2", "dkim_public_key": row["dkim_public_key"]}, None)
+            # Documented create contract (docs/api/endpoints/domains.md): the
+            # response answers the domain SHAPE with the verification booleans
+            # and never the generated DKIM material (GET /dns-records is the
+            # only surface that exposes it).
+            self._json(201, {
+                "id": row["id"], "name": name, "status": "pending",
+                "ses_verified": False, "spf_verified": False, "dkim_verified": False,
+                "dmarc_verified": False, "return_path_verified": False,
+                "created_at": row.get("created_at", ""),
+            }, None)
             return True
         if path.startswith("/v1/domains/") and path.endswith("/dns-records") and method == "GET":
             auth = self._require(["domains:read"])
@@ -1333,11 +1347,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if not auth:
                 return True
             self._ok({"plans": [
-                {"id": "free", "priceMonthly": 0, "emailLimit": 3000},
-                {"id": "starter", "priceMonthly": 2900, "emailLimit": 50000},
-                {"id": "pro", "priceMonthly": 8900, "emailLimit": 200000},
-                {"id": "growth", "priceMonthly": 22900, "emailLimit": 1000000},
-                {"id": "scale", "priceMonthly": 69900, "emailLimit": 5000000},
+                {"id": "free", "name": "free", "priceMonthly": 0, "emailLimit": 3000},
+                {"id": "starter", "name": "starter", "priceMonthly": 2900, "emailLimit": 50000},
+                {"id": "pro", "name": "pro", "priceMonthly": 8900, "emailLimit": 200000},
+                {"id": "growth", "name": "growth", "priceMonthly": 22900, "emailLimit": 1000000},
+                {"id": "scale", "name": "scale", "priceMonthly": 69900, "emailLimit": 5000000},
             ]})
             return True
         if path == "/v1/billing/quota" and method == "GET":

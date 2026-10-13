@@ -26,10 +26,23 @@ to be caught.
    run with a failing CHECK that did not fail in the clean control run — a
    check that is already red clean can never be credited with catching a
    mutation (that would be "the harness happened to be red", not detection).
-5. `--mutation-test` exits non-zero if any mutation is MISSED. The full
-   per-mutation attribution lands in `out/mutation-report.json` and
-   `out/mutation-findings.json`; `--mutation-only <id>` re-runs a single
-   mutation.
+5. The **mutation→partition gate** (`harness/mutation.py::partition_proof`)
+   then fails the battery (non-zero) when any probe-bearing partition has no
+   CAUGHT mutation among its catching probes. Evidence is a caught probe,
+   never the mutation's family label: the label is validated to name a
+   partition, but only `catching_probes` credit one. `--mutation-only`
+   (partial runs) skips the gate; full batteries enforce it.
+6. `--mutation-test` exits non-zero if any mutation is MISSED or the
+   partition gate is unproven. The full per-mutation attribution lands in
+   `out/mutation-report.json` and `out/mutation-findings.json`;
+   `--mutation-only <id>` re-runs a single mutation.
+7. Both product binaries under test are rebuilt from the scratch copy and
+   run natively: `api-server` on `127.0.0.1:18080` and `tracking-service` on
+   `127.0.0.1:18081` (the tracking probes aim at the native mutant, so a
+   tracking-service patch is actually exercised). The native mutants talk to
+   the dedicated test Redis (16379) and the compose Postgres; the DB
+   endpoint can be moved with `DOGFOOD_V2_DB_HOST`/`DOGFOOD_V2_DB_PORT`
+   (a host where 5432 is taken).
 
 ## Safety rails
 
@@ -48,17 +61,33 @@ to be caught.
 
 ## Families covered
 
-| family | mutation | catching probe(s) |
-|---|---|---|
-| authz | M01 tenant scoping dropped (IDOR read) | `p.authz.cross_tenant_idor` |
-| authz | M02 scope guard no-op | `p.authz.role_matrix`, `p.auth.api_key_lifecycle` |
-| hostile | M05 HTML escaping dropped | `p.hostile.xss_stored`, `p.hostile.xss_reflected` |
-| hostile | M06 CRLF subject guard dropped | `p.hostile.crlf_injection` |
-| state | M04 verification token replay | `p.auth.signup_verification` |
-| resource | M07 login rate bound dropped | `p.resource.login_rate_bound` |
-| errors | M03 edit-after-send returns 200 | `p.state.out_of_order` |
-| errors | M10 empty/invalid required email accepted | `p.errors.taxonomy` |
-| pipeline | M08 enqueue dropped (jobs lost) | `p.mail.send_to_mailpit`, `p.pipeline.worker_liveness` |
-| invariants | M09 suppression gate dropped | `p.mail.suppression_consent` |
+Every probe-bearing partition has at least one seeded defect whose targeted
+probe(s) must trip it (the partition gate enforces the caught version of
+this); `p.<partition>.*` names the probe that is expected to catch it.
+
+| family | mutation | defect | catching probe(s) |
+|---|---|---|---|
+| surface | M11 SSR route dropped | ledger-enumerated public SSR page (/compliance) answers 404 | `p.surface.ssr_reach` |
+| auth | M12 CSRF guard dropped | cookie-session writes without the CSRF header are admitted | `p.auth.csrf_contract` |
+| authz | M01 tenant scoping dropped (IDOR read) | cross-tenant contact read | `p.authz.cross_tenant_idor` |
+| authz | M02 scope guard no-op | every tenant role/write scope admitted | `p.auth.api_key_lifecycle`, `p.authz.role_matrix` |
+| console | M13 SSR contacts scope dropped | /contacts scopes to the system tenant; new contacts vanish | `p.console.crud_roundtrip` |
+| cp | M14 CP session + tenant gates no-op | customer sessions reach /v1/admin/* | `p.cp.json_admin` |
+| marketing | M15 /dpa route dropped | linked marketing page answers 404 | `p.marketing.content` |
+| money | M16 catalog price zeroed | /v1/billing/plans reports priceMonthly=0 | `p.money.plan_catalog` |
+| mail | M17 template refusal dropped | unresolved {{variables}} accepted instead of 422 | `p.mail.template_send` |
+| tracking | M18 unknown token → 503 | invalid tracking tokens 5xx | `p.tracking.route_contract` |
+| bots | M19 /api-console route dropped | the advertised capability page answers 404 | `p.bots.capability_pages` |
+| hostile | M05 HTML escaping dropped | stored/served HTML escapes nothing | `p.hostile.xss_stored`, `p.hostile.xss_reflected` |
+| hostile | M06 CRLF subject guard dropped | header injection admitted | `p.hostile.crlf_injection` |
+| state | M04 verification token replay | single-use email-verification token replayed | `p.auth.signup_verification` |
+| resource | M07 login rate bound dropped | no 429 from the public auth limiter | `p.resource.login_rate_bound` |
+| errors | M03 edit-after-send returns 200 | false success on a refused transition | `p.state.out_of_order` |
+| errors | M10 empty/invalid required email accepted | required-field validation skipped | `p.errors.taxonomy` |
+| infra | M20 /health/deep route dropped | the deep health contract answers 404 | `p.infra.health` |
+| pipeline | M21 /v1/events route dropped | the delivery-event API answers 404 after a real campaign delivery | `p.pipeline.events_consistency` |
+| invariants | M22 contact tenant scope dropped | fixture contact rows lose their tenant scope | `p.inv.fixture_scoping` |
+| pipeline | M08 enqueue dropped (jobs lost) | accepted sends never reach the worker/Mailpit | `p.mail.send_to_mailpit`, `p.pipeline.worker_liveness` |
+| invariants | M09 suppression gate dropped | sends to suppressed recipients accepted | `p.mail.suppression_consent` |
 
 Patches are generated from and apply to `base_commit` in `manifest.json`.

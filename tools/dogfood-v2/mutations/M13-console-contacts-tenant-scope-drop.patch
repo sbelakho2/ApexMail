@@ -1,0 +1,11 @@
+--- a/services/mail-server/crates/api-server/src/routes/web/data.rs
++++ b/services/mail-server/crates/api-server/src/routes/web/data.rs
+@@ -1768,6 +1768,8 @@
+ }
+ 
+ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
++    // Seeded defect: the SSR contacts page scopes to the system tenant.
++    let tenant = "system_internal_tenant01";
+     let mut where_sql = WhereBuilder::new();
+     where_sql.eq("tenant_id", tenant);
+     where_sql.status_in(

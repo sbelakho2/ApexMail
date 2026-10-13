@@ -1,0 +1,21 @@
+--- a/services/mail-server/crates/api-server/src/routes/messages.rs
++++ b/services/mail-server/crates/api-server/src/routes/messages.rs
+@@ -1155,17 +1155,7 @@
+             )]),
+         })?;
+ 
+-    let missing = missing_template_variables(&rendered.warnings);
+-    if !missing.is_empty() {
+-        return Err(TemplateSendRefusal::Refused(
+-            missing
+-                .into_iter()
+-                .map(|variable| {
+-                    format!("template variable '{variable}' is missing from template_data")
+-                })
+-                .collect(),
+-        ));
+-    }
++    let _ = missing_template_variables(&rendered.warnings);
+ 
+     Ok(Some(RenderedTemplateFields {
+         // The renderer returns the stored subject unless the request

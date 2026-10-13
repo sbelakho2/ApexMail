@@ -96,6 +96,114 @@
         "p.errors.taxonomy"
       ],
       "description": "Contact email validation is skipped: an empty/invalid required field is accepted"
+    },
+    {
+      "id": "M11-surface-ssr-route-drop",
+      "family": "surface",
+      "patch": "M11-surface-ssr-route-drop.patch",
+      "probes": [
+        "p.surface.ssr_reach"
+      ],
+      "description": "The /compliance marketing page route is dropped from both render tables: the ledger-enumerated public SSR surface answers 404"
+    },
+    {
+      "id": "M12-auth-csrf-guard-drop",
+      "family": "auth",
+      "patch": "M12-auth-csrf-guard-drop.patch",
+      "probes": [
+        "p.auth.csrf_contract"
+      ],
+      "description": "validate_session_csrf() accepts everything: cookie-session writes with a missing/malformed X-CSRF-Token are admitted"
+    },
+    {
+      "id": "M13-console-contacts-tenant-scope-drop",
+      "family": "console",
+      "patch": "M13-console-contacts-tenant-scope-drop.patch",
+      "probes": [
+        "p.console.crud_roundtrip"
+      ],
+      "description": "The SSR /contacts page scopes its query to the system tenant: created contacts vanish from the console page"
+    },
+    {
+      "id": "M14-cp-system-tenant-gate-noop",
+      "family": "cp",
+      "patch": "M14-cp-system-tenant-gate-noop.patch",
+      "probes": [
+        "p.cp.json_admin"
+      ],
+      "description": "The CP session cookie gate accepts any authenticated session and the system-tenant comparison is a no-op: customer sessions reach /v1/admin/*"
+    },
+    {
+      "id": "M15-marketing-dpa-route-drop",
+      "family": "marketing",
+      "patch": "M15-marketing-dpa-route-drop.patch",
+      "probes": [
+        "p.marketing.content"
+      ],
+      "description": "The /dpa marketing page route is dropped from both render tables: the linked page answers 404"
+    },
+    {
+      "id": "M16-money-plan-price-zero",
+      "family": "money",
+      "patch": "M16-money-plan-price-zero.patch",
+      "probes": [
+        "p.money.plan_catalog"
+      ],
+      "description": "GET /v1/billing/plans serialises priceMonthly=0 for every tier (catalog prices dropped)"
+    },
+    {
+      "id": "M17-mail-template-missing-variable-accepted",
+      "family": "mail",
+      "patch": "M17-mail-template-missing-variable-accepted.patch",
+      "probes": [
+        "p.mail.template_send"
+      ],
+      "description": "The missing-template-variable refusal is dropped: a send with unresolved {{variables}} is accepted instead of 422"
+    },
+    {
+      "id": "M18-tracking-unknown-token-503",
+      "family": "tracking",
+      "patch": "M18-tracking-unknown-token-503.patch",
+      "probes": [
+        "p.tracking.route_contract"
+      ],
+      "description": "Unknown tracking tokens are reported as 503 service-unavailable instead of a named 404: invalid tracking links 5xx"
+    },
+    {
+      "id": "M19-bots-api-console-route-drop",
+      "family": "bots",
+      "patch": "M19-bots-api-console-route-drop.patch",
+      "probes": [
+        "p.bots.capability_pages"
+      ],
+      "description": "The /api-console marketing capability page is renamed away from the route tables: the advertised page answers 404"
+    },
+    {
+      "id": "M20-infra-health-deep-route-drop",
+      "family": "infra",
+      "patch": "M20-infra-health-deep-route-drop.patch",
+      "probes": [
+        "p.infra.health"
+      ],
+      "description": "The /health/deep route is renamed away: the ops liveness contract answers 404"
+    },
+    {
+      "id": "M21-pipeline-events-route-drop",
+      "family": "pipeline",
+      "patch": "M21-pipeline-events-route-drop.patch",
+      "probes": [
+        "p.pipeline.events_consistency"
+      ],
+      "description": "The /v1/events API route is unmounted: the delivery-event surface answers 404 after a real campaign delivery"
+    },
+    {
+      "id": "M22-invariants-contacts-tenant-scope-drop",
+      "family": "invariants",
+      "patch": "M22-invariants-contacts-tenant-scope-drop.patch",
+      "probes": [
+        "p.inv.fixture_scoping"
+      ],
+      "description": "Contact creation binds the system tenant instead of the session tenant: fixture rows lose their tenant scope"
     }
   ]
 }

@@ -1,0 +1,31 @@
+--- a/services/mail-server/crates/api-server/src/middleware/cp_auth.rs
++++ b/services/mail-server/crates/api-server/src/middleware/cp_auth.rs
+@@ -565,12 +565,15 @@
+     )
+ }
+ 
++#[allow(unreachable_code)]
+ pub async fn require_cp_auth(
+     axum::extract::State(state): axum::extract::State<AppState>,
+     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+     mut req: axum::extract::Request,
+     next: axum::middleware::Next,
+ ) -> Result<axum::response::Response, ApiError> {
++    // Seeded defect: the CP session gate accepts any authenticated session.
++    return Ok(next.run(req).await);
+     let path = req.uri().path().to_string();
+ 
+     // `require_auth` runs before this gate on the admin router and always
+--- a/services/mail-server/crates/api-server/src/middleware/auth.rs
++++ b/services/mail-server/crates/api-server/src/middleware/auth.rs
+@@ -1589,7 +1589,9 @@
+ /// login gate uses (`routes::web::is_system_tenant`): the `system` literal
+ /// or a tenants row whose slug is `system`. A database error fails CLOSED.
+ pub async fn require_system_tenant(state: &AppState, auth: &AuthUser) -> Result<(), ApiError> {
+-    if auth.tenant_id != "system" {
++    // Seeded defect: the membership comparison became a self-comparison
++    // (always false), so the tenant gate admits every authenticated session.
++    if auth.tenant_id != auth.tenant_id {
+         // Fail closed (audit #16): a storage failure is not evidence of
+         // system-tenant membership.
+         let system_tenant = match crate::routes::web::is_system_tenant(state, &auth.tenant_id).await

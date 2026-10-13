@@ -1,0 +1,11 @@
+--- a/services/mail-server/crates/api-server/src/routes/billing.rs
++++ b/services/mail-server/crates/api-server/src/routes/billing.rs
+@@ -251,7 +251,7 @@
+             name: plan.name,
+             display_name: plan.display_name,
+             description: plan.description,
+-            price_monthly: plan.price_monthly,
++            price_monthly: 0,
+             price_yearly: plan.price_yearly,
+             email_limit: plan.email_limit,
+             api_call_limit: plan.api_call_limit,

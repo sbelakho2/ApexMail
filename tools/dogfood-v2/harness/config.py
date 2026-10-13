@@ -22,7 +22,6 @@ DEFAULT_CP_HOST = "admin.localhost"
 DEFAULT_MARKETING_HOST = "marketing.localhost"
 DEFAULT_MAILPIT = "http://127.0.0.1:8025"
 DEFAULT_TRACKING = "http://127.0.0.1:3001"
-DEFAULT_ENTERPRISE = "http://127.0.0.1:3002"
 DEFAULT_MTA_SMTP = ("127.0.0.1", 5525)
 DEFAULT_IMAPS = ("127.0.0.1", 993)
 DEFAULT_CLICKHOUSE = "http://127.0.0.1:8123"
@@ -65,7 +64,6 @@ class Config:
     marketing_host: str = DEFAULT_MARKETING_HOST
     mailpit: str = DEFAULT_MAILPIT
     tracking: str = DEFAULT_TRACKING
-    enterprise: str = DEFAULT_ENTERPRISE
     # infrastructure
     docker_context: str = DEFAULT_DOCKER_CONTEXT
     postgres: tuple[str, int] = DEFAULT_POSTGRES
@@ -74,6 +72,7 @@ class Config:
     psql_bin: str = "/opt/homebrew/bin/psql"
     postgres_password: str = field(default_factory=lambda: _read_secret("postgres_password.txt"))
     redis_password: str = field(default_factory=lambda: _read_secret("redis_password.txt", "dev-redis-password-minimum-32-chars"))
+    clickhouse_password: str = field(default_factory=lambda: _read_secret("clickhouse_password.txt"))
     # harness behaviour
     mode: str = "live"                    # live | self-test | mutation
     partitions: list[str] = field(default_factory=list)   # empty = all
@@ -87,10 +86,8 @@ class Config:
     verbose: bool = False
     max_requests: int = 12000             # hard budget: refuse to look like a DoS
     # self-test / mutation plumbing
-    fixture_port: int = 0                 # 0 = pick free port
     mutation_worktree: Path = REPO_ROOT.parent / "ApexMail-scratch-v2"
     mutation_manifest: Path = TOOL_DIR / "mutations" / "manifest.json"
-    mutation_build_jobs: int = 8
     # the dedicated test Redis (documented 16379): mutant runs must not share
     # the live dev Redis's limiter/session state
     mutation_redis: tuple[str, int] = ("127.0.0.1", 16379)
@@ -120,7 +117,7 @@ class Config:
 def from_args(args) -> Config:
     cfg = Config()
     for key in (
-        "base", "host", "cp_host", "marketing_host", "mailpit", "tracking", "enterprise",
+        "base", "host", "cp_host", "marketing_host", "mailpit", "tracking",
         "docker_context", "psql_bin", "pace_seconds", "timeout", "concurrency",
     ):
         value = getattr(args, key, None)
@@ -142,4 +139,11 @@ def from_args(args) -> Config:
         cfg.pace_seconds = float(os.environ["DOGFOOD_V2_PACE"])
     if os.environ.get("DOGFOOD_V2_MAX_REQUESTS"):
         cfg.max_requests = int(os.environ["DOGFOOD_V2_MAX_REQUESTS"])
+    # DB endpoint override (the documented dev stack publishes Postgres on
+    # 5432; a host where that port is taken can relocate it without editing
+    # the harness or the compose defaults).
+    if os.environ.get("DOGFOOD_V2_DB_HOST"):
+        cfg.postgres = (os.environ["DOGFOOD_V2_DB_HOST"], cfg.postgres[1])
+    if os.environ.get("DOGFOOD_V2_DB_PORT"):
+        cfg.postgres = (cfg.postgres[0], int(os.environ["DOGFOOD_V2_DB_PORT"]))
     return cfg

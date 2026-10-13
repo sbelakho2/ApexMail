@@ -89,6 +89,58 @@ def coverage_rule_selfcheck() -> tuple[bool, list[str]]:
     return ok, lines
 
 
+def mutation_partition_gate_selfcheck() -> tuple[bool, list[str]]:
+    """Prove the mutation→partition coverage gate with synthetic reports (no
+    stack needed): a probe-bearing partition is proven ONLY by a CAUGHT
+    mutation that was caught by one of that partition's probes — a family
+    label or a missed mutation never credits. Returns (ok, lines)."""
+    from .mutation import partition_proof
+
+    lines: list[str] = []
+    ok = True
+    probe_partition = {"p.synth.a": "surface", "p.synth.b": "console", "p.synth.c": "cp"}
+    report: dict = {"mutations": [
+        {"id": "M-synth-1", "family": "surface", "caught": True,
+         "probes": ["p.synth.a"], "catching_probes": ["p.synth.a"]},
+    ]}
+    gate = partition_proof(report, probe_partition)
+    if gate["ok"] or gate["unproven"] != ["console", "cp"]:
+        ok = False
+        lines.append(f"FAIL: gate did not fail on the unproven partitions (got {gate['unproven']})")
+    else:
+        lines.append("ok: gate fails naming the unproven partitions (console, cp)")
+    report["mutations"].append({"id": "M-synth-2", "family": "console", "caught": False,
+                                "probes": ["p.synth.b", "p.synth.c"], "catching_probes": []})
+    gate = partition_proof(report, probe_partition)
+    if gate["ok"]:
+        ok = False
+        lines.append("FAIL: a MISSED mutation was credited by the gate")
+    else:
+        lines.append("ok: a missed mutation credits nothing")
+    report["mutations"] = [
+        {"id": "M-synth-3", "family": "surface", "caught": True,
+         "probes": ["p.synth.b"], "catching_probes": ["p.synth.b"]},
+    ]
+    gate = partition_proof(report, probe_partition)
+    if "surface" not in gate["unproven"] or "console" not in gate["proven"]:
+        ok = False
+        lines.append("FAIL: family label credited a partition or catching partition was not credited")
+    else:
+        lines.append("ok: family labels never credit; only the catching probe's partition is proven")
+    report["mutations"] = [
+        {"id": f"M-synth-{index}", "family": partition, "caught": True,
+         "probes": [probe_id], "catching_probes": [probe_id]}
+        for index, (probe_id, partition) in enumerate(sorted(probe_partition.items()), start=4)
+    ]
+    gate = partition_proof(report, probe_partition)
+    if not gate["ok"] or gate["proven_count"] != 3:
+        ok = False
+        lines.append("FAIL: a fully covered synthetic corpus did not pass the gate")
+    else:
+        lines.append("ok: every probe-bearing partition proven → gate passes")
+    return ok, lines
+
+
 def _free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -104,6 +156,9 @@ def run_self_test(cfg: Config, ledger) -> int:
     rule_ok, rule_lines = coverage_rule_selfcheck()
     for line in rule_lines:
         print(f"[dogfood-v2] ledger self-check: {line}", flush=True)
+    gate_ok, gate_lines = mutation_partition_gate_selfcheck()
+    for line in gate_lines:
+        print(f"[dogfood-v2] mutation-gate self-check: {line}", flush=True)
 
     web_port = _free_port()
     tracking_port = _free_port()
@@ -163,10 +218,12 @@ def run_self_test(cfg: Config, ledger) -> int:
         f"self-test: {len(result.observations)} checks, {len(dynamic_failures)} dynamic failures, "
         f"{len(static_failures)} repo-static notes"
     )
-    if dynamic_failures or not rule_ok:
+    if dynamic_failures or not rule_ok or not gate_ok:
         print("SELF-TEST FAILED — the harness disagrees with its own honest fixture:")
         if not rule_ok:
             print("  - ledger self-check failed (fail-if-unprobed rule or allowlist justification)")
+        if not gate_ok:
+            print("  - mutation-gate self-check failed (evidence-strict partition coverage)")
         for obs in dynamic_failures[:60]:
             print(f"  - {obs.probe_id} :: {obs.title} :: {obs.observed[:200]}")
         return 1

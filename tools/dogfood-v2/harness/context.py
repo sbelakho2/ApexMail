@@ -39,8 +39,6 @@ class Context:
     fixtures: dict[str, dict] = field(default_factory=dict)
     started_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     ledger: object = None
-    findings_meta: dict = field(default_factory=dict)
-    mutation_targets: dict = field(default_factory=dict)
     # optional callable restarting the api-server under test (mutation mode
     # restarts the native mutant process; live uses the documented container
     # restart). Set by the mutation runner / used only on self-inflicted

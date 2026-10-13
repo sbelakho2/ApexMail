@@ -1,0 +1,11 @@
+--- a/services/mail-server/crates/api-server/src/routes/contacts.rs
++++ b/services/mail-server/crates/api-server/src/routes/contacts.rs
+@@ -269,7 +269,7 @@
+          VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$7)",
+     )
+     .bind(id)
+-    .bind(&auth.tenant_id)
++    .bind(crate::routes::SYSTEM_TENANT_ID)
+     .bind(&email)
+     .bind(&body.name)
+     .bind(&tags)

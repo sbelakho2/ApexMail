@@ -1,0 +1,11 @@
+--- a/services/mail-server/crates/tracking-service/src/routes/click.rs
++++ b/services/mail-server/crates/tracking-service/src/routes/click.rs
+@@ -265,7 +265,7 @@
+             | RedirectRefusal::InvalidTarget { .. }
+             | RedirectRefusal::MalformedToken => StatusCode::BAD_REQUEST,
+             RedirectRefusal::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+-            RedirectRefusal::UnknownToken => StatusCode::NOT_FOUND,
++            RedirectRefusal::UnknownToken => StatusCode::SERVICE_UNAVAILABLE,
+         }
+     }
+ 

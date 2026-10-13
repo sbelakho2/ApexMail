@@ -1,0 +1,10 @@
+--- a/services/mail-server/crates/api-server/src/app.rs
++++ b/services/mail-server/crates/api-server/src/app.rs
+@@ -719,7 +719,6 @@
+         .nest("/v1/retention", routes::retention::router())
+         .nest("/v1/templates", routes::templates::router())
+         .nest("/v1/suppressions", routes::suppressions::router())
+-        .nest("/v1/events", routes::events::router())
+         .nest("/v1/webhooks", routes::webhooks::router())
+         // Customer audit trail (audit_logs, Growth and above): tenant-scoped
+         // read + export, scope `audit:read` (see routes/audit.rs).
