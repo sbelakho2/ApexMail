@@ -178,9 +178,9 @@ ensure_smoke_assets() {
   # overlay runs nginx as uid 101, and Docker Desktop bind mounts do not map
   # host ownership into the container (verified: uid 101 gets EACCES on a
   # 0600 host file), so 0600 would prevent the smoke nginx from loading its
-  # TLS key. Production perms are enforced by deploy-hetzner.yml (privkey
-  # 0640 root-owned-by-101); this file is an ephemeral 1-day localhost cert
-  # inside a throwaway smoke directory.
+  # TLS key. Production perms are enforced by the ci/ deploy stage
+  # (ci/stages/deploy.sh: privkey 0640, group 101); this file is an ephemeral
+  # 1-day localhost cert inside a throwaway smoke directory.
   chmod 0644 "$SMOKE_SSL_DIR/privkey.pem"
   chmod 0644 "$SMOKE_SSL_DIR/fullchain.pem" "$SMOKE_SSL_DIR/ca-chain.pem"
 }

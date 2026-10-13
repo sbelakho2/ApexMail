@@ -116,7 +116,7 @@
       "enforcement_mode": "not-applicable",
       "monitored": false,
       "advertised": false,
-      "evidence": "ci/README.md \u00a75: 'Dependabot + auto-merge \u2014 gone | manual cargo update \u2192 check-pr.sh full \u2192 push'; .github/dependabot.yml is vestigial (its own comments say so; auto-merge is archived) and must not be claimed as a control",
+      "evidence": "ci/README.md \u00a75: 'Dependabot + auto-merge \u2014 gone | manual cargo update \u2192 check-pr.sh full \u2192 push'; no dependabot configuration or auto-merge remains in the tree and it must not be claimed as a control",
       "source": "ci/README.md"
     },
     "firewall_inbound_ports": {

@@ -33,7 +33,7 @@ This document defines the load-testing strategy for ApexMail. Every release that
 | k6 billing tests | [`services/mail-server/crates/load-tests/tests/k6/billing-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/billing-load-test.js) |
 | Baseline files | [`docs/evaluation/baselines/`](baselines) |
 | Grafana dashboard | [`deploy/grafana/dashboards/load-testing-overview.json`](../../deploy/grafana/dashboards/load-testing-overview.json) |
-| CI integration | manual/periodic (archived with the GitHub workflows — see `.github/workflows-archive/` and `ci/README.md` §2) |
+| CI integration | manual/periodic (`deploy/load-test-infra/docker-compose.ci.yml`; mapping of retired GitHub workflows to ci/ stages in `ci/README.md` §2) |
 | Docker Compose environment | [`deploy/load-test-infra/docker-compose.yml`](../../deploy/load-test-infra/docker-compose.yml) |
 
 ### Running Load Tests

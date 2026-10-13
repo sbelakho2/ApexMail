@@ -23,8 +23,8 @@
 #   make verify                         — check live endpoints
 #   make verify-env ENV_FILE=.env.production
 #                                       — validate an env file against the
-#                                          compose ${VAR:?} contract (same
-#                                          gate deploy-hetzner.yml runs)
+#                                          compose ${VAR:?} contract (the same
+#                                          gate the ci/ validate stage runs)
 #
 # Server-local state NEVER touched by these targets:
 #   .env, secrets/, certs/ (not in SYNC_DIRS), target/ (Docker build cache),
@@ -60,8 +60,9 @@ RSYNC_SSH   := -e "ssh -o StrictHostKeyChecking=accept-new"
 # Code directories that get synced. Each rsync uses --delete so the server
 # has EXACTLY the current repo state — no stale files, no old binaries.
 # NOTE: docs/ is synced because services/mail-server/Dockerfile COPYs it into
-# the builder stages (COPY docs /app/docs).
-SYNC_DIRS := services/mail-server packages/kiwicaptcha packages/kiwicaptcha-wasm apps/marketing-zola docs deploy
+# the builder stages (COPY docs /app/docs). ci/ is synced so the host pipeline
+# (ci/pipeline.sh, the canonical deploy path) stays current (ci/README.md §10).
+SYNC_DIRS := services/mail-server packages/kiwicaptcha packages/kiwicaptcha-wasm apps/marketing-zola docs deploy ci
 SYNC_FILES := docker-compose.yml docker-compose.prod.yml
 
 # Map service names to the code directories they depend on (for partial deploys).
@@ -196,7 +197,7 @@ verify:
 ##
 ## Derives the required variable set straight out of docker-compose*.yml
 ## (${:?} guards) and fails when any value is missing or still a documented
-## placeholder — the same check deploy-hetzner.yml runs as an early gate
+## placeholder — the same check the ci/ validate stage runs as an early gate
 ## against APEXMAIL_PROD_ENV. Default file: .env.production.
 verify-env:
 	@if [ -z "$(ENV_FILE)" ]; then \

@@ -1383,12 +1383,6 @@ def validate_extended_artifacts(catalog: dict[str, ParsedPlan], errors: list[str
     read."""
     validate_pricing_mirror(catalog, errors)
 
-    payg_fix = ROOT / "tools/fix_payg_calculations.py"
-    if payg_fix.exists():
-        source = read(payg_fix)
-        check("€" in source, "tools/fix_payg_calculations.py must quote EUR amounts", errors)
-        check("$" not in source, "tools/fix_payg_calculations.py must not write USD amounts", errors)
-
     # NOTE 2026-10-07 (coverage audit U-2b adjacent, fixed by the residual
     # wave): the old block here ASSERTED the stale values in
     # apps/ai/training/new_customer_profiles.py ("email_limit": "30,000") as

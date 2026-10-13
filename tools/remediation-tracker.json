@@ -67,11 +67,11 @@
       "development_completion_date": "2026-07-29",
       "staging_approval_date": null,
       "production_deployment_date": null,
-      "test_evidence": ".github/workflows/release-gates.yml",
+      "test_evidence": "ci/stages/validate.sh + ci/stages/test.sh (the ci/pipeline.sh release-gate stages)",
       "screenshot_evidence": null,
       "known_limitations": "E2E tests require staging/production environment",
       "final_approver": "CTO",
-      "evidence": ".github/workflows/release-gates.yml with valid checks"
+      "evidence": "ci/stages/validate.sh + ci/stages/test.sh with valid checks"
     },
     {
       "id": "T-2.1",
@@ -109,11 +109,11 @@
       "development_completion_date": "2026-07-29",
       "staging_approval_date": null,
       "production_deployment_date": null,
-      "test_evidence": ".github/workflows/legal-identity.yml + tools/validate_legal_identity.py",
+      "test_evidence": "ci/stages/validate.sh (legal-identity lanes) + tools/validate_legal_identity.py",
       "screenshot_evidence": null,
       "known_limitations": "Crawls static HTML build; does not test runtime-rendered pages",
       "final_approver": "Legal",
-      "evidence": ".github/workflows/legal-identity.yml"
+      "evidence": "ci/stages/validate.sh (legal-identity lanes)"
     },
     {
       "id": "T-3.1",
@@ -151,7 +151,7 @@
       "development_completion_date": "2026-07-29",
       "staging_approval_date": null,
       "production_deployment_date": null,
-      "test_evidence": "tools/check_claim_expiry.py + .github/workflows/claim-expiry-check.yml",
+      "test_evidence": "tools/check_claim_expiry.py + ci/stages/validate.sh (advisory claim-expiry lane)",
       "screenshot_evidence": null,
       "known_limitations": "Claims embedded in source code only; CMS-routed claims need separate integration",
       "final_approver": "Legal",

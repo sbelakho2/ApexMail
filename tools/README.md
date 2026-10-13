@@ -53,7 +53,7 @@ The script rewrites the checksum file atomically so stale placeholder hashes do 
 ## Shared Library (`tools/lib/`)
 
 The `tools/lib/` package provides a single source of truth for pricing constants and fix utilities,
-shared across all audit/fix scripts to eliminate duplication:
+shared across the audit/validation scripts to eliminate duplication:
 
 - `lib/pricing.py` — Python mirror of the canonical Rust catalog
   (`services/mail-server/crates/platform-catalog/src/lib.rs`): plan prices,
@@ -67,16 +67,6 @@ shared across all audit/fix scripts to eliminate duplication:
   Writes are guarded: overwriting an existing file requires a `.bak` backup
   unless `dry_run=True` (coverage audit U-2b). Probe:
   `python3 tools/lib/fix_utils.py --self-test`.
-
-Scripts that used to have their own hardcoded pricing constants now import from
-`lib/pricing.py`: `fix_all_errors.py`, `fix_all_training_limits.py`,
-`fix_payg_calculations.py`, `fix_payg_errors.py`.
-
-`definitive_audit.py` is RETIRED (coverage audit U-4): it imported
-nonexistent `lib.pricing` names, targeted a deleted corpus, and printed
-"ALL 1,089 LINES CLEAN" without running. The file is now a stub that always
-exits 2 with the retirement record. Use `validate_pricing_drift.py`
-(catalog mirror gate) and `check_eval_corpora.py` (AI goldens) instead.
 
 ## Historical Audit And Remediation Scripts
 
