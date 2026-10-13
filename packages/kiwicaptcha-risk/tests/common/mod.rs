@@ -123,5 +123,212 @@ pub fn observation(
         event_id,
         network_risk: 0,
         now_ms,
+        device_id: None,
     }
+}
+
+/// Free loopback ports for the spawn harnesses (distinct entries).
+pub fn free_ports(count: usize) -> Vec<u16> {
+    use std::collections::BTreeSet;
+    use std::net::TcpListener;
+    let mut ports = BTreeSet::new();
+    while ports.len() < count {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        ports.insert(listener.local_addr().expect("addr").port());
+    }
+    ports.into_iter().collect()
+}
+
+/// One routed-slot stand-in endpoint of the sharded spawn harnesses: a
+/// spawned throwaway redis-server (shut down with a nosave final write
+/// on drop) or an env-provided endpoint (never touched on drop).
+pub struct RedisStandin {
+    url: String,
+    child: Option<std::process::Child>,
+}
+
+/// `true` when the `redis-server` binary answers `--version` (the
+/// binary exists and is executable).
+fn redis_server_available() -> bool {
+    std::process::Command::new("redis-server")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// The env-provided stand-in endpoints, normalized to the `redis://`
+/// scheme the same way [`common::redis_url`] normalizes the single
+/// test URL: `RISK_REDIS_URLS` (comma separated) is the list override,
+/// `RISK_REDIS_URL` the single-endpoint override.
+fn env_standin_urls() -> Vec<String> {
+    let raw = std::env::var("RISK_REDIS_URLS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("RISK_REDIS_URL").ok())
+        .unwrap_or_default();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if let Some(rest) = s.strip_prefix("tcp://") {
+                format!("redis://{rest}")
+            } else {
+                s.to_string()
+            }
+        })
+        .collect()
+}
+
+impl RedisStandin {
+    /// Spawns one throwaway `redis-server` on a free port and waits for
+    /// its PING. `None` when the binary is missing (the caller skips).
+    fn spawn_free() -> Option<RedisStandin> {
+        let port = free_ports(1).into_iter().next()?;
+        let url = format!("redis://127.0.0.1:{port}/");
+        let child = std::process::Command::new("redis-server")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--save")
+            .arg("")
+            .arg("--appendonly")
+            .arg("no")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let standin = RedisStandin {
+            url,
+            child: Some(child),
+        };
+        standin.wait_ready();
+        Some(standin)
+    }
+
+    /// An env-provided endpoint: reachable-check only, never owned.
+    fn external(url: &str) -> RedisStandin {
+        RedisStandin {
+            url: url.to_string(),
+            child: None,
+        }
+    }
+
+    /// Blocks until the endpoint answers PING (bounded); `false` on a
+    /// dead endpoint, so a bad env override fails loudly at the caller.
+    fn wait_ready(&self) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(client) = redis::Client::open(self.url.as_str()) {
+                if let Ok(mut conn) = client.get_connection() {
+                    let pong: Result<String, _> = redis::cmd("PING").query(&mut conn);
+                    if pong.is_ok() {
+                        return true;
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The stand-in's connection URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The `cmdstat_evalsha:calls=` counter of this stand-in.
+    pub fn evalsha_calls(&self) -> u64 {
+        let mut conn = redis::Client::open(self.url.as_str())
+            .expect("url parses")
+            .get_connection()
+            .expect("connects");
+        let info: String = redis::cmd("INFO")
+            .arg("commandstats")
+            .query(&mut conn)
+            .expect("info");
+        for line in info.lines() {
+            if let Some(rest) = line.strip_prefix("cmdstat_evalsha:") {
+                for field in rest.split(',') {
+                    if let Some(calls) = field.strip_prefix("calls=") {
+                        return calls.trim().parse().expect("calls is an integer");
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    pub fn reset_stats(&self) {
+        let mut conn = redis::Client::open(self.url.as_str())
+            .expect("url parses")
+            .get_connection()
+            .expect("connects");
+        let _: Result<String, _> = redis::cmd("CONFIG").arg("RESETSTAT").query(&mut conn);
+    }
+
+    pub fn exists(&self, key: &str) -> bool {
+        let mut conn = redis::Client::open(self.url.as_str())
+            .expect("url parses")
+            .get_connection()
+            .expect("connects");
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(key)
+            .query(&mut conn)
+            .expect("exists");
+        exists == 1
+    }
+}
+
+impl Drop for RedisStandin {
+    fn drop(&mut self) {
+        // Only an owned spawn is shut down: the nosave shutdown leaves
+        // no persistence artifacts. An env-provided endpoint is left
+        // exactly as the operator handed it over.
+        if self.child.is_some() {
+            if let Ok(client) = redis::Client::open(self.url.as_str()) {
+                if let Ok(mut conn) = client.get_connection() {
+                    let _: Result<String, _> =
+                        redis::cmd("SHUTDOWN").arg("NOSAVE").query(&mut conn);
+                }
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The `n` stand-in endpoints for a sharded spawn harness. The env
+/// override is authoritative: `RISK_REDIS_URLS` (comma separated) when
+/// it lists at least `n` endpoints, else `RISK_REDIS_URL` when `n == 1`.
+/// Otherwise `n` throwaway `redis-server` processes are spawned on free
+/// ports and shut down on drop. `None` (the caller prints the skip
+/// notice) when the override is absent or too short and no local
+/// `redis-server` binary is installed, so the suite stays green without
+/// infrastructure.
+pub fn shard_standins(n: usize) -> Option<Vec<RedisStandin>> {
+    let urls = env_standin_urls();
+    if urls.len() >= n {
+        let standins: Vec<RedisStandin> = urls
+            .into_iter()
+            .take(n)
+            .map(|u| RedisStandin::external(&u))
+            .collect();
+        if standins.iter().all(|s| s.wait_ready()) {
+            return Some(standins);
+        }
+        return None;
+    }
+    if !redis_server_available() {
+        return None;
+    }
+    let mut standins = Vec::with_capacity(n);
+    for _ in 0..n {
+        standins.push(RedisStandin::spawn_free()?);
+    }
+    Some(standins)
 }

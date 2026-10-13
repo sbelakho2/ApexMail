@@ -21,6 +21,17 @@
 //! client-influenceable (the endpoint accepts possession of a pending
 //! nonce), so it must never erase the issued-but-unsolved signal.
 //!
+//! Value 22 is the step-up completion surface: a server-verified secondary
+//! authentication finished successfully. The event is trust-positive on
+//! the identity channels and the principal channel (the same trust credit
+//! as `ProtectedActionSuccess`, 8) — a completed step-up is
+//! server-confirmed, so it may decrement risk under the trust-source
+//! invariant. NOT 18: the live runtime already assigns 18..20 to the
+//! honeypot/decoy evidence kinds and 21 to cancellation; 22 is the next
+//! free contract value. Mixed-version readiness: an older state script
+//! treats 22 as an unknown kind (no-op, safe in the trust direction only),
+//! and an older `from_u8` refuses it fail-closed rather than aliasing it.
+//!
 //! The trust-source invariant: `SolveSuccess` is trust-neutral. A valid
 //! PoW proves expenditure (which the economic model explicitly permits
 //! bots to pay), never legitimacy. Only server/application-confirmed
@@ -38,7 +49,8 @@ use crate::RiskError;
 type HmacSha256 = Hmac<Sha256>;
 
 /// The fixed risk event kinds of the risk-v1 contract (1..17) plus the
-/// additive risk-v2 honeypot/decoy kinds (18..20).
+/// additive risk-v2 honeypot/decoy kinds (18..20), the cancellation
+/// surface (21) and the step-up completion surface (22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
@@ -68,12 +80,15 @@ pub enum RiskEventKind {
     DecoyFieldSubmitted = 20,
     /// A server-issued challenge was cancelled before any verification.
     ChallengeCancelled = 21,
+    /// A server-verified step-up finished successfully (NOT 18: 18..20
+    /// are the honeypot/decoy evidence kinds, 21 is cancellation).
+    StepUpCompleted = 22,
 }
 
 impl RiskEventKind {
-    /// All twenty-one kinds, in contract value order (17 risk-v1 +
-    /// 3 risk-v2 + ChallengeCancelled).
-    pub const ALL: [RiskEventKind; 21] = [
+    /// All twenty-two kinds, in contract value order (17 risk-v1 +
+    /// 3 risk-v2 + ChallengeCancelled + StepUpCompleted).
+    pub const ALL: [RiskEventKind; 22] = [
         RiskEventKind::PreIssue,
         RiskEventKind::ChallengeIssued,
         RiskEventKind::SolveSuccess,
@@ -95,14 +110,15 @@ impl RiskEventKind {
         RiskEventKind::DecoyEndpointTouched,
         RiskEventKind::DecoyFieldSubmitted,
         RiskEventKind::ChallengeCancelled,
+        RiskEventKind::StepUpCompleted,
     ];
 
-    /// The contract integer value (1..21), as passed to the Lua script.
+    /// The contract integer value (1..22), as passed to the Lua script.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..21.
+    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..22.
     pub fn from_u8(value: u8) -> Option<RiskEventKind> {
         match value {
             1 => Some(RiskEventKind::PreIssue),
@@ -126,6 +142,7 @@ impl RiskEventKind {
             19 => Some(RiskEventKind::DecoyEndpointTouched),
             20 => Some(RiskEventKind::DecoyFieldSubmitted),
             21 => Some(RiskEventKind::ChallengeCancelled),
+            22 => Some(RiskEventKind::StepUpCompleted),
             _ => None,
         }
     }
@@ -172,6 +189,11 @@ pub struct RiskObservation {
     pub subnet_id_next: String,
     pub session_id: Option<[u8; 16]>,
     pub principal_id: Option<[u8; 16]>,
+    /// The keyed device pseudonym, or `None` when the request carries no
+    /// trusted-device cookie. Same 16-byte contract as the session
+    /// pseudonym, derived under the `dev` context (the PHP mirror names
+    /// the field `deviceId`).
+    pub device_id: Option<[u8; 16]>,
     /// Dedupe key: 16 random bytes in hex (32 chars) or the 64-hex
     /// HMAC-SHA256 of a normalized caller idempotency key — the same
     /// 32-or-64 lowercase-hex contract the PHP mirror's constructor
@@ -246,6 +268,7 @@ impl Default for RiskObservation {
             subnet_id_next: "0".repeat(32),
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: "0".repeat(32),
             network_risk: 0,
             now_ms: 0,
@@ -292,6 +315,8 @@ mod tests {
             // Cancellation surface (risk-neutral observability, no state
             // mutation).
             (21, "challenge_cancelled"),
+            // Step-up completion surface (server-confirmed trust). NOT 18.
+            (22, "step_up_completed"),
         ];
         for (i, (value, name)) in expected.iter().enumerate() {
             let kind = RiskEventKind::ALL[i];
@@ -300,8 +325,19 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
         }
         assert_eq!(RiskEventKind::from_u8(0), None);
-        assert_eq!(RiskEventKind::from_u8(22), None);
+        assert_eq!(RiskEventKind::from_u8(23), None);
         assert_eq!(RiskEventKind::from_u8(255), None);
+        // 22 is StepUpCompleted (the step-up completion channel), never a
+        // reserved hole and never an alias of the honeypot kinds at 18.
+        assert_eq!(
+            RiskEventKind::from_u8(22),
+            Some(RiskEventKind::StepUpCompleted)
+        );
+        assert_eq!(RiskEventKind::StepUpCompleted.as_u8(), 22);
+        assert_ne!(
+            RiskEventKind::StepUpCompleted,
+            RiskEventKind::HoneypotTriggered
+        );
     }
 
     #[test]
@@ -324,6 +360,29 @@ mod tests {
         // values and the v2 kinds extend the range without renumbering.
         assert_eq!(RiskEventKind::RiskDenied.as_u8(), 17);
         assert_eq!(RiskEventKind::HoneypotTriggered.as_u8(), 18);
+        assert_eq!(RiskEventKind::ChallengeCancelled.as_u8(), 21);
+        assert_eq!(RiskEventKind::StepUpCompleted.as_u8(), 22);
+        // StepUpCompleted is a trust kind, never a honeypot kind.
+        assert!(!RiskEventKind::StepUpCompleted.is_honeypot());
+    }
+
+    #[test]
+    fn step_up_completed_serializes_as_step_up_completed() {
+        // Serialization contract: the serde wire name is snake_case, the
+        // same name the PHP mirror and the cross-language vectors use.
+        assert_eq!(
+            serde_json::to_value(RiskEventKind::StepUpCompleted).unwrap(),
+            serde_json::json!("step_up_completed")
+        );
+        let parsed: RiskEventKind = serde_json::from_str("\"step_up_completed\"").expect("parses");
+        assert_eq!(parsed, RiskEventKind::StepUpCompleted);
+        // Mixed-version readiness: an unknown wire name refuses fail-closed
+        // (no silent default to PreIssue), and the wire number 22 round-trips
+        // through the u8 contract without aliasing 18..21.
+        assert!(serde_json::from_str::<RiskEventKind>("\"step_up_completd\"").is_err());
+        for kind in RiskEventKind::ALL {
+            assert_eq!(RiskEventKind::from_u8(kind.as_u8()), Some(kind));
+        }
     }
 
     #[test]

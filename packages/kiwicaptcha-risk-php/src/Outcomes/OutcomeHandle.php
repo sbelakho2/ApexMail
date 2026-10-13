@@ -45,6 +45,13 @@ final class OutcomeHandle
 
     public static function target(string $pseudonym): self
     {
+        // The target dimension carries the engine's derived target
+        // pseudonym (the full 64-char HMAC hex), so its rule is wider
+        // than the 128-bit identity pseudonyms.
+        if (preg_match('/^[0-9a-f]{64}$/D', $pseudonym) === 1) {
+            return new self(OutcomeHandleDimension::Target, $pseudonym);
+        }
+
         return new self(OutcomeHandleDimension::Target, self::pseudonymIdentifier('target', $pseudonym));
     }
 

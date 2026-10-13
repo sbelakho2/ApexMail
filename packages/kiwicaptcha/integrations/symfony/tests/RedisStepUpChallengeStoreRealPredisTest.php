@@ -7,11 +7,12 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
-use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpCode;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
@@ -62,7 +63,6 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->handler = new TotpStepUpHandler(
             $this->store,
             new StepUpTicket(self::MASTER),
-            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             'sha1', 6, 1, 300, 5, 100, 900, '/kiwi/step-up/complete',
             static fn (): int => self::NOW,
             self::MASTER,
@@ -102,20 +102,47 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $base32 = $this->enrollFirstTime();
         $secretRaw = (string) TotpCode::base32Decode($base32);
 
+        // The demand plane rides the walk: the begin binds its challenge
+        // to the demand the finalizer minted, and the completed proof
+        // settles authorized through it. The credit is the finalizer's
+        // booking, never the handler's.
+        $reporter = new SpyOutcomeReporter();
+        $finalizer = new StepUpDemandFinalizer(
+            $this->store,
+            new StepUpCompletionCredit($reporter, self::MASTER),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            static fn (): int => self::NOW,
+            self::MASTER,
+        );
+        $demandId = (string) $finalizer->mintLoginDemand('login', self::PRINCIPAL, null, 600);
+        self::assertNotSame('', $demandId, 'the login demand persists through the real client');
+
         $response = $this->handler->begin(
             Request::create('https://captcha.example.com/kiwi/step-up/begin'),
-            new StepUpContext(self::PRINCIPAL, null, 'login', null, 'post_solve_step_up_required', StepUpContext::MODE_JSON),
+            new StepUpContext(self::PRINCIPAL, null, 'login', null, 'post_solve_step_up_required', StepUpContext::MODE_JSON, false, $demandId),
         );
         self::assertSame(200, $response->getStatusCode(), 'begin() must persist its record through the real client');
 
         $body = json_decode((string) $response->getContent(), true);
         self::assertIsArray($body);
         $ticket = (string) $body['challenge'];
+        // A sessionless begin is stateless: the challenge mints its
+        // one-time client secret and the completion must present it
+        // (exactly one binding per challenge).
+        $clientSecret = (string) ($body['client_secret'] ?? '');
+        self::assertNotSame('', $clientSecret, 'a stateless begin returns its one-time client secret');
 
         $code = TotpCode::at($secretRaw, TotpCode::stepOf(self::NOW), 'sha1', 6);
-        $result = $this->handler->complete($this->completeRequest($ticket, $code));
-        self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted, consumed and credited end to end');
-        self::assertTrue($result->creditedPrincipal);
+        $result = $this->handler->complete($this->completeRequest($ticket, $code, $clientSecret));
+        self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted and consumed end to end');
+        $finalization = $finalizer->finalizeLogin($result, 'login');
+        self::assertTrue($finalization->authorized, 'the completed proof settles authorized through its demand');
+        self::assertCount(1, $reporter->reports, 'the authorized settlement books the completion credit exactly once');
     }
 
     public function testTheConsumedRecordStaysSingleUseOnTheRealClient(): void
@@ -140,6 +167,69 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->store->create($this->challenge($id), 300);
         $this->expectException(\RuntimeException::class);
         $this->store->create($this->challenge($id), 300);
+    }
+
+    public function testASupersededDemandCompletesNoChallengeOnTheRealClient(): void
+    {
+        // The finding this pins, on the real server: the escalation
+        // supersede wrote the parent's child link but left its state
+        // open, so the completion script's open-state gate passed and
+        // the weak proof landed behind the family's back. The
+        // supersession marker is now judged inside the completion
+        // script itself. The clock is the wall clock: the supersede
+        // script takes its liveness decision on the Redis server time,
+        // so frozen fixture timestamps would read as expired.
+        $now = time();
+        $demandId = 'realsupersededdemand000001';
+        $this->store->createDemand(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand::mint($demandId, 'login', null, null, null, $now, 300),
+            300,
+        );
+        $challenge = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
+            'realsupersededchallenge00001',
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            $now,
+            300,
+            5,
+            str_repeat('a', 64),
+            null,
+            null,
+            false,
+            false,
+            null,
+            $demandId,
+        );
+        $this->store->create($challenge, 300);
+        $child = $this->store->readDemand($demandId)->spawnChild('realsupersededchild0000001', $now, 'decision-2');
+        self::assertNotNull($this->store->supersedeDemandWithChild($demandId, $child), 'the escalation replaces the open parent');
+        self::assertNull(
+            $this->store->completeFactor('realsupersededchallenge00001', $demandId, (string) $challenge->clientSecretHash, $now + 1, null),
+            'the superseded parent completes no challenge on the real server',
+        );
+        self::assertNull($this->store->claimDemandFinalization($demandId, $now + 2, 30), 'the superseded parent is never claimed for finalization');
+    }
+
+    public function testAReleasedReservationRefundsItsBudgetsOnTheRealClient(): void
+    {
+        // The finding this pins: the settle script reads the budget
+        // counters off the reservation marker. A release that only
+        // dropped the marker answered true while the spend stood, and
+        // the freed capacity never served again.
+        $dom = 'dom:'.str_repeat('b', 32);
+        self::assertTrue($this->store->reserveMailQuota('real.0.1', [$dom, 'global:'], [1, 1000], 3600, 30));
+        self::assertFalse($this->store->reserveMailQuota('real.0.2', [$dom, 'global:'], [1, 1000], 3600, 30), 'the second reservation passes the limit of one');
+        self::assertTrue($this->store->releaseMailQuota('real.0.1'), 'the pre-handoff release refunds the counters');
+        self::assertSame('0', $this->client->get(self::PREFIX.'emb:'.$dom), 'the released reservation left no spend behind');
+        self::assertTrue($this->store->reserveMailQuota('real.0.3', [$dom, 'global:'], [1, 1000], 3600, 30), 'the freed capacity serves again on the real server');
+        // A committed reservation never releases: the spend stands.
+        $this->store->commitMailQuota('real.0.3');
+        self::assertFalse($this->store->releaseMailQuota('real.0.3'), 'a committed reservation never releases');
+        self::assertSame('1', $this->client->get(self::PREFIX.'emb:'.$dom), 'the committed spend stands');
     }
 
     /**
@@ -180,12 +270,16 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         );
     }
 
-    private function completeRequest(string $ticket, string $code): Request
+    private function completeRequest(string $ticket, string $code, string $clientSecret = ''): Request
     {
-        $request = Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', [
+        $fields = [
             TotpStepUpHandler::TICKET_FIELD => $ticket,
             TotpStepUpHandler::CODE_FIELD => $code,
-        ]);
+        ];
+        if ($clientSecret !== '') {
+            $fields[\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::CLIENT_SECRET_FIELD] = $clientSecret;
+        }
+        $request = Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', $fields);
         // The controller binds the re-resolved principal before the
         // handler runs; direct handler calls bind it the same way.
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);

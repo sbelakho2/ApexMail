@@ -8,28 +8,12 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * The RFC 6238 time-based one-time passcode reference handler. A 30 s
- * step, a plus-or-minus one step acceptance window, and a replay guard
- * that refuses the same time-step twice per principal. The algorithm
- * is in-bundle ({@see TotpCode}, hash_hmac based, SHA-1 or SHA-256,
- * with the base32 codec of RFC 4648), so this handler adds no composer
- * dependency.
- *
- * Enrollment surface: enroll() generates a fresh 160-bit secret,
- * persists it server-side keyed by the principal pseudonym and answers
- * its base32 form for the application to render. A QR label is the
- * application's own surface. The secret is sealed at rest with
- * XSalsa20-Poly1305 (sodium_crypto_secretbox) under a seal key derived
- * from the step-up master and bound to the owning principal's
- * pseudonym, so a ciphertext copied across principal slots never
- * decrypts; only the sealed blob is ever persisted. Unsealing a value
- * this key cannot open (data predating the seal, a tampered store, a
- * cross-principal transplant) fails closed with the typed
- * {@see TotpSecretUnsealException}, which complete() maps to a typed
- * failure verdict, never an uncaught error.
- *
- * The completion credit runs through {@see StepUpCompletionCredit} on
- * the one consumed record, exactly once per challenge.
+ * The RFC 6238 time-based one-time passcode reference handler. A 30
+ * second step. A plus-or-minus one step acceptance window. A replay
+ * guard refuses the same time-step twice per principal. The secret is
+ * sealed at rest with XSalsa20-Poly1305. The key derives from the
+ * deployment master through HKDF under the principal pseudonym. A
+ * storage writer cannot copy one account secret into another slot.
  */
 final class TotpStepUpHandler implements StepUpHandlerInterface
 {
@@ -41,10 +25,12 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     /** How far back a completed session step-up may authorize enrollment. */
     private const ENROLLMENT_LOOKBACK_SECS = 900;
 
+    /** How long the factor-plane proof markers of one completion live. */
+    private const PROOF_MARKER_TTL_SECS = 900;
+
     public function __construct(
         private readonly StepUpChallengeStore $store,
         private readonly StepUpTicket $ticket,
-        private readonly StepUpCompletionCredit $credit,
         private readonly string $algo = 'sha1',
         private readonly int $digits = 6,
         private readonly int $window = 1,
@@ -73,6 +59,11 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         }
     }
 
+    public function assurance(): StepUpFactorAssurance
+    {
+        return StepUpFactorAssurance::totp();
+    }
+
     /**
      * The at-rest seal key: HKDF over the step-up master, purpose-
      * separated AND bound to the owning principal's pseudonym (the
@@ -97,11 +88,12 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
     /**
      * Unseal a stored secret under the owning principal's key. A value
-     * this key cannot open (data written before sealing existed, a
-     * tampered store, or a ciphertext copied across principal slots)
-     * fails closed with the typed {@see TotpSecretUnsealException}: the
-     * operator re-enrolls the account rather than the deployment
-     * silently downgrading to plaintext or erroring as a 500.
+     * this key cannot open fails closed with the typed
+     * {@see TotpSecretUnsealException}. That includes data written
+     * before sealing existed, a tampered store, and a ciphertext
+     * copied across principal slots. The operator re-enrolls the
+     * account. The deployment never silently downgrades to plaintext
+     * and never errors as a 500.
      *
      * @throws TotpSecretUnsealException when the stored value cannot be decrypted for this principal
      */
@@ -230,6 +222,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             null,
             StepUpSessionBinding::sessionId($request),
             $context->targetOwned,
+            false,
+            null,
+            $context->demandId,
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
@@ -295,16 +290,37 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             return StepUpResult::failed(StepUpResult::FAIL_REPLAYED_STEP, $challenge->id);
         }
 
-        // The single-use boundary: exactly one completer consumes the
-        // record; a replayed completion answers unknown_challenge and
-        // never reaches the credit.
-        $consumed = $this->store->consume($challenge->id);
-        if ($consumed === null) {
+        // The single-use boundary is one atomic transition: the challenge
+        // consumption and the demand completion are the same script, so
+        // a verified factor can never strand beside a demand that stayed
+        // open, and a lost race consumes nothing. A replayed completion
+        // answers unknown_challenge and never reaches a proof.
+        if (!$this->completeAtomically($request, $challenge, $now)) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
         $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $boundContextKey);
 
-        return $this->credit($challenge, $boundSessionId);
+        return $this->proof($challenge, $boundSessionId);
+    }
+
+    /**
+     * The atomic completion of one verified factor: the store's single
+     * script consumes the challenge and completes its demand. A
+     * challenge that names no demand consumes single-use as before; its
+     * proof carries no demand id and finalizes nothing (the finalizer
+     * refuses an unbound proof, fail closed).
+     */
+    private function completeAtomically(Request $request, StepUpChallenge $challenge, int $now): bool
+    {
+        if ($challenge->demandId === null) {
+            return $this->store->consume($challenge->id) !== null;
+        }
+        $binding = StepUpSessionBinding::presentedBindingHash($request, $challenge);
+        if ($binding === null) {
+            return false;
+        }
+
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash) !== null;
     }
 
     /**
@@ -375,30 +391,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return $this->store->read($payload['challengeId']);
     }
 
-    private function credit(StepUpChallenge $challenge, string $boundSessionId = ''): StepUpResult
+    /**
+     * The factor-plane proof of the consumed record: FactorVerified,
+     * never AuthorizedStepUp. No enrollment marker, no session restore,
+     * no StepUpCompleted is booked here — the shared
+     * {@see StepUpDemandFinalizer} creates those only after the demand
+     * settles authorized.
+     */
+    private function proof(StepUpChallenge $challenge, string $boundSessionId): StepUpResult
     {
-        $result = $this->creditOnce($challenge);
-        if ($result->status === StepUpResultStatus::Succeeded) {
-            $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
-            $this->store->markSessionStepUpSuccess(
-                $boundSessionId,
-                $challenge->principalPseudonym,
-                'totp',
-                900,
-                $this->now(),
-            );
-        }
-
-        return $result;
-    }
-
-    private function creditOnce(StepUpChallenge $challenge): StepUpResult
-    {
-        try {
-            return $this->credit->credit($challenge->id, $challenge);
-        } catch (\Throwable) {
-            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $challenge->id);
-        }
+        return StepUpResult::proved($challenge, $this->assurance());
     }
 
     /**

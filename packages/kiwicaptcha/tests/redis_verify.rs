@@ -306,8 +306,7 @@ fn issue_armed_execution(target_bits: u32) -> kiwicaptcha::challenge::Issued {
 }
 
 /// The same issuance at an explicit execution version, so the
-/// register-maximum suite can arm the version-5 causal object-graph
-/// grammar.
+/// register-maximum suite can arm the live grammar rung.
 fn issue_armed_execution_at(target_bits: u32, version: u8) -> kiwicaptcha::challenge::Issued {
     issue_challenge_with_execution(
         &execution_config(target_bits),
@@ -332,7 +331,19 @@ fn issue_armed_execution_at(target_bits: u32, version: u8) -> kiwicaptcha::chall
 fn execution_evidence(record: &ChallengeRecord) -> (String, String) {
     let program = record.execution_program.as_deref().expect("armed");
     let decoded = execution::decode(program).expect("the issued program must parse");
-    let trace = execution::fixtures::executed_trace_for(&decoded);
+    // The live register maximum carries the real-platform probe slots.
+    // Their entries must land inside the operand-derived envelopes, so
+    // the evidence follows the cross-language fixture selection: the
+    // envelope-aware synthesizer at v6 and up, the browser-equivalent
+    // path below.
+    let trace = if decoded.op_version >= 6 {
+        execution::fixtures::white_box_envelope_forgery_solver(
+            &decoded,
+            execution::fixtures::OBSERVED_HEIGHT,
+        )
+    } else {
+        execution::fixtures::executed_trace_for(&decoded)
+    };
     let trace_b64: String = B64
         .encode(trace.as_bytes())
         .replace('+', "-")
@@ -2214,13 +2225,13 @@ fn execution_armed_v4_record_verifies_through_the_production_verifier() {
 #[test]
 fn execution_armed_record_at_the_register_maximum_verifies_through_the_production_verifier() {
     // The register-maximum direction of the same contract: an armed
-    // issuance at execution::MAX_EXECUTION_VERSION (the version-5
-    // causal object-graph grammar) stores the authenticated triplet,
-    // its program decodes at the maximum and carries the version-5
-    // spine ops, and the real digest:trace evidence verifies through
-    // the production verifier over Redis.
+    // issuance at execution::MAX_EXECUTION_VERSION stores the
+    // authenticated triplet, its program decodes at the maximum and
+    // carries the real-platform block of the top grammar rung, and the
+    // envelope-aware digest:trace evidence verifies through the
+    // production verifier over Redis.
     let Some(url) = redis_url() else { return };
-    let prefix = prefix("v5-armed-max");
+    let prefix = prefix("armed-max-register");
     let issued = issue_armed_execution_at(4, kiwicaptcha::execution::MAX_EXECUTION_VERSION);
     assert_eq!(
         issued.record.protocol_version, 4,
@@ -2237,22 +2248,52 @@ fn execution_armed_record_at_the_register_maximum_verifies_through_the_productio
         decoded.op_version,
         kiwicaptcha::execution::MAX_EXECUTION_VERSION
     );
-    // The version-5 spine ops must all be present. The read-only extra
-    // probe pool may repeat URL_CANON, so membership is asserted per op
-    // instead of an exact occurrence count.
-    let spine_position = |opcode: u8| decoded.ops.iter().position(|op| op.opcode == opcode);
-    let clone_at = spine_position(execution::OP_DOM_CLONE);
-    let reparent_at = spine_position(execution::OP_DOM_REPARENT);
-    let text_at = spine_position(execution::OP_DOM_TEXT_MUTATE);
-    let canon_at = spine_position(execution::OP_DOM_URL_CANON);
-    assert!(
-        clone_at.is_some() && reparent_at.is_some() && text_at.is_some() && canon_at.is_some(),
-        "the max-register program carries every version-5 spine op"
+    // The expected operation set comes from the protocol manifest
+    // (protocol/execution-v1.json, the canonical opcode register shared
+    // by the PHP core, the Rust core and the interpreter asset), never
+    // from a hardcoded rung: the top grammar rung emits its five
+    // real-platform probes as one fixed block, so the manifest numbers
+    // (each cross-checked against the module register constant) name
+    // the ops every max-register program carries, in the block order.
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../../protocol/execution-v1.json"))
+            .expect("the protocol manifest must parse");
+    assert_eq!(
+        manifest["max_execution_version"].as_u64(),
+        Some(u64::from(execution::MAX_EXECUTION_VERSION)),
+        "the manifest maximum must equal the module register maximum"
     );
-    assert!(
-        clone_at < reparent_at && reparent_at < text_at,
-        "the version-5 mutation spine keeps its fixed order"
-    );
+    let opcode_of = |name: &str| -> u8 {
+        manifest["opcodes"][name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the manifest must carry the {name} opcode")) as u8
+    };
+    let block = [
+        ("CSS_GEOM", execution::OP_CSS_GEOM),
+        ("MUT_ORDER", execution::OP_MUT_ORDER),
+        ("EV_PHASE_FULL", execution::OP_EV_PHASE_FULL),
+        ("RANGE_ORDER", execution::OP_RANGE_ORDER),
+        ("INT_OBS", execution::OP_INT_OBS),
+    ];
+    let position = |opcode: u8| decoded.ops.iter().position(|op| op.opcode == opcode);
+    let mut previous: Option<usize> = None;
+    for (name, register) in block {
+        assert_eq!(
+            opcode_of(name),
+            register,
+            "the manifest {name} opcode number must equal the module register constant"
+        );
+        let at = position(register).unwrap_or_else(|| {
+            panic!("the max-register program carries the manifest {name} probe")
+        });
+        if let Some(prev) = previous {
+            assert!(
+                prev < at,
+                "the max-register real-platform block keeps its fixed order"
+            );
+        }
+        previous = Some(at);
+    }
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let (digest, trace_b64) = execution_evidence(&issued.record);
     let standard: String = trace_b64
@@ -2286,9 +2327,9 @@ fn execution_armed_record_at_the_register_maximum_verifies_through_the_productio
         "a max-register armed record must verify through the production verifier"
     );
     println!(
-        "EXECUTION_AT_MAX_REGISTER: v{} trace carries dclone/drepar/durlc: {}",
+        "EXECUTION_AT_MAX_REGISTER: v{} trace carries dcsgeom/dintobs: {}",
         kiwicaptcha::execution::MAX_EXECUTION_VERSION,
-        trace.contains("dclone(") && trace.contains("durlc(")
+        trace.contains("dcsgeom(") && trace.contains("dintobs(")
     );
 }
 

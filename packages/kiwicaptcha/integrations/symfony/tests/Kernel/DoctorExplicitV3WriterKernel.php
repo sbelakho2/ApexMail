@@ -22,6 +22,7 @@ final class DoctorExplicitV3WriterKernel extends DoctorV3WriterTestKernel
             'public_base_url' => 'https://captcha.example.com',
             'redis_service' => self::FAKE_REDIS_ID,
             'risk' => [
+                    'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                 // The risk array node is canBeEnabled(): any array form
                 // auto-enables the engine, so the non-high_abuse
                 // scenario declares the disabled posture explicitly.

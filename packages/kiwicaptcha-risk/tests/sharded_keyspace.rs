@@ -385,6 +385,8 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
             v1_weights: kiwicaptcha_risk::score::RiskWeights::default(),
             v2_weights: kiwicaptcha_risk::score::RiskV2Weights::default(),
             target_id: None,
+            target_source_element: String::new(),
+            target_asn_element: String::new(),
         };
         (o, registration)
     };
@@ -489,7 +491,7 @@ fn hysteresis_floors_negative_levels_and_writes_only_on_change() {
     // A tampered -3 level must read as 0 after one transition.
     let _: i32 = conn.hset(&key, "scope", -3).unwrap();
     let _: i32 = conn.hset(&key, "cool", -9).unwrap();
-    let run = |conn: &mut redis::Connection, gp: i64| -> (Vec<i64>) {
+    let run = |conn: &mut redis::Connection, gp: i64| -> Vec<i64> {
         redis::cmd("EVAL")
             .arg(kiwicaptcha_risk::sharded::SHARDED_HYSTERESIS_LUA)
             .arg(1)

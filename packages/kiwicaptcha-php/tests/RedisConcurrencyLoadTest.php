@@ -259,7 +259,11 @@ final class RedisConcurrencyLoadTest extends TestCase
         $counting->commands = [];
 
         $challenge = $issuer->issue('login', '198.51.100.7');
-        self::assertSame(['SET'], $counting->commands, 'issuance must be exactly one SET with the TTL riding along');
+        // The store's rewind guard reads the prior state before the
+        // write (an older pending envelope must never re-open a
+        // consumed token), so the issuance is that guard GET plus one
+        // envelope SET with the TTL riding along, never more.
+        self::assertSame(['GET', 'SET'], $counting->commands, 'issuance must be the rewind-guard GET plus one SET with the TTL riding along');
         $counting->commands = [];
 
         $saltBytes = base64_decode($challenge->salt, true);

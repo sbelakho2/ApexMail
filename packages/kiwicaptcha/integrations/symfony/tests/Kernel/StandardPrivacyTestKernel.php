@@ -9,7 +9,9 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
  * Kernel with privacy_mode 'standard': the operator's explicit telemetry and
- * timing choices must pass through untouched.
+ * timing choices must pass through untouched. The evidence arm carries the
+ * explicit risk.evidence.telemetry opt-in (the rendered data-kiwi-telemetry
+ * surface), the root telemetry knob stays the legacy scorer surface.
  */
 final class StandardPrivacyTestKernel extends TestKernel
 {
@@ -32,6 +34,14 @@ final class StandardPrivacyTestKernel extends TestKernel
                 'privacy_mode' => 'standard',
                 'telemetry' => 'minimal',
                 'min_duration_ms' => 100,
+                'risk' => [
+                    // The engine stays off: this kernel carries no risk
+                    // Redis, the explicit enabled=false wins over the
+                    // present-node default, and the evidence opt-in
+                    // rides along.
+                    'enabled' => false,
+                    'evidence' => ['telemetry' => 'minimal'],
+                ],
             ]);
         });
     }

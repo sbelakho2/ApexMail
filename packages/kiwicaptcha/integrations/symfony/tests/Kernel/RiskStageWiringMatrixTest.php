@@ -130,12 +130,26 @@ final class RiskStageWiringMatrixTest extends TestCase
 
     public function testNoDatasetMeansNoAsnDimensionButEveryOtherStage(): void
     {
-        $container = $this->boot('abuse_first', [], withAsnDataset: false);
+        // Outside the abuse posture the dataset stays optional: the
+        // marks and pricing stages survive, the asn dimension drops.
+        $container = $this->boot('balanced', [], withAsnDataset: false);
 
         self::assertNotNull($this->stage($container, 'marksReader'), 'the marks stage survives without a dataset');
         self::assertNotNull($this->stage($container, 'priceContext'), 'the pricing stage survives without a dataset');
         self::assertFalse($container->has('kiwi_captcha.risk.asn'));
         self::assertFalse($container->has('kiwi_captcha.risk.trust'), 'no dataset, no bucket resolution, no trust facade');
+    }
+
+    public function testAbuseFirstWithoutADatasetIsRefusedAtBuild(): void
+    {
+        // The abuse posture's novel-network gate is judged on the ASN
+        // bucket first, so a missing dataset silently weakened the
+        // strongest profile's first-attempt defense. The absence is now
+        // a build-time refusal, not a quietly weaker stage.
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->expectExceptionMessage('kiwi_captcha.risk.asn.dataset_path is required');
+
+        $this->boot('abuse_first', [], withAsnDataset: false);
     }
 
     private function boot(?string $profile, array $overrides = [], bool $withAsnDataset = true): ContainerInterface

@@ -9,48 +9,9 @@ use Symfony\Component\HttpFoundation\Request;
 /**
  * The RFC 9421 Ed25519 verifier of the verified-agents plane.
  *
- * The signature base is built exactly per RFC 9421 §2.3: one line
- * per covered component, each line the quoted component identifier,
- * one space, the component value, one line feed. The final line is
- * the quoted @signature-params identifier, one space and the
- * serialized signature parameters (the inner list of the
- * Signature-Input value, re-serialized canonically). Derived
- * components follow §2.2: @method is the request method and
- * @target-uri is the absolute request target. Header field values
- * follow §2.1: obs-folded whitespace is never accepted here because
- * each of the covered headers must arrive as exactly one field
- * line, trimmed of surrounding whitespace.
- *
- * The covered set is fixed: @method, @target-uri and the RFC 9530
- * content-digest always; content-length additionally whenever a
- * request body is present. Anything else in the covered list is
- * refused (this verifier cannot derive it, so it must not pretend
- * to), and a body-bearing request without a covered, matching
- * content-digest is refused, the header-strip defense.
- *
- * The signature parameters are enforced, not advisory. The alg must
- * be exactly "ed25519" (any other value, including a lookalike,
- * fails closed, the alg-confusion defense). The tag must be this
- * plane's fixed tag, created must sit inside the ±skew window,
- * expires must be honored. The nonce is single-use through the
- * Redis ledger, claimed only after the signature itself verified.
- * Key ids resolve to configured agents with rotation-capable key
- * sets: every configured public key of the agent is tried, so a
- * rotation window verifies under either key.
- *
- * @target-uri is reconstructed as the configured public origin
- * (public_base_url) concatenated with the request URI, never from the
- * request Host header. Behind a reverse proxy that strips an external
- * mount prefix before the request reaches the application,
- * public_base_url must include that mount prefix: the client signs
- * the externally visible absolute URI, and only a base that carries
- * the stripped prefix reconstructs it. A mismatch fails the
- * signature (the captured @target-uri never verifies against a
- * different base).
- *
- * Failure mapping: every refusal carries a typed code and an HTTP
- * status (401 for everything here); no path can surface a raw
- * exception to the caller, and no unverifiable input can verify.
+ * The signature base is built per RFC 9421 section 2.3. One line per
+ * covered component. Behind a reverse proxy that strips a mount
+ * prefix, the configured base URL must include that prefix.
  */
 final class AgentSignatureVerifier
 {

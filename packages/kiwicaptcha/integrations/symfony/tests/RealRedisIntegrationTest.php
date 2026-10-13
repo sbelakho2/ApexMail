@@ -73,7 +73,7 @@ final class RealRedisIntegrationTest extends TestCase
             p: 1,
             targetBits: 8,
             salt: base64_encode('1234567890abcdef'),
-            prefix: 'prefix',
+            prefix: 'challenge|'.base64_encode('1234567890abcdef').'|',
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: 1_800_000_000_000_000,
@@ -679,12 +679,19 @@ final class RealRedisIntegrationTest extends TestCase
         // transition and fires no second event: the debt stays at its
         // naturally decayed value (never a further −1000).
         $r0 = $t3;
-        $r1 = $redisNowMs();
         self::assertSame(200, $controller->cancel(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge/cancel', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['nonce' => $nonce], JSON_THROW_ON_ERROR)))->getStatusCode());
         $r2 = $redisNowMs();
         $debtAfterRepeat = $issueDebt();
         self::assertGreaterThanOrEqual($leak($debtAfterCancel, $r2 - $r0), $debtAfterRepeat, 'a repeated cancellation never subtracts the debt');
-        self::assertLessThanOrEqual($leak($debtAfterCancel, max(0, $r1 - $t3)), $debtAfterRepeat);
+        // The stored field only moves when a script re-saves it, and
+        // every save writes the previous value decayed by the real
+        // elapsed window, so the raw field is monotone non-increasing
+        // across reads. The idempotent repeat dedupes before the risk
+        // script, so between these two reads no save may run and the
+        // value must carry over exactly; a wall-clock leak ceiling here
+        // would wrongly demand decay the raw store never performs
+        // between saves.
+        self::assertLessThanOrEqual($debtAfterCancel, $debtAfterRepeat, 'the raw stored debt never rises between reads');
     }
 }
 

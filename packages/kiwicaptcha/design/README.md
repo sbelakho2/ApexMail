@@ -13,17 +13,20 @@ The primary mark is `../resources/kiwi-mark.svg`. Keep its two paths,
 64×64 viewBox and `currentColor` treatment. The shackle stays still and
 reads separately from the lower spiral, including at favicon sizes.
 Use the bare mark for favicons and primary branding. The shield is a
-secondary security-status emblem.
+secondary security-status emblem. `IDENTITY.md` is the design contract:
+the suite masters, the palette, the type system and the voice rules.
+The wordmark lettering is fixed artwork recorded in `lettering.json`.
 
-After changing the canonical mark or widget skin, run from the repo root:
+After changing the canonical mark, the lettering or the widget skin, run
+from the repo root:
 
 ```sh
 node packages/kiwicaptcha/tools/sync-brand.mjs
 node packages/kiwicaptcha/tools/sync-brand.mjs --check
 ```
 
-This updates the Rust lockup/shield assets, framework geometry,
-Symfony template, compatibility/shim marks, preview specimen, and
+This updates the Rust mark/lockup/stacked/app-icon/shield assets, framework
+geometry, Symfony template, compatibility/shim marks, preview specimen, and
 packaged CSS/JS mirrors. CI checks their agreement. Rendering remains
 self-contained: no brand-asset request, font download or added runtime
 dependency is needed.

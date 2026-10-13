@@ -14,7 +14,7 @@
 //! The clock is Redis TIME inside the script, so the test backdates the
 //! stored `ts` watermark between calls to emulate the 30 s spacings.
 
-use kiwicaptcha_risk::keyspace::target_state_keys;
+use kiwicaptcha_risk::keyspace::{target_state_keys, KeyspaceMode};
 use kiwicaptcha_risk::redis::RedisRiskStateStore;
 use kiwicaptcha_risk::store::{RiskStateStore, TargetState};
 
@@ -53,7 +53,7 @@ fn sub_minute_failures_still_leak_one_per_minute() {
         .register_target_failure(TARGET, "src100000000000000000000000000", "as64496")
         .expect("fail 1");
     assert_eq!(state.fails, 1);
-    let key = target_state_keys(&namespace, TARGET)[0].clone();
+    let key = target_state_keys(&namespace, TARGET, KeyspaceMode::Legacy)[0].clone();
     let mut conn = client.get_connection().expect("connection");
     let t1: i64 = redis::Commands::hget(&mut conn, key.as_str(), "ts").expect("ts field");
     assert!(t1 > 0, "the first write stamps the watermark");
@@ -94,6 +94,6 @@ fn sub_minute_failures_still_leak_one_per_minute() {
     );
 
     // Cleanup: the target's own key family.
-    let keys = target_state_keys(&namespace, TARGET);
+    let keys = target_state_keys(&namespace, TARGET, KeyspaceMode::Legacy);
     let _: i64 = redis::Commands::del(&mut conn, keys.to_vec()).unwrap();
 }

@@ -37,6 +37,16 @@ final class StepUpContext
         public readonly string $reason,
         public readonly string $mode = self::MODE_HTML,
         public readonly bool $targetOwned = false,
+        /**
+         * The demand the begun challenge answers: the id of the live
+         * {@see StepUpDemand} record the plane minted for this step-up
+         * (the validator for the carrier scopes, the login plane for a
+         * pending token). The handler binds the id into the challenge
+         * record, so the proof can only ever finalize the demand it
+         * was begun against. Null only for a caller outside the demand
+         * architecture; the controller always threads it.
+         */
+        public readonly ?string $demandId = null,
     ) {
         if (preg_match('/^[0-9a-f]{32}$/D', $principalPseudonym) !== 1) {
             throw new \InvalidArgumentException(sprintf(
@@ -64,6 +74,9 @@ final class StepUpContext
         }
         if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $reason) !== 1) {
             throw new \InvalidArgumentException('The reason of a step-up context must be 1-128 chars of [A-Za-z0-9._:-] (e.g. the post_solve_step_up_required violation name)');
+        }
+        if ($demandId !== null && preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
+            throw new \InvalidArgumentException('The demand id of a step-up context must be the base64url id shape');
         }
     }
 

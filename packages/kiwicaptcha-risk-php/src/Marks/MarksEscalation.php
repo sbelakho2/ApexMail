@@ -66,6 +66,14 @@ final class MarksEscalation
     public const TARGET_ATTACK_THRESHOLD = 5;
 
     /**
+     * The distinct-source count at which the target spread signal
+     * saturates (Rust mirror: marks::TARGET_SPREAD_SATURATION); the
+     * fail-closed target picture reads the threshold failure count
+     * with the spread saturated on both axes.
+     */
+    public const TARGET_SPREAD_SATURATION = 20;
+
+    /**
      * The scope failure-ratio pressure floor for first-attempt login
      * escalation (Rust mirror: marks::`SCOPE_PRESSURE`_FLOOR): at/above
      * this global_pressure signal (or global level
@@ -211,6 +219,13 @@ final class MarksEscalation
             if ($firstAttempt->scopePressure) {
                 $stageReasons[] = RiskReason::GlobalAttack;
             }
+        }
+        // Unreadable trusted history is its own reason, independent of
+        // the step-up: enforcement escalates a novel verdict carrying
+        // it, learn mode keeps the plain Allow while still reporting
+        // why the evidence plane could not vouch for the login.
+        if ($firstAttempt->evidenceUnavailable) {
+            $stageReasons[] = RiskReason::EvidenceUnavailable;
         }
 
         if ($stageReasons === []) {

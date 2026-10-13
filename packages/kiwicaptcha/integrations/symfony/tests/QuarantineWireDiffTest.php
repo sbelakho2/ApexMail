@@ -100,6 +100,12 @@ final class QuarantineWireDiffTest extends TestCase
         // does not own.
         $control = $this->learnVolatility($harness);
         $reference = $control['reference'];
+        // The response Date header is part of the documented volatility
+        // (second-granularity, see the class docblock). A learning
+        // window whose control pairs never straddled a second boundary
+        // cannot observe it, while the long pair loop can, so it is
+        // pinned into the learned set.
+        $control['volatileHeaders'] = array_values(array_unique(array_merge($control['volatileHeaders'], ['date'])));
 
         $markedDeltasMs = [];
         $floorDeltasMs = $control['deltasMs'];
@@ -111,9 +117,15 @@ final class QuarantineWireDiffTest extends TestCase
             // load and the floor cannot drift away under a loaded suite.
             $controlPair = $i % 100 === 50;
             if ($controlPair) {
-                $first = $this->challengeLeg($harness, self::CONTROL_A_SESSION);
+                // Both legs are clean: the first one stands in for the
+                // marked half of the per-leg checks below, so the pair
+                // always inspects two fresh leg arrays (a reused stale
+                // one would carry the volatile headers the previous
+                // iteration already unset). The timing noise floor uses
+                // the same two fresh legs.
+                $marked = $this->challengeLeg($harness, self::CONTROL_A_SESSION);
                 $clean = $this->challengeLeg($harness, self::CONTROL_B_SESSION);
-                $floorDeltasMs[] = abs($first['ms'] - $clean['ms']);
+                $floorDeltasMs[] = abs($marked['ms'] - $clean['ms']);
             } else {
                 $marked = $this->challengeLeg($harness, self::MARKED_SESSION);
                 $clean = $this->challengeLeg($harness, self::CLEAN_SESSION);
@@ -292,6 +304,11 @@ final class QuarantineWireDiffTest extends TestCase
                     $volatileHeaders[$name] = true;
                 }
             }
+            // The Date header ticks every wall-clock second, so a
+            // control pair that straddles a second boundary is timing
+            // noise, never a wire diff: it stays volatile even when two
+            // consecutive legs happened to land in the same second.
+            $volatileHeaders['date'] = true;
         }
         ksort($volatile);
         ksort($volatileHeaders);

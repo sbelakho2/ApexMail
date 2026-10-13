@@ -46,6 +46,10 @@ final class StepUpPendingTokenVoterTest extends TestCase
             {
             }
 
+            public function eraseCredentials(): void
+            {
+            }
+
             public function getAttributes(): array
             {
                 return $this->attributes;
@@ -99,6 +103,7 @@ final class StepUpPendingTokenVoterTest extends TestCase
             public function getRoleNames(): array { return ['ROLE_USER']; }
             public function getUser(): ?UserInterface { return null; }
             public function setUser(UserInterface $user): void {}
+            public function eraseCredentials(): void {}
             public function getAttributes(): array { return $this->attributes; }
             public function setAttributes(array $attributes): void { $this->attributes = $attributes; }
             public function hasAttribute(string $name): bool { return isset($this->attributes[$name]); }

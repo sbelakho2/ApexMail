@@ -23,7 +23,7 @@
 -- KEYS[2] per-shard dedupe marker (same slot; touched only on write)
 --
 -- ARGV:
---   [1] event        RiskEventKind int (1..21)
+--   [1] event        RiskEventKind int (1..22)
 --   [2] scope        int (0 = unknown)
 --   [3] has_write    0/1 — 0 = read-only leak (the merge refresh path);
 --                    the marker is never touched
@@ -43,7 +43,10 @@
 -- Event semantics mirror the risk-v1 global dimension exactly: the same
 -- event table, GlobalCapacityHit (16) adds its global-only bad pressure
 -- here, SourceRateLimitHit (15) adds nothing (source/session only), and
--- RiskDenied (17) / ChallengeCancelled (21) never mutate.
+-- RiskDenied (17) / ChallengeCancelled (21) never mutate. StepUpCompleted
+-- (22) is server-confirmed trust (same credit as ProtectedActionSuccess,
+-- 8) — NOT 18, which is the honeypot kind. An older shard script treats
+-- 22 as an unknown kind (no-op).
 
 local function num(v)
     if not v then return 0 end
@@ -107,7 +110,9 @@ local function apply_feedback(s, event, scope)
         s.iss = s.iss + 300
     elseif event == 7 then
         s.rep = s.rep + 3000
-    elseif event == 8 then
+    elseif event == 8 or event == 22 then
+        -- ProtectedActionSuccess (8) / StepUpCompleted (22): both are
+        -- server-confirmed trust with the same credit.
         s.trust = s.trust + 800
     elseif event == 9 then
         s.af = s.af + 1200
@@ -170,7 +175,7 @@ end
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
 if event ~= math.floor(event) or event < 1 or event > 21 then
-    return redis.error_reply('risk-v1-sharded: event must be an integer within 1..21')
+    return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
 end
 
 -- ── Per-shard dedupe: the marker is SET NX inside this script, so the

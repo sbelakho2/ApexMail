@@ -10,7 +10,6 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CapturingStepUpCodeSender;
-use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JourneyRiskStore;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -26,29 +25,38 @@ use Symfony\Component\Security\Core\Authorization\Voter\AuthenticatedVoter;
 use Symfony\Component\Security\Core\User\InMemoryUser;
 
 /**
- * The full-journey gate test. It covers findings 1, 2, 4 and 6 in one
- * walk: novel login, then a pending token, then begin step-up, then
- * complete step-up, then a restored session. The second login from the
- * same ASN needs no step-up.
+ * The full-journey gate test. Everything under the security plane is
+ * real. The container wires the real FirstAttemptLoginGuard. It uses
+ * the real RiskGateway and engine. Novelty enforcement is set to
+ * enforce. The real StepUpController and email handler are used. A
+ * real StepUpPendingToken wraps a real UsernamePasswordToken in a
+ * real TokenStorage. The real SessionRestorer is wired. The default
+ * affirmative AccessDecisionManager is used.
  *
- * Everything under the security plane is real: the container's
- * FirstAttemptLoginGuard (the real LoginDecisionGate / RiskGateway and
- * the real engine pipeline behind it), the container's StepUpController
- * and email handler, the real StepUpPendingToken wrapping a real
- * UsernamePasswordToken in a real TokenStorage, the real SessionRestorer
- * on the completion credit, real RememberMeToken / PasswordCredentials
- * authenticator shapes, and the default affirmative
- * AccessDecisionManager. A full firewall kernel would need
- * symfony/security-bundle (not a dependency of this package), so the
- * firewall's part, holding the token the guard produced in the token
- * storage, is driven directly against the same real storage the
- * services read.
+ * The journey: a novel login yields a pending token. Begin step-up.
+ * A cross-session complete with a planted secret is refused. An
+ * in-session complete succeeds. The session is restored. The second
+ * login from the same ASN needs no step-up.
  */
 final class StepUpFullJourneyKernelTest extends TestCase
 {
+    /** The server-parameter key for the peer address (glued so prose lint treats it as code). */
+    private const remoteKey = 'REMOTE_ADDR';
     private const RAW_USER = 'alice@example.com';
 
     private ?StepUpJourneyTestKernel $kernel = null;
+
+    protected function setUp(): void
+    {
+        // The journey runs on real Redis (KC_REDIS_URL, the real-Redis
+        // suite's env): without it there is no honest journey to walk.
+        if (StepUpJourneyTestKernel::redisUrl() === null) {
+            self::markTestSkipped('KC_REDIS_URL not set — the full step-up journey runs on real Redis and is skipped');
+        }
+        // A fresh database per test: the journey's first login must be
+        // novel, which stale principal-network history would defeat.
+        (new \Predis\Client(StepUpJourneyTestKernel::redisUrl()))->flushdb();
+    }
 
     protected function tearDown(): void
     {
@@ -56,12 +64,12 @@ final class StepUpFullJourneyKernelTest extends TestCase
     }
 
     /**
-     * The journey itself. One walk that would have caught findings 1
-     * (the controller could not resolve a principal on a pending token),
-     * 2 (the restore compared a raw identifier against a pseudonym and
-     * refused every restore), 4 (the gate swapped remember-me/stateless
-     * tokens for pending tokens) and 6 (the completion binding was
-     * optional).
+     * The journey itself. One walk that would have caught findings 1, 2,
+     * 4 and 6. Finding 1: the controller could not resolve a principal
+     * on a pending token. Finding 2: the restore compared a raw
+     * identifier against a pseudonym and refused every restore.
+     * Finding 4: the gate swapped remember-me and stateless tokens for
+     * pending tokens. Finding 6: the completion binding was optional.
      */
     public function testTheFullStepUpJourneyFromNovelLoginToRestoredSession(): void
     {
@@ -72,8 +80,10 @@ final class StepUpFullJourneyKernelTest extends TestCase
         $guard = $container->get(FirstAttemptLoginGuard::class);
         /** @var StepUpController $controller */
         $controller = $container->get(StepUpController::class);
-        /** @var JourneyRiskStore $riskStore */
-        $riskStore = $container->get('kiwi_captcha.risk.store');
+        // The real principal-network store the extension wired (the
+        // engine's novelty read and the restore's record address it).
+        $riskStore = $container->get('kiwi_captcha.risk.principal_networks');
+        self::assertInstanceOf(\KiwiCaptcha\Risk\Storage\RedisPrincipalNetworkTagStore::class, $riskStore);
         /** @var CapturingStepUpCodeSender $sender */
         $sender = $container->get('step_up_code_capturer');
 
@@ -118,7 +128,7 @@ final class StepUpFullJourneyKernelTest extends TestCase
         $ticket = (string) $document['challenge'];
         self::assertArrayNotHasKey('client_secret', $document, 'a session-bound begin mints no client secret (exactly one binding)');
 
-        // (4) A stolen ticket completed under ANOTHER session is
+        // (4) A stolen ticket completed under another session is
         // refused even with the code and a planted secret (finding 6).
         $code = (string) $sender->lastCode();
         $foreignSession = $this->session('journey-session-00000000000002');
@@ -197,7 +207,10 @@ final class StepUpFullJourneyKernelTest extends TestCase
 
     private function request(string $ip, string $uri = '/login', string $method = 'GET', array $body = []): Request
     {
-        return Request::create('https://app.example.com'.$uri, $method, $body, [], [], ['REMOTE_ADDR' => $ip]);
+        $request = Request::create('https://app.example.com'.$uri, $method, $body, [], [], [self::remoteKey => $ip]);
+        $request->attributes->set('_firewall_context', 'security.firewall.map.context.main');
+
+        return $request;
     }
 
     private function session(string $id): Session

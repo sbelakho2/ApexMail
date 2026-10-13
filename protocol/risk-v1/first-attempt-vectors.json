@@ -1,0 +1,144 @@
+{
+  "protocol": "risk-v1",
+  "kind": "first-attempt-vectors",
+  "dataset_path": "protocol/asn/sample-asn.tsv",
+  "description": "Shared first-attempt prevention vectors. Each row pins the trusted-history state the engine evaluates an AuthenticationSuccess against; the expected block carries one cell per novelty enforcement mode. The F16 core is the cross product of the binary history axes (asn seen or unseen, prefix seen or new, device continuity bound or unbound) over the two modes; the remaining rows pin the dataset-less ASN fallback (where the account trusted axis decides), the seen but untrusted continuity trap, scope pressure, the breached credential flag, the fail-closed probe outage, and the non-login event. Every request carries one session pseudonym and one device pseudonym; only the session tag is ever seeded, so the post-call device trust reads as the binding detector. Trust is sticky in the canonical store: a record without the trust flag never revokes a minted mirror. Both the Rust suite (packages/kiwicaptcha-risk/tests/first_attempt_vectors.rs) and the PHP mirror (FirstAttemptVectorsTest.php) consume this corpus.",
+  "vectors": [
+    {
+      "note": "home ASN, home prefix, trusted session: the fully vouched login",
+      "asn": "seen", "prefix": "seen", "continuity": "bound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" },
+        "enforce": { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" }
+      }
+    },
+    {
+      "note": "home ASN and prefix with no continuity cookie: known history still vouches",
+      "asn": "seen", "prefix": "seen", "continuity": "unbound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" },
+        "enforce": { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" }
+      }
+    },
+    {
+      "note": "new /64 on the home ASN with device continuity: the mobile-user case",
+      "asn": "seen", "prefix": "new", "continuity": "bound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" },
+        "enforce": { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" }
+      }
+    },
+    {
+      "note": "new /64 on the home ASN without continuity: the residential-proxy shape",
+      "asn": "seen", "prefix": "new", "continuity": "unbound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "never-seen ASN on a known prefix: novel regardless of the /64",
+      "asn": "unseen", "prefix": "seen", "continuity": "bound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "never-seen ASN, known prefix, no continuity",
+      "asn": "unseen", "prefix": "seen", "continuity": "unbound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "never-seen ASN on a new /64 with device continuity: still novel",
+      "asn": "unseen", "prefix": "new", "continuity": "bound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "never-seen ASN on a new /64 without continuity: the canonical first attempt",
+      "asn": "unseen", "prefix": "new", "continuity": "unbound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "no ASN dataset, seen prefix, trusted account: the /64 fallback vouches",
+      "asn": "absent", "prefix": "seen", "continuity": "unbound", "account_trusted": true,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" },
+        "enforce": { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "minted" }
+      }
+    },
+    {
+      "note": "no ASN dataset, seen prefix, no trusted network anywhere: fallback novelty",
+      "asn": "absent", "prefix": "seen", "continuity": "unbound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "no ASN dataset, new /64, trusted account: a fresh prefix alone is weak evidence",
+      "asn": "absent", "prefix": "new", "continuity": "unbound", "account_trusted": true,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "no ASN dataset, new /64, no trusted network: both fallback conditions fire",
+      "asn": "absent", "prefix": "new", "continuity": "unbound", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "seen but untrusted session cookie: bare seen-ness is never continuity",
+      "asn": "seen", "prefix": "new", "continuity": "seen-untrusted", "account_trusted": false,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "unminted", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "scope pressure at the global level floor escalates an unbound login in both modes",
+      "asn": "seen", "prefix": "seen", "continuity": "unbound", "account_trusted": true, "global_level": 1,
+      "expected": {
+        "learn":   { "action": "step_up", "novel_network": false, "evidence_unavailable": false, "global_attack": true, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" },
+        "enforce": { "action": "step_up", "novel_network": false, "evidence_unavailable": false, "global_attack": true, "breached_credential": false, "session_trust": "unbound", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "a breached credential escalates the fully vouched login in both modes",
+      "asn": "seen", "prefix": "seen", "continuity": "bound", "account_trusted": true, "breached": true,
+      "expected": {
+        "learn":   { "action": "step_up", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": true, "session_trust": "minted", "device_trust": "absent" },
+        "enforce": { "action": "step_up", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": true, "session_trust": "minted", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "an unreadable history fails closed: enforce steps up, learn stays allow",
+      "asn": "seen", "prefix": "seen", "continuity": "bound", "account_trusted": true, "probe_failure": true,
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": true, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "unminted" },
+        "enforce": { "action": "step_up", "novel_network": true, "evidence_unavailable": true, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "absent" }
+      }
+    },
+    {
+      "note": "a non-login event derives no first-attempt evidence and never binds",
+      "asn": "seen", "prefix": "seen", "continuity": "bound", "account_trusted": true, "event": "solve_success",
+      "expected": {
+        "learn":   { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "absent" },
+        "enforce": { "action": "allow", "novel_network": false, "evidence_unavailable": false, "global_attack": false, "breached_credential": false, "session_trust": "minted", "device_trust": "absent" }
+      }
+    }
+  ]
+}

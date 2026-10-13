@@ -494,7 +494,14 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame('sha18', $risk['scopes']['login']['minimum']);
         self::assertSame('sha18', $risk['scopes']['password_reset']['minimum']);
         self::assertSame('sha20', $risk['scopes']['admin_login']['minimum']);
-        self::assertSame('sha20', $risk['scopes']['financial_action']['minimum']);
+        // financial_action ships no minimum: its value class is high
+        // and its step-up carrier is the principal totp factor, so the
+        // anonymous email grant can never carry or answer this scope.
+        // (The extension fills the sparse row's policy children from
+        // the tree defaults, minimum allow included.)
+        self::assertSame('high', $risk['scopes']['financial_action']['value_class']);
+        self::assertSame('totp', $risk['scopes']['financial_action']['carrier']);
+        self::assertArrayNotHasKey('minimum', $risk['scopes']['financial_action']);
         self::assertSame(120, $risk['scopes']['login']['base_risk']);
         self::assertTrue($risk['scopes']['login']['post_solve_check']);
         self::assertNull($risk['scopes']['login']['id']);

@@ -36,4 +36,5 @@ enum RiskReason: string
     case SpamMarkQuarantine = 'spam_mark_quarantine';
     case NovelNetwork = 'novel_network';
     case BreachedCredential = 'breached_credential';
+    case EvidenceUnavailable = 'evidence_unavailable';
 }

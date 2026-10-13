@@ -49,8 +49,12 @@ final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKerne
             'execution_allow_downgrade' => $this->allowDowngrade,
             'protocol_rollout' => ['mode' => $this->rolloutMode],
             'risk' => [
+                    'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                 'namespace' => 'doctor-v3',
                 'redis_service' => self::FAKE_REDIS_ID,
+                // The gate check under a non-abuse profile: the login
+                // map arms the guard the enforcing posture demands.
+                'login_scopes' => ['main' => 'login'],
             ],
         ];
         if ($this->profile !== 'high_abuse') {

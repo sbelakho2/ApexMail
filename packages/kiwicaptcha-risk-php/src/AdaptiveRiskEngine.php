@@ -15,6 +15,7 @@ use KiwiCaptcha\Risk\Marks\FirstAttemptEvidence;
 use KiwiCaptcha\Risk\Marks\MarksEscalation;
 use KiwiCaptcha\Risk\Marks\MarksReaderInterface;
 use KiwiCaptcha\Risk\Marks\MarksRequest;
+use KiwiCaptcha\Risk\Marks\MarksView;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Pricing\PriceContextSourceInterface;
@@ -28,6 +29,7 @@ use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
 use KiwiCaptcha\Risk\Storage\SessionContextTagStoreInterface;
 use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
+use KiwiCaptcha\Risk\Storage\TargetStateStoreInterface;
 
 /**
  * Adaptive risk engine: assesses one request and returns a RiskDecision.
@@ -388,6 +390,20 @@ final class AdaptiveRiskEngine
         // ledger atomically, so the engine keeps that as the sole
         // authority. The decision_id is generated here so the ledger and
         // the returned decision carry the same id.
+        //
+        // The assessment's target dimension (target-account protection,
+        // change.md 3.2.1): resolved beside the frozen observation wire
+        // from the context's submitted fields through the wired
+        // resolver. The pseudonym rides the consolidated registration,
+        // so the assessment itself maintains the target's failure
+        // counter and spread HLLs and the reply carries them into the
+        // score; the raw field values never leave this boundary.
+        $targetId = $this->resolveTargetId($c->scope, $c->targetFields);
+        $targetSourceElement = '';
+        $targetAsnElement = '';
+        if ($targetId !== null) {
+            [$targetSourceElement, $targetAsnElement] = $this->targetSpreadElements($targetId, $c);
+        }
         $decisionId = null;
         $registration = null;
         if ($this->calibration === null && $this->store instanceof ConsolidatedAssessmentStoreInterface) {
@@ -400,6 +416,9 @@ final class AdaptiveRiskEngine
                 honeypotHit: $v2?->honeypotHit ?? false,
                 weights: $this->policy->weights,
                 v2Weights: $v2Weights ?? new RiskV2Weights(),
+                targetId: $targetId,
+                targetSourceElement: $targetSourceElement,
+                targetAsnElement: $targetAsnElement,
             );
         }
 
@@ -506,10 +525,17 @@ final class AdaptiveRiskEngine
         // record reads. The v2 weights are the operator override when
         // given, else the default weights (byte-identical scores to today).
         $v2Signals = null;
+        // True when the fallback path's live target read failed: the
+        // evidence-unavailable verdict the first-attempt stage folds
+        // into its fail-closed judgment below.
+        $targetEvidenceUnavailable = false;
         if ($v2 !== null) {
-            $v2Signals = $this->store instanceof ConsolidatedAssessmentStoreInterface
-                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpreadSources, $targetSpreadAsns)
-                : $this->buildV2Signals($v2, $c, $observation);
+            if ($this->store instanceof ConsolidatedAssessmentStoreInterface) {
+                $v2Signals = $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpreadSources, $targetSpreadAsns);
+            } else {
+                [$targetFailures, $targetSpreadSources, $targetSpreadAsns, $targetEvidenceUnavailable] = $this->liveTargetCounts($targetId);
+                $v2Signals = $this->buildV2Signals($v2, $c, $observation, $targetFailures, $targetSpreadSources, $targetSpreadAsns);
+            }
         }
         $score = $v2Signals !== null
             ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
@@ -534,12 +560,63 @@ final class AdaptiveRiskEngine
             clientKey: $observation->sessionId ?? $observation->sourceId,
         );
 
-        // The decisive attacker stage: additive, after the plain policy
-        // decision, and only when a marks reader is wired. An unreadable
-        // marks surface floors the request at the maximum challenge rung
-        // fail-closed instead of fabricating a deny.
+        // The named-carrier raise (post-solve only): a scope whose
+        // step-up demand rides a carrier (risk.scopes.<name>.carrier)
+        // and that carries no step_up_above rung answers its post-solve
+        // assessment with the interactive step-up, so the demand appears
+        // where a principal exists while issuance stays a plain
+        // proof-of-work flow. The pre-issue path never runs this raise:
+        // a carrier minimum would refuse issuance with the typed 403
+        // before any widget renders. The raise is additive: a Deny
+        // stays Deny, stronger composed actions stay as they are, and a
+        // later stage may still raise further.
+        if (
+            $c->event === RiskEventKind::SolveSuccess
+            && $this->policy->carrier($c->scope) !== null
+            && $this->policy->stepUpAbove($c->scope) === null
+            && $decision->action->rank() < RiskAction::StepUp->rank()
+        ) {
+            $decision = new RiskDecision(
+                score: $decision->score,
+                action: RiskAction::StepUp,
+                reasons: $decision->reasons,
+                policyVersion: $decision->policyVersion,
+                globalLevel: $decision->globalLevel,
+                retryAfterMs: $decision->retryAfterMs,
+                band: $decision->band,
+                decisionId: $decision->decisionId,
+                modelRevision: $decision->modelRevision,
+                quarantined: $decision->quarantined,
+            );
+            $decision = $this->dropQuarantineOnEscalation($decision);
+        }
+
+        // The first-attempt prevention evidence (P0-1), derived for every
+        // assessment: with a marks reader wired the marks stage composes
+        // it into the decision, and without one the fallback below still
+        // enforces it, so the gate never silently disappears with the
+        // reader. The post-Allow trust binding below reads the unmasked
+        // novelty verdict either way.
+        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision, $targetEvidenceUnavailable);
         if ($this->marksReader !== null) {
-            $decision = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs);
+            [$decision, $firstAttempt] = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs, $targetId, $firstAttempt);
+        } elseif ($firstAttempt->requiresStepUp() || $firstAttempt->evidenceUnavailable) {
+            // No marks reader: the first-attempt gate runs on its own.
+            // A step-up-worthy first attempt (novel network in enforce
+            // mode, a breached credential, scope pressure) escalates to
+            // the interactive step-up exactly like the marks stage's
+            // own rule, and unreadable trusted history still reports
+            // why no read could vouch for the login. The empty view
+            // carries no marks of its own, so nothing but the attached
+            // evidence can escalate here.
+            $decision = MarksEscalation::apply(
+                $decision,
+                MarksView::empty()->withFirstAttempt($firstAttempt),
+                false,
+                $nowMs,
+                MarksEscalation::DEFAULT_MARK_TTL_MS,
+                $c->resources,
+            );
         }
 
         // The decoy escalation stage: additive, after the marks stage,
@@ -584,6 +661,92 @@ final class AdaptiveRiskEngine
         $this->metrics->gauge('resources:argon_capacity', $c->resources->argonCapacity);
         $this->recordDecisionMetrics($c->scope, $decision);
         $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
+
+        // Session-to-principal binding: a successful (non-pending)
+        // login records the session pseudonym under the principal so
+        // "device continuity" means "this session was used by this
+        // principal before", never "a cookie was presented". A fresh
+        // or attacker-minted cookie has no binding and cannot vouch
+        // for anyone. Pending (step-up) logins bind at restore.
+        //
+        // The trust flag on the session and the device binding follows
+        // the enforcement verdict: the trust is minted when the Allow
+        // is one enforce mode would also have allowed (a known
+        // network, readable history). An Allow that enforce mode would
+        // have stepped up (a genuinely novel network, or unreadable
+        // history) records the session and the device without the
+        // trust flag, even in learn mode: the step-up demand is only
+        // deferred there, and the deferred login mints no trust — a
+        // stolen-credential login from a novel network leaves nothing
+        // trusted behind. What earns the trust is the repeat visit: a
+        // login the gate judges non-novel (history the account was
+        // already granted from) is the trust-minting event, in learn
+        // and in enforce alike, and a credential change revokes every
+        // trust mirror (the forget-devices op), so the next login
+        // re-runs the first-attempt gate on its own evidence. The
+        // trusted device cookie outlives the session window, so the
+        // sliding refresh happens here on every minting Allow that
+        // carries the cookie.
+        //
+        // The same Allow also records the network bucket and the ASN
+        // bucket with the trust flag minted (the learn history: the
+        // novelty gate's seen-ness accrues from every granted login,
+        // which is what keeps a known carrier from stepping up every
+        // future mobile login). Each write stands alone: one failed
+        // record never masks the others, and no binding write ever
+        // breaks the login.
+        if (
+            $c->event === RiskEventKind::AuthenticationSuccess
+            && $decision->action === RiskAction::Allow
+            && $this->principalNetworks !== null
+            && $observation->principalId !== null
+        ) {
+            $mintTrust = !($firstAttempt?->wouldStepUpUnderEnforce ?? false);
+            if ($observation->sessionId !== null && $observation->sessionId !== '') {
+                try {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        'session:'.$observation->sessionId,
+                        trusted: $mintTrust,
+                    );
+                } catch (\Throwable) {
+                    // Best effort: the binding write never breaks login.
+                }
+            }
+            if ($observation->deviceId !== null && $observation->deviceId !== '') {
+                try {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        'device:'.$observation->deviceId,
+                        trusted: $mintTrust,
+                    );
+                } catch (\Throwable) {
+                    // Best effort: the binding write never breaks login.
+                }
+            }
+            try {
+                $this->principalNetworks->recordPrincipalNetworkTag(
+                    $observation->principalId,
+                    self::networkBucket($c->sourceIp),
+                    trusted: true,
+                );
+            } catch (\Throwable) {
+                // Best effort: the binding write never breaks login.
+            }
+            $asn = $this->asnBucketOf($c->sourceIp);
+            if ($asn !== '' && $asn !== '0') {
+                try {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        'asn:'.$asn,
+                        trusted: true,
+                    );
+                } catch (\Throwable) {
+                    // Best effort: the binding write never breaks login.
+                }
+            }
+        }
+
         return $decision;
     }
 
@@ -625,6 +788,13 @@ final class AdaptiveRiskEngine
      * decision plane's posture: a server-confirmed spam identity with a
      * clean request quarantines instead of escalating, wire-identical
      * to allow.
+     *
+     * Returns the composed decision together with the first-attempt
+     * evidence the caller derived before the stage (the pipeline
+     * computes it once for every assessment, with or without a wired
+     * reader).
+     *
+     * @return array{0: RiskDecision, 1: FirstAttemptEvidence}
      */
     private function applyMarksStage(
         RiskDecision $decision,
@@ -633,22 +803,24 @@ final class AdaptiveRiskEngine
         SignalVector $vector,
         ?RiskV2Context $v2,
         int $nowMs,
-    ): RiskDecision {
+        ?string $targetId,
+        FirstAttemptEvidence $firstAttempt,
+    ): array {
         $request = new MarksRequest(
             scope: $c->scope,
             sourceIp: $c->sourceIp,
             session: $observation->sessionId,
             principal: $observation->principalId,
+            target: $targetId,
         );
         $decoyEvidence = $c->event->isHoneypot() || ($v2?->honeypotHit ?? false);
-        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision);
         try {
             $view = $this->marksReader->requestMarks($request);
         } catch (\Throwable) {
-            return MarksEscalation::applyUnreadable($decision, $nowMs, $c->resources);
+            return [MarksEscalation::applyUnreadable($decision, $nowMs, $c->resources), $firstAttempt];
         }
 
-        return MarksEscalation::apply(
+        $result = MarksEscalation::apply(
             $decision,
             $view->withFirstAttempt($firstAttempt),
             MarksEscalation::corroborated($vector, $decoyEvidence),
@@ -657,6 +829,103 @@ final class AdaptiveRiskEngine
             $c->resources,
             true,
         );
+
+        // Returning-browser exemption: a login whose session was
+        // bound to this principal at an earlier login (real device
+        // continuity), on a known network, carrying no marks and no
+        // target-under-attack, is the owner's own device. Storm state
+        // (cooldown, global floor) must never step it up. This is NOT a
+        // blanket Allow: the pre-storm price stands, and a source above
+        // the hard velocity threshold is never exempt.
+        if (
+            $result->action !== RiskAction::Allow
+            && !$firstAttempt->requiresStepUp()
+            && $view->freshestOwnInTtl($nowMs, $this->marksReader->markTtlMs()) === null
+            && $view->targetInTtl($nowMs, $this->marksReader->markTtlMs()) === null
+            && $this->principalNetworks !== null
+            && $observation->principalId !== null
+        ) {
+            // Continuity is the trust probe over both identities: the
+            // session tag or the device tag, whichever the request
+            // carries. The tagIsTrusted read is the strict form (the
+            // mirror field, not bare seen-ness), and a store failure
+            // keeps the storm decision (the exemption is best effort).
+            $deviceContinuity = false;
+            try {
+                $deviceContinuity = ($observation->sessionId !== null && $observation->sessionId !== ''
+                    && $this->principalNetworks->tagIsTrusted($observation->principalId, 'session:'.$observation->sessionId) === true)
+                    || ($observation->deviceId !== null && $observation->deviceId !== ''
+                    && $this->principalNetworks->tagIsTrusted($observation->principalId, 'device:'.$observation->deviceId) === true);
+            } catch (\Throwable) {
+                $deviceContinuity = false;
+            }
+            $network = self::networkBucket($c->sourceIp);
+            $netSeen = false;
+            $asnSeen = false;
+            try {
+                $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network) === true;
+                $asn = $this->asnBucketOf($c->sourceIp);
+                $asnSeen = $asn !== '' && $asn !== '0'
+                    && $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn) === true;
+            } catch (\Throwable) {
+                $netSeen = false;
+                $asnSeen = false;
+            }
+            // Hard velocity: never exempt a source above the hard
+            // rate limit. A shared carrier-grade NAT exit can carry an attacker
+            // beside the owner; velocity alone is not a deny but it
+            // removes the exemption.
+            $hardVelocity = $vector->sourceFast >= 950
+                || $vector->badProof >= 800
+                || $vector->malformed >= 800
+                || $vector->replay >= 800
+                || $vector->networkRisk >= 900;
+            // Bound session + known ASN is the returning browser: the
+            // owner's own device, even on a new prefix of the same
+            // carrier (the mobile-user case). The exact network bucket
+            // need not be seen — the session binding is the stronger
+            // signal.
+            if ($deviceContinuity && ($netSeen || $asnSeen) && !$hardVelocity) {
+                // Pre-storm price: the policy's own risk at global
+                // level 0, keeping the request's signals but dropping
+                // the storm's global floor and cooldown. A hard deny
+                // from the request's own evidence (bad proofs, replay,
+                // malformed) is already excluded above.
+                $preStorm = $this->policy->decide(
+                    $c->scope,
+                    $decision->score,
+                    $vector,
+                    $c->resources,
+                    0,
+                    $nowMs,
+                );
+                // The unreadable-evidence verdict survives the
+                // exemption: the decision keeps reporting why the
+                // evidence plane could not vouch for the login (the
+                // stage's prepend order, capped at 4).
+                $exemptReasons = $preStorm->reasons;
+                if ($firstAttempt->evidenceUnavailable
+                    && !in_array(RiskReason::EvidenceUnavailable, $exemptReasons, true)) {
+                    array_unshift($exemptReasons, RiskReason::EvidenceUnavailable);
+                    $exemptReasons = array_slice($exemptReasons, 0, 4);
+                }
+                if ($preStorm->action !== RiskAction::Deny) {
+                    return [new RiskDecision(
+                        score: $preStorm->score,
+                        action: $preStorm->action,
+                        reasons: $exemptReasons,
+                        policyVersion: $preStorm->policyVersion,
+                        globalLevel: $preStorm->globalLevel,
+                        retryAfterMs: $preStorm->retryAfterMs,
+                        band: $preStorm->band,
+                        decisionId: $decision->decisionId,
+                        modelRevision: $preStorm->modelRevision,
+                    ), $firstAttempt];
+                }
+            }
+        }
+
+        return [$result, $firstAttempt];
     }
 
     /**
@@ -670,6 +939,15 @@ final class AdaptiveRiskEngine
      *   IPv6, the IPv4 itself) OR the account carries no prior trusted
      *   network. A store without the record surface degrades to neutral
      *   (never novel), like the session tags.
+     * - evidenceUnavailable: a history probe failed with a store error,
+     *   so no read can vouch for the login. Fail closed: the request
+     *   counts as novel (enforce mode steps it up carrying the
+     *   evidence-unavailable reason; learn mode stays on Allow while
+     *   still carrying the reason and the degraded:evidence metric).
+     *   A store without the record surface is not a failure and keeps
+     *   the neutral degradation above. Any error class counts: a store
+     *   outage, a rejected tag or a type violation all mean the same
+     *   thing, that no readable history vouches for the login.
      * - breachedCredential: the caller's v2 context asserts a
      *   known-breached credential (the same step-up-worthy shape as
      *   honeypot evidence).
@@ -678,6 +956,16 @@ final class AdaptiveRiskEngine
      *   MarksEscalation::`SCOPE_PRESSURE`_FLOOR / `SCOPE_PRESSURE`_LEVEL —
      *   every first-attempt login escalates, not only the attacked
      *   target's.
+     * - wouldStepUpUnderEnforce: the novelty verdict before the
+     *   enforcement mask is applied. The post-Allow binding reads it to
+     *   decide whether the login may mint session and device trust.
+     *
+     * @param bool $targetEvidenceUnavailable true when the assessment's
+     *                                        live target-state read
+     *                                        failed on the fallback
+     *                                        path; the same fail-closed
+     *                                        verdict as a failed
+     *                                        trusted-history probe
      */
     private function firstAttemptEvidence(
         RiskContext $c,
@@ -685,61 +973,18 @@ final class AdaptiveRiskEngine
         SignalVector $vector,
         ?RiskV2Context $v2,
         RiskDecision $decision,
+        bool $targetEvidenceUnavailable = false,
     ): FirstAttemptEvidence {
         $isLogin = $c->event === RiskEventKind::AuthenticationSuccess
             || $c->event === RiskEventKind::AuthenticationFailure;
         $novelNetwork = false;
+        $wouldStepUpUnderEnforce = false;
         $scopePressure = false;
+        $evidenceUnavailable = $targetEvidenceUnavailable;
         if ($isLogin) {
-            if ($this->principalNetworks !== null && $observation->principalId !== null) {
-                // Novelty is judged on the ASN bucket first: carriers
-                // rotate IPv6 /64s and cgnat addresses per connection,
-                // so a /64 key alone would step up most mobile logins.
-                // A known ASN is never novel; an unknown ASN is novel.
-                // The /64 bucket is a contributing signal only (it can
-                // raise novelty when the principal has no trusted
-                // network at all, never on its own against a known ASN).
-                $network = self::networkBucket($c->sourceIp);
-                $asn = $this->asnBucketOf($c->sourceIp);
-                try {
-                    $asnSeen = $asn !== '' && $asn !== '0'
-                        ? $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn)
-                        : null;
-                    $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
-                    $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
-                } catch (\Throwable) {
-                    $asnSeen = null;
-                    $trusted = null;
-                    $netSeen = null;
-                }
-                $isNovel = false;
-                if ($asnSeen === false) {
-                    // Never-seen ASN: novel regardless of the /64.
-                    $isNovel = true;
-                } elseif ($asnSeen === true) {
-                    // Known ASN: /64 novelty alone never fires.
-                    $isNovel = false;
-                } else {
-                    // No ASN data: fall back to the /64 bucket, and to
-                    // the no-trusted-network condition.
-                    $isNovel = ($netSeen === false) || ($trusted === false);
-                }
-                // Migration grace: in 'learn' mode a novel network is
-                // recorded but never escalates. Every existing account
-                // has no network history on the day this ships; without
-                // this window every user would be stepped up at once.
-                if ($isNovel) {
-                    try {
-                        $this->principalNetworks->recordPrincipalNetworkTag($observation->principalId, $network);
-                        if ($asn !== '' && $asn !== '0') {
-                            $this->principalNetworks->recordPrincipalNetworkTag($observation->principalId, 'asn:'.$asn);
-                        }
-                    } catch (\Throwable) {
-                        // Best effort: the tag write never breaks login.
-                    }
-                }
-                $novelNetwork = $isNovel && $this->noveltyEnforcement === 'enforce';
-            }
+            // Scope pressure is judged first: it is an independent
+            // first-attempt signal and also the override that keeps a
+            // big-ISP ASN match from passing during an active storm.
             if (
                 $this->enableGlobalPressure
                 && $decision->globalLevel >= MarksEscalation::SCOPE_PRESSURE_LEVEL
@@ -752,12 +997,117 @@ final class AdaptiveRiskEngine
             ) {
                 $scopePressure = true;
             }
+            if ($this->principalNetworks !== null && $observation->principalId !== null) {
+                // Novelty is judged on the ASN bucket first: carriers
+                // rotate IPv6 /64s and cgnat addresses per connection,
+                // so a /64 key alone would step up most mobile logins.
+                // An unknown ASN is novel. A known ASN is NOT an
+                // automatic pass: ISP-matched residential proxies ride
+                // the victim's own ASN on a fresh /64, so the same-ASN
+                // new-/64 shape is a weaker novelty signal that fires
+                // unless device continuity vouches for the browser.
+                $network = self::networkBucket($c->sourceIp);
+                $asn = $this->asnBucketOf($c->sourceIp);
+                // Each probe stands alone in its own try, and every
+                // failure mode fails closed: one failed read must not
+                // neutralize the others, and no error class reads as
+                // neutral (an unreadable history cannot vouch for the
+                // login, whatever threw).
+                try {
+                    $asnSeen = $asn !== '' && $asn !== '0'
+                        ? $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn)
+                        : null;
+                } catch (\Throwable) {
+                    $evidenceUnavailable = true;
+                    $asnSeen = false;
+                }
+                try {
+                    $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
+                } catch (\Throwable) {
+                    $evidenceUnavailable = true;
+                    $trusted = false;
+                }
+                try {
+                    $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
+                } catch (\Throwable) {
+                    $evidenceUnavailable = true;
+                    $netSeen = false;
+                }
+                // Device continuity: the session or the device pseudonym
+                // was bound to this principal with the trust flag
+                // minted (an Allow or a completed step-up). A fresh
+                // or attacker-minted cookie has no binding and cannot
+                // vouch for anyone — presenting any 32-hex value is not
+                // the owner's device. Both identities are probed: the
+                // continuity cookie may have expired while the
+                // trusted-device cookie still vouches.
+                $deviceContinuity = false;
+                try {
+                    $deviceContinuity = ($observation->sessionId !== null && $observation->sessionId !== ''
+                        && $this->principalNetworks->tagIsTrusted($observation->principalId, 'session:'.$observation->sessionId) === true)
+                        || ($observation->deviceId !== null && $observation->deviceId !== ''
+                        && $this->principalNetworks->tagIsTrusted($observation->principalId, 'device:'.$observation->deviceId) === true);
+                } catch (\Throwable) {
+                    $evidenceUnavailable = true;
+                    $deviceContinuity = false;
+                }
+                $newPrefix = ($netSeen === false);
+                $isNovel = false;
+                if ($asnSeen === false) {
+                    // Never-seen ASN: novel regardless of the /64.
+                    $isNovel = true;
+                } elseif ($asnSeen === true) {
+                    // Known ASN: the /64 novelty is weak, never a free
+                    // pass. It fires when the prefix is new and no
+                    // device continuity vouches for the browser. A
+                    // bound session is the stronger signal — during a
+                    // storm it still vouches for the owner. The
+                    // no-continuity shape is what scope pressure
+                    // escalates.
+                    $isNovel = $newPrefix && !$deviceContinuity;
+                } else {
+                    // No ASN data: fall back to the /64 bucket, and to
+                    // the no-trusted-network condition.
+                    $isNovel = $newPrefix || ($trusted === false);
+                }
+                if ($evidenceUnavailable) {
+                    // Fail closed: history that cannot be read cannot
+                    // vouch for the login, so the request counts as
+                    // novel. Learn mode records the condition and the
+                    // metric without escalating; enforce mode steps it
+                    // up with the evidence-unavailable reason.
+                    $this->metrics->increment('degraded:evidence');
+                    $isNovel = true;
+                }
+                // A returning browser with a bound session is exempt
+                // from the scope-pressure override: the storm targets
+                // stolen credentials from unbound sessions, not the
+                // owner's own device. This holds even on a new prefix
+                // of the same carrier (the mobile-user case).
+                if ($scopePressure && $deviceContinuity && !$isNovel) {
+                    $scopePressure = false;
+                }
+                // The unmasked novelty verdict, recorded before the
+                // enforcement mask: the post-Allow binding reads it to
+                // decide whether this Allow may mint session and device
+                // trust. A login that enforce mode would have stepped up
+                // stays trust-free even where learn mode allows it.
+                $wouldStepUpUnderEnforce = $isNovel;
+                // Evidence is read-only: the network tag is recorded
+                // only after the decision (post-Allow binding), never
+                // during evaluation. Recording here would write the
+                // attacker's network under the victim's principal and
+                // make the second attempt from the same IP "seen".
+                $novelNetwork = $isNovel && $this->noveltyEnforcement === 'enforce';
+            }
         }
 
         return new FirstAttemptEvidence(
             novelNetwork: $novelNetwork,
             breachedCredential: $v2?->breachedCredential ?? false,
             scopePressure: $scopePressure,
+            evidenceUnavailable: $evidenceUnavailable,
+            wouldStepUpUnderEnforce: $wouldStepUpUnderEnforce,
         );
     }
 
@@ -1376,6 +1726,48 @@ final class AdaptiveRiskEngine
     }
 
     /**
+     * The live target-dimension counts of one resolved target, for the
+     * fallback path without a consolidated reply: the same state the
+     * outcome bridge maintains, read through the store's target
+     * surface. A store without the capability degrades to the neutral
+     * zero counts, exactly like the session-tag record reads. A failed
+     * read fails closed: the counts return the saturated attack
+     * picture (the threshold failure count, the spread saturated on
+     * both axes) and the fourth element marks the evidence
+     * unavailable. A target under attack never reads as clean because
+     * the store hiccuped. The saturated signals raise the score, and
+     * the first-attempt stage carries the evidence-unavailable reason,
+     * whose enforce-mode verdict is the interactive step-up (always
+     * completable).
+     *
+     * @return array{0: int, 1: int, 2: int, 3: bool} failures, source
+     *         spread, asn spread, evidence-unavailable flag
+     */
+    private function liveTargetCounts(?string $targetId): array
+    {
+        if ($targetId === null || !$this->store instanceof TargetStateStoreInterface) {
+            return [0, 0, 0, false];
+        }
+        try {
+            $state = $this->store->readTargetState($targetId);
+        } catch (\Throwable) {
+            return [
+                MarksEscalation::TARGET_ATTACK_THRESHOLD,
+                MarksEscalation::TARGET_SPREAD_SATURATION,
+                MarksEscalation::TARGET_SPREAD_SATURATION,
+                true,
+            ];
+        }
+
+        return [
+            (int) ($state['fails'] ?? 0),
+            (int) ($state['spread_sources'] ?? 0),
+            (int) ($state['spread_asns'] ?? 0),
+            false,
+        ];
+    }
+
+    /**
      * Builds the observation of one assessment or feedback event. The
      * pseudonym overrides carry the typed outcomes API's pre-derived
      * session/principal pseudonyms: when given, the observation rides
@@ -1408,6 +1800,7 @@ final class AdaptiveRiskEngine
             subnetIdNext: $this->identityFactory->subnetIdForEpoch($c, $netEpoch + 1),
             sessionId: $sessionPseudonym ?? ($c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null),
             principalId: $principalPseudonym ?? ($c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null),
+            deviceId: $c->deviceId !== null && $c->deviceId !== '' ? $this->identityFactory->deviceId($c->deviceId) : null,
             eventId: $this->normalizeEventId($event, $c->scope, $idempotencyKey),
             networkRisk: $c->networkFlags->networkRisk(),
             nowMs: $nowMs,

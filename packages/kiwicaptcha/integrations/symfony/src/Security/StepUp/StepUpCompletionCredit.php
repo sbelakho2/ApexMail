@@ -5,31 +5,38 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
-use BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey;
 use KiwiCaptcha\Risk\Outcomes\Outcome;
 use KiwiCaptcha\Risk\Outcomes\OutcomeHandle;
 
 /**
- * The completion credit of the step-up plane: the stepUpCompleted
- * outcome reported for the challenge's principal and target pseudonyms
- * through the outcomes seam. A legitimate user is therefore not
- * demanded a second step-up while the credited trust holds, because
+ * The completion effect of the demand finalization: the stepUpCompleted
+ * outcome reported for the authorized demand's principal and target
+ * pseudonyms through the outcomes seam. A legitimate user is therefore
+ * not demanded a second step-up while the credited trust holds, because
  * the risk side subtracts risk on that outcome through its mapping
  * table.
+ *
+ * This is an internal effect of {@see StepUpDemandFinalizer} and of
+ * nothing else: the factor completion answers a proof, the finalizer
+ * reassesses and settles the demand terminally, and only an authorized
+ * settlement invokes this credit. The factor can never turn its proof
+ * into an outcome booking by itself, which is exactly the boundary the
+ * demand architecture draws.
  *
  * The idempotency keys derive from the challenge record id under a
  * purpose-separated key, built with the bundle's shared HKDF
  * derivation and this class's own info string. The same challenge can
- * never double-credit, and both handlers share one derivation. Each
+ * never double-credit, and every caller shares one derivation. Each
  * handle dimension carries its own derived key, so the principal
  * report and the target report stay distinct bookings.
  *
- * The credit runs after the single-use consumption, so exactly one
- * completer of a challenge ever reaches it. A report that fails
- * surfaces as an exception to the caller, fail-closed: the handlers
- * answer the outcome_unavailable failure and the user begins a fresh
- * challenge, since a completion without its credit would leave the
- * user stepped up again.
+ * A report that fails surfaces as an exception to the caller,
+ * fail-closed: the finalizer answers the retryable
+ * outcome_unavailable failure and the user repeats the completion,
+ * since an authorized demand whose credit never landed would leave the
+ * user stepped up again. The terminal settlement keeps the authorized
+ * state, so the idempotent retry re-runs the effect without
+ * double-booking.
  */
 final class StepUpCompletionCredit
 {
@@ -42,8 +49,6 @@ final class StepUpCompletionCredit
     public function __construct(
         private readonly OutcomeReporterInterface $reporter,
         string $master,
-        private readonly ?SessionRestorer $sessionRestorer = null,
-        private readonly ?\Symfony\Component\HttpFoundation\RequestStack $requestStack = null,
     ) {
         if (\strlen($master) < 32) {
             throw new \InvalidArgumentException('The step-up idempotency master must be at least 32 bytes (the same floor as secret_key)');
@@ -52,41 +57,37 @@ final class StepUpCompletionCredit
     }
 
     /**
-     * Report stepUpCompleted for the principal and (when the challenge
-     * carried one) the target pseudonym, and answer the succeeded
-     * verdict naming what was credited.
+     * Report stepUpCompleted for the authorized demand's principal and,
+     * when the challenge asserted the principal owns the target, the
+     * target pseudonym.
+     *
+     * The target credit (and the risk-side failure clear) only runs when
+     * the challenge asserts the principal owns the target. A challenge
+     * that merely *named* a victim target must never clear that
+     * target's failure counter or lockout. The handle carries the
+     * canonical 64-hex digest the challenge record stores, so the clear
+     * lands on exactly the target state keys the engine's consolidated
+     * assessment reads (the outcomes layer projects the digest to the
+     * mark spelling where marks are written).
      *
      * @throws \Throwable when a report failed; the caller answers the
-     *                    fail-closed outcome_unavailable verdict
+     *                    retryable failure and the idempotent retry
+     *                    re-runs the effect
      */
-    public function credit(string $challengeId, StepUpChallenge $challenge): StepUpResult
+    public function report(string $challengeId, string $principalPseudonym, ?string $targetPseudonym, bool $targetOwned): void
     {
         $this->reporter->report(
             Outcome::StepUpCompleted,
-            OutcomeHandle::principal($challenge->principalPseudonym),
+            OutcomeHandle::principal($principalPseudonym),
             $this->idempotencyKey('principal', $challengeId),
         );
-        $creditedTarget = false;
-        // Target credit (and the risk-side failure clear) only runs when
-        // the challenge asserts the principal owns the target. A
-        // challenge that merely *named* a victim target must never
-        // clear that target's failure counter or lockout.
-        if ($challenge->targetPseudonym !== null && $challenge->targetOwned) {
+        if ($targetPseudonym !== null && $targetOwned) {
             $this->reporter->report(
                 Outcome::StepUpCompleted,
-                OutcomeHandle::target(TargetMarkKey::of($challenge->targetPseudonym)),
+                OutcomeHandle::target($targetPseudonym),
                 $this->idempotencyKey('target', $challengeId),
             );
-            $creditedTarget = true;
         }
-        // Restore the wrapped token and record the network bucket so
-        // the next login from the same network is no longer novel.
-        $this->sessionRestorer?->restore(
-            $challenge->principalPseudonym,
-            $this->requestStack?->getCurrentRequest(),
-        );
-
-        return StepUpResult::succeeded(true, $creditedTarget);
     }
 
     private function idempotencyKey(string $dimension, string $challengeId): string

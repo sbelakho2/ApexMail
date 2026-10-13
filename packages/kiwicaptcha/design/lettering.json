@@ -1,0 +1,117 @@
+{
+  "product": "KiwiCaptcha",
+  "text": "kiwi captcha",
+  "units": {
+    "kiwiFontSize": 100.0,
+    "captchaFontSize": 82.0,
+    "wordGap": 12.0,
+    "baseline": 0.0,
+    "convention": "lowercase humanist lettering on one shared baseline; sizes are font-size units; captcha is 82% of kiwi on the same baseline; the 12-unit gap between the words is fixed in the master, never left to browser kerning"
+  },
+  "source": {
+    "family": "Alegreya Sans",
+    "style": "Bold",
+    "weight": 700,
+    "version": "2.004",
+    "license": "SIL Open Font License 1.1",
+    "vendor": "Huerta Tipografica",
+    "unitsPerEm": 1000,
+    "sourceFile": "alegreya-700.ttf (Google Fonts v28 distribution)",
+    "sourceFileSha256": "5bd81a6704bdd6f8da8b0eceba723b384311e008fefdd92e782674f70a7d3ab7",
+    "outlineDerivation": "absolute glyph outlines extracted with fontTools SVGPathPen; font kerning (GPOS XAdvance) baked into fixed positions"
+  },
+  "words": {
+    "kiwi": {
+      "fontSize": 100.0,
+      "startX": 0.0,
+      "width": 171.5,
+      "glyphs": [
+        {
+          "glyph": "k",
+          "x": 0.0,
+          "advance": 49.5
+        },
+        {
+          "glyph": "i",
+          "x": 49.5,
+          "advance": 26.1
+        },
+        {
+          "glyph": "w",
+          "x": 75.6,
+          "advance": 69.8
+        },
+        {
+          "glyph": "i",
+          "x": 145.4,
+          "advance": 26.1
+        }
+      ],
+      "kerning": {}
+    },
+    "captcha": {
+      "fontSize": 82.0,
+      "startX": 183.5,
+      "width": 254.2,
+      "glyphs": [
+        {
+          "glyph": "c",
+          "x": 183.5,
+          "advance": 31.57
+        },
+        {
+          "glyph": "a",
+          "x": 214.25,
+          "advance": 39.44
+        },
+        {
+          "glyph": "p",
+          "x": 253.69,
+          "advance": 42.48
+        },
+        {
+          "glyph": "t",
+          "x": 296.17,
+          "advance": 27.72
+        },
+        {
+          "glyph": "c",
+          "x": 323.31,
+          "advance": 31.57
+        },
+        {
+          "glyph": "h",
+          "x": 354.55,
+          "advance": 43.71
+        },
+        {
+          "glyph": "a",
+          "x": 398.26,
+          "advance": 39.44
+        }
+      ],
+      "kerning": {
+        "c+a": -0.82,
+        "t+c": -0.57,
+        "c+h": -0.33
+      }
+    }
+  },
+  "master": {
+    "file": "packages/kiwicaptcha/resources/kiwi-wordmark.svg",
+    "viewBox": [
+      0,
+      0,
+      429.15,
+      85.37
+    ],
+    "baselineY": 70.2,
+    "inkBoundsFontUnits": [
+      6.5,
+      -15.17,
+      435.65,
+      70.2
+    ],
+    "treatment": "outlined absolute paths, fill currentColor, no text element, no font dependency"
+  }
+}

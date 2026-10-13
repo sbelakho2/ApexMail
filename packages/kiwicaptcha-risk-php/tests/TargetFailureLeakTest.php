@@ -46,7 +46,7 @@ final class TargetFailureLeakTest extends TestCase
             return;
         }
         try {
-            $prefix = '{kiwi:'.$this->namespace.':target:5e}';
+            $prefix = '{kiwi:'.$this->namespace.'}';
             $keys = $this->client->keys($prefix.'*');
             if ($keys !== []) {
                 $this->client->del(...$keys);
@@ -58,7 +58,7 @@ final class TargetFailureLeakTest extends TestCase
 
     public function testSubMinuteFailuresStillLeakOnePerMinute(): void
     {
-        $key = '{kiwi:'.$this->namespace.':target:5e}:risk:tgt:'.self::TARGET;
+        $key = '{kiwi:'.$this->namespace.'}:risk:tgt:'.self::TARGET;
 
         // Failure 1: the record is created, the watermark stamps now.
         $state = $this->store->registerTargetFailure(self::TARGET, 'src100000000000000000000000000', 'as64496');

@@ -584,8 +584,11 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     const risk = riskModuleSource();
     // The driver surface is the eager core plus the lazy widget modules.
     // Fetch accounting across the surface: the eager core owns the
-    // challenge fetch and the bounded cancellation fetch ({endpoint}/
-    // cancel); the widget-risk.js module owns the two files-mode lazy
+    // challenge fetch, the bounded cancellation fetch ({endpoint}/
+    // cancel) and the step-up pair (the begin and complete posts of the
+    // email-ownership dialog, both same-origin JSON posts to the paths
+    // the server's own 403 advertises); the widget-risk.js module owns
+    // the two files-mode lazy
     // fetches (the WASM runtime glue and the Argon worker asset,
     // worker.<hash>.js), downloaded only when a memory-hard challenge
     // arrives; the widget-compat.js module issues NO network request at
@@ -599,11 +602,15 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // hash. There can be no "retry with a weaker challenge" code path to
     // fetch a second challenge: exactly ONE fetch targets the challenge
     // endpoint itself.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(2);
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(3);
     expect(risk.match(/fetch\(/g) ?? []).toHaveLength(2);
     expect(src.match(/fetch\(endpoint,/g) ?? []).toHaveLength(1);
     expect(risk.match(/fetch\(url, \{ cache: "force-cache"/g) ?? []).toHaveLength(2);
     expect(src.match(/fetch\(cancelUrl,/g) ?? []).toHaveLength(1);
+    // The step-up dialog's posts share one helper and never touch the
+    // challenge endpoint: the URLs come from the 403 body and the begin
+    // document alone.
+    expect(src.match(/fetch\(url, \{\n        method: "POST", credentials: "same-origin", cache: "no-store",/g) ?? []).toHaveLength(1);
     // The algorithm variable is declared exactly once in the driver (from
     // the container/widget attributes only); the worker's own declaration
     // lives in the standalone asset, which the driver no longer embeds.

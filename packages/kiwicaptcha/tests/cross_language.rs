@@ -1018,7 +1018,14 @@ do {{ $hash = hash('sha256', $record->prefix . $counter . base64_decode($record-
 --$counter;
 $program = KiwiCaptcha\ExecutionChallengeGenerator::decode($ch->executionProgram);
 if ($program === null) {{ fwrite(STDERR, 'the issued program must parse'); exit(4); }}
-$trace = KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
+// The rung-scoped synthesizer: the naive fixture's version-6 probe
+// placeholders are rejected by the envelope walker by design, so the
+// real-platform rung (op_version 6) rides the white-box fixture (the
+// documented browser-equivalent synthesizer inside the published
+// operand-derived envelopes); versions 1-5 keep the naive fixture.
+$trace = $program['op_version'] >= 6
+    ? KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceForWhiteBox($program, KiwiCaptcha\Tests\Support\ExecutionTraceFixture::OBSERVED_HEIGHT)
+    : KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
 $digest = KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($ch->executionProgram, $ch->nonce, $trace);
 if ($digest === null) {{ fwrite(STDERR, 'the digest over the executed trace must compute'); exit(5); }}
 if ('{tamper}' === '1') {{ $digest[0] = $digest[0] === '0' ? '1' : '0'; }}
@@ -1306,7 +1313,13 @@ $record = $storage->find($decoded->nonce);
 if ($record === null) { fwrite(STDERR, 'PHP must load the Rust max-register record'); exit(30); }
 $program = KiwiCaptcha\ExecutionChallengeGenerator::decode($record->executionProgram);
 if ($program === null) { fwrite(STDERR, 'the Rust max-register program must parse in PHP'); exit(31); }
-$trace = KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
+// The rung-scoped synthesizer at the reference observe height: the
+// white-box fixture on the real-platform rung (the naive placeholders
+// are envelope-rejected by design), the same choice and height the
+// Rust serialization used, so the byte-equality proof stays exact.
+$trace = $program['op_version'] >= 6
+    ? KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceForWhiteBox($program, KiwiCaptcha\Tests\Support\ExecutionTraceFixture::OBSERVED_HEIGHT)
+    : KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
 $digest = KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
 if ($digest === null || $decoded->executionDigest === null) { fwrite(STDERR, 'the recomputed digest must exist'); exit(32); }
 if (!hash_equals($digest, $decoded->executionDigest)) { fwrite(STDERR, 'the Rust-serialized digest must equal the PHP recomputation'); exit(33); }
@@ -1470,7 +1483,12 @@ fn issue_execution_for_interop_at(
 /// exactly like the interpreter: decode the stored program, execute it
 /// (the browser-equivalent executed trace), digest over the executed
 /// trace, and serialize the token with the trace in its base64url
-/// wire form.
+/// wire form. The synthesizer is rung-scoped like the PHP fixture: the
+/// naive trace's version-6 probe placeholders are rejected by the
+/// envelope walker by design, so the real-platform rung rides the
+/// white-box fixture (the documented browser-equivalent synthesizer
+/// inside the published operand-derived envelopes) at the same
+/// reference observe height both mirrors pin.
 #[cfg(feature = "redis")]
 fn digest_trace_token(record: &kiwicaptcha::challenge::ChallengeRecord, counter: u64) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1480,7 +1498,14 @@ fn digest_trace_token(record: &kiwicaptcha::challenge::ChallengeRecord, counter:
         .expect("the execution-armed record carries the program");
     let decoded =
         kiwicaptcha::execution::decode(program).expect("the issued program must decode in Rust");
-    let trace = kiwicaptcha::execution::fixtures::executed_trace_for(&decoded);
+    let trace = if decoded.op_version >= 6 {
+        kiwicaptcha::execution::fixtures::white_box_envelope_forgery_solver(
+            &decoded,
+            kiwicaptcha::execution::fixtures::OBSERVED_HEIGHT,
+        )
+    } else {
+        kiwicaptcha::execution::fixtures::executed_trace_for(&decoded)
+    };
     let digest = kiwicaptcha::execution::expected_digest_over_trace(program, &record.nonce, &trace)
         .expect("the digest over the executed trace must compute in Rust");
     kiwicaptcha::token::SolutionToken {

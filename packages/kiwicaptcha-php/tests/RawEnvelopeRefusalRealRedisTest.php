@@ -47,8 +47,22 @@ final class RawEnvelopeRefusalRealRedisTest extends TestCase
         }
     }
 
+    /**
+     * A wire-valid nonce (44 base64 characters of 32 bytes): the key
+     * suffix the raw envelopes live under and the envelope's own nonce
+     * field, so the strict serde-mirror decoder accepts every envelope
+     * the transitions consume.
+     */
+    private function wireNonce(): string
+    {
+        return base64_encode(random_bytes(32));
+    }
+
     private function makeRecord(string $nonce): ChallengeRecord
     {
+        $salt = base64_encode(random_bytes(16));
+        $challenge = 'challenge';
+
         return new ChallengeRecord(
             nonce: $nonce,
             scope: 'login',
@@ -60,9 +74,9 @@ final class RawEnvelopeRefusalRealRedisTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
-            challenge: 'challenge',
+            salt: $salt,
+            prefix: $challenge.'|'.$salt.'|',
+            challenge: $challenge,
             minDurationMs: 0,
             issuedAtNs: 123_456_789,
         );
@@ -84,7 +98,7 @@ final class RawEnvelopeRefusalRealRedisTest extends TestCase
         self::assertNotNull($client);
         $prefix = 'raw-refusal-'.bin2hex(random_bytes(4)).'-';
         $storage = new RedisStorage($client, $prefix);
-        $nonce = 'persistent-nonce';
+        $nonce = $this->wireNonce();
         $key = $prefix.$nonce;
         $raw = $this->envelope($nonce);
         $client->set($key, $raw);
@@ -106,7 +120,7 @@ final class RawEnvelopeRefusalRealRedisTest extends TestCase
         self::assertNotNull($client);
         $prefix = 'raw-refusal-'.bin2hex(random_bytes(4)).'-';
         $storage = new RedisStorage($client, $prefix);
-        $nonce = 'markerless-nonce';
+        $nonce = $this->wireNonce();
         $key = $prefix.$nonce;
         $client->set($key, $this->envelope($nonce, withIdentityMarker: false), 'EX', 120);
 
@@ -134,7 +148,7 @@ final class RawEnvelopeRefusalRealRedisTest extends TestCase
         self::assertNotNull($client);
         $prefix = 'raw-refusal-'.bin2hex(random_bytes(4)).'-';
         $storage = new RedisStorage($client, $prefix);
-        $nonce = 'ms-nonce';
+        $nonce = $this->wireNonce();
         $key = $prefix.$nonce;
         $client->set($key, $this->envelope($nonce), 'EX', 2);
         usleep(600_000);
@@ -157,7 +171,7 @@ final class RawEnvelopeRefusalRealRedisTest extends TestCase
         self::assertNotNull($client);
         $prefix = 'raw-refusal-'.bin2hex(random_bytes(4)).'-';
         $storage = new RedisStorage($client, $prefix);
-        $nonce = 'us-nonce';
+        $nonce = $this->wireNonce();
         $key = $prefix.$nonce;
         $client->set($key, $this->envelope($nonce), 'EX', 120);
         $storage->consume($nonce);

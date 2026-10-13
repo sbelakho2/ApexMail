@@ -260,6 +260,29 @@ final class RiskIdentityFactory
         return $this->pseudonym($this->keys->session, 'sess', 0, $raw);
     }
 
+    /**
+     * Device pseudonym: context "dev", no epoch. The material is the
+     * decoded 16-byte trusted-device cookie value. The context is distinct
+     * from the session one ("sess"), so the same hex value can never
+     * derive the same pseudonym under both identities. Keyed by the
+     * session HKDF key like the agent pattern (one key, per-purpose
+     * context); the raw value stays in process memory.
+     *
+     * @throws \InvalidArgumentException when the value is not exactly 32
+     *                                   lowercase hex chars
+     */
+    public function deviceId(string $device): string
+    {
+        if (preg_match('/^[0-9a-f]{32}\z/', $device) !== 1) {
+            throw new \InvalidArgumentException(
+                'The device cookie value must be 32 lowercase hex chars (16 raw bytes)'
+            );
+        }
+        $raw = hex2bin($device);
+        \assert(\is_string($raw));
+        return $this->pseudonym($this->keys->session, 'dev', 0, $raw);
+    }
+
     /** Principal pseudonym: context "prin", no epoch, app principal id bytes. */
     public function principalId(string $principal): string
     {

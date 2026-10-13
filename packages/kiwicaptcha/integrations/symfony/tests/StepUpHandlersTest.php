@@ -83,129 +83,26 @@ final class StepUpHandlersTest extends TestCase
 
         $result = $handler->complete($this->completeRequest($this->ticketOf($response), $code));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status);
-        self::assertTrue($result->creditedPrincipal);
-        self::assertTrue($result->creditedTarget);
+        // FactorVerified, never AuthorizedStepUp: the proof books
+        // nothing — no credit flags, no outcome reports. The shared
+        // StepUpDemandFinalizer owns the StepUpCompleted write.
+        self::assertFalse($result->creditedPrincipal, 'FactorVerified books no credit');
+        self::assertFalse($result->creditedTarget, 'FactorVerified books no credit');
+        self::assertNotNull($result->demandId, 'the proof names the demand it answers');
+        self::assertSame('email_otp', $result->factor);
+        self::assertCount(0, $this->reporter->reports, 'a factor proof books no outcome');
 
-        // The credit: stepUpCompleted on the principal and the target,
-        // each with an idempotency key derived from the challenge id.
-        self::assertCount(2, $this->reporter->reports);
-        self::assertSame(Outcome::StepUpCompleted, $this->reporter->reports[0]['outcome']);
-        self::assertSame(OutcomeHandleDimension::Principal, $this->reporter->reports[0]['handle']->dimension);
-        self::assertSame(self::PRINCIPAL, $this->reporter->reports[0]['handle']->id);
-        self::assertSame(OutcomeHandleDimension::Target, $this->reporter->reports[1]['handle']->dimension);
-        // The target handle carries the one derived mark key (the
-        // leading 128 bits of the canonical 64-hex pseudonym).
-        self::assertSame(self::TARGET_MARK_KEY, $this->reporter->reports[1]['handle']->id);
-        self::assertNotSame($this->reporter->reports[0]['idempotencyKey'], $this->reporter->reports[1]['idempotencyKey']);
-
-        // The replayed completion is rejected and credits nothing.
+        // The replayed completion is rejected and books nothing.
         $replay = $handler->complete($this->completeRequest($this->ticketOf($response), $code));
         self::assertSame(StepUpResultStatus::Failed, $replay->status);
         self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $replay->failureCode);
-        self::assertCount(2, $this->reporter->reports);
+        self::assertCount(0, $this->reporter->reports, 'neither the proof nor its replay books an outcome');
     }
 
     public function testTheStoredRecordCarriesOnlyTheCodeHash(): void
     {
-        $records = [];
-        $inner = $this->store;
-        $store = new class ($inner, $records) implements \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore {
-            /** @param list<string> $records */
-            public function __construct(
-                private readonly ArrayStepUpChallengeStore $inner,
-                private array $records,
-            ) {
-            }
-
-            public function create(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge $challenge, int $ttlSecs): string
-            {
-                $this->records[] = (string) json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES);
-
-                return $this->inner->create($challenge, $ttlSecs);
-            }
-
-            public function read(string $challengeId): ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge
-            {
-                return $this->inner->read($challengeId);
-            }
-
-            public function consume(string $challengeId): ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge
-            {
-                return $this->inner->consume($challengeId);
-            }
-
-            public function recordFailure(string $challengeId, int $maxAttempts): int
-            {
-                return $this->inner->recordFailure($challengeId, $maxAttempts);
-            }
-
-            public function countBegin(string $principalPseudonym, int $windowSecs): int
-            {
-                return $this->inner->countBegin($principalPseudonym, $windowSecs);
-            }
-
-            public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void
-            {
-                $this->inner->saveTotpSecret($principalPseudonym, $secretRaw);
-            }
-
-            public function findTotpSecret(string $principalPseudonym): ?string
-            {
-                return $this->inner->findTotpSecret($principalPseudonym);
-            }
-
-            public function markTotpStep(string $principalPseudonym, int $step, int $ttlSecs): bool
-            {
-                return $this->inner->markTotpStep($principalPseudonym, $step, $ttlSecs);
-            }
-
-            public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void
-            {
-                $this->inner->markStepUpSuccess($principalPseudonym, $ttlSecs, $now);
-            }
-
-            public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void
-            {
-                $this->inner->markSessionStepUpSuccess($sessionId, $principalPseudonym, $factor, $ttlSecs, $now);
-            }
-
-            public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool
-            {
-                return $this->inner->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, $withinSecs, $now);
-            }
-
-            public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
-            {
-                return $this->inner->recentStepUpSuccess($principalPseudonym, $withinSecs, $now);
-            }
-
-            public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
-            {
-                return $this->inner->countLockoutFailure($dimension, $pseudonym, $windowSecs);
-            }
-
-            public function lockoutUntil(string $dimension, string $pseudonym, int $now): int
-            {
-                return $this->inner->lockoutUntil($dimension, $pseudonym, $now);
-            }
-
-            public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void
-            {
-                $this->inner->armLockout($dimension, $pseudonym, $now, $ttlSecs);
-            }
-
-            public function clearLockout(string $dimension, string $pseudonym): void
-            {
-                $this->inner->clearLockout($dimension, $pseudonym);
-            }
-
-            /** @return list<string> */
-            public function recorded(): array
-            {
-                return $this->records;
-            }
-        };
-        $handler = new EmailOtpStepUpHandler($store, $this->ticket, $this->credit(), $this->sender, self::MASTER);
+        $store = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RecordingStepUpChallengeStore($this->store);
+        $handler = new EmailOtpStepUpHandler($store, $this->ticket, $this->sender, self::MASTER);
         $handler->begin($this->beginRequest(), $this->context());
         $code = (string) $this->sender->lastCode();
         $stored = $store->recorded();
@@ -335,9 +232,11 @@ final class StepUpHandlersTest extends TestCase
         $step = TotpCode::stepOf($this->now);
         $result = $handler->complete($this->completeRequest($this->ticketOf($response), TotpCode::at((string) $secret, $step)));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the current step verifies');
-        self::assertTrue($result->creditedPrincipal);
-        self::assertFalse($result->creditedTarget);
-        self::assertCount(1, $this->reporter->reports, 'the principal-only context credits once');
+        // FactorVerified, never AuthorizedStepUp: the proof books
+        // nothing. The shared StepUpDemandFinalizer owns the credit.
+        self::assertFalse($result->creditedPrincipal, 'FactorVerified books no credit');
+        self::assertFalse($result->creditedTarget, 'FactorVerified books no credit');
+        self::assertCount(0, $this->reporter->reports, 'a factor proof books no outcome');
 
         // The replay guard: the same step can never verify twice.
         $response2 = $handler->begin($this->beginRequest(), $this->contextNoTarget());
@@ -455,12 +354,17 @@ final class StepUpHandlersTest extends TestCase
 
     public function testACreditFailureFailsTheCompletionClosed(): void
     {
+        // FactorVerified books nothing, so a dead outcome backend can
+        // never fail the factor completion: the credit is the
+        // finalizer's effect and runs only after the demand settles
+        // authorized. The proof itself succeeds and names its demand.
         $this->reporter->throwOnReport = new \RuntimeException('outcome backend down');
         $handler = $this->otpHandler();
         $response = $handler->begin($this->beginRequest(), $this->context());
         $result = $handler->complete($this->completeRequest($this->ticketOf($response), (string) $this->sender->lastCode()));
-        self::assertSame(StepUpResultStatus::Failed, $result->status);
-        self::assertSame(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $result->failureCode);
+        self::assertSame(StepUpResultStatus::Succeeded, $result->status);
+        self::assertFalse($result->creditedPrincipal);
+        self::assertCount(0, $this->reporter->reports, 'the factor proof never reaches the outcome backend');
         // The challenge was consumed: a retry must begin fresh, never
         // re-complete.
         $again = $handler->complete($this->completeRequest($this->ticketOf($response), (string) $this->sender->lastCode()));
@@ -493,6 +397,12 @@ final class StepUpHandlersTest extends TestCase
             300,
             5,
             str_repeat('a', 64),
+            null,
+            null,
+            false,
+            false,
+            null,
+            'BBBBBBBBBBBBBBBBBBBBBBBB',
         );
         $round = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::fromJson((string) json_encode($record->toArray(), JSON_UNESCAPED_SLASHES));
         self::assertSame($record->toArray(), $round->toArray());
@@ -508,7 +418,6 @@ final class StepUpHandlersTest extends TestCase
         return new EmailOtpStepUpHandler(
             $this->store,
             $this->ticket,
-            $this->credit(),
             $this->sender,
             self::MASTER,
             $ttl,
@@ -526,7 +435,6 @@ final class StepUpHandlersTest extends TestCase
         return new TotpStepUpHandler(
             $this->store,
             $this->ticket,
-            $this->credit(),
             'sha1',
             6,
             1,
@@ -554,7 +462,7 @@ final class StepUpHandlersTest extends TestCase
 
     private function context(string $principal = self::PRINCIPAL, string $mode = StepUpContext::MODE_HTML): StepUpContext
     {
-        return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required', $mode, true);
+        return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required', $mode, true, $this->mintDemandId());
     }
 
     private function contextNoTarget(): StepUpContext
@@ -564,7 +472,24 @@ final class StepUpHandlersTest extends TestCase
 
     private function contextNoTargetFor(string $principal): StepUpContext
     {
-        return new StepUpContext($principal, null, 'login', null, 'post_solve_step_up_required');
+        return new StepUpContext($principal, null, 'login', null, 'post_solve_step_up_required', StepUpContext::MODE_HTML, false, $this->mintDemandId());
+    }
+
+    /** Mint the demand an authorizing challenge must bind. */
+    private function mintDemandId(): string
+    {
+        $demand = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand::mint(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
+            'login',
+            null,
+            null,
+            null,
+            $this->now,
+            600,
+        );
+        $this->store->createDemand($demand, 600);
+
+        return $demand->id;
     }
 
     private const SESSION = 'handlers-test-session-000000000001';

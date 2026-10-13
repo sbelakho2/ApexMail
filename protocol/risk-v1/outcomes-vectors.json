@@ -50,7 +50,7 @@
             "outcome": "stepUpCompleted",
             "handle": {"dimension": "principal", "id": "9f1c4a7e2b8d63f05a1e9c4d7b2e6f18"},
             "accepted": true,
-            "channel_value": 8,
+            "channel_value": 22,
             "ledger_action": null,
             "mark_kind": null,
             "mark_key": null,

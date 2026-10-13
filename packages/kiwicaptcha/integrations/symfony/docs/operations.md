@@ -749,7 +749,7 @@ The ingress caps exist so a single source can never saturate a worker's connecti
 ### Autoscale on admitted demand, never raw hostile CPU
 
 Scale the captcha workers on the admission-side metrics, not on CPU.
-The deployment-wide issuance rate (the `{kiwi:<ns>}:issuance:<second>` counter the controller increments on every minted challenge, exposed via the resource-pressure provider / Redis) and the outstanding-challenge pressure are the honest demand signals.
+The deployment-wide issuance rate and the outstanding-challenge pressure are the honest demand signals. The issuance counter is `{kiwi:<ns>}:issuance:<second>`. The controller increments it on every minted challenge. It is exposed via the resource-pressure provider and Redis.
 A hostile flood that is being denied (rate limiter, risk engine, emergency cap) must not trigger scale-up.
 Those requests never mint. They never consume verification CPU on the workers.
 Example:
@@ -865,11 +865,10 @@ The trace is supplementary evidence, reproducible by any
 implementation of the public semantics plus the published envelopes,
 never a browser attestation. A full-knowledge forger who reads the
 open-source verifier reimplements the five version-6 acceptance
-envelopes (they are deterministic functions of the operands that ship
-with the program) and passes every version-6 program without a browser
-(WhiteBoxExecutionForgeryTest / white_box_envelope_forgery_solver;
-measured pass rate 1.0). Version 6 costs an attacker one reading of
-the source, the same class as versions 1-5. Acceptance criterion: the
+envelopes. Those envelopes are deterministic functions of the operands
+that ship with the program. The forger then passes every version-6
+program without a browser. See WhiteBoxExecutionForgeryTest and
+white_box_envelope_forgery_solver. The measured pass rate is 1.0. Version 6 costs an attacker one source reading only. That cost matches versions 1-5. Acceptance criterion: the
 naive oracle keeps accepting every version-1-5 trace the generator
 mints, and the white-box forger keeps measuring the honest
 full-knowledge pass rate on version 6. No rung is a browser boundary;

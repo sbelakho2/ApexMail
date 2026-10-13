@@ -52,6 +52,25 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // (the request-scope admission gate); the fixture registers a
         // minimal stand-in.
         $container->register('request_stack', \Symfony\Component\HttpFoundation\RequestStack::class);
+        // The abuse posture requires the ASN dataset path (the
+        // novel-network gate is judged on the ASN bucket first): the
+        // fixture supplies what the profile requires when the layers
+        // select it without a dataset.
+        foreach ($layers as $i => $layer) {
+            $profile = $layer['protection_profile'] ?? null;
+            if (\in_array($profile, ['abuse_first', 'high_abuse'], true)) {
+                $covered = false;
+                foreach ($layers as $other) {
+                    if (isset($other['risk']['asn']['dataset_path'])) {
+                        $covered = true;
+                        break;
+                    }
+                }
+                if (!$covered) {
+                    $layers[$i]['risk']['asn']['dataset_path'] = \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskStageMatrixTestKernel::asnFixturePath();
+                }
+            }
+        }
         (new KiwiCaptchaExtension())->load($layers, $container);
 
         return $container;

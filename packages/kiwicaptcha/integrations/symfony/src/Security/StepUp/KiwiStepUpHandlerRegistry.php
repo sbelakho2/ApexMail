@@ -14,6 +14,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
  * An unknown name is a refusal (fail-closed): the registry never falls
  * back to a default when an explicit name cannot be resolved, and an
  * empty registry refuses every lookup.
+ *
+ * Every registered handler must also name itself: the server-owned
+ * factor identity of the handler must equal the name it is registered
+ * under. A mismatched registration is refused at build time, so the
+ * assurance a completion books is always the one the deployment
+ * configured, and a custom handler cannot present a different factor
+ * identity than the one its demand plane wiring names.
  */
 final class KiwiStepUpHandlerRegistry
 {
@@ -28,6 +35,13 @@ final class KiwiStepUpHandlerRegistry
             }
             if (!$handler instanceof StepUpHandlerInterface) {
                 throw new \InvalidArgumentException(sprintf('The step-up handler "%s" does not implement StepUpHandlerInterface', (string) $name));
+            }
+            if ($handler->assurance()->identity !== (string) $name) {
+                throw new \InvalidArgumentException(sprintf(
+                    'The step-up handler "%s" names itself "%s": the registered name and the server-owned factor identity must agree',
+                    (string) $name,
+                    $handler->assurance()->identity,
+                ));
             }
         }
         if ($defaultHandler === '' || !isset($handlers[$defaultHandler])) {

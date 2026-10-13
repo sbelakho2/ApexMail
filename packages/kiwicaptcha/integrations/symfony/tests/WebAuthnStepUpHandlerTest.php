@@ -178,7 +178,6 @@ final class WebAuthnStepUpHandlerTest extends TestCase
             new WebAuthnStepUpHandler(
                 $this->store,
                 new StepUpTicket(self::MASTER),
-                new StepUpCompletionCredit($this->reporter, self::MASTER),
                 $this->registry(),
                 self::MASTER,
                 300,
@@ -218,8 +217,11 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $assertion = $this->assertion($document['public_key']['challenge'], 'cred-A', 5);
         $result = $handler->complete($this->completeRequest($document['challenge'], $assertion));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, (string) json_encode($result->toArray()));
-        self::assertTrue($result->creditedPrincipal);
-        self::assertTrue($result->creditedTarget, 'the context carried a target pseudonym');
+        // FactorVerified, never AuthorizedStepUp: the proof books no
+        // credit; the shared StepUpDemandFinalizer owns the write.
+        self::assertFalse($result->creditedPrincipal, 'a factor proof books no credit');
+        self::assertFalse($result->creditedTarget, 'a factor proof books no credit');
+        self::assertSame('webauthn', $result->factor, 'the proof names its factor');
         self::assertSame(5, $this->registry()->findOneByCredentialId('cred-A')?->counter, 'the sign count advanced in the registry');
     }
 
@@ -379,7 +381,6 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         return new WebAuthnStepUpHandler(
             $this->store,
             new StepUpTicket(self::MASTER),
-            new StepUpCompletionCredit($this->reporter, self::MASTER),
             $this->registry(),
             self::MASTER,
             300,

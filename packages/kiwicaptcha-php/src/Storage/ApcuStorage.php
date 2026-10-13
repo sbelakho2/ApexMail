@@ -160,10 +160,64 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
      *                                                 deterministic
      *                                                 expiry and lease
      *                                                 checks.
+     * @param \Closure|null            $sapiEnvironment the simulated
+     *                                                 SAPI environment
+     *                                                 for the cli
+     *                                                 detection, an
+     *                                                 array of the SAPI
+     *                                                 name and the raw
+     *                                                 apc.enable_cli ini
+     *                                                 value; defaults to
+     *                                                 reading the real
+     *                                                 process. A test
+     *                                                 seam.
+     * @param bool                     $allowPrivateCliSegment the
+     *                                                         single-process
+     *                                                         acknowledgement
+     *                                                         for the cli
+     *                                                         SAPI. The
+     *                                                         apc.enable_cli
+     *                                                         ini is only
+     *                                                         the
+     *                                                         precondition
+     *                                                         that gives
+     *                                                         a CLI
+     *                                                         process a
+     *                                                         segment at
+     *                                                         all, so
+     *                                                         construction
+     *                                                         under cli
+     *                                                         requires
+     *                                                         the ini
+     *                                                         AND this
+     *                                                         flag.
+     *                                                         The flag
+     *                                                         is valid
+     *                                                         only for
+     *                                                         one
+     *                                                         long-lived
+     *                                                         process
+     *                                                         (Swoole
+     *                                                         with APCu
+     *                                                         initialised
+     *                                                         before
+     *                                                         fork;
+     *                                                         RoadRunner
+     *                                                         never
+     *                                                         qualifies).
+     *                                                         The
+     *                                                         Symfony
+     *                                                         bundle
+     *                                                         exposes it
+     *                                                         as
+     *                                                         storage.apcu.single_process_cli.
      *
      * @throws ApcuStorageException   when the default real backend is
-     *                                requested and the extension is
-     *                                missing or disabled
+     *                                requested under the cli SAPI
+     *                                without the apc.enable_cli ini AND
+     *                                the allowPrivateCliSegment flag,
+     *                                or when the extension is missing
+     *                                or disabled
      * @throws \InvalidArgumentException when an argument is out of
      *                                  range.
 
@@ -174,6 +228,8 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
         private readonly int $lockTimeoutMs = 5000,
         private readonly int $ttlMarginSecs = 60,
         private readonly ?\Closure $now = null,
+        private readonly ?\Closure $sapiEnvironment = null,
+        private readonly bool $allowPrivateCliSegment = false,
     ) {
         if ($this->lockTimeoutMs < 0) {
             throw new \InvalidArgumentException('lockTimeoutMs must be >= 0');
@@ -184,8 +240,53 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
         if ($keyPrefix === '') {
             throw new \InvalidArgumentException('keyPrefix must not be empty');
         }
-        $this->backend = $backend ?? new RealApcuBackend();
+        if ($backend === null) {
+            // The real backend carries the segment policy of the
+            // adapter: a CLI process owns a private APCu segment
+            // invisible to the web tier, so the default construction
+            // refuses the cli SAPI. apc.enable_cli=1 is the
+            // precondition for a CLI segment at all, so it is
+            // necessary and never sufficient: the hazard
+            // acknowledgement is this constructor flag, valid only for
+            // one long-lived process. An injected backend is a
+            // deliberate override (the emulated test seam), never the
+            // production segment, so the detection does not fire.
+            [$sapi, $enableCliRaw] = $this->sapiEnvironment !== null
+                ? ($this->sapiEnvironment)()
+                : [\PHP_SAPI, \ini_get('apc.enable_cli')];
+            if (RealApcuBackend::cliConstructionRefused(
+                $sapi,
+                RealApcuBackend::apcEnableCliIni($enableCliRaw),
+                $this->allowPrivateCliSegment,
+            )) {
+                throw new ApcuStorageException(
+                    'ApcuStorage refuses the cli SAPI without the single-process acknowledgement: a CLI process '
+                    . '(RoadRunner worker, queue consumer, command) owns a private APCu segment invisible to the '
+                    . 'web tier that serves traffic, so a challenge stored here can never be verified by the web '
+                    . 'tier (or the reverse). apc.enable_cli=1 is only the precondition that gives a CLI process a '
+                    . 'segment at all, so it is required in php.ini AND the construction needs the explicit '
+                    . 'allowPrivateCliSegment: true flag (bundle option storage.apcu.single_process_cli), valid '
+                    . 'only for one long-lived process (Swoole with APCu initialised before fork; RoadRunner never '
+                    . 'qualifies). Otherwise select the Redis/SQLite store for CLI hosts.'
+                );
+            }
+            $this->backend = new RealApcuBackend($this->sapiEnvironment, $this->allowPrivateCliSegment);
+        } else {
+            $this->backend = $backend;
+        }
         $this->prefix = $keyPrefix;
+    }
+
+    /**
+     * The diagnostic view of the cli-segment acknowledgement, the same
+     * flag the constructor took. The doctor reads it to separate the
+     * deliberate one-long-lived-process wiring (a warning about the
+     * per-process segment) from a wiring that cannot serve (a
+     * production failure).
+     */
+    public function allowsPrivateCliSegment(): bool
+    {
+        return $this->allowPrivateCliSegment;
     }
 
     /**

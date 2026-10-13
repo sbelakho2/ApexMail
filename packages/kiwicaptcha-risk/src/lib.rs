@@ -136,9 +136,9 @@ pub enum RiskError {
     /// observation pipeline.
     #[error("{0} must be >= 1 (got {1})")]
     InvalidTiming(&'static str, u64),
-    /// The risk master secret is shorter than the 16-byte minimum: an
+    /// The risk master secret is shorter than the 32-byte minimum: an
     /// empty or tiny master deterministically derives predictable keys.
-    #[error("the risk master secret must be at least 16 bytes (got {0})")]
+    #[error("the risk master secret must be at least 32 bytes (got {0})")]
     InvalidMasterLength(usize),
     /// A typed outcome handle is inadmissible: the identifier value
     /// fails its byte-shape rule (a raw principal, target or session
@@ -174,7 +174,7 @@ fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
 /// fleets during a rollout. A model revision that materially affects
 /// security requires a `policy_version` bump in the operator policy
 /// snapshot (see [`crate::policy::RiskPolicy`]).
-pub const RISK_MODEL_REVISION: u32 = 17;
+pub const RISK_MODEL_REVISION: u32 = 18;
 
 /// Immutable risk decision produced by the engine.
 ///
@@ -502,6 +502,19 @@ impl ProcessEmergencyCap {
 /// and 60 s dedupe TTL.
 ///
 /// The five fields are private and read through the accessors below:
+/// Novelty enforcement mode, the PHP mirror of `AdaptiveRiskEngine`'s
+/// `$noveltyEnforcement`. `Learn` (default) records the network tag on
+/// every successful login without demanding a step-up, so a rollout
+/// never locks out existing users. `Enforce` demands step-up on a
+/// genuinely novel ASN/network. `Off` disables the novelty gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NoveltyEnforcement {
+    Off,
+    #[default]
+    Learn,
+    Enforce,
+}
+
 /// [`RiskTimingConfig::new`] is the only constructor, so a caller can
 /// never assemble an unvalidated configuration and hand it to
 /// [`RiskEngine::with_timing`].
@@ -617,6 +630,7 @@ pub struct RiskEngine<
     metrics: Metrics,
     current_global_level: AtomicU8,
     enable_global_pressure: bool,
+    novelty_enforcement: NoveltyEnforcement,
     hysteresis: crate::hysteresis::ScopeActionHysteresis,
     /// Optional target-identifier resolver: when attached,
     /// [`RiskEngine::resolve_target_id`] derives the target pseudonym of
@@ -694,6 +708,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             metrics: Metrics::new(),
             current_global_level: AtomicU8::new(0),
             enable_global_pressure: true,
+            novelty_enforcement: NoveltyEnforcement::default(),
             hysteresis: crate::hysteresis::ScopeActionHysteresis::new(),
             target_resolver: None,
             marks_reader: None,
@@ -728,6 +743,15 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// inert, while per-source signals keep working.
     pub fn with_global_pressure(mut self, enable: bool) -> RiskEngine<S, N> {
         self.enable_global_pressure = enable;
+        self
+    }
+
+    /// Sets the novelty enforcement mode (the PHP mirror of
+    /// `AdaptiveRiskEngine`'s `$noveltyEnforcement`). `Learn` (default)
+    /// records without escalating; `Enforce` demands step-up on a
+    /// genuinely novel network.
+    pub fn with_novelty_enforcement(mut self, mode: NoveltyEnforcement) -> RiskEngine<S, N> {
+        self.novelty_enforcement = mode;
         self
     }
 
@@ -844,10 +868,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// through it to the source address's listed or unlisted bucket.
     /// Without a dataset the element resolves to the unlisted-namespace
     /// bucket of the source address, so distinct origins still spread.
-    pub fn with_asn_dataset(
-        mut self,
-        dataset: Arc<crate::asn::AsnDataset>,
-    ) -> RiskEngine<S, N> {
+    pub fn with_asn_dataset(mut self, dataset: Arc<crate::asn::AsnDataset>) -> RiskEngine<S, N> {
         self.asn_dataset = Some(dataset);
         self
     }
@@ -1148,6 +1169,18 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         } else {
             None
         };
+        // The assessment's target dimension (target-account protection,
+        // change.md 3.2.1): resolved beside the frozen observation wire
+        // from the context's submitted fields through the wired resolver.
+        // The pseudonym rides the consolidated registration, so the
+        // assessment itself maintains the target's failure counter and
+        // spread HLLs and the reply carries them into the score; the raw
+        // field values never leave this boundary.
+        let target_id = self.resolve_target_id(ctx.scope, ctx.target_fields);
+        let (target_source_element, target_asn_element) = match &target_id {
+            Some(id) => self.target_spread_elements(id, Some(&ctx)),
+            None => (String::new(), String::new()),
+        };
         let effective_v2_weights = v2_weights.unwrap_or_default();
         let registration = decision_id.as_ref().map(|id| OutcomeRegistration {
             decision_id: id.clone(),
@@ -1157,7 +1190,9 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot_hit: v2.map(|v2ctx| v2ctx.honeypot_hit).unwrap_or(false),
             v1_weights: self.policy.weights,
             v2_weights: effective_v2_weights,
-            target_id: None,
+            target_id: target_id.clone(),
+            target_source_element,
+            target_asn_element,
         });
 
         let start = Instant::now();
@@ -1194,7 +1229,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         reply.target_spread_asns,
                     )
                 });
-                (reply.observed, v2_signals, registration.is_some())
+                (reply.observed, v2_signals, registration.is_some(), false)
             }
             Ok(None) => {
                 // Store without the consolidated capability: the plain
@@ -1218,17 +1253,49 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 self.metrics
                     .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
+                let mut target_evidence_unavailable = false;
                 let v2_signals = v2.map(|v2ctx| {
                     // The fallback path has no consolidated reply: the
-                    // target counters stay zero here (the marks stage
-                    // still reads live TargetState on its own).
-                    self.derive_v2_signals(v2ctx, observation.session_id, ctx.event, 0, 0, 0)
+                    // live target state is read directly (the same state
+                    // the outcome bridge maintains). A store miss
+                    // degrades to the neutral zero counts, exactly like
+                    // the session-tag record reads; a failed read fails
+                    // closed: the counts return saturated at the attack
+                    // picture (the threshold failure count, the spread
+                    // saturated on both axes), so a target under attack
+                    // never reads as clean because the store hiccuped.
+                    // The first-attempt stage then carries the
+                    // evidence-unavailable reason, whose enforce-mode
+                    // verdict is the interactive step-up (always
+                    // completable).
+                    let (target_failures, spread_sources, spread_asns) = match &target_id {
+                        Some(id) => match self.store.read_target_state(id) {
+                            Ok(state) => (state.fails, state.spread_sources, state.spread_asns),
+                            Err(_) => {
+                                target_evidence_unavailable = true;
+                                (
+                                    crate::marks::TARGET_ATTACK_THRESHOLD,
+                                    crate::marks::TARGET_SPREAD_SATURATION,
+                                    crate::marks::TARGET_SPREAD_SATURATION,
+                                )
+                            }
+                        },
+                        None => (0, 0, 0),
+                    };
+                    self.derive_v2_signals(
+                        v2ctx,
+                        observation.session_id,
+                        ctx.event,
+                        target_failures,
+                        spread_sources,
+                        spread_asns,
+                    )
                 });
-                (observed, v2_signals, false)
+                (observed, v2_signals, false, target_evidence_unavailable)
             }
         };
 
-        let (observed, v2_signals, outcome_registered) = outcome;
+        let (observed, v2_signals, outcome_registered, target_evidence_unavailable) = outcome;
         // When global pressure is disabled, the signal, the level
         // and the cooldown are ALL zeroed before any policy or
         // cooldown-deny check: the global channel is inert (the
@@ -1312,6 +1379,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             v2,
             &vector,
             global_level,
+            target_evidence_unavailable,
         );
         // allow.
         if let Some(reader) = self.marks_reader.as_ref() {
@@ -1320,6 +1388,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 source_ip: ctx.source_ip,
                 session: observation.session_id.map(hex::encode),
                 principal: observation.principal_id.map(hex::encode),
+                target: target_id.clone(),
             };
             let decoy_evidence =
                 v2.is_some_and(|context| context.honeypot_hit) || ctx.event.is_honeypot();
@@ -1335,10 +1404,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 ),
                 Err(_) => crate::marks::apply_unreadable(decision, now_ms, &ctx.resources),
             };
-        } else if first_attempt.requires_step_up() {
+        } else if first_attempt.requires_step_up() || first_attempt.evidence_unavailable {
             // No marks reader: the first-attempt gate still runs (a
             // clean view with just the evidence), so the prevention
-            // never depends on the marks surface being wired.
+            // never depends on the marks surface being wired. Unreadable
+            // trusted history takes the same path in learn mode: the
+            // action stays Allow while the decision carries the
+            // evidence-unavailable reason.
             let view = crate::marks::MarksView::default().with_first_attempt(first_attempt);
             decision = crate::marks::apply(
                 decision,
@@ -1411,6 +1483,74 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             decision = drop_quarantine_on_escalation(decision);
         }
         self.record_decision_metrics(ctx.scope, &decision);
+        // Session-to-principal binding (post-Allow, mirrors the PHP
+        // AdaptiveRiskEngine block): a successful (non-pending) login
+        // records the session pseudonym under the principal so "device
+        // continuity" means "this session was used by this principal
+        // before", never "a cookie was presented". A fresh or
+        // attacker-minted cookie has no binding and cannot vouch for
+        // anyone. Pending (step-up) logins bind at restore.
+        //
+        // The trust flag on the session and the device binding follows
+        // the enforcement verdict: the trust is minted when the Allow
+        // is one enforce mode would also have allowed (a known
+        // network, readable history — the unmasked verdict the
+        // first-attempt stage carried out of the pipeline). An Allow
+        // that enforce mode would have stepped up (a genuinely novel
+        // network, or unreadable history) records the session and the
+        // device without the trust flag, even in learn mode: the
+        // step-up demand is only deferred there, and the deferred
+        // login mints no trust — a stolen-credential login from a
+        // novel network leaves nothing trusted behind. What earns the
+        // trust is the repeat visit: a login the gate judges non-novel
+        // is the trust-minting event, in learn and in enforce alike,
+        // and a credential change revokes every trust mirror (the
+        // forget-devices op), so the next login re-runs the
+        // first-attempt gate on its own evidence.
+        //
+        // The same Allow also records the network bucket and the ASN
+        // bucket with the trust flag minted (the learn history: the
+        // novelty gate's seen-ness accrues from every granted login,
+        // which is what keeps a known carrier from stepping up every
+        // future mobile login). Each write stands alone: one failed
+        // record never masks the others, and no binding write ever
+        // breaks the login.
+        if ctx.event == RiskEventKind::AuthenticationSuccess && decision.action == RiskAction::Allow
+        {
+            if let (Some(networks), Some(principal)) =
+                (&self.principal_networks, &observation.principal_id)
+            {
+                let principal_hex = hex::encode(principal);
+                let mint_trust = !first_attempt.would_step_up_under_enforce;
+                if let Some(session) = &observation.session_id {
+                    let _ = networks.record_principal_network_tag(
+                        &principal_hex,
+                        &format!("session:{}", hex::encode(session)),
+                        mint_trust,
+                    );
+                }
+                if let Some(device) = &observation.device_id {
+                    let _ = networks.record_principal_network_tag(
+                        &principal_hex,
+                        &format!("device:{}", hex::encode(device)),
+                        mint_trust,
+                    );
+                }
+                let _ = networks.record_principal_network_tag(
+                    &principal_hex,
+                    &network_bucket(ctx.source_ip),
+                    true,
+                );
+                let asn = self.asn_bucket_of(&ctx.source_ip);
+                if !asn.is_empty() && asn != "0" {
+                    let _ = networks.record_principal_network_tag(
+                        &principal_hex,
+                        &format!("asn:{asn}"),
+                        true,
+                    );
+                }
+            }
+        }
         Ok(self.finalize_decision(ctx.scope, decision, decision_id, outcome_registered))
     }
 
@@ -1491,6 +1631,30 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     ///   [`crate::marks::SCOPE_PRESSURE_FLOOR`] /
     ///   [`crate::marks::SCOPE_PRESSURE_LEVEL`] — every first-attempt
     ///   login escalates, not only the attacked target's.
+    /// - `evidence_unavailable` also fires when
+    ///   `target_evidence_unavailable` is passed: a failed live target
+    ///   read on the fallback path is the same fail-closed verdict, so
+    ///   the decision carries the reason and enforce mode treats the
+    ///   login as novel.
+    /// - `would_step_up_under_enforce`: the novelty verdict before the
+    ///   enforcement mask is applied, for the caller's post-Allow trust
+    ///   minting decision.
+    ///
+    /// The ASN bucket of a source address for the novel-network gate:
+    /// the ASN number as a decimal string when the dataset resolved
+    /// one, else the bucket id. Mirrors the PHP `asnBucketOf`.
+    fn asn_bucket_of(&self, ip: &std::net::IpAddr) -> String {
+        let Some(dataset) = self.asn_dataset.as_ref() else {
+            return String::new();
+        };
+        let info = dataset.lookup(*ip);
+        match info.asn {
+            Some(asn) => asn.to_string(),
+            None => info.bucket,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn first_attempt_evidence(
         &self,
         ctx: &RiskContext<'_>,
@@ -1498,44 +1662,142 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         v2: Option<&RiskV2Context>,
         vector: &crate::signals::SignalVector,
         global_level: u8,
+        target_evidence_unavailable: bool,
     ) -> crate::marks::FirstAttemptEvidence {
         use crate::marks::FirstAttemptEvidence;
 
         let is_login = ctx.event == RiskEventKind::AuthenticationSuccess
             || ctx.event == RiskEventKind::AuthenticationFailure;
         let mut evidence = FirstAttemptEvidence::zero();
+        // A failed live target read (the fallback path) is evidence
+        // unavailable from the start: unreadable state cannot vouch for
+        // the login, whatever probe failed.
+        evidence.evidence_unavailable = target_evidence_unavailable;
+        let mut scope_pressure = false;
 
-        // Novel network: only on the login shape and only with a
-        // principal to address. The network bucket is the IPv4 address
-        // itself or the IPv6 /64 (identity::masked_network with a full
-        // IPv4 mask).
         if is_login {
+            // Scope pressure is judged first: it is an independent
+            // first-attempt signal and the override that keeps a
+            // big-ISP ASN match from passing during an active storm.
+            if self.enable_global_pressure
+                && (global_level >= crate::marks::SCOPE_PRESSURE_LEVEL
+                    || vector.global_pressure >= crate::marks::SCOPE_PRESSURE_FLOOR)
+            {
+                scope_pressure = true;
+            }
+
             if let (Some(networks), Some(principal)) =
                 (&self.principal_networks, &observation.principal_id)
             {
                 let principal_hex = hex::encode(principal);
                 let network = network_bucket(ctx.source_ip);
-                let seen = networks
-                    .principal_network_seen(&principal_hex, &network)
-                    .unwrap_or(None);
-                let trusted = networks
-                    .principal_has_trusted_network(&principal_hex)
-                    .unwrap_or(None);
-                // Novel when either first-attempt condition holds and
-                // the store answers definitively: the principal has
-                // never been seen from this network bucket, or the
-                // account carries no prior trusted network at all. A
-                // neutral answer (None — no surface / failed read)
-                // never fires, like the session tags.
+                let asn = self.asn_bucket_of(&ctx.source_ip);
+                // Each probe is judged on its own result, and a store
+                // error arms the fail-closed flag instead of reading as
+                // neutral: unreadable history cannot vouch for the
+                // login, so the request counts as novel.
+                let mut evidence_unavailable = evidence.evidence_unavailable;
+                let asn_seen = if asn.is_empty() || asn == "0" {
+                    None
+                } else {
+                    match networks.principal_network_seen(&principal_hex, &format!("asn:{asn}")) {
+                        Ok(seen) => seen,
+                        Err(_) => {
+                            evidence_unavailable = true;
+                            Some(false)
+                        }
+                    }
+                };
+                let net_seen = match networks.principal_network_seen(&principal_hex, &network) {
+                    Ok(seen) => seen,
+                    Err(_) => {
+                        evidence_unavailable = true;
+                        Some(false)
+                    }
+                };
+                let trusted = match networks.principal_has_trusted_network(&principal_hex) {
+                    Ok(trusted) => trusted,
+                    Err(_) => {
+                        evidence_unavailable = true;
+                        Some(false)
+                    }
+                };
+
+                // Device continuity: the session or the device pseudonym
+                // was bound to this principal with trust minted (an
+                // Allow or a completed step-up). The strict probe reads
+                // the minted trust flag (`tag_is_trusted`), never the
+                // bare seen-ness: a fresh or attacker-minted cookie may
+                // have been *seen* (the learning history records every
+                // granted login), but only a trust-minting Allow or a
+                // completed step-up can vouch for it. Both identities
+                // are probed: the continuity cookie may have expired
+                // while the trusted-device cookie still vouches.
+                let mut device_continuity = false;
+                if let Some(sid) = &observation.session_id {
+                    let sid_hex = hex::encode(sid);
+                    match networks.tag_is_trusted(&principal_hex, &format!("session:{sid_hex}")) {
+                        Ok(trusted) => device_continuity |= trusted == Some(true),
+                        Err(_) => {
+                            evidence_unavailable = true;
+                        }
+                    }
+                }
+                if let Some(did) = &observation.device_id {
+                    let did_hex = hex::encode(did);
+                    match networks.tag_is_trusted(&principal_hex, &format!("device:{did_hex}")) {
+                        Ok(trusted) => device_continuity |= trusted == Some(true),
+                        Err(_) => {
+                            evidence_unavailable = true;
+                        }
+                    }
+                }
+
+                let new_prefix = net_seen == Some(false);
+                let mut is_novel = if asn_seen == Some(false) {
+                    // Never-seen ASN: novel regardless of the /64.
+                    true
+                } else if asn_seen == Some(true) {
+                    // Known ASN: the /64 novelty is weak, never a free
+                    // pass. It fires when the prefix is new and no
+                    // device continuity vouches for the browser.
+                    new_prefix && !device_continuity
+                } else {
+                    // No ASN data: fall back to the /64 bucket, and to
+                    // the no-trusted-network condition.
+                    new_prefix || trusted == Some(false)
+                };
+                if evidence_unavailable {
+                    // Learn mode records the condition and the metric
+                    // without escalating; enforce mode steps the login
+                    // up carrying the evidence-unavailable reason.
+                    self.metrics.incr("degraded:evidence");
+                    is_novel |= evidence_unavailable;
+                }
+
+                // A returning browser with a bound session is exempt
+                // from the scope-pressure override: the storm targets
+                // stolen credentials from unbound sessions, not the
+                // owner's own device.
+                if scope_pressure && device_continuity && !is_novel {
+                    scope_pressure = false;
+                }
+
+                // The unmasked novelty verdict, recorded before the
+                // enforcement mask: the post-Allow trust minting reads
+                // it to decide whether this Allow may mint session and
+                // device trust.
+                evidence.would_step_up_under_enforce = is_novel;
+                // Evidence is read-only: the network tag is recorded
+                // only after the decision (post-Allow binding), never
+                // during evaluation. Recording here would write the
+                // attacker's network under the victim's principal and
+                // make the second attempt from the same IP "seen".
                 evidence.novel_network =
-                    matches!(seen, Some(false)) || matches!(trusted, Some(false));
+                    is_novel && self.novelty_enforcement == NoveltyEnforcement::Enforce;
+                evidence.evidence_unavailable = evidence_unavailable;
             }
-            if self.enable_global_pressure
-                && (global_level >= crate::marks::SCOPE_PRESSURE_LEVEL
-                    || vector.global_pressure >= crate::marks::SCOPE_PRESSURE_FLOOR)
-            {
-                evidence.scope_pressure = true;
-            }
+            evidence.scope_pressure = scope_pressure;
         }
         if v2.is_some_and(|context| context.breached_credential) {
             evidence.breached_credential = true;
@@ -1561,6 +1823,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// The tags returned by the consolidated call are non-`None` exactly
     /// when a tag was presented, so `existing_* == None` implies the
     /// current tag is absent — identical to the individual-record path.
+    #[allow(clippy::too_many_arguments)]
     fn derive_v2_signals_from_records(
         &self,
         v2: &RiskV2Context,
@@ -1695,8 +1958,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     // survives an error, so a retry applies the outcome
                     // exactly once instead of amplifying it.
                     Ok(status) => {
-                        let authorize = matches!(status, 1 | 2)
-                            || (status == 3 && !legitimate);
+                        let authorize = matches!(status, 1 | 2) || (status == 3 && !legitimate);
                         if !authorize {
                             return Ok(EventReceipt {
                                 event_id: observation.event_id,
@@ -2133,6 +2395,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             Some(raw) => Some(raw),
             None => ctx.principal_id.map(|p| self.identity.principal_id(p)),
         };
+        let device_id = ctx.device_id.map(|d| self.identity.device_id(d));
         // Canonical idempotency normalization shared with PHP: verbatim keys
         // become the lowercase hex of the hmac-sha256 MAC over event_key,
         // pack('N', scope), chr(event) and key — domain-separated per scope
@@ -2166,6 +2429,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 .subnet_id_for_epoch(ctx.source_ip, net_epoch + 1),
             session_id,
             principal_id,
+            device_id,
             event_id,
             network_risk: ctx.network_flags.network_risk(),
             now_ms,
@@ -2345,14 +2609,14 @@ fn presented_tls_tag(v2: Option<&RiskV2Context>, session_id: Option<[u8; 16]>) -
 /// Bounded target-failure pressure: five failures (the attack threshold)
 /// saturates at 1000 so a stuffed target raises the numeric score before
 /// the marks stage escalates.
-fn target_pressure_signal(fails: u32) -> u16 {
+pub(crate) fn target_pressure_signal(fails: u32) -> u16 {
     crate::signals::normalize(fails.min(u32::from(u16::MAX)), 5)
 }
 
 /// Bounded target source+asn spread: twenty distinct sources saturate at
 /// 1000 so a wide spray raises the numeric score. The scored value is
 /// the wider of the two dimensions (never the sum).
-fn target_spread_signal(spread: u32) -> u16 {
+pub(crate) fn target_spread_signal(spread: u32) -> u16 {
     crate::signals::normalize(spread.min(u32::from(u16::MAX)), 20)
 }
 
@@ -4249,7 +4513,7 @@ mod tests {
         // policy_version, model_revision, global_level, retry_after_ms,
         // band.
         assert_eq!(json.as_object().unwrap().len(), 9);
-        assert_eq!(json["model_revision"], 17);
+        assert_eq!(json["model_revision"], 18);
     }
 
     #[test]

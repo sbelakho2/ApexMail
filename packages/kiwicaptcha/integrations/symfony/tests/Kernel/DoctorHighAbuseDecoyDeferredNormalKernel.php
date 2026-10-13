@@ -31,6 +31,7 @@ final class DoctorHighAbuseDecoyDeferredNormalKernel extends DoctorV3WriterTestK
                 'mode' => 'normal',
             ],
             'risk' => [
+                    'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                 'namespace' => 'doctor-v3',
                 'redis_service' => self::FAKE_REDIS_ID,
                 'decoy_v3_enabled' => false,

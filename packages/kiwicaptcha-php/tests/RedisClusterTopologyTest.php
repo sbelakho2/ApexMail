@@ -6,7 +6,6 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
-use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Tests\Fixtures\RealRedisTestEnv;
@@ -326,25 +325,34 @@ final class RedisClusterTopologyTest extends TestCase
         $cacheProperty->setValue($storage, $cache);
     }
 
-    private function makeRecord(string $nonce): \KiwiCaptcha\ChallengeRecord
+    /**
+     * The issuer the topology suites share: the same configuration the
+     * in-test verification runs use, wired to the storage under test.
+     */
+    private function issuerFor(RedisStorage $storage): Issuer
     {
-        return new \KiwiCaptcha\ChallengeRecord(
-            nonce: $nonce,
-            scope: 'login',
-            bindingTag: 'abc123',
-            issuedAt: self::ISSUED_AT,
-            expiresAt: self::ISSUED_AT + 120,
-            algorithm: PoWAlgorithm::Sha256,
-            mKib: 0,
-            t: 1,
-            p: 1,
-            targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
-            challenge: 'challenge',
-            minDurationMs: 0,
-            issuedAtNs: 123_456_789,
+        return new Issuer(
+            new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
         );
+    }
+
+    /**
+     * A valid, signed record issued through the production issuer (the
+     * issuance stores the envelope) and re-read through the storage's
+     * strict serde-mirror decoder. The decoder derives the prefix
+     * (`challenge|salt|`) and the nonce/salt wire shapes, so hand-built
+     * records are refused; the topology mechanics must run on exactly
+     * the records issuance writes.
+     */
+    private function issueRecord(RedisStorage $storage): \KiwiCaptcha\ChallengeRecord
+    {
+        $challenge = $this->issuerFor($storage)->issue('login', '198.51.100.7');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record, 'the issued record must be stored under the challenge nonce');
+
+        return $record;
     }
 
     public function testRedisStorageLifecycleIsSingleSlotOnTheRealCluster(): void
@@ -354,8 +362,9 @@ final class RedisClusterTopologyTest extends TestCase
         $storage = new RedisStorage($this->clusterClient, $prefix);
         $this->preloadScripts($ports, $storage);
 
-        $nonce = bin2hex(random_bytes(16));
-        $storage->store($this->makeRecord($nonce));
+        $record = $this->issueRecord($storage);
+        $nonce = $record->nonce;
+        $storage->store($record);
         $record = $storage->find($nonce);
         self::assertNotNull($record, 'the record must round-trip through the cluster');
         self::assertSame($nonce, $record->nonce);
@@ -370,8 +379,7 @@ final class RedisClusterTopologyTest extends TestCase
         self::assertTrue($after->consumedResult->valid);
         self::assertSame('txn-cluster', $after->consumedResult->binding);
 
-        $claimNonce = bin2hex(random_bytes(16));
-        $storage->store($this->makeRecord($claimNonce));
+        $claimNonce = $this->issueRecord($storage)->nonce;
         self::assertNull($storage->claimResumeDerivation($claimNonce), 'a pending record is not claimable');
         self::assertNotNull($storage->consume($claimNonce));
         $owner = $storage->claimResumeDerivation($claimNonce);
@@ -380,19 +388,16 @@ final class RedisClusterTopologyTest extends TestCase
         self::assertTrue($storage->commitResultResume($claimNonce, true, 'txn-claim', $owner), 'the claim-bearing commit is one key');
         self::assertFalse($storage->releaseResumeDerivation($claimNonce, $owner), 'the commit already cleared the claim');
 
-        $pendingNonce = bin2hex(random_bytes(16));
-        $storage->store($this->makeRecord($pendingNonce));
+        $pendingNonce = $this->issueRecord($storage)->nonce;
         $deleted = $storage->deleteIfPending($pendingNonce);
         self::assertSame('deleted-pending', $deleted->state);
         self::assertNull($storage->find($pendingNonce));
 
-        $cancelNonce = bin2hex(random_bytes(16));
-        $storage->store($this->makeRecord($cancelNonce));
+        $cancelNonce = $this->issueRecord($storage)->nonce;
         self::assertNotNull($storage->cancel($cancelNonce));
         self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Cancelled, $storage->runtimeState($cancelNonce)->kind);
 
-        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
-        $challenge = $issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuerFor($storage)->issue('login', '198.51.100.7');
         $saltBytes = base64_decode($challenge->salt, true);
         $counter = 0;
         do {

@@ -773,6 +773,9 @@ mod tests {
             stuffed_score > calm_score,
             "a stuffed target must raise the numeric decision ({stuffed_score} vs {calm_score})"
         );
-        assert!(stuffed_score - calm_score >= 200, "the default weights move the score meaningfully");
+        assert!(
+            stuffed_score - calm_score >= 200,
+            "the default weights move the score meaningfully"
+        );
     }
 }

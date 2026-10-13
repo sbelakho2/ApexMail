@@ -345,6 +345,26 @@ result on a duplicate instead of executing the operation twice. The jti is
 high-entropy (256-bit random challenge nonce), unguessable, and never reused
 across challenges, so it is safe to expose in application tables and logs.
 
+**Binding the operation contents: keep the canonical tuple boring, and
+consider the object version.** The protected-content recipe
+(`risk.scopes.<name>.operation_content_fields`) hashes the named
+fields as canonical bytes. Name primitive, already-normalized domain
+values: the operation type and id, the amount in minor integer units,
+the ISO currency, the immutable source and destination ids, and the
+beneficiary id. Do not name localized display text, formatted account
+numbers, floating-point values, or anything whose bytes depend on a
+serializer's mood.
+
+For financial operations it is worth naming the domain object's version
+field too (a `revision` or `version` column). The settled step-up
+authorization is then invalidated the moment the object moves to a new
+revision, even when every user-visible field is unchanged. That covers
+the non-obvious state changes: a re-verified beneficiary, a
+sanctions-status flip, an approval-chain edit, a changed settlement
+rail, a changed fee. Applications that deliberately want
+semantic-content equality leave the version field out of the recipe;
+both shapes ride the same digest machinery.
+
 ## Next steps
 
 - [configuration.md](configuration.md): protection profiles and every

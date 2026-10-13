@@ -218,6 +218,69 @@ final class RiskPolicyTest extends TestCase
         RiskPolicy::fromConfig($config);
     }
 
+    public function testStepUpAboveRungRaisesTheComposedAction(): void
+    {
+        $config = $this->config();
+        $config['scopes'][1]['step_up_above'] = 600;
+        $config['scopes'][1]['carrier'] = 'step_up_email';
+        $policy = RiskPolicy::fromConfig($config);
+        self::assertSame(600, $policy->stepUpAbove(1));
+        self::assertSame('step_up_email', $policy->carrier(1));
+        self::assertNull($policy->stepUpAbove(999), 'unconfigured scopes carry no rung');
+        self::assertNull($policy->carrier(999));
+
+        // Score 600 is the Argon16 band; the rung raises it to StepUp.
+        $d = $policy->decide(1, 600, $this->zeroVector(), $this->healthy(), 0, 1_700_000_000_000);
+        self::assertSame(RiskAction::StepUp, $d->action);
+        // Below the rung the plain band mapping stands.
+        $d = $policy->decide(1, 599, $this->zeroVector(), $this->healthy(), 0, 1_700_000_000_000);
+        self::assertSame(RiskAction::Sha20, $d->action);
+        // The rung is a raise only: a hard deny still outranks it.
+        $d = $policy->decide(1, 1000, $this->zeroVector(), $this->healthy(), 0, 1_700_000_000_000);
+        self::assertSame(RiskAction::Deny, $d->action);
+        // An explicit minimum above the rung wins over it.
+        $config = $this->config();
+        $config['scopes'][1]['minimum'] = 'deny';
+        $config['scopes'][1]['step_up_above'] = 600;
+        $policy = RiskPolicy::fromConfig($config);
+        $d = $policy->decide(1, 600, $this->zeroVector(), $this->healthy(), 0, 1_700_000_000_000);
+        self::assertSame(RiskAction::Deny, $d->action);
+    }
+
+    public function testMalformedStepUpAboveAndCarrierAreRejected(): void
+    {
+        $config = $this->config();
+        $config['scopes'][1]['step_up_above'] = 1001;
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testMalformedStepUpAboveTypeIsRejected(): void
+    {
+        $config = $this->config();
+        $config['scopes'][1]['step_up_above'] = '600';
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testMalformedCarrierIsRejected(): void
+    {
+        $config = $this->config();
+        $config['scopes'][1]['carrier'] = '';
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testNullRungAndCarrierParseAsAbsent(): void
+    {
+        $config = $this->config();
+        $config['scopes'][1]['step_up_above'] = null;
+        $config['scopes'][1]['carrier'] = null;
+        $policy = RiskPolicy::fromConfig($config);
+        self::assertNull($policy->stepUpAbove(1));
+        self::assertNull($policy->carrier(1));
+    }
+
     public function testBaseRiskOutOfRangeThrows(): void
     {
         $config = $this->config();
@@ -303,10 +366,14 @@ final class RiskPolicyTest extends TestCase
         self::assertNotEmpty($vectors);
 
         foreach ($vectors as $vector) {
+            $scopeRow = ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'];
+            if (isset($vector['step_up_above'])) {
+                $scopeRow['step_up_above'] = (int) $vector['step_up_above'];
+            }
             $policy = RiskPolicy::fromConfig([
                 'version' => 3,
                 'weights' => RiskWeights::fromArray($vector['weights'])->toArray(),
-                'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+                'scopes' => [1 => $scopeRow],
                 'global_floors' => [0 => 'allow', 1 => 'allow', 2 => 'allow', 3 => 'allow', 4 => 'allow'],
             ]);
             $decision = $policy->decide(
@@ -495,7 +562,7 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(500, $json['score']);
         self::assertSame('sha20', $json['action']);
         self::assertSame(3, $json['policy_version']);
-        self::assertSame(17, $json['model_revision'], 'the decision carries the model revision in the public JSON');
+        self::assertSame(18, $json['model_revision'], 'the decision carries the model revision in the public JSON');
         self::assertSame(2, $json['global_level']);
         self::assertNull($json['retry_after_ms']);
         self::assertSame(5, $json['band']);

@@ -101,6 +101,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
     public const OPERATION_ID_ATTRIBUTE = '_kiwi_captcha_operation_id';
 
     /**
+     * Request attribute holding the demand id of the standing email
+     * step-up demand: set when this validator answers the StepUp
+     * disposition for a carrier scope and minted the demand record the
+     * 403 step-up surface exposes. The application forwards it to the
+     * begin endpoint's `demand` field.
+     */
+    public const STEP_UP_DEMAND_ATTRIBUTE = '_kiwi_captcha_step_up_demand';
+
+    /**
      * The token verified correctly, but the chained-challenge
      * reassessment (risk.chaining) demands a stronger stage than the
      * first-stage profile (e.g. an Argon action or StepUp). The
@@ -265,6 +274,98 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
          * surface absent (the flag still rides the request attribute).
          */
         private readonly ?QuarantineMarkerInterface $quarantineMarker = null,
+        /**
+         * The anonymous email-ownership factor (the step_up_email scope
+         * carrier). When wired, a submission whose value is a completed
+         * grant instead of a solved token is honored when the grant
+         * redeems: the factor is the second proof the step-up demand
+         * asked for. Null keeps the surface absent (a grant then
+         * verifies as a malformed token, fail closed).
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp $emailOwnership = null,
+        /**
+         * The scopes whose step-up demands the email factor carries
+         * (built from risk.scopes.*.carrier === 'step_up_email'). The
+         * grant branch of validate() runs only for these scopes. A
+         * grant-shaped value on any other scope falls through to the
+         * ordinary token verification and fails there as malformed, so
+         * the factor can never carry a scope that did not name it.
+         *
+         * @var array<string, true>
+         */
+        private readonly array $emailCarrierScopes = [],
+        /**
+         * Application scope name to the configured form field carrying
+         * the address the grant proves (risk.scopes.<scope>.
+         * email_field, default `email`). The redeemed grant must name
+         * the pseudonym of exactly the address the submission uses.
+         *
+         * @var array<string, string>
+         */
+        private readonly array $emailFieldsByScope = [],
+        /**
+         * Application scope name to the configured target form field name
+         * (risk.scopes.<scope>.target_field). When the validated scope
+         * declares a target field, its submitted form value rides the
+         * post-solve decision's context as the target dimension input,
+         * exactly like the first-attempt gate and the outcome bridge.
+         *
+         * @var array<string, string>
+         */
+        private readonly array $targetFieldsByScope = [],
+        /**
+         * The shared demand finalizer of the step-up plane (wired by the
+         * extension whenever the email carrier is): the redeemed grant's
+         * demand is authorized here and nowhere else. Null keeps the
+         * manual-construction fallback: the demand gate then lives in
+         * the inline reassessment below, the shape a hand-built
+         * validator uses. The container never produces it.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer $stepUpFinalizer = null,
+        /**
+         * The request-scoped step-up demand view registry (wired by the
+         * extension): a minted demand is filed under the validating
+         * field's own constraint instance, so the form type's
+         * finishView() routes every demand to exactly the form that was
+         * refused. Null keeps the surface absent (manual construction);
+         * the request attribute still carries the demand.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandViewRegistry $stepUpDemandViews = null,
+        /**
+         * The scopes whose step-up demands carry the split
+         * financial/action binding (built from
+         * risk.scopes.*.operation_identity_source ===
+         * 'request_attribute'). On these scopes the StepUp disposition
+         * mints the durable financial demand through the shared
+         * finalizer. The server-owned logical operation id under
+         * {@see self::OPERATION_ID_ATTRIBUTE}, the canonical protected
+         * contents and the resolved factor requirement ride the stored
+         * record, so a step-up for one operation can never authorize
+         * another. A scope absent here keeps the carrier surface.
+         *
+         * @var array<string, true>
+         */
+        private readonly array $operationBoundScopes = [],
+        /**
+         * The authenticated principal of the current request, resolved
+         * through the same wired resolver the risk engine and the
+         * step-up controller use (null = no principal resolves). The
+         * financial demand's completion reassessment books the
+         * principal signal; a scope whose operation binding is
+         * financial resolves no demand when the principal is absent,
+         * fail closed.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface $principalResolver = null,
+        /**
+         * The protected-operation resolver (wired by the extension when
+         * any scope names a content recipe): the operation-bound mint
+         * takes the logical operation id and the canonical protected
+         * contents from it, so the real business operation rides the
+         * content digest. Null keeps the form-field recipe: the mint
+         * then binds the email and target fields, the shape a
+         * hand-built validator uses.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationResolverInterface $operationResolver = null,
     ) {
     }
 
@@ -368,6 +469,31 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         }
         if (!\is_string($value)) {
             throw new UnexpectedTypeException($value, 'string');
+        }
+
+        // The email-ownership grant path, carrier scopes only: a value
+        // carrying the grant prefix is never a solution token, and it is
+        // honored only when the validated scope names the email factor
+        // as its carrier. The grant redeems in place of a solved token
+        // when it verifies, binds to this request and its submitted
+        // address, and consumes single-use; the completion then still
+        // faces the engine's fresh assessment. Anything else (forged,
+        // expired, spent, wrong scope, wrong session, wrong address,
+        // wrong chain) answers the standing step-up violation, never a
+        // silent pass. On a non-carrier scope the grant-shaped value
+        // falls through to the ordinary verification below and fails
+        // there as malformed.
+        if ($this->emailOwnership !== null
+            && isset($this->emailCarrierScopes[$constraint->scope])
+            && str_starts_with($value, \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::GRANT_PREFIX.'.')
+        ) {
+            $this->acceptEmailOwnershipGrant(
+                $value,
+                $constraint,
+                $this->requestStack->getMainRequest(),
+            );
+
+            return;
         }
 
         // The security-policy epoch is refreshed before the verification
@@ -827,10 +953,40 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 // becomes a chain ticket (a ticket could later be spent
                 // on ordinary PoW instead of the application's step-up).
                 // The application routes the user to MFA/passkey/email
-                // confirmation.
-                $this->context->buildViolation($constraint->message)
-                    ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
-                    ->addViolation();
+                // confirmation. The demand the 403 answers is minted
+                // here, by the lane the scope names: an operation-bound
+                // scope (operation_identity_source request_attribute)
+                // mints the durable financial demand through the shared
+                // finalizer, bound to the server-owned logical operation
+                // id and the canonical protected contents; a carrier
+                // scope mints the email demand the factor then requires
+                // before it sends any code. The mint is best effort: a
+                // failed store leaves the violation with no demand id,
+                // and the completion then refuses every code request
+                // (fail closed, never a dead-end advertisement).
+                //
+                // Operation-bound authorization: a retry of the same
+                // logical operation after its step-up already settled
+                // authorized must not re-demand. The operation digest
+                // reproduces the authorization idempotently (see
+                // StepUpDemandState::Authorized), so a submission whose
+                // operation already carries an authorized demand is
+                // accepted instead of looping back into a fresh demand.
+                if ($this->operationStepUpAlreadyAuthorized($constraint, $request, $canonicalBinding)) {
+                    $this->logger?->info('KiwiCaptcha: step-up already authorized for this operation; accepting the retry', [
+                        'scope' => $constraint->scope,
+                    ]);
+                    $this->finishSuccessfulApplicationVerification($value, $outcome, $request);
+
+                    return;
+                }
+                $demandId = $this->mintStepUpDemand($disposition, $constraint, $request, $requirement, $canonicalBinding);
+                $violation = $this->context->buildViolation($constraint->message)
+                    ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED);
+                if ($demandId !== null) {
+                    $violation = $violation->setParameter('{{ step_up_demand }}', $demandId);
+                }
+                $violation->addViolation();
 
                 return;
             case PostSolveDispositionKind::ChainRequired:
@@ -1569,15 +1725,48 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         // zero adaptive friction (mirrors the fail-safe degraded rule
         // on the pre-issue path).
         $postSolveKey = 'postsolve:'.hash('sha256', $nonce);
+        $targetFields = $this->submittedTargetFields($constraint->scope);
         try {
             $postSolve = $v2 !== null
-                ? $this->risk->postSolveDecisionV2($constraint->scope, $ip, $session, null, $postSolveKey, $v2)
-                : $this->risk->postSolveDecision($constraint->scope, $ip, $session, null, $postSolveKey);
+                ? $this->risk->postSolveDecisionV2($constraint->scope, $ip, $session, null, $postSolveKey, $v2, null, $targetFields)
+                : $this->risk->postSolveDecision($constraint->scope, $ip, $session, null, $postSolveKey, $targetFields);
         } catch (\InvalidArgumentException) {
             $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
         }
 
         return $this->mapPostSolveDecision($token, $outcome, $constraint, $nonce, $postSolve, $canonicalBinding, $requirement);
+    }
+
+    /**
+     * The submitted values of the validated scope's configured target
+     * field, keyed by field name: the exact input shape the engine's
+     * target resolver reads, so the post-solve assessment carries the
+     * target dimension like every other decision-bearing path. Empty
+     * when the scope declares no target field, no request is in scope,
+     * or the request submitted none (an absent or non-scalar value
+     * under the field name contributes nothing).
+     *
+     * @return array<string, string>
+     */
+    private function submittedTargetFields(string $scope): array
+    {
+        $field = $this->targetFieldsByScope[$scope] ?? null;
+        if ($field === null || $field === '') {
+            return [];
+        }
+        $request = $this->requestStack->getMainRequest();
+        if ($request === null) {
+            return [];
+        }
+        // Nesting-aware: a Symfony form nests its data under the form
+        // name, so a flat request-key read would miss every nested
+        // submission. A non-scalar or ambiguous value resolves nothing.
+        $value = \BelConsulting\KiwiCaptchaBundle\Http\RequestFieldResolver::string($request, $field);
+        if ($value === null || $value === '') {
+            return [];
+        }
+
+        return [$field => $value];
     }
 
     /**
@@ -2164,6 +2353,560 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      * second operation, see the bundle README. Also exports the Ed25519 result
      * receipt when signing is configured.
      */
+    /**
+     * The email-ownership redemption, carrier scopes only. The grant
+     * must verify (signature, expiry), name this constraint's scope,
+     * bind to the presenting browser (session hash, or the stateless
+     * binding), re-present a bound chain id when it carries one, and
+     * name the pseudonym of the address the submission uses. That
+     * address is the value of the scope's email_field. The redeemed
+     * grant then still faces the engine: a fresh step-up completion
+     * assessment runs on the same (scope, source, session, target)
+     * context the refused submission carried, and only an Allow or
+     * StepUp answer passes.
+     * A Deny, a live mark or an escalation the engine still holds
+     * refuses the submission exactly like an ordinary post-solve deny.
+     * The accepted path exposes the grant id through the verified-jti
+     * attribute so the application can key its idempotency. A refused
+     * grant answers the standing step-up violation: the demand is
+     * exactly why the visitor holds a grant at all.
+     */
+    private function acceptEmailOwnershipGrant(string $grant, KiwiCaptcha $constraint, ?Request $request): void
+    {
+        $presentedChain = $request?->request->get(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::CHAIN_FIELD);
+        $payload = null;
+        if ($request !== null) {
+            try {
+                $payload = $this->emailOwnership?->redeem(
+                    $grant,
+                    $constraint->scope,
+                    $request,
+                    \is_string($presentedChain) && $presentedChain !== '' ? $presentedChain : null,
+                    $this->submittedEmail($constraint->scope),
+                );
+            } catch (\Throwable) {
+                // A broken factor or store refuses the grant (below),
+                // never a 500 and never a pass.
+                $payload = null;
+            }
+        }
+        if ($payload === null) {
+            $this->logger?->info('KiwiCaptcha: email-ownership grant refused', [
+                'scope' => $constraint->scope,
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
+                ->addViolation();
+
+            return;
+        }
+        if (!$this->authorizeRedeemedGrant($payload, $constraint, $request)) {
+            return;
+        }
+        $this->lastVerifiedJti = 'emg:'.$payload['grantId'];
+        $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $this->lastVerifiedJti);
+        $this->logger?->info('KiwiCaptcha: email-ownership grant accepted in place of a solved token', [
+            'scope' => $constraint->scope,
+        ]);
+    }
+
+    /**
+     * The authorization of a redeemed grant through the demand plane:
+     * the grant names the demand its factor completed, and the shared
+     * finalizer reruns the demand's stored operation recipe over the
+     * resubmission's canonical material. It reassesses the completed
+     * factor and settles the demand terminally. Only an authorized
+     * settlement accepts the submission. A reassessed denial answers
+     * the post-solve rejection, an escalated assurance answers the
+     * standing step-up demand of the stronger child, every other
+     * refusal the standing step-up demand.
+     *
+     * The manual-construction fallback (no finalizer wired) keeps the
+     * inline reassessment the hand-built validator has always run; the
+     * container never produces this shape.
+     *
+     * @param array{grantId: string, scope: string, emailPseudonym: string, sessionHash: string, chainId: string, demandId: string, expiresAt: int} $payload
+     */
+    private function authorizeRedeemedGrant(array $payload, KiwiCaptcha $constraint, ?Request $request): bool
+    {
+        $finalizer = $this->stepUpFinalizer;
+        if ($finalizer === null) {
+            return $this->reassessRedeemedGrantWithoutFinalizer($payload, $constraint, $request);
+        }
+        $resolvedRequest = $request ?? $this->requestStack->getMainRequest();
+        $material = new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationMaterial(
+            $this->canonicalOperationFields($constraint->scope),
+            $this->submittedTargetFields($constraint->scope),
+            $this->authoritativeBindingOf($constraint, $request),
+            $resolvedRequest !== null ? $this->principalResolver?->resolve($resolvedRequest, $constraint->scope) : null,
+        );
+        try {
+            $finalization = $finalizer->finalizeGrant($payload['demandId'], $material, $request);
+        } catch (\Throwable $e) {
+            $this->logger?->info('KiwiCaptcha: the step-up demand finalization is unavailable', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                ->addViolation();
+
+            return false;
+        }
+        if ($finalization->authorized) {
+            return true;
+        }
+        if ($finalization->reason === \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFinalization::REFUSED_DENIED) {
+            $this->logger?->info('KiwiCaptcha: completed email step-up refused by the fresh assessment', [
+                'scope' => $constraint->scope,
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
+                ->addViolation();
+
+            return false;
+        }
+        $this->logger?->info('KiwiCaptcha: the redeemed grant does not answer its demand', [
+            'scope' => $constraint->scope,
+            'reason' => $finalization->reason,
+        ]);
+        $violation = $this->context->buildViolation($constraint->message)
+            ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED);
+        if ($finalization->reason === \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFinalization::ESCALATED && $finalization->demand !== null) {
+            // The assurance escalated: the child demand is the one the
+            // visitor now owes a proof for, so the refusal advertises
+            // exactly that demand id.
+            $violation = $violation->setParameter('{{ step_up_demand }}', $finalization->demand->id);
+        }
+        $violation->addViolation();
+
+        return false;
+    }
+
+    /**
+     * The canonical operation fields of a scope's protected form: the
+     * email field in the canonical spelling the factor compares (the
+     * trimmed lowercased address) plus the target fields. The same map
+     * feeds the digest mint at the demand and the recipe rerun at the
+     * redemption, so the form-field identity is one canonicalization.
+     *
+     * @return array<string, string>
+     */
+    private function canonicalOperationFields(string $scope): array
+    {
+        $fields = [];
+        $email = $this->submittedEmail($scope);
+        if (\is_string($email) && $email !== '') {
+            $field = isset($this->emailFieldsByScope[$scope]) && $this->emailFieldsByScope[$scope] !== ''
+                ? $this->emailFieldsByScope[$scope]
+                : \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::EMAIL_FIELD;
+            $fields[$field] = strtolower(trim($email));
+        }
+        foreach ($this->submittedTargetFields($scope) as $name => $value) {
+            $fields[$name] = trim($value);
+        }
+
+        return $fields;
+    }
+
+    /**
+     * The authoritative transaction binding of the grant resubmission,
+     * resolved through the same authority the verification path uses.
+     * Null when no binding resolves or the authority is unavailable: a
+     * demand minted under the binding recipe then refuses its
+     * finalization, fail closed.
+     */
+    private function authoritativeBindingOf(KiwiCaptcha $constraint, ?Request $request): ?string
+    {
+        try {
+            return $this->resolveAuthoritativeBinding($constraint, $request);
+        } catch (PostSolveDispositionUnavailableException) {
+            return null;
+        }
+    }
+
+    /**
+     * The inline reassessment of a redeemed grant, the
+     * manual-construction fallback when no finalizer is wired. The
+     * completion assessment runs on the same context an ordinary
+     * post-solve check uses (scope, canonical client IP, continuity
+     * session, submitted target fields), keyed on the grant id so a
+     * replayed redemption never double-books the signal. Only an Allow
+     * or StepUp answer passes; a Deny refuses with the post-solve
+     * violation, and a degraded engine answer applies the scope's
+     * configured degraded disposition. Without a wired gateway the
+     * grant stands alone: the demand gate then lives entirely in the
+     * factor.
+     *
+     * @param array{grantId: string, scope: string, emailPseudonym: string, sessionHash: string, chainId: string, demandId: string, expiresAt: int} $payload
+     */
+    private function reassessRedeemedGrantWithoutFinalizer(array $payload, KiwiCaptcha $constraint, ?Request $request): bool
+    {
+        if ($this->risk === null) {
+            return true;
+        }
+        $clientIp = null;
+        if ($request !== null) {
+            try {
+                $clientIp = $this->clientIpResolver !== null
+                    ? $this->clientIpResolver->resolve($request)
+                    : $request->getClientIp();
+            } catch (AmbiguousForwardingException) {
+                $clientIp = null;
+            }
+        }
+        $session = $request !== null ? $this->continuityCookie?->read($request) : null;
+        $ip = (string) ($clientIp ?? '');
+        try {
+            $decision = $this->risk->stepUpCompletedDecision(
+                $constraint->scope,
+                $ip,
+                $session,
+                null,
+                'emg-grant:'.$payload['grantId'],
+                $this->submittedTargetFields($constraint->scope),
+            );
+        } catch (\InvalidArgumentException) {
+            $decision = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
+        }
+        if ($decision !== null && $decision->action === \KiwiCaptcha\Risk\RiskAction::Deny) {
+            $this->logger?->info('KiwiCaptcha: completed email step-up refused by the fresh assessment', [
+                'scope' => $constraint->scope,
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
+                ->addViolation();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether this submission's logical operation already carries a
+     * durable authorized step-up settlement: a retry of the same
+     * operation after its step-up completed must not re-demand. The
+     * operation digest is reproduced exactly like the mint path builds
+     * it (authoritative binding first, canonical form fields otherwise),
+     * and the family tip is consulted through the email-ownership
+     * carrier. An operation-bound scope reproduces the split financial
+     * identity digest of its server-owned operation id instead, so the
+     * settled demand of one logical operation never answers another. A
+     * scope with no carrier, no resolvable identity or a store failure
+     * answers false (fail-closed toward re-demand, never a silent
+     * pass).
+     */
+    private function operationStepUpAlreadyAuthorized(KiwiCaptcha $constraint, ?Request $request, ?string $canonicalBinding): bool
+    {
+        if (isset($this->operationBoundScopes[$constraint->scope])) {
+            if ($request === null || $this->stepUpFinalizer === null) {
+                return false;
+            }
+            // The resolver-fed replay gate: the presented operation is
+            // resolved exactly like the mint resolved it, so the same
+            // canonical bytes are hashed on both sides of the compare.
+            if ($this->operationResolver !== null) {
+                try {
+                    $operation = $this->operationResolver->resolve($request, $constraint->scope);
+                } catch (\Throwable) {
+                    return false;
+                }
+
+                return $this->stepUpFinalizer->operationAuthorizedContents(
+                    $constraint->scope,
+                    $operation->logicalOperationId,
+                    $operation->canonicalProtectedContents,
+                );
+            }
+            $operationId = $request->attributes->get(self::OPERATION_ID_ATTRIBUTE);
+            if (!\is_string($operationId) || $operationId === '') {
+                return false;
+            }
+
+            return $this->stepUpFinalizer->operationAuthorized(
+                $constraint->scope,
+                $operationId,
+                $this->canonicalOperationFields($constraint->scope),
+            );
+        }
+        if ($this->emailOwnership === null || !isset($this->emailCarrierScopes[$constraint->scope])) {
+            return false;
+        }
+        $fields = $this->canonicalOperationFields($constraint->scope);
+        if ($canonicalBinding !== null && $canonicalBinding !== '') {
+            $digest = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest::requestBinding($constraint->scope, $canonicalBinding);
+        } elseif ($fields !== []) {
+            $digest = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest::formFields($constraint->scope, $fields);
+        } else {
+            return false;
+        }
+
+        return $this->emailOwnership->isOperationAuthorized($digest);
+    }
+
+    /**
+     * Mint the step-up demand of a StepUp disposition, by the lane the
+     * scope names: an operation-bound scope (operation_identity_source
+     * request_attribute) mints the durable financial demand through the
+     * shared finalizer; a carrier scope mints the email demand. Null
+     * means no demand stands and the violation carries no id.
+     *
+     * @param ChainRequirement|null $requirement the threaded
+     *                                      authoritative requirement
+     */
+    private function mintStepUpDemand(PostSolveDisposition $disposition, KiwiCaptcha $constraint, ?Request $request, ?ChainRequirement $requirement, ?string $canonicalBinding): ?string
+    {
+        if (isset($this->operationBoundScopes[$constraint->scope])) {
+            return $this->mintOperationBoundDemand($disposition, $constraint, $request, $requirement);
+        }
+
+        return $this->mintEmailStepUpDemand($disposition, $constraint, $request, $requirement, $canonicalBinding);
+    }
+
+    /**
+     * Mint the financial/action-bound demand of an operation-bound
+     * scope: the durable demand path of the protected operation. The
+     * binding is the split financial identity: the HMAC of the
+     * server-owned unique logical operation id (the request attribute
+     * the application mints itself) plus the HMAC of the canonical
+     * protected contents the wired resolver reads from the submission.
+     * The record carries
+     * the resolved factor requirement, the authenticated principal's
+     * browser session, the open chain id and the disposition's decision
+     * id. A missing operation id, a missing principal or an unwired
+     * finalizer mints nothing (fail closed: the violation then carries
+     * no demand, and no completion can answer the step-up through an
+     * unbound lane).
+     *
+     * @param ChainRequirement|null $requirement the threaded
+     *                                      authoritative requirement
+     */
+    private function mintOperationBoundDemand(PostSolveDisposition $disposition, KiwiCaptcha $constraint, ?Request $request, ?ChainRequirement $requirement): ?string
+    {
+        $finalizer = $this->stepUpFinalizer;
+        if ($finalizer === null || $request === null) {
+            return null;
+        }
+        // The resolver-fed mint: the protected operation is resolved
+        // once, and its logical id and canonical contents feed the
+        // content digest directly. A resolution that throws (a missing
+        // server-owned operation id, a configured content field with no
+        // submitted value) mints nothing: a demand whose business
+        // contents did not resolve could never refuse a content swap.
+        if ($this->operationResolver !== null) {
+            try {
+                $operation = $this->operationResolver->resolve($request, $constraint->scope);
+            } catch (\Throwable $e) {
+                $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; the protected operation did not resolve', [
+                    'scope' => $constraint->scope,
+                    'reason' => $e->getMessage(),
+                ]);
+
+                return null;
+            }
+
+            return $this->recordOperationBoundDemand(
+                $disposition,
+                $constraint,
+                $request,
+                $requirement,
+                $finalizer,
+                fn () => $finalizer->mintBoundDemand(
+                    $constraint->scope,
+                    $operation->logicalOperationId,
+                    $operation->canonicalProtectedContents,
+                    $this->presentedSessionHashOf($request),
+                    $disposition->chainId ?? $requirement?->chainId,
+                    $disposition->decisionId,
+                    600,
+                    $disposition->quarantined,
+                ),
+            );
+        }
+        $operationId = $request->attributes->get(self::OPERATION_ID_ATTRIBUTE);
+        if (!\is_string($operationId) || $operationId === '') {
+            // No server-owned identity: a demand minted without one
+            // could never refuse a cross-authorization, so none is
+            // minted and the factor completes nothing.
+            $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; the server-owned operation id is missing', [
+                'scope' => $constraint->scope,
+            ]);
+
+            return null;
+        }
+
+        return $this->recordOperationBoundDemand(
+            $disposition,
+            $constraint,
+            $request,
+            $requirement,
+            $finalizer,
+            fn () => $finalizer->mintFinancialDemand(
+                $constraint->scope,
+                $operationId,
+                $this->canonicalOperationFields($constraint->scope),
+                $this->presentedSessionHashOf($request),
+                $disposition->chainId ?? $requirement?->chainId,
+                $disposition->decisionId,
+                600,
+                $disposition->quarantined,
+            ),
+        );
+    }
+
+    /**
+     * The shared tail of the operation-bound mint: the principal check
+     * the demand path owns (the demand records the browser session of
+     * exactly the principal the operation belongs to), the recording
+     * mint call, and the request-attribute plus per-form routing
+     * bookkeeping. The mint callable arrives from the lane (the
+     * resolver-fed or the form-field recipe); the bookkeeping is one
+     * and the same.
+     *
+     * @param callable(): ?string $mint
+     */
+    private function recordOperationBoundDemand(
+        PostSolveDisposition $disposition,
+        KiwiCaptcha $constraint,
+        Request $request,
+        ?ChainRequirement $requirement,
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer $finalizer,
+        callable $mint,
+    ): ?string {
+        $principal = $this->principalResolver?->resolve($request, $constraint->scope);
+        if ($principal === null || $principal === '') {
+            $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; no authenticated principal resolves', [
+                'scope' => $constraint->scope,
+            ]);
+
+            return null;
+        }
+        try {
+            $demandId = $mint();
+        } catch (\Throwable $e) {
+            $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand could not be recorded', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+        if ($demandId !== null) {
+            $request->attributes->set(self::STEP_UP_DEMAND_ATTRIBUTE, $demandId);
+            // The per-form routing record: the demand is filed under
+            // this field's own constraint instance, so the form's
+            // finishView() claims exactly this entry.
+            $this->stepUpDemandViews?->record($constraint, $demandId);
+        }
+
+        return $demandId;
+    }
+
+    /**
+     * The session hash of the presenting browser: the continuity
+     * session's SHA-256 when one is carried, the started session's id
+     * hash otherwise, null when neither exists. The same derivation the
+     * step-up factors store, so the demand is bound to exactly the
+     * browser the operation belongs to.
+     */
+    private function presentedSessionHashOf(?Request $request): ?string
+    {
+        if ($request === null) {
+            return null;
+        }
+        $continuity = $this->continuityCookie?->read($request);
+        if (\is_string($continuity) && $continuity !== '') {
+            return hash('sha256', $continuity);
+        }
+        $session = $request->hasSession() ? $request->getSession() : null;
+        if ($session !== null && $session->isStarted() && (string) $session->getId() !== '') {
+            return \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::sessionHash((string) $session->getId());
+        }
+
+        return null;
+    }
+
+    /**
+     * Mint the email step-up demand for a StepUp disposition on a
+     * carrier scope: the demand record the begin endpoint requires
+     * before it sends any code. The record binds the continuity session
+     * hash, the open chain id (the stage-2 obligation when one is open)
+     * and the disposition's decision id. It also carries the operation
+     * identity of the protected operation: the digest minted with the
+     * recipe the canonical material names. The authoritative transaction binding
+     * is the identity when one resolves. The canonical form fields are
+     * the identity otherwise, and a form with neither mints the unbound
+     * identity. The finalization reruns exactly the stored recipe, so
+     * the redemption answers this operation and no other. Null when the
+     * scope does not name the email carrier, the factor is absent, or
+     * the mint failed; the caller then answers the bare violation.
+     *
+     * @param ChainRequirement|null $requirement the threaded
+     *                                      authoritative requirement
+     */
+    private function mintEmailStepUpDemand(PostSolveDisposition $disposition, KiwiCaptcha $constraint, ?Request $request, ?ChainRequirement $requirement, ?string $canonicalBinding): ?string
+    {
+        if ($this->emailOwnership === null || !isset($this->emailCarrierScopes[$constraint->scope])) {
+            return null;
+        }
+        $fields = $this->canonicalOperationFields($constraint->scope);
+        if ($canonicalBinding !== null && $canonicalBinding !== '') {
+            $kind = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::RequestBinding;
+            $digest = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest::requestBinding($constraint->scope, $canonicalBinding);
+        } elseif ($fields !== []) {
+            $kind = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::FormFields;
+            $digest = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest::formFields($constraint->scope, $fields);
+        } else {
+            $kind = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::None;
+            $digest = '';
+        }
+        try {
+            $demandId = $this->emailOwnership->mintDemand(
+                $constraint->scope,
+                $request !== null ? $this->emailOwnership->presentedSessionHash($request) : null,
+                $disposition->chainId ?? $requirement?->chainId,
+                $disposition->decisionId,
+                $kind,
+                $digest,
+            );
+        } catch (\Throwable) {
+            return null;
+        }
+        if ($demandId !== null) {
+            $request?->attributes->set(self::STEP_UP_DEMAND_ATTRIBUTE, $demandId);
+            // The per-form routing record: the demand is filed under
+            // this field's own constraint instance (the stable
+            // server-side field-instance identity the form type shares
+            // through its config), so the field's finishView() claims
+            // exactly this entry and no sibling form's field ever
+            // renders another form's demand.
+            $this->stepUpDemandViews?->record($constraint, $demandId);
+        }
+
+        return $demandId;
+    }
+
+    /**
+     * The submitted value of the validated scope's configured email
+     * field (risk.scopes.<scope>.email_field): the address whose
+     * pseudonym the redeemed grant must carry. Null on a missing or
+     * non-scalar value, which refuses the grant downstream.
+     */
+    private function submittedEmail(string $scope): ?string
+    {
+        $field = $this->emailFieldsByScope[$scope] ?? \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::EMAIL_FIELD;
+        $request = $this->requestStack->getMainRequest();
+        if ($field === '' || $request === null) {
+            return null;
+        }
+        // Nesting-aware: a Symfony form nests its data under the form
+        // name. A non-scalar or ambiguous value resolves no address.
+        $value = \BelConsulting\KiwiCaptchaBundle\Http\RequestFieldResolver::string($request, $field);
+
+        return $value !== null && $value !== '' ? $value : null;
+    }
+
     private function finishSuccessfulApplicationVerification(string $value, VerifyOutcome $outcome, ?Request $request): void
     {
         $jti = null;
@@ -2248,18 +2991,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      */
     private function formDecoyEvidence(Request $request, string $expectedField): bool
     {
-        try {
-            $value = $request->request->get($expectedField);
-        } catch (BadRequestException) {
-            // A non-scalar (array-shaped) parameter under the decoy name:
-            // no usable decoy value — skip the evidence, never a 500.
-            return false;
-        }
-        if (!\is_string($value) || $value === '') {
-            return false;
-        }
+        // Nesting-aware: a Symfony form nests its data under the form
+        // name, so a flat request-key read would miss every nested
+        // submission. A non-scalar or ambiguous value is not a usable
+        // decoy value — the deterministic answer is no evidence.
+        $value = \BelConsulting\KiwiCaptchaBundle\Http\RequestFieldResolver::string($request, $expectedField);
 
-        return true;
+        return $value !== null && $value !== '';
     }
 
     /**
@@ -2483,20 +3221,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
 
     /**
      * The request's transaction binding: the documented attribute first,
-     * then the raw POSTed kiwi_request_binding field (the widget fallback).
+     * then the submitted kiwi_request_binding field (the widget
+     * fallback). The field lookup is nesting-aware: a Symfony form
+     * nests its data under the form name, so a flat request-key read
+     * would miss every nested submission.
      * Shared by the request-binding check and the retry resolution.
      */
     private function requestBindingFromRequest(?Request $request): ?string
     {
         $binding = $request?->attributes->get(self::REQUEST_BINDING_ATTRIBUTE);
         if (!\is_string($binding) || $binding === '') {
-            try {
-                $binding = $request?->request->get('kiwi_request_binding');
-            } catch (BadRequestException) {
-                // An array-shaped kiwi_request_binding parameter is not a
-                // usable binding: deterministic no-binding, never a 500.
-                $binding = null;
-            }
+            $binding = $request === null
+                ? null
+                : \BelConsulting\KiwiCaptchaBundle\Http\RequestFieldResolver::string($request, 'kiwi_request_binding');
         }
 
         return \is_string($binding) && $binding !== '' ? $binding : null;

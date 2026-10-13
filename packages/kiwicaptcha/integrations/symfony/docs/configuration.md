@@ -765,6 +765,8 @@ kiwi_captcha:
     #                                       # TTL, so a later caller
     #                                       # observes the consumed state
     #                                       # instead of re-verifying
+    # The object form wires the bundled APCu adapter instead (see the
+    # "APCu storage" section): storage: { apcu: { single_process_cli: false } }
 ```
 
 ### Asset delivery (`asset_mode`)
@@ -965,6 +967,47 @@ Validation notes:
 - `algorithm`: the issued algorithm always comes from the server; a
   client-supplied `algorithm` field in the challenge POST is accepted only
   for forward-compatibility and never changes the issued algorithm.
+
+### APCu storage (`storage.apcu`)
+
+The `storage` knob carries two forms. The string form is a service id
+(`storage: kiwicaptcha.storage.redis`). The object form wires the
+bundled APCu adapter, `KiwiCaptcha\Storage\ApcuStorage`:
+
+```yaml
+kiwi_captcha:
+    storage:
+        apcu:
+            single_process_cli: false   # the default: the web-tier shared segment
+```
+
+Under the web SAPI the adapter keeps one shared APCu segment per host,
+and every worker on the host reads and writes the same records, so the
+default (`single_process_cli: false`) is the only valid shape there.
+APCu remains the single-PHP-host adapter: no replication, no failover
+and a segment that restarts empty. Deployments that need shared or
+replicated state use Redis.
+
+#### The CLI segment (`single_process_cli`)
+
+A CLI process owns a private APCu segment, invisible to the web tier
+and to every other CLI process. `apc.enable_cli=1` in php.ini is the
+precondition that gives a CLI process a segment at all; it is a
+switch, not an acknowledgement. With the ini on and the flag off, the
+adapter refuses construction under the cli SAPI. Every RoadRunner
+worker or queue consumer that constructed would store records its
+peers can never read, so a random share of the solves lands in a
+foreign segment.
+
+Setting `single_process_cli: true` is the explicit acknowledgement
+that this CLI host runs exactly one long-lived process whose segment
+outlives the request cycle: a Swoole server that initialised APCu
+before fork. RoadRunner never qualifies: workers hop processes between
+requests. The doctor keys its verdict on the flag. A production run
+fails when a wired adapter under cli lacks it, warns when the
+deployment declares it, and fails again when the declaration sits on a
+host with `apc.enable_cli` off, since the ini precondition is missing
+there.
 
 ### Privacy posture
 

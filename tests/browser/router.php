@@ -1894,6 +1894,15 @@ if ($path === '/' || $path === '/index.html') {
     $fetchTimeoutAttr = ctype_digit($fetchTimeoutValue) && (int) $fetchTimeoutValue > 0
         ? ' data-kiwi-fetch-timeout-ms="'.$fetchTimeoutValue.'"'
         : '';
+    // ?step_up_demand=<id> seeds the container with the rendered
+    // data-kiwi-step-up-demand attribute: the exact markup the Symfony
+    // form theme emits after a validation refusal minted the demand, so
+    // the step-up spec can prove the driver reads the attribute and
+    // presents it to the begin and complete endpoints.
+    $stepUpDemandValue = (string) ($_GET['step_up_demand'] ?? '');
+    $stepUpDemandAttr = preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $stepUpDemandValue) === 1
+        ? ' data-kiwi-step-up-demand="'.htmlspecialchars($stepUpDemandValue, ENT_QUOTES).'"'
+        : '';
     // Files-mode variant (?assets=files): mirrors the bundle theme's
     // files tier — the stylesheet link and the driver script are emitted
     // once (the page-level dedup registry), the runtime and the worker
@@ -2010,7 +2019,7 @@ if ($path === '/' || $path === '/index.html') {
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$telemetryAttr}{$fetchTimeoutAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$telemetryAttr}{$fetchTimeoutAttr}{$stepUpDemandAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"group\" aria-label=\"KiwiCaptcha security check\">
     <div class=\"kiwi-icon-wrapper\" aria-hidden=\"true\">{$mark}</div>

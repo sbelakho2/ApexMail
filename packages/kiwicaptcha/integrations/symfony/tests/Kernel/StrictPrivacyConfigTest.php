@@ -93,6 +93,23 @@ final class StrictPrivacyConfigTest extends TestCase
         self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html);
     }
 
+    /**
+     * The rendered evidence arm under the default posture is off:
+     * behavioral telemetry is off by default, and the standard kernel
+     * without an explicit evidence opt-in renders no collector.
+     */
+    public function testTheRenderedEvidenceArmDefaultsOff(): void
+    {
+        $kernel = new TestKernel('test', true);
+        $kernel->boot();
+        $container = $kernel->getContainer()->get('test.service_container');
+        $factory = $container->get('form.factory');
+        $form = $factory->createNamed('captcha', \BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType::class, null, ['scope' => 'login']);
+
+        $html = $container->get('twig')->render('@Test/form.html.twig', ['form' => $form->createView()]);
+        self::assertStringContainsString('data-kiwi-telemetry="off"', $html);
+    }
+
     public function testStrictForcesEnforceTelemetryFalse(): void
     {
         // strict + enforce_telemetry: true must compile to enforce_telemetry

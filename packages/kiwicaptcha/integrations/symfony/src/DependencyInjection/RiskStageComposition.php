@@ -65,10 +65,16 @@ final class RiskStageComposition
      *   pipeline it ran before the stages existed.
      *
      * The evidence-plane entries follow the same uniform rule. The
-     * telemetry arm defaults to "minimal" under every profile and to
-     * "full" under the abuse postures; the knob (risk.evidence.telemetry)
-     * carries the explicit override. The decoy-escalation reader wires
-     * with the server-side memory stages (everywhere except
+     * telemetry arm defaults to "off" under every privacy-bearing
+     * profile: balanced, ha_safe, privacy_strict, compatibility and the
+     * profile-less default. The public claim is behavioral telemetry
+     * off by default, and the composition keeps it. The abuse postures
+     * arm "full", whose contract is the coarse form-level aggregates.
+     * The knob (risk.evidence.telemetry) carries the explicit override,
+     * with one pinned floor: under privacy_strict no operator value
+     * re-arms collection, the same unconditional force the profile
+     * applies to the execution dimension. The decoy-escalation reader
+     * wires with the server-side memory stages (everywhere except
      * compatibility); the write side stays fail-closed through the
      * engine's autofill-qualification gate, so an unwired escalation
      * surface and a closed one are equally inert.
@@ -76,10 +82,10 @@ final class RiskStageComposition
     private const MATRICES = [
         'abuse_first' => ['marks' => true, 'pricing' => true, 'explain' => true, 'telemetry' => 'full', 'decoy' => true],
         'high_abuse' => ['marks' => true, 'pricing' => true, 'explain' => true, 'telemetry' => 'full', 'decoy' => true],
-        'balanced' => ['marks' => true, 'pricing' => true, 'explain' => false, 'telemetry' => 'minimal', 'decoy' => true],
-        'ha_safe' => ['marks' => true, 'pricing' => true, 'explain' => false, 'telemetry' => 'minimal', 'decoy' => true],
-        'privacy_strict' => ['marks' => true, 'pricing' => true, 'explain' => false, 'telemetry' => 'minimal', 'decoy' => true],
-        'compatibility' => ['marks' => false, 'pricing' => false, 'explain' => false, 'telemetry' => 'minimal', 'decoy' => false],
+        'balanced' => ['marks' => true, 'pricing' => true, 'explain' => false, 'telemetry' => 'off', 'decoy' => true],
+        'ha_safe' => ['marks' => true, 'pricing' => true, 'explain' => false, 'telemetry' => 'off', 'decoy' => true],
+        'privacy_strict' => ['marks' => true, 'pricing' => true, 'explain' => false, 'telemetry' => 'off', 'decoy' => true],
+        'compatibility' => ['marks' => false, 'pricing' => false, 'explain' => false, 'telemetry' => 'off', 'decoy' => false],
     ];
 
     /** The telemetry vocabulary of the evidence stage's browser arm. */
@@ -117,8 +123,10 @@ final class RiskStageComposition
             // data-kiwi-telemetry value. The profile matrix fills the
             // null default exactly like the boolean stage knobs; the
             // explicit knob (risk.evidence.telemetry) widens or narrows
-            // the derived mode in any config layer.
-            'telemetry' => self::telemetryKnob($riskConfig, $matrix['telemetry']),
+            // the derived mode in any config layer — except under
+            // privacy_strict, whose contract pins the arm off against
+            // any operator value.
+            'telemetry' => self::telemetryKnob($profile, $riskConfig, $matrix['telemetry']),
             // The decoy-escalation reader follows the server-side memory
             // stages: wired with the engine wherever the stage pipeline
             // is composed, never under the compatibility posture. The
@@ -166,10 +174,17 @@ final class RiskStageComposition
      * (risk.evidence.telemetry) wins when it names a vocabulary mode,
      * and the profile matrix fills the null default. The config tree
      * refuses every other value, so the guard here restates the shape
-     * instead of converting it.
+     * instead of converting it. Under privacy_strict the arm is pinned
+     * off and the knob cannot re-arm it. The profile's own contract,
+     * every behavioral evidence surface off, is stronger than an
+     * operator's per-layer value. The force mirrors the execution
+     * dimension's.
      */
-    private static function telemetryKnob(array $riskConfig, string $derived): string
+    private static function telemetryKnob(?string $profile, array $riskConfig, string $derived): string
     {
+        if ($profile === 'privacy_strict') {
+            return 'off';
+        }
         $explicit = $riskConfig['evidence']['telemetry'] ?? null;
         if (\is_string($explicit) && \in_array($explicit, self::TELEMETRY_MODES, true)) {
             return $explicit;

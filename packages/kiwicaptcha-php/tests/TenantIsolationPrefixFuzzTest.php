@@ -102,6 +102,7 @@ final class TenantIsolationPrefixFuzzTest extends TestCase
     private function makeRecord(string $nonce, string $scope): ChallengeRecord
     {
         $salt = base64_encode(random_bytes(16));
+        $challenge = 'challenge';
 
         return new ChallengeRecord(
             nonce: $nonce,
@@ -115,8 +116,8 @@ final class TenantIsolationPrefixFuzzTest extends TestCase
             p: 1,
             targetBits: 8,
             salt: $salt,
-            prefix: 'prefix|'.$salt.'|',
-            challenge: 'challenge',
+            prefix: $challenge.'|'.$salt.'|',
+            challenge: $challenge,
             minDurationMs: 0,
             issuedAtNs: 1_800_000_000_000_000,
             protocolVersion: 2,

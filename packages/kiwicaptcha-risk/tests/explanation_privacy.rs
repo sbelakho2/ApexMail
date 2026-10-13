@@ -151,9 +151,11 @@ fn serialized_explanations_never_carry_pseudonym_values_or_raw_inputs() {
         source_ip: CANARY_IP.parse().unwrap(),
         session_id: Some(&cookie),
         principal_id: Some(CANARY_PRINCIPAL.as_bytes()),
+        device_id: None,
         event: RiskEventKind::PreIssue,
         network_flags: NetworkFlags::default(),
         resources: Default::default(),
+        target_fields: &[],
     };
     let explained = engine
         .assess_pre_issue_with_explanation(ctx, None)

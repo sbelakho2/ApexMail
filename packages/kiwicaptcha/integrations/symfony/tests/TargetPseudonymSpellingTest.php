@@ -125,8 +125,11 @@ final class TargetPseudonymSpellingTest extends TestCase
     }
 
     /**
-     * The completion credit and the mark key agree: one projection,
-     * pinned against the outcomes handle gate's own 32-hex rule.
+     * The completion credit and the mark key agree: the handle carries
+     * the canonical digest, the spelling the engine's target state
+     * addresses, so a completion clears exactly the counter a stuffing
+     * storm filled. The mark key stays the one documented projection
+     * of that digest.
      */
     public function testCreditAndMarkKeyShareOneProjection(): void
     {
@@ -138,7 +141,10 @@ final class TargetPseudonymSpellingTest extends TestCase
         // The handle gate accepts exactly that spelling.
         self::assertSame($markKey, OutcomeHandle::target($markKey)->id);
 
-        // The credit books the projected key, never the raw 64 digest.
+        // The credit books the canonical digest: the outcomes layer
+        // projects it to the mark spelling where marks are written,
+        // and the target state ops address the digest the engine's
+        // consolidated assessment reads.
         $reporter = new SpyOutcomeReporter();
         $credit = new StepUpCompletionCredit($reporter, self::MASTER);
         $challenge = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
@@ -155,9 +161,9 @@ final class TargetPseudonymSpellingTest extends TestCase
             'hash',
             targetOwned: true,
         );
-        $credit->credit($challenge->id, $challenge);
+        $credit->report($challenge->id, $challenge->principalPseudonym, $challenge->targetPseudonym, $challenge->targetOwned);
         self::assertCount(2, $reporter->reports);
-        self::assertSame($markKey, $reporter->reports[1]['handle']->id, 'the target credit carries the mark key');
+        self::assertSame($target, $reporter->reports[1]['handle']->id, 'the target credit carries the canonical digest');
 
         // The projection is total: a non-canonical input is refused,
         // never silently truncated into a usable key.
@@ -177,9 +183,12 @@ final class TargetPseudonymSpellingTest extends TestCase
         $handler = new EmailOtpStepUpHandler(
             $store,
             new StepUpTicket(self::MASTER),
-            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             new CapturingStepUpCodeSender(),
             self::MASTER,
+        );
+        $finalizer = new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer(
+            $store,
+            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
         );
 
         return new StepUpController(
@@ -187,6 +196,9 @@ final class TargetPseudonymSpellingTest extends TestCase
             $this->identityFactory(),
             self::SCOPE,
             new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePrincipalResolver('user-42'),
+            null,
+            null,
+            $finalizer,
         );
     }
 }

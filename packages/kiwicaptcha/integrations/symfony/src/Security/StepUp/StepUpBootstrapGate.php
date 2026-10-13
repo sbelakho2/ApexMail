@@ -9,20 +9,16 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
- * The first-factor bootstrap gate. Applications without email OTP have
- * no prior factor to complete a step-up with. A first enrollment would
- * then be a dead end. When enabled, a freshly verified signup or
- * recovery session may enroll a first factor.
- *
- * The grant is never a request attribute (any client could set one).
- * The application calls {@see self::grant()} with the RAW identifier
- * (email, username) it verified out of band; the gate pseudonymizes it
- * internally, so the enrollment path's 32-hex principal pseudonym and
- * the application's raw spelling can never disagree (the same class of
- * bug that broke the session restorer). The grant is single-use,
- * session-scoped, bound to that principal, and expires after
- * {@see self::TTL_SECS}. The gate is off by default; the doctor warns
- * when step-up is enabled without either email OTP or this bootstrap.
+ * The first-factor bootstrap gate. Applications without email OTP
+ * have no prior factor to complete a step-up with. A first enrollment
+ * would then be a dead end. When enabled, a freshly verified signup
+ * or recovery session may enroll a first factor. The application
+ * calls grant() with the raw identifier. The gate pseudonymizes it
+ * internally. The enrollment path carries the engine pseudonym. The
+ * two spellings can never disagree. The grant is single-use. It is
+ * session-scoped. It expires after 15 minutes. The gate is off by
+ * default. The doctor warns when step-up is enabled without email OTP
+ * and without this bootstrap.
  */
 final class StepUpBootstrapGate
 {

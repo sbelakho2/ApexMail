@@ -1,8 +1,9 @@
 //! Typed outcomes API and the long-memory mark surface: the eight
 //! application-reported outcomes, the sealed handle set that addresses
 //! their subjects, and the one versioned mapping table that resolves
-//! every outcome onto the existing risk-v1 event channels, the
-//! always-on outcome ledger and the marks.
+//! every outcome onto the risk-v1 event channels (including the
+//! step-up-completion channel 22), the always-on outcome ledger and the
+//! marks.
 //!
 //! The trust polarity lives in the table and is enforced by property
 //! tests: only the server-confirmed trust outcomes may subtract risk,
@@ -195,9 +196,14 @@ pub struct OutcomeHandle {
 
 impl OutcomeHandle {
     fn new(dimension: HandleDimension, id: &str) -> Result<OutcomeHandle, RiskError> {
-        let rule = if matches!(
+        // The target dimension carries the engine's derived target
+        // pseudonym (the full 64-char HMAC hex), so its rule is wider
+        // than the 128-bit identity pseudonyms.
+        let rule = if dimension == HandleDimension::Target {
+            Self::is_target_pseudonym
+        } else if matches!(
             dimension,
-            HandleDimension::Principal | HandleDimension::Target | HandleDimension::Session
+            HandleDimension::Principal | HandleDimension::Session
         ) {
             Self::is_pseudonym
         } else {
@@ -251,6 +257,17 @@ impl OutcomeHandle {
     /// HMAC pseudonym byte shape shared by both cores.
     fn is_pseudonym(value: &str) -> bool {
         value.len() == 32
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// The target pseudonym rule: the engine's derived target pseudonym
+    /// (the full 64-char HMAC hex) or the 32-char form (legacy call
+    /// sites). Every other shape looks raw and is rejected before any
+    /// target key is built from it.
+    fn is_target_pseudonym(value: &str) -> bool {
+        (value.len() == 32 || value.len() == 64)
             && value
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -342,7 +359,11 @@ pub fn mapping(outcome: Outcome) -> OutcomeMapping {
         },
         Outcome::StepUpCompleted => OutcomeMapping {
             outcome,
-            channel: RiskEventKind::ProtectedActionSuccess,
+            // The dedicated step-up completion event (22), NOT the shared
+            // ProtectedActionSuccess channel: a completed step-up is its
+            // own server-confirmed trust kind (same credit as event 8 in
+            // the state script). NOT 18 (the honeypot kind).
+            channel: RiskEventKind::StepUpCompleted,
             ledger_legitimate: None,
             writes_abuse_mark: false,
             server_confirmed: true,
@@ -616,8 +637,7 @@ where
             // trust label must never mint unlimited reputation credit
             // (status 4 is the v2 confirm's trust cap and never
             // authorizes).
-            let authorize =
-                matches!(status, 1 | 2) || (status == 3 && !legitimate);
+            let authorize = matches!(status, 1 | 2) || (status == 3 && !legitimate);
             if authorize {
                 if let Some(ctx) = context {
                     let receipt: EventReceipt = self.engine.record_outcome_feedback(
@@ -1068,7 +1088,12 @@ mod tests {
         }
         channels.sort_unstable();
         channels.dedup();
-        assert_eq!(channels, vec![8, 9, 10, 11, 12, 13]);
+        // The vocabulary maps onto the risk-v1 pressure/auth channels
+        // plus the step-up-completion channel (22). Event 8
+        // (ProtectedActionSuccess) remains a valid state-script channel
+        // but the table no longer selects it: step-up completion has its
+        // own kind at 22.
+        assert_eq!(channels, vec![9, 10, 11, 12, 13, 22]);
     }
 
     #[test]
@@ -1100,11 +1125,11 @@ mod tests {
                 );
             }
             // The channel polarity: trust rows map only onto the trust
-            // channels (8, 10, 12); every other row maps only onto the
+            // channels (8, 10, 12, 22); every other row maps only onto the
             // pressure channels (9, 11, 13).
             if row.may_subtract_risk {
                 assert!(
-                    [8, 10, 12].contains(&row.channel.as_u8()),
+                    [8, 10, 12, 22].contains(&row.channel.as_u8()),
                     "{name} trust channel"
                 );
             } else {
@@ -1542,6 +1567,7 @@ mod tests {
             subnet_id_next: hex32('b'),
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: event_id.to_string(),
             network_risk: 0,
             now_ms,
@@ -1638,7 +1664,13 @@ mod tests {
         );
         assert_eq!(
             store
-                .write_mark("session", SESSION, "accountBanned", T0 + 5, &"beef".repeat(16))
+                .write_mark(
+                    "session",
+                    SESSION,
+                    "accountBanned",
+                    T0 + 5,
+                    &"beef".repeat(16)
+                )
                 .unwrap(),
             2
         );
@@ -1650,11 +1682,8 @@ mod tests {
         let _: i64 = {
             use ::redis::Commands;
             let mut conn = store_pool_connection(&store);
-            conn.del(format!(
-                "mark:{{kiwi:{}}}:dd:{event}",
-                store.namespace()
-            ))
-            .unwrap()
+            conn.del(format!("mark:{{kiwi:{}}}:dd:{event}", store.namespace()))
+                .unwrap()
         };
     }
 

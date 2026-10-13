@@ -23,6 +23,7 @@ final class DoctorHighAbuseV3WriterKernel extends DoctorV3WriterTestKernel
             'protection_profile' => 'high_abuse',
             'redis_service' => self::FAKE_REDIS_ID,
             'risk' => [
+                    'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                 'namespace' => 'doctor-v3',
                 'redis_service' => self::FAKE_REDIS_ID,
             ],

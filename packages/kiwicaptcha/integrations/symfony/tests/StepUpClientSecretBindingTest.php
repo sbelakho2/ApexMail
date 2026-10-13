@@ -230,7 +230,6 @@ final class StepUpClientSecretBindingTest extends TestCase
         return new EmailOtpStepUpHandler(
             $this->store,
             $this->ticket,
-            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             $this->sender,
             self::MASTER,
             maxBegins: 50,

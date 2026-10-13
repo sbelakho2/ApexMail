@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Kernel;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Tests\Support\RswFixture;
 use Symfony\Component\Config\Loader\LoaderInterface;
+use Symfony\Component\Routing\Loader\Configurator\RoutingConfigurator;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
@@ -69,6 +70,29 @@ final class NewIntegratorSmokeKernel extends TestKernel
                 // profile-default algorithm.
                 $config['rsw_modulus_n'] = RswFixture::MODULUS_N_B64;
                 $config['rsw_lambda'] = RswFixture::LAMBDA_B64;
+                // The profile also requires the ASN dataset (the
+                // novel-network gate is judged on the ASN bucket
+                // first); the smoke fixture stages the shared file.
+                $config['risk']['asn']['dataset_path'] = RiskStageMatrixTestKernel::asnFixturePath();
+                // The profile wires the step-up plane with a carrier
+                // for financial_action; the doctor's carrier-factor
+                // check needs the named factor enabled with a real
+                // (non-logging) sender to clear the carrier and
+                // delivery rows.
+                $config['risk']['login_scopes'] = ['main' => 'login', 'admin' => 'admin_login'];
+                $config['risk']['step_up']['handlers']['totp']['enabled'] = true;
+                $config['risk']['step_up']['handlers']['email_otp']['enabled'] = true;
+                $config['risk']['step_up']['handlers']['email_otp']['sender'] = 'kiwi_step_up_test_sender';
+                $config['risk']['step_up']['default_handler'] = 'totp';
+                $config['risk']['step_up']['email_ownership']['sender'] = 'kiwi_step_up_test_ownership_sender';
+                $config['risk']['decoy_v3_enabled'] = true;
+                foreach (['financial_action', 'admin_login'] as $s) {
+                    $config['risk']['scopes'][$s]['operation_identity_source'] = 'request_attribute';
+                }
+                // The admin login binds the presented identifier as its
+                // protected content; the transfer-shaped recipe of
+                // financial_action rides the shipped scope default.
+                $config['risk']['scopes']['admin_login']['operation_content_fields'] = ['username'];
             }
             if ($this->storageServiceId !== null) {
                 // The advanced escape hatch: an explicit storage service
@@ -76,6 +100,10 @@ final class NewIntegratorSmokeKernel extends TestKernel
                 $config['storage'] = $this->storageServiceId;
                 $container->register($this->storageServiceId, ArrayStorage::class);
             }
+            $container->register('kiwi_step_up_test_sender', \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\Fixtures\DoctorCarrierOtpSender::class)
+                ->setPublic(true);
+            $container->register('kiwi_step_up_test_ownership_sender', \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\Fixtures\DoctorCarrierOwnershipSender::class)
+                ->setPublic(true);
             $container->loadFromExtension('kiwi_captcha', $config);
         });
     }

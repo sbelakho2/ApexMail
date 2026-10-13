@@ -1073,15 +1073,30 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
      * diagnostics are exercised with (the container path validates first,
      * which would refuse the very states under test for the wrong
      * reason). The security Redis is a FakePredisClient so tests seed
-     * central policy state directly.
+     * central policy state directly. The armed wiring (the post-
+     * credential gate and, by default, the registered outcome bridge)
+     * rides along explicitly, so each check under study stays the
+     * subject; the reporting-lane tests pass withBridge false to
+     * simulate the missing lane.
      *
      * @param callable(array<string, mixed>): array<string, mixed>|null $mutate
+     * @param object|null                                                    $outcomeBridge
      */
-    private function doctorWithConfig(?callable $mutate = null): CommandTester
+    private function doctorWithConfig(?callable $mutate = null, ?object $outcomeBridge = null, bool $withBridge = true): CommandTester
     {
         $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
             new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
-            [['secret_key' => str_repeat('a', 32), 'risk' => ['enabled' => true]]],
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'risk' => [
+                    'enabled' => true,
+                    // The gate check audits the guard the extension wires;
+                    // the direct constructions carry the armed wiring
+                    // explicitly, so the check under study stays the
+                    // subject of each assertion.
+                    'login_scopes' => ['main' => 'login'],
+                ],
+            ]],
         );
         self::assertIsArray($config);
         if ($mutate !== null) {
@@ -1104,6 +1119,30 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
             $redis,
             null,
             null,
+            null,
+            null,
+            null,
+            // The armed post-credential gate the login_scopes entry
+            // promises: the gate check then audits the posture against
+            // a real wiring instead of its absence.
+            new \BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard(
+                new class implements \BelConsulting\KiwiCaptchaBundle\Risk\LoginDecisionGate {
+                    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null, array $targetFields = []): ?\KiwiCaptcha\Risk\RiskDecision
+                    {
+                        return null;
+                    }
+                },
+                new \KiwiCaptcha\Risk\RiskIdentityFactory(
+                    \KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('b', 32)),
+                ),
+                ['main' => 'login'],
+            ),
+            $outcomeBridge ?? ($withBridge ? new \BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber(
+                new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter(),
+                new \KiwiCaptcha\Risk\RiskIdentityFactory(\KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('c', 32))),
+                10,
+                str_repeat('d', 32),
+            ) : null),
         );
 
         return new CommandTester($command);
@@ -1177,6 +1216,60 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('payments', $display, 'every actions scope must be collected');
         self::assertStringNotContainsString('login,', $display, 'scopes listed in risk.scopes are not reported');
         self::assertDoesNotMatchRegularExpression('/\bArray\b/', $display, 'a non-string allowed_scopes entry must not become a phantom "Array" scope');
+    }
+
+    /**
+     * The reporting lane of the protected logins: with the login map
+     * active and the bridge absent the doctor fails the deployment
+     * (the successes and failures of the withheld sessions would never
+     * report), and a registered bridge passes the same posture.
+     */
+    public function testDoctorFailsMappedLoginsWithoutARegisteredOutcomeBridge(): void
+    {
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['login_scopes'] = ['main' => 'login'];
+
+            return $config;
+        }, null, withBridge: false);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString(''.self::failTag().' Outcome bridge', $display, 'protected logins without a reporting lane must fail the deploy gate');
+        self::assertStringContainsString('risk.outcomes.scope', $display);
+    }
+
+    public function testDoctorRequiresTheExplicitScopeForDifferingLoginScopes(): void
+    {
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['login_scopes'] = ['main' => 'login', 'admin' => 'admin_login'];
+
+            return $config;
+        }, null, withBridge: false);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString(''.self::failTag().' Outcome bridge', $display);
+        self::assertStringContainsString('several differing scopes leave no single outcome scope to infer', $display, 'the failure must demand the explicit risk.outcomes.scope mapping');
+    }
+
+    public function testDoctorPassesMappedLoginsWithARegisteredOutcomeBridge(): void
+    {
+        $bridge = new \BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber(
+            new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter(),
+            new \KiwiCaptcha\Risk\RiskIdentityFactory(\KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('c', 32))),
+            10,
+            str_repeat('d', 32),
+        );
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['login_scopes'] = ['main' => 'login'];
+
+            return $config;
+        }, $bridge);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Outcome bridge', $display, 'a registered bridge reports the protected logins');
+        self::assertStringNotContainsString(''.self::failTag().' Outcome bridge', $display);
     }
 
     public function testDoctorWarnsWhenTheCentralEpochIsAheadOfTheConfiguredPolicyVersion(): void
@@ -1297,5 +1390,131 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('[PASS] Continuity cookie', $display);
         self::assertStringContainsString('forces the Secure flag', $display);
         self::assertStringNotContainsString('[WARN] Continuity cookie', $display);
+    }
+
+    /**
+     * The APCu adapter over the do-nothing backend seam: the injected
+     * backend skips the storage's own cli detection, so both flag
+     * variants construct under the cli SAPI phpunit runs in, and the
+     * doctor verdict is the only thing under test.
+     */
+    private function apcuStorageForDoctor(bool $allowPrivateCliSegment): \KiwiCaptcha\Storage\ApcuStorage
+    {
+        $backend = new class implements \KiwiCaptcha\Storage\ApcuBackendInterface {
+            public function fetch(string $key): \KiwiCaptcha\Storage\ApcuFetchOutcome
+            {
+                return \KiwiCaptcha\Storage\ApcuFetchOutcome::notFound();
+            }
+
+            public function store(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function add(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function delete(string $key): bool
+            {
+                return true;
+            }
+        };
+
+        return new \KiwiCaptcha\Storage\ApcuStorage($backend, 'kiwi-doctor-apcu', 5000, 60, null, null, $allowPrivateCliSegment);
+    }
+
+    private function doctorForApcuStorage(\KiwiCaptcha\Storage\ApcuStorage $storage, string $environment, ?\Closure $apcEnableCli = null): CommandTester
+    {
+        $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
+            new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
+            [['secret_key' => str_repeat('a', 32)]],
+        );
+        self::assertIsArray($config);
+        $redis = new FakePredisClient();
+        $command = new KiwiCaptchaDoctorCommand(
+            $environment,
+            $config,
+            $storage,
+            new \KiwiCaptcha\Config(secretKey: str_repeat('b', 32)),
+            new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+                new \KiwiCaptcha\Verifier(new \KiwiCaptcha\Storage\ArrayStorage()),
+                $redis,
+                'doctor-apcu',
+                1,
+                300,
+            ),
+            $redis,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $apcEnableCli,
+        );
+
+        return new CommandTester($command);
+    }
+
+    public function testDoctorFailsOnApcuStorageUnderCliWithoutTheAcknowledgement(): void
+    {
+        // phpunit runs under the cli SAPI, so the wired APCu adapter
+        // without the single-process acknowledgement is exactly the
+        // wiring that cannot serve: a RoadRunner worker would store
+        // records in its own private segment. Production fails the
+        // gate with the remediation named.
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(false), 'prod');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString(''.self::failTag().' APCu SAPI', $display);
+        self::assertStringContainsString('storage.apcu.single_process_cli', $display);
+        self::assertStringContainsString('Redis/SQLite', $display);
+    }
+
+    public function testDoctorWarnsOnApcuStorageUnderCliWithTheAcknowledgement(): void
+    {
+        // The declared one-long-lived-process wiring: the per-process
+        // segment hazard stays a warning, and the warn names the
+        // topology bound (Swoole initialised before fork qualifies,
+        // RoadRunner never does).
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(true), 'prod', static fn (): string => '1');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('[WARN] APCu SAPI', $display);
+        self::assertStringContainsString('one long-lived process', $display);
+        self::assertStringContainsString('RoadRunner never qualifies', $display);
+        self::assertStringNotContainsString(''.self::failTag().' APCu SAPI', $display);
+    }
+
+    public function testDoctorFailsWhenTheAcknowledgementLacksTheIniPrecondition(): void
+    {
+        // The flag without apc.enable_cli=1: no ini, no segment at all,
+        // so the wiring cannot serve and the gate fails even though the
+        // acknowledgement was declared.
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(true), 'prod', static fn (): string => '0');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString(''.self::failTag().' APCu SAPI', $display);
+        self::assertStringContainsString('apc.enable_cli', $display);
+    }
+
+    public function testDoctorWarnsInsteadOfFailsOutsideProductionWithoutTheAcknowledgement(): void
+    {
+        // test and dev keep the warning so local tooling still boots;
+        // the fail gate is a production verdict.
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(false), 'test');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('[WARN] APCu SAPI', $display);
+        self::assertStringNotContainsString(''.self::failTag().' APCu SAPI', $display);
     }
 }

@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::event::RiskObservation;
+use crate::keyspace::KeyspaceMode;
 use crate::namespace::{deployment_namespace, NamespaceVersion};
 use crate::signals::SignalVector;
 use crate::store::{
@@ -649,26 +650,6 @@ impl RedisRiskStateStore {
                 .any(|c| c.is_control() || matches!(c, ':' | '}' | '\u{2028}' | '\u{2029}'))
     }
 
-    /// Cheap per-assessment key-family check: every key must carry either
-    /// the store's shared hash-tag prefix (a shared prefix implies a
-    /// shared cluster slot — the tag's slot is fixed at construction, so
-    /// the per-key CRC-16 recomputation is unnecessary) or the target
-    /// family tag `{kiwi:<ns>:target:<hex2>}` (the target failure hash
-    /// and its spread HLLs ride their own slot so a stuffing storm never
-    /// hammers the shared primary).
-    fn check_key_tag(&self, keys: &[String]) -> Result<(), RiskStoreError> {
-        let target_family = format!("{{kiwi:{}:target:", self.namespace);
-        for key in keys {
-            if !key.starts_with(&self.key_tag) && !key.starts_with(&target_family) {
-                return Err(RiskStoreError::ScriptError(format!(
-                    "key {key} does not carry the {{kiwi:{}}} hash tag or the target family",
-                    self.namespace
-                )));
-            }
-        }
-        Ok(())
-    }
-
     /// The ten risk-v1 observation keys for `o`, in the Lua keys order,
     /// built on the cached hash-tag prefix.
     fn observation_keys(&self, o: &RiskObservation) -> Vec<String> {
@@ -723,7 +704,7 @@ impl RedisRiskStateStore {
     pub fn observe_full(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
         Self::validate_observation(o)?;
         let keys = self.observation_keys(o);
-        self.check_key_tag(&keys)?;
+        Self::assert_same_slot(&keys)?;
 
         // The full 22-value argv contract, in order. Integers are pushed
         // typed (the redis crate serializes them as their decimal strings,
@@ -851,7 +832,10 @@ impl RedisRiskStateStore {
                 keys.push(format!("{}:risk:tgt:asn:unused", self.key_tag));
             }
         }
-        self.check_key_tag(&keys)?;
+        // The real cluster contract: every key of the invocation hashes
+        // to one slot (a divergent key set is refused server-side with a
+        // cross-slot error, so the contract is enforced here first).
+        Self::assert_same_slot(&keys)?;
 
         // The full argv contract: the 22 v1 values + the two presented
         // tags + the 23 registration values (ARGV[25..47]). Integers are
@@ -913,14 +897,16 @@ impl RedisRiskStateStore {
                     invocation.arg(weight);
                 }
                 // Target dimension (KEYS[14..16]) and the two additive
-                // target score weights (ARGV[52..53]).
+                // target score weights (ARGV[52..53]); the failing
+                // request's spread elements ride ARGV[49..50], PFADDed
+                // when the observation itself is a failure.
                 if reg.target_id.is_some() {
                     invocation.arg(1u8);
                 } else {
                     invocation.arg(0u8);
                 }
-                invocation.arg("");
-                invocation.arg("");
+                invocation.arg(reg.target_source_element.as_str());
+                invocation.arg(reg.target_asn_element.as_str());
                 invocation.arg(self.target_ttl_secs);
                 invocation.arg(w2.target_failure_pressure);
                 invocation.arg(w2.target_spread);
@@ -1021,14 +1007,14 @@ impl RedisRiskStateStore {
     }
 
     /// The target-dimension state keys of one target pseudonym: the
-    /// failure hash plus the source/asn spread HLLs, on the target id's
-    /// own family slot (`{kiwi:<ns>:target:<hex2>}`) — byte-identical
+    /// failure hash plus the source/asn spread HLLs, on this store's
+    /// shared namespace tag (`{kiwi:<ns>}`) — the single-tag layout
+    /// keeps every key of one consolidated assessment invocation on
+    /// one cluster slot, so the script is Cluster safe. Byte-identical
     /// with the keys assess_v2.lua maintains (KEYS[14..16]) and the
-    /// PHP `RedisRiskStateStore::targetStateKeys`. A stuffing storm
-    /// against one target then hits that target's slot, never the
-    /// shared `{kiwi:<ns>}` primary.
+    /// PHP `RedisRiskStateStore::targetStateKeys`.
     fn target_state_keys(&self, target_id: &str) -> [String; 3] {
-        crate::keyspace::target_state_keys(&self.namespace, target_id)
+        crate::keyspace::target_state_keys(&self.namespace, target_id, KeyspaceMode::Legacy)
     }
 
     /// One target_failure.lua op, returning {fails, spread}.
@@ -1576,7 +1562,10 @@ impl RiskStateStore for RedisRiskStateStore {
         Ok(())
     }
 
-    fn read_target_state(&self, target_id: &str) -> Result<crate::store::TargetState, RiskStoreError> {
+    fn read_target_state(
+        &self,
+        target_id: &str,
+    ) -> Result<crate::store::TargetState, RiskStoreError> {
         self.run_target_op("read", target_id, "", "")
     }
 
@@ -1680,6 +1669,255 @@ impl RedisRiskStateStore {
     }
 }
 
+/// The canonical principal-network tag script, embedded verbatim from
+/// this package's resources directory (shared byte-identically with
+/// the PHP core's `resources/principal_networks.lua` and the protocol
+/// asset `protocol/risk-v1/principal_networks.lua`).
+pub const PRINCIPAL_NETWORKS_LUA: &str = include_str!("../resources/principal_networks.lua");
+
+/// Redis-backed [`crate::store::PrincipalNetworkTagStore`]: the
+/// principal's first-seen network tag records over the canonical
+/// `principal_networks.lua` script. The Rust mirror of the PHP
+/// `RedisPrincipalNetworkTagStore` — the same key form
+/// (`pnet:{kiwi:<ns>:<principal>}`, one Cluster slot per principal),
+/// the same class TTLs and caps, the same fail-closed error contract
+/// (any backend failure is a typed store error, never a "not seen").
+///
+/// The class TTLs and caps are the store's own configuration (the
+/// deployment's continuity-cookie and trusted-device lifetimes), sent
+/// per call exactly like the PHP store sends them: the read paths
+/// answer "not seen" past the caller's configured TTL, never past the
+/// class ceiling.
+pub struct RedisPrincipalNetworks {
+    client: redis_crate::Client,
+    /// The encoded namespace inside the `pnet:{kiwi:<ns>:<principal>}`
+    /// key form, derived through the shared deployment derivation.
+    namespace: String,
+    session_ttl_ms: u64,
+    device_ttl_ms: u64,
+    net_ttl_ms: u64,
+    session_cap: u32,
+    device_cap: u32,
+    net_cap: u32,
+    script: Arc<redis_crate::Script>,
+    pool: ConnectionPool,
+}
+
+impl RedisPrincipalNetworks {
+    /// Session-tag TTL in ms (2x a 15-30 minute continuity cookie).
+    pub const DEFAULT_SESSION_TTL_MS: u64 = 3_600_000;
+    /// Device-tag TTL in ms (90 days).
+    pub const DEFAULT_DEVICE_TTL_MS: u64 = 7_776_000_000;
+    /// Network/ASN tag TTL in ms (400 days).
+    pub const DEFAULT_NET_TTL_MS: u64 = 34_560_000_000;
+    /// Per-principal caps: session 32, device 16, net/asn 64.
+    pub const DEFAULT_SESSION_CAP: u32 = 32;
+    pub const DEFAULT_DEVICE_CAP: u32 = 16;
+    pub const DEFAULT_NET_CAP: u32 = 64;
+
+    /// Builds the store over the raw namespace discriminator (the
+    /// encoded `{kiwi:<ns>}` derivation matches the PHP store's).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace is empty or contains `{`/`}` (the hash
+    /// tag would be malformed), mirroring the PHP constructor.
+    pub fn new(client: redis_crate::Client, namespace: &str) -> RedisPrincipalNetworks {
+        Self::with_namespace_version(client, namespace, NamespaceVersion::Legacy)
+    }
+
+    /// Builds the store with an explicit namespace key version.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace is empty or contains `{`/`}`.
+    pub fn with_namespace_version(
+        client: redis_crate::Client,
+        namespace: &str,
+        namespace_version: NamespaceVersion,
+    ) -> RedisPrincipalNetworks {
+        assert!(
+            !namespace.is_empty() && !namespace.contains(['{', '}']),
+            "Risk namespace must be non-empty and free of braces"
+        );
+        RedisPrincipalNetworks {
+            namespace: deployment_namespace(namespace, namespace_version),
+            client,
+            session_ttl_ms: Self::DEFAULT_SESSION_TTL_MS,
+            device_ttl_ms: Self::DEFAULT_DEVICE_TTL_MS,
+            net_ttl_ms: Self::DEFAULT_NET_TTL_MS,
+            session_cap: Self::DEFAULT_SESSION_CAP,
+            device_cap: Self::DEFAULT_DEVICE_CAP,
+            net_cap: Self::DEFAULT_NET_CAP,
+            script: Arc::new(redis_crate::Script::new(PRINCIPAL_NETWORKS_LUA)),
+            pool: ConnectionPool::new(
+                DEFAULT_POOL_SIZE,
+                RedisRiskStateStore::CONNECTION_TIMEOUT_MS,
+                RedisRiskStateStore::COMMAND_TIMEOUT_MS,
+            ),
+        }
+    }
+
+    /// The principal's tag hash key:
+    /// `pnet:{kiwi:<ns>:<principal>}` — the hash tag carries the whole
+    /// principal identity, so a Cluster routes each principal to its
+    /// own slot instead of every principal colliding on the shared
+    /// namespace tag (the hot-slot seam the D3.5 wire volume would
+    /// drive).
+    fn tag_key(&self, principal_id: &str) -> Result<String, RiskStoreError> {
+        Self::assert_principal(principal_id)?;
+        Ok(format!("pnet:{{kiwi:{}:{}}}", self.namespace, principal_id))
+    }
+
+    /// The class TTL (ms) and cap of one tag, the deployment's own
+    /// configured lifetimes, sent to the script per call.
+    fn class_of(&self, network: &str) -> (u64, u32) {
+        if network.starts_with("session:") {
+            return (self.session_ttl_ms, self.session_cap);
+        }
+        if network.starts_with("device:") {
+            return (self.device_ttl_ms, self.device_cap);
+        }
+        (self.net_ttl_ms, self.net_cap)
+    }
+
+    /// Runs one script operation: the single key plus the argv vector,
+    /// answering the integer reply.
+    fn run_op(&self, key: &str, args: &[&str]) -> Result<i64, RiskStoreError> {
+        let mut invocation = self.script.prepare_invoke();
+        invocation.key(key);
+        for arg in args {
+            invocation.arg(*arg);
+        }
+        let reply: i64 = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
+        Ok(reply)
+    }
+
+    fn valid_principal(principal_id: &str) -> bool {
+        !principal_id.is_empty()
+            && principal_id.len() <= 64
+            && principal_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    fn assert_principal(principal_id: &str) -> Result<(), RiskStoreError> {
+        if !Self::valid_principal(principal_id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "principalId must be a lowercase hex pseudonym of at most 64 chars (got 0x{})",
+                hex::encode(principal_id)
+            )));
+        }
+        Ok(())
+    }
+
+    /// The tag grammar the PHP store validates client-side:
+    /// `net|session|device:<hex>`, `asn:<decimal|u4/prefix|u6/prefix>`
+    /// or the engine's bare-hex bucket spelling. The script validates
+    /// again (the last line of defense).
+    fn assert_tag(network: &str) -> Result<(), RiskStoreError> {
+        let tagged = |prefix: &str| {
+            network.strip_prefix(prefix).is_some_and(|hex_part| {
+                !hex_part.is_empty()
+                    && hex_part.len() <= 64
+                    && hex_part
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        };
+        let valid = tagged("net:")
+            || tagged("session:")
+            || tagged("device:")
+            || network == "asn:0"
+            || network
+                .strip_prefix("asn:")
+                .is_some_and(|rest| rest.chars().all(|b| b.is_ascii_digit()) && !rest.is_empty())
+            || network.starts_with("asn:u4/")
+            || network.starts_with("asn:u6/")
+            || {
+                // The engine's bare-hex bucket spelling (no prefix).
+                !network.is_empty()
+                    && network.len() >= 2
+                    && network.len() <= 68
+                    && network
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            };
+        if !valid {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "tag must match net|session|device:<hex>, asn:<decimal|u4/prefix|u6/prefix> or bare hex (got 0x{})",
+                hex::encode(network)
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl crate::store::PrincipalNetworkTagStore for RedisPrincipalNetworks {
+    fn principal_network_seen(
+        &self,
+        principal_id: &str,
+        network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Self::assert_tag(network)?;
+        let (ttl, _) = self.class_of(network);
+        let key = self.tag_key(principal_id)?;
+        let reply = self.run_op(&key, &["seen", network, &ttl.to_string()])?;
+        Ok(Some(reply == 1))
+    }
+
+    fn record_principal_network_tag(
+        &self,
+        principal_id: &str,
+        network: &str,
+        trusted: bool,
+    ) -> Result<bool, RiskStoreError> {
+        Self::assert_tag(network)?;
+        let (ttl, cap) = self.class_of(network);
+        let key = self.tag_key(principal_id)?;
+        let reply = self.run_op(
+            &key,
+            &[
+                "record",
+                network,
+                &ttl.to_string(),
+                &cap.to_string(),
+                if trusted { "1" } else { "0" },
+            ],
+        )?;
+        Ok(reply == 1)
+    }
+
+    fn principal_has_trusted_network(
+        &self,
+        principal_id: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        let key = self.tag_key(principal_id)?;
+        let reply = self.run_op(&key, &["has_any_trusted", ""])?;
+        Ok(Some(reply == 1))
+    }
+
+    fn tag_is_trusted(
+        &self,
+        principal_id: &str,
+        network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Self::assert_tag(network)?;
+        let (ttl, _) = self.class_of(network);
+        let key = self.tag_key(principal_id)?;
+        let reply = self.run_op(&key, &["has_trusted", network, &ttl.to_string()])?;
+        Ok(Some(reply == 1))
+    }
+
+    fn forget_devices(&self, principal_id: &str) -> Result<(), RiskStoreError> {
+        let key = self.tag_key(principal_id)?;
+        self.run_op(&key, &["forget_devices", ""])?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1766,6 +2004,7 @@ mod tests {
             subnet_id_next: net_next,
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: event_id.to_string(),
             network_risk,
             now_ms,
@@ -1811,6 +2050,65 @@ mod tests {
 
         let no_tag = vec!["risk:global".to_string()];
         assert!(RedisRiskStateStore::assert_same_slot(&no_tag).is_err());
+    }
+
+    /// The legacy consolidated assessment key set shares one cluster
+    /// slot, target dimension included: the script touches the ten
+    /// observation keys, the two first-seen tag records, the ledger
+    /// slot and the three target keys in one invocation, so a target
+    /// key on its own family tag would be refused server-side with a
+    /// cross-slot error. Pure slot math over the canonical builders.
+    #[test]
+    fn legacy_consolidated_keys_with_target_share_one_slot() {
+        // A fixed namespace: the tag divergence below is a deterministic
+        // slot fact, never a random draw.
+        let namespace = "slotmix";
+        let (src_epoch, src_prev, src_cur, src_next) = epoch_ids("aa");
+        let (net_epoch, net_prev, net_cur, net_next) = epoch_ids("bb");
+        let mut keys = RedisRiskStateStore::keys_for(
+            namespace,
+            NamespaceVersion::Legacy,
+            src_epoch,
+            &src_prev,
+            &src_cur,
+            &src_next,
+            net_epoch,
+            &net_prev,
+            &net_cur,
+            &net_next,
+            None,
+            None,
+            &event_id(7),
+        );
+        let session = "0".repeat(32);
+        keys.push(format!("{{kiwi:{namespace}}}:risk:ctx:{session}"));
+        keys.push(format!("{{kiwi:{namespace}}}:risk:tls:{session}"));
+        keys.push(format!("{{kiwi:{namespace}}}:outcome:{}", event_id(8)));
+        keys.extend(crate::keyspace::target_state_keys(
+            namespace,
+            "5e2a",
+            KeyspaceMode::Legacy,
+        ));
+        assert_eq!(keys.len(), 16, "the consolidated key set is pinned");
+        RedisRiskStateStore::assert_same_slot(&keys).expect("every key on one slot");
+
+        // The sharded target family tag disperses away from the
+        // namespace tag (slots 15411 vs 8303 for this namespace): the
+        // two layouts address different slots, and the sharded store
+        // runs its target op on its own endpoint.
+        let legacy_slot = crate::keyspace::slot_of(&keys[13]);
+        let sharded_keys =
+            crate::keyspace::target_state_keys(namespace, "5e2a", KeyspaceMode::Sharded);
+        assert_eq!(
+            sharded_keys[0],
+            format!("{{kiwi:{namespace}:target:5e}}:risk:tgt:5e2a")
+        );
+        assert_eq!(legacy_slot, 15_411);
+        assert_eq!(
+            crate::keyspace::slot_of(&sharded_keys[0]),
+            8_303,
+            "the sharded family tag must hash away from the namespace tag"
+        );
     }
 
     // ── Hermetic pool-eviction tests (no Redis URL needed) ──
@@ -2678,6 +2976,8 @@ mod tests {
             v1_weights: crate::score::RiskWeights::default(),
             v2_weights: crate::score::RiskV2Weights::default(),
             target_id: None,
+            target_source_element: String::new(),
+            target_asn_element: String::new(),
         };
 
         let reply = store

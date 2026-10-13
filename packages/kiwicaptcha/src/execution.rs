@@ -2449,8 +2449,10 @@ pub mod fixtures {
             } else if white_box && op.opcode == OP_RANGE_ORDER {
                 // White-box: the range string length is exact and the
                 // fragment count band admits the floor.
-                let (t_exact, rects_lo, _rects_hi) =
-                    range_order_envelope(operand_int(op, "b0") as u32, operand_int(op, "b1") as u32);
+                let (t_exact, rects_lo, _rects_hi) = range_order_envelope(
+                    operand_int(op, "b0") as u32,
+                    operand_int(op, "b1") as u32,
+                );
                 entries.push(format!("drange({t_exact},{rects_lo},1)"));
                 let cell = operand_int(op, "cell") as usize;
                 if cell < u8arr.len() {
@@ -3011,7 +3013,9 @@ mod tests {
     // feature-gated test-fixtures module (see `fixtures`); the self
     // dev-dependency in Cargo.toml enables `test-fixtures` for every
     // test build, so the unit tests reach it here.
-    use super::fixtures::{browserless_forgery_solver, executed_trace_for, white_box_envelope_forgery_solver};
+    use super::fixtures::{
+        browserless_forgery_solver, executed_trace_for, white_box_envelope_forgery_solver,
+    };
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";

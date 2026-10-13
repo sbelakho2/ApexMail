@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk\Storage;
 
 use KiwiCaptcha\Risk\DeploymentNamespace;
+use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
 use Predis\Client;
@@ -31,12 +32,16 @@ use Predis\Response\ServerException;
  * `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`. The hysteresis state is
  * `{kiwi:<ns>}:risk:hyst` and the mode marker is `{kiwi:<ns>}:mode`.
  *
- * <dim> names a source, net, session or principal family. <hex2> is the
- * two hex characters of the family identifier's first byte. <shard> is
- * fnv1a32(event_id) mod 16. Source and subnet keep their epoch boundary
- * pseudonyms: each pseudonym carries its own family prefix, so the
- * boundary reads run as their own read-only invocations and the caller
- * sums the replies exactly per the risk-v1 sum3 contract.
+ * <dim> names one of the seven sharded dimensions: src, net, session,
+ * principal, asn, target and agent. <hex2> is the two hex characters of
+ * the family identifier's first byte. <shard> is fnv1a32(event_id)
+ * mod 16, or the caller's stable fallback hash for an empty event id
+ * (the assessment's source pseudonym), so dedupe-less writes disperse
+ * over the shards instead of funneling onto one slot. Source and subnet
+ * keep their epoch boundary pseudonyms: each pseudonym carries its own
+ * family prefix, so the boundary reads run as their own read-only
+ * invocations and the caller sums the replies exactly per the risk-v1
+ * sum3 contract.
  *
  * Batching contract: one assessment is one pipelined batch. The batch's
  * invocations are grouped by endpoint (the owner of each key's slot:
@@ -77,9 +82,9 @@ use Predis\Response\ServerException;
  *   per-slot state; each dimension's own atomicity stays per-slot.
  *
  * Single-use consume (the nonce marker, the ledger transitions, the
- * first-seen tags) and the level chain stay single-slot on purpose: a
- * wider batch would widen the atomicity boundary without adding
- * throughput, because these transitions touch one key each.
+ * first-seen tags) stays single-slot on purpose: a wider batch would
+ * widen the atomicity boundary without adding throughput, because these
+ * transitions touch one key each.
  *
  * Keyspace mode and the mixed-fleet rule: a namespace carries exactly
  * one layout, recorded in its mode marker key {kiwi:<ns>}:mode. This
@@ -94,12 +99,16 @@ use Predis\Response\ServerException;
  * mode before switching. The two layouts address disjoint state
  * families, so a straggler would observe an empty keyspace.
  *
- * Auxiliary surfaces: the outcome ledger, the long-memory marks, the
- * bucket trust records and the first-seen session tag records are
- * single-key scripts. Their slot placement is irrelevant to throughput,
- * so they keep the shared {kiwi:<ns>} tag in both modes and this store
- * delegates them to an embedded classic store aimed at the node that
- * owns that tag. The assessment path is where the sharded layout lives.
+ * Auxiliary surfaces: the long-memory marks and the bucket trust
+ * records are single-key scripts whose slot placement is irrelevant to
+ * throughput. They keep the shared {kiwi:<ns>} tag in both modes, and
+ * this store delegates them to an embedded classic store aimed at the
+ * node that owns that tag.
+ *
+ * The surfaces the hot path touches (the first-seen session tags, the
+ * outcome ledger, the target failure state) ride their own family slots
+ * and are addressed through the same routed dispatch as the assessment
+ * batch. The assessment path is where the sharded layout lives.
  */
 final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface
 {
@@ -152,6 +161,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     private readonly int $dedupeTtlSecs;
     private readonly int $hysteresisMs;
     private readonly int $outcomeTtlSecs;
+    private readonly int $targetTtlSecs;
 
     /** @var array<string, int> */
     private array $saturations;
@@ -200,6 +210,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         int $markTtlSecs = RedisRiskStateStore::DEFAULT_MARK_TTL_SECS,
         float $connectTimeoutSecs = 0.005,
         float $commandTimeoutSecs = 0.010,
+        int $targetTtlSecs = 86_400,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace) === 1) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
@@ -217,6 +228,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             'dedupeTtlSecs' => $dedupeTtlSecs,
             'outcomeTtlSecs' => $outcomeTtlSecs,
             'markTtlSecs' => $markTtlSecs,
+            'targetTtlSecs' => $targetTtlSecs,
             'hysteresisMs' => $hysteresisMs,
         ] as $knob => $value) {
             if ($value < 1) {
@@ -234,6 +246,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             'dedupeTtlSecs' => $dedupeTtlSecs,
             'outcomeTtlSecs' => $outcomeTtlSecs,
             'markTtlSecs' => $markTtlSecs,
+            'targetTtlSecs' => $targetTtlSecs,
         ] as $knob => $value) {
             if ($value > self::MAX_TTL_SECS) {
                 throw new \InvalidArgumentException(sprintf(
@@ -269,6 +282,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $this->dedupeTtlSecs = $dedupeTtlSecs;
         $this->hysteresisMs = $hysteresisMs;
         $this->outcomeTtlSecs = $outcomeTtlSecs;
+        $this->targetTtlSecs = $targetTtlSecs;
         $this->saturations = $saturations;
         $this->connectTimeoutSecs = $connectTimeoutSecs;
         $this->commandTimeoutSecs = $commandTimeoutSecs;
@@ -475,6 +489,9 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             existingContextTag: $assessment['existingContextTag'],
             existingTlsTag: $assessment['existingTlsTag'],
             registrationStatus: $assessment['registrationStatus'],
+            targetFailures: $assessment['targetFailures'],
+            targetSpreadSources: $assessment['targetSpreadSources'],
+            targetSpreadAsns: $assessment['targetSpreadAsns'],
         );
     }
 
@@ -551,22 +568,54 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         return $replies[0] ?? null;
     }
 
+    /**
+     * The canonical target_failure.lua ops, routed to the target
+     * family's own slot (never the shared namespace tag): the
+     * outcome-bridge write path of target-account protection in the
+     * sharded layout. The sharded key derivation gives the target
+     * failure hash and its spread HLLs their own family tag, so the
+     * canonical script runs on whichever endpoint owns that family.
+     */
+    private function runTargetOp(string $op, string $targetId, string $source, string $asn): array
+    {
+        RedisRiskStateStore::assertKeySafeIdentifier('targetId', $targetId);
+        $keys = KeyspaceMode::targetStateKeys($this->namespace, $targetId, KeyspaceMode::Sharded);
+        $script = self::shardedScript('target_failure.lua');
+        $replies = $this->dispatch([[
+            'endpoint' => $this->endpointForKey($keys[0]),
+            'cmd' => $this->evalshaCmd($script, $keys, [$op, $source, $asn, (string) $this->targetTtlSecs]),
+            'script' => $script,
+        ]]);
+        $result = $replies[0] ?? null;
+        if (!\is_array($result) || \count($result) < 5) {
+            throw new RiskStoreException('the target_failure reply is not a 5-slot array');
+        }
+
+        return [
+            'fails' => self::scriptInteger($result[0], 'target fails'),
+            'spread_sources' => self::scriptInteger($result[1], 'target spread sources'),
+            'spread_asns' => self::scriptInteger($result[2], 'target spread asns'),
+            'first_ms' => self::scriptInteger($result[3], 'target first_ms'),
+            'last_ms' => self::scriptInteger($result[4], 'target last_ms'),
+        ];
+    }
+
     /** @inheritdoc */
     public function registerTargetFailure(string $targetId, string $source, string $asn): array
     {
-        return $this->legacy->registerTargetFailure($targetId, $source, $asn);
+        return $this->runTargetOp('fail', $targetId, $source, $asn);
     }
 
     /** @inheritdoc */
     public function clearTargetFailures(string $targetId): void
     {
-        $this->legacy->clearTargetFailures($targetId);
+        $this->runTargetOp('clear', $targetId, '', '');
     }
 
     /** @inheritdoc */
     public function readTargetState(string $targetId): array
     {
-        return $this->legacy->readTargetState($targetId);
+        return $this->runTargetOp('read', $targetId, '', '');
     }
 
     /** The classic mark key: the marks surface is mode-insensitive (shared tag). */
@@ -667,7 +716,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
      * scripts on their own slots, the nonce verdict and the single-slot
      * level transition, plus the consolidated single-key extras.
      *
-     * @return array{vector: SignalVector, globalLevel: int, cooldownUntilMs: int, isDuplicate: bool, existingContextTag: ?string, existingTlsTag: ?string, registrationStatus: bool}
+     * @return array{vector: SignalVector, globalLevel: int, cooldownUntilMs: int, isDuplicate: bool, existingContextTag: ?string, existingTlsTag: ?string, registrationStatus: bool, targetFailures: int, targetSpreadSources: int, targetSpreadAsns: int}
      *
      * @throws RiskStoreException when the underlying state backend fails
      */
@@ -761,6 +810,27 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             }
         }
 
+        // The target dimension (target-account protection): a read-only
+        // invocation on the target family's own slot returns the
+        // leak-decayed failure count and the two spread cardinalities
+        // with the main batch's round trip. The failure write (an
+        // AuthenticationFailure observation) runs as the batch's second
+        // phase, once the duplicate verdict is known — the canonical
+        // target_failure.lua owns the same state the outcome bridge
+        // writes, and the ledger score reacts to the returned counts.
+        $targetId = $registration !== null
+            && $registration->targetId !== null
+            && $registration->targetId !== '' ? $registration->targetId : null;
+        if ($targetId !== null) {
+            $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId, KeyspaceMode::Sharded);
+            $targetScript = self::shardedScript('target_failure.lua');
+            $units[] = [
+                'endpoint' => $this->endpointForKey($targetKeys[0]),
+                'cmd' => $this->evalshaCmd($targetScript, $targetKeys, ['read', '', '', (string) $this->targetTtlSecs]),
+                'script' => $targetScript,
+            ];
+        }
+
         $replies = $this->dispatch($units);
         $it = $replies;
         $next = function () use (&$it): mixed {
@@ -839,6 +909,47 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $existingContextTag = $readTag($contextTag, 'client-context tag');
         $existingTlsTag = $readTag($tlsTag, 'TLS tag');
 
+        // The target read's reply rides the main batch when a target is
+        // addressed: {fails, spread_sources, spread_asns, first_ms,
+        // last_ms} of the leak-decayed state. An AuthenticationFailure
+        // observation against the target then records one failure (the
+        // leaky counter plus the spread PFADDs) unless the event id is a
+        // duplicate — the same rule the consolidated legacy script
+        // applies inside its atomic block.
+        $targetFailures = 0;
+        $targetSpreadSources = 0;
+        $targetSpreadAsns = 0;
+        if ($targetId !== null) {
+            $targetReply = $next();
+            if (!\is_array($targetReply) || \count($targetReply) < 5) {
+                throw new RiskStoreException('the target state reply is not a 5-slot array');
+            }
+            $targetFailures = max(0, self::scriptInteger($targetReply[0], 'target fails'));
+            $targetSpreadSources = max(0, self::scriptInteger($targetReply[1], 'target spread sources'));
+            $targetSpreadAsns = max(0, self::scriptInteger($targetReply[2], 'target spread asns'));
+            if ($observation->event === RiskEventKind::AuthenticationFailure && !$isDuplicate) {
+                $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId, KeyspaceMode::Sharded);
+                $failScript = self::shardedScript('target_failure.lua');
+                $failReply = $this->dispatch([[
+                    'endpoint' => $this->endpointForKey($targetKeys[0]),
+                    'cmd' => $this->evalshaCmd($failScript, $targetKeys, [
+                        'fail',
+                        $registration->targetSourceElement ?? '',
+                        $registration->targetAsnElement ?? '',
+                        (string) $this->targetTtlSecs,
+                    ]),
+                    'script' => $failScript,
+                ]]);
+                $fail = $failReply[0] ?? null;
+                if (!\is_array($fail) || \count($fail) < 5) {
+                    throw new RiskStoreException('the target failure reply is not a 5-slot array');
+                }
+                $targetFailures = max(0, self::scriptInteger($fail[0], 'target fails'));
+                $targetSpreadSources = max(0, self::scriptInteger($fail[1], 'target spread sources'));
+                $targetSpreadAsns = max(0, self::scriptInteger($fail[2], 'target spread asns'));
+            }
+        }
+
         // The risk-v1 aggregation, client-side: rotated-epoch pseudonyms
         // of one dimension SUM (the replies carry the leaked channels),
         // identity dimensions MAX, every channel normalizes with the
@@ -892,6 +1003,9 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
                 $contextTag,
                 $tlsTag,
                 $registration,
+                $targetFailures,
+                $targetSpreadSources,
+                $targetSpreadAsns,
             );
             $registrationStatus = $this->registerOutcome(
                 $registration->decisionId,
@@ -909,6 +1023,9 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             'existingContextTag' => $existingContextTag,
             'existingTlsTag' => $existingTlsTag,
             'registrationStatus' => $registrationStatus,
+            'targetFailures' => $targetFailures,
+            'targetSpreadSources' => $targetSpreadSources,
+            'targetSpreadAsns' => $targetSpreadAsns,
         ];
     }
 
@@ -929,6 +1046,9 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         ?string $presentedContextTag,
         ?string $presentedTlsTag,
         OutcomeRegistration $registration,
+        int $targetFailures = 0,
+        int $targetSpreadSources = 0,
+        int $targetSpreadAsns = 0,
     ): int {
         $w = $registration->weights->toArray();
         $gp = $registration->globalPressureEnabled ? $vector->globalPressure : 0;
@@ -957,6 +1077,19 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $risk += $weighted($honeypot, $registration->v2Weights->honeypot);
         $risk += $weighted($sessionInconsistency, $registration->v2Weights->sessionInconsistency);
         $risk += $weighted($tlsInconsistency, $registration->v2Weights->tls);
+        // Target pressure and spread: five failures or twenty distinct
+        // sources saturate at 1000, matching the engine's target helpers
+        // and the consolidated legacy script. The scored spread is the
+        // wider of the two dimensions (never the sum: sources+asns would
+        // double-count one campaign's growth).
+        $risk += $weighted(
+            (int) min(1000, intdiv(max(0, $targetFailures) * 1000, 5)),
+            $registration->v2Weights->targetFailurePressure,
+        );
+        $risk += $weighted(
+            (int) min(1000, intdiv(max(0, max($targetSpreadSources, $targetSpreadAsns)) * 1000, 20)),
+            $registration->v2Weights->targetSpread,
+        );
 
         return max(0, min(1000, $risk));
     }

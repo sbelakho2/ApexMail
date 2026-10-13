@@ -91,6 +91,7 @@ fn no_raw_pii_anywhere_in_redis_state() {
             subnet_id_next: subnet_id_next.clone(),
             session_id: session,
             principal_id: Some(principal_id),
+            device_id: None,
             event_id: common::event_id(event_id),
             network_risk: 0,
             now_ms: common::T0,

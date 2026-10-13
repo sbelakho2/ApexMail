@@ -6,7 +6,10 @@ The Rust implementation (`packages/kiwicaptcha-risk`) and the PHP
 implementation (`packages/kiwicaptcha-risk-php`) MUST be byte-for-byte
 identical in:
 
-1) `RiskEventKind` — fixed enum, values 1..17:
+1) `RiskEventKind` — fixed enum, values 1..22. Values 1..17 are the
+   risk-v1 core and MUST NOT be renumbered; values 18..20 are the additive
+   risk-v2 honeypot/decoy evidence kinds; value 21 is the cancellation
+   surface; value 22 is the step-up completion surface:
 
    | value | name |
    |-------|------|
@@ -27,6 +30,11 @@ identical in:
    | 15 | SourceRateLimitHit |
    | 16 | GlobalCapacityHit |
    | 17 | RiskDenied |
+   | 18 | HoneypotTriggered |
+   | 19 | DecoyEndpointTouched |
+   | 20 | DecoyFieldSubmitted |
+   | 21 | ChallengeCancelled |
+   | 22 | StepUpCompleted |
 
    Event semantics: only `PreIssue` (1) counts as a request (velocity);
    feedback events mutate only their own channels. `SourceRateLimitHit`
@@ -35,6 +43,26 @@ identical in:
    source/session/principal reputation, since deployment overload must not
    contaminate an individual visitor. `RiskDenied` (17) performs no state
    mutation, so a risk decision that already denied is never double-counted.
+
+   Honeypot/decoy kinds 18..20 ride the same observation path (idempotency
+   domain separation, dedupe receipt) but the state script treats them as
+   no-ops: the honeypot signal itself is scored from the risk-v2 context,
+   never from accumulated state. `ChallengeCancelled` (21) is risk-neutral
+   (no state change): an issued-and-abandoned challenge keeps its issue-debt
+   contribution (`iss`), which decays naturally and is repaid only by an
+   actual `SolveSuccess`. `StepUpCompleted` (22) is a server-confirmed
+   trust event. It builds the same trust credit as `ProtectedActionSuccess`
+   (8) on the identity channels and the same principal trust on the
+   principal channel. A completed step-up is a server-verified
+   secondary authentication (trust-source invariant: only
+   server/application-confirmed outcomes may decrement risk).
+
+   Mixed-version readiness: an older state script that does not know
+   event 22 treats it as an unknown kind and applies no mutation (the
+   if/elseif fall-through is a no-op). That degradation is safe in the
+   trust direction only — a node that misses the trust credit can never
+   add risk — and the older enum's `from_u8`/`tryFrom` refuses the wire
+   value fail-closed rather than misreading it as a different kind.
 
 2) `SignalVector` — 13 fixed-point fields (u16/int, each 0..1000), in this
    exact order (JSON keys in `fixtures.json`):

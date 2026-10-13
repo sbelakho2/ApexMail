@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Tests;
 
-use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
-use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Tests\Fixtures\RealRedisTestEnv;
@@ -311,25 +309,32 @@ final class RedisSentinelFailoverTest extends TestCase
         return [(int) $reply[1], (string) $reply[0]];
     }
 
-    private function makeRecord(string $nonce): ChallengeRecord
+    /**
+     * The issuer the suite shares: the same configuration the baseline
+     * verification runs use, wired to the storage under test.
+     */
+    private function issuerFor(RedisStorage $storage): Issuer
     {
-        return new ChallengeRecord(
-            nonce: $nonce,
-            scope: 'login',
-            bindingTag: 'abc123',
-            issuedAt: self::ISSUED_AT,
-            expiresAt: self::ISSUED_AT + 120,
-            algorithm: PoWAlgorithm::Sha256,
-            mKib: 0,
-            t: 1,
-            p: 1,
-            targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
-            challenge: 'challenge',
-            minDurationMs: 0,
-            issuedAtNs: 123_456_789,
+        return new Issuer(
+            new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
         );
+    }
+
+    /**
+     * Issue a challenge through the production issuer and return its
+     * nonce (the issuance stores the envelope). The strict serde-mirror
+     * decoder derives the prefix (`challenge|salt|`) and the nonce/salt
+     * wire shapes, so hand-built records are refused; the failover
+     * mechanics must run on exactly the records issuance writes.
+     */
+    private function issuedNonce(Issuer $issuer, RedisStorage $storage): string
+    {
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        self::assertNotNull($storage->find($challenge->nonce), 'the issued envelope must be stored under the challenge nonce');
+
+        return $challenge->nonce;
     }
 
     public function testFailClosedDuringTheOutageAndTheStalePromotionBoundary(): void
@@ -338,22 +343,19 @@ final class RedisSentinelFailoverTest extends TestCase
         $prefix = 'sentinel-test-'.bin2hex(random_bytes(4)).'-';
         $masterClient = new \Predis\Client('tcp://127.0.0.1:'.$masterPort, ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $storage = new RedisStorage($masterClient, $prefix);
+        $issuer = $this->issuerFor($storage);
 
-        $c1 = 'c1-'.bin2hex(random_bytes(8));
-        $c2 = 'c2-'.bin2hex(random_bytes(8));
-        $c3 = 'c3-'.bin2hex(random_bytes(8));
-        $storage->store($this->makeRecord($c1));
+        $c1 = $this->issuedNonce($issuer, $storage);
         $pendingJson = $masterClient->get($prefix.$c1);
         self::assertIsString($pendingJson, 'the issued envelope must exist before the consume');
         $consumed1 = $storage->consume($c1);
         self::assertNotNull($consumed1);
         self::assertTrue($consumed1->consumedNow);
-        $storage->store($this->makeRecord($c2));
+        $c2 = $this->issuedNonce($issuer, $storage);
         self::assertNotNull($storage->consume($c2));
         self::assertTrue($storage->commitResult($c2, true, 'txn-committed'));
-        $storage->store($this->makeRecord($c3));
+        $c3 = $this->issuedNonce($issuer, $storage);
 
-        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
         $challenge = $issuer->issue('login', '198.51.100.7');
         $saltBytes = base64_decode($challenge->salt, true);
         $counter = 0;

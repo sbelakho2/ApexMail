@@ -38,9 +38,30 @@ final class ShardedScalingTest extends TestCase
         return $ports;
     }
 
+    /**
+     * The bench harness spawns its own throwaway servers, so a missing
+     * binary is an explicit skip with the remedy, never a red exit
+     * code 127 from the spawn itself.
+     */
+    private static function requireStandinBinaries(): void
+    {
+        foreach (['redis-server', 'redis-cli'] as $binary) {
+            if (trim((string) shell_exec('command -v ' . escapeshellarg($binary) . ' 2>/dev/null')) !== '') {
+                continue;
+            }
+            self::markTestSkipped(sprintf(
+                '%s is not on PATH; the sharding bench spawns its own throwaway local stand-in'
+                . ' servers, so install redis-server and redis-cli (or run the bench in a lane'
+                . ' image that ships them)',
+                $binary,
+            ));
+        }
+    }
+
     /** @return array{0: list<int>, 1: list<resource>} ports and server handles */
     private static function startServers(int $count): array
     {
+        self::requireStandinBinaries();
         $ports = self::freePorts($count);
         $servers = [];
         foreach ($ports as $port) {

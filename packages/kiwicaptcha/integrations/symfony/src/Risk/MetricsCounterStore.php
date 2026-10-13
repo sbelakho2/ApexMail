@@ -34,6 +34,14 @@ final class MetricsCounterStore
     private array $local = [];
 
     /**
+     * The cached usability verdict for the real APCu lane, resolved
+     * once per store instance (the lifetime of the shared-segment
+     * decision): null before the first probe, the boolean verdict
+     * after. The injected test seam bypasses the probe entirely.
+     */
+    private ?bool $apcuUsable = null;
+
+    /**
      * @param string      $keyPrefix the per-deployment key prefix,
      *                               namespace and secret derived, like
      *                               the health controller's APCu keys
@@ -52,10 +60,24 @@ final class MetricsCounterStore
     /**
      * True when the counters aggregate across the workers of one
      * deployment (the APCu lane); false when they are per-process.
+     *
+     * The extension check is the usable check, {@see \apcu_enabled()},
+     * never a bare function-exists. An APCu build that is loaded but
+     * disabled for the current SAPI, the apc.enable_cli default,
+     * silently drops every write. Trusting the function name alone
+     * would park every counter at zero while claiming the shared
+     * scope. The test seam stays authoritative when injected.
      */
     public function shared(): bool
     {
-        return $this->apcu !== null || \function_exists('apcu_inc');
+        if ($this->apcu !== null) {
+            return true;
+        }
+        if ($this->apcuUsable === null) {
+            $this->apcuUsable = \function_exists('apcu_enabled') && \apcu_enabled();
+        }
+
+        return $this->apcuUsable;
     }
 
     /**

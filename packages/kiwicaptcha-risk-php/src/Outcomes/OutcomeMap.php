@@ -78,7 +78,10 @@ final class OutcomeMap
                 ),
                 'stepUpCompleted' => new OutcomeMapping(
                     outcome: Outcome::StepUpCompleted,
-                    channel: RiskEventKind::ProtectedActionSuccess,
+                    // The dedicated step-up completion event (22), NOT the
+                    // shared ProtectedActionSuccess channel: same trust
+                    // credit as event 8 in the state script, its own kind.
+                    channel: RiskEventKind::StepUpCompleted,
                     ledgerLegitimate: null,
                     writesAbuseMark: false,
                     serverConfirmed: true,

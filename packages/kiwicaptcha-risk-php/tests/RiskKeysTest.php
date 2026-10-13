@@ -51,15 +51,18 @@ final class RiskKeysTest extends TestCase
 
     public function testShortMasterIsRefusedAtTheDerivationBoundary(): void
     {
-        foreach (['', 'tiny', str_repeat(chr(0x42), 15)] as $master) {
+        foreach (['', 'tiny', str_repeat(chr(0x42), 15), str_repeat(chr(0x42), 31)] as $master) {
             try {
                 RiskKeys::fromMaster($master);
                 self::fail(sprintf('the %d-byte master must be refused', strlen($master)));
             } catch (\InvalidArgumentException $e) {
-                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage());
             }
         }
-        self::assertInstanceOf(RiskKeys::class, RiskKeys::fromMaster(str_repeat(chr(0x42), 16)));
+        // The 32-byte floor is the one both engines enforce: PHP refuses
+        // 31 bytes exactly where the Rust MIN_MASTER_BYTES guard does,
+        // so a master one engine accepts the other never refuses.
+        self::assertInstanceOf(RiskKeys::class, RiskKeys::fromMaster(str_repeat(chr(0x42), 32)));
     }
 
     public function testDifferentMasterDerivesDifferentKeys(): void

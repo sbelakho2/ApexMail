@@ -11,8 +11,9 @@ use KiwiCaptcha\Risk\Storage\OutcomeMarksStoreInterface;
  * The store-backed default marks reader: the session and principal
  * marks of the engine-derived pseudonyms, plus the agent mark for a
  * configured agent name and the ASN bucket mark when a dataset is
- * attached. It resolves no target: a login form's target enters through
- * a reader that sees the submitted identifier.
+ * attached. The attacked-target record of the request's resolved target
+ * pseudonym (when the engine carries one) is read from the live failure
+ * state, so a stuffed target forces the interactive step-up.
  */
 final class StoreMarksReader implements MarksReaderInterface
 {
@@ -40,7 +41,7 @@ final class StoreMarksReader implements MarksReaderInterface
             $own['asn'] = $this->asn->bucketId($request->sourceIp);
         }
 
-        return MarksView::read($this->marks, $own, null);
+        return MarksView::read($this->marks, $own, $request->target);
     }
 
     public function markTtlMs(): int

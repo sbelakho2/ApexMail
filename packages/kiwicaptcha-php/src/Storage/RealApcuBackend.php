@@ -15,14 +15,18 @@ namespace KiwiCaptcha\Storage;
  * APCu while a cli process does not, so the message names the
  * `apc.enable_cli` remedy for that case.
  *
- * Construction also refuses the cli SAPI outside test runners. A CLI
- * process (RoadRunner worker, queue consumer, command) owns a private
- * APCu segment invisible to the PHP-FPM workers that serve traffic.
- * Records stored from CLI can never be verified by the web tier and
- * vice versa. The one-host shared-segment contract of this adapter
- * only holds inside one web SAPI. Tests (phpunit) construct it for the
- * real-extension leg; production CLI hosts select the Redis or SQLite
- * store instead.
+ * Construction also refuses the cli SAPI unless both of two distinct
+ * inputs hold. `apc.enable_cli=1` is the precondition: APCu stays
+ * inert in a cli process without it, so no segment exists to refuse.
+ * It is a switch, not an acknowledgement, and granting it alone would
+ * let every RoadRunner worker construct against its own private
+ * segment, where (N-1)/N of the solves land in a foreign segment and
+ * fail at random. The acknowledgement is the constructor flag
+ * `allowPrivateCliSegment: true` (the Symfony bundle exposes it as
+ * `storage.apcu.single_process_cli`), and it is valid only for one
+ * long-lived process: a Swoole server that initialised APCu before
+ * fork. RoadRunner never qualifies. CLI hosts without the pair select
+ * the Redis or SQLite store instead.
  *
  * The atomicity promises are APCu's own: within one SAPI's segment the
  * region is shared memory guarded by APCu's internal lock,
@@ -32,19 +36,51 @@ namespace KiwiCaptcha\Storage;
 final class RealApcuBackend implements ApcuBackendInterface
 {
     /**
+     * @param \Closure|null $sapiEnvironment the simulated SAPI
+     *                                       environment for the cli
+     *                                       detection, an array of the
+     *                                       SAPI name and the raw
+     *                                       apc.enable_cli ini value;
+     *                                       defaults to reading the
+     *                                       real process. The seam the
+     *                                       constructor of
+     *                                       {@see ApcuStorage} forwards
+     *                                       its own probed values
+     *                                       through, so both layers
+     *                                       decide on one environment.
+     * @param bool          $allowPrivateCliSegment the single-process
+     *                                              acknowledgement: under
+     *                                              the cli SAPI the
+     *                                              backend constructs
+     *                                              only when this is
+     *                                              true AND the
+     *                                              apc.enable_cli ini is
+     *                                              on (the bundle knob
+     *                                              is
+     *                                              storage.apcu.single_process_cli).
+     *
      * @throws ApcuStorageException when the APCu extension is not
      *                              loaded or is disabled for this
      *                              process, or the process runs under
-     *                              the cli SAPI outside a test runner
+     *                              the cli SAPI without the
+     *                              apc.enable_cli ini AND the
+     *                              allowPrivateCliSegment flag
      */
-    public function __construct()
+    public function __construct(?\Closure $sapiEnvironment = null, bool $allowPrivateCliSegment = false)
     {
-        if (self::cliConstructionRefused(\PHP_SAPI, self::underTestRunner())) {
+        [$sapi, $enableCliRaw] = $sapiEnvironment !== null
+            ? $sapiEnvironment()
+            : [\PHP_SAPI, \ini_get('apc.enable_cli')];
+        if (self::cliConstructionRefused($sapi, self::apcEnableCliIni($enableCliRaw), $allowPrivateCliSegment)) {
             throw new ApcuStorageException(
-                'ApcuStorage refuses the cli SAPI: a CLI process (RoadRunner worker, queue '
-                . 'consumer, command) owns a private APCu segment invisible to the web tier '
-                . 'that serves traffic. Serve verification from a web SAPI (php-fpm) or '
-                . 'select the Redis/SQLite store for CLI hosts.'
+                'ApcuStorage refuses the cli SAPI without the single-process acknowledgement: a CLI process '
+                . '(RoadRunner worker, queue consumer, command) owns a private APCu segment invisible to the '
+                . 'web tier that serves traffic, so a challenge stored here can never be verified by the web '
+                . 'tier (or the reverse). apc.enable_cli=1 is only the precondition that gives a CLI process a '
+                . 'segment at all, so it is required in php.ini AND the construction needs the explicit '
+                . 'allowPrivateCliSegment: true flag (bundle option storage.apcu.single_process_cli), valid '
+                . 'only for one long-lived process (Swoole with APCu initialised before fork; RoadRunner never '
+                . 'qualifies). Otherwise select the Redis/SQLite store for CLI hosts.'
             );
         }
         if (!\function_exists('apcu_store')) {
@@ -60,22 +96,36 @@ final class RealApcuBackend implements ApcuBackendInterface
     }
 
     /**
-     * The cli-refusal decision, pure: the cli SAPI refuses outside a
-     * test runner, every other SAPI constructs.
+     * The cli-refusal decision, pure: the cli SAPI constructs only when
+     * the apc.enable_cli precondition AND the allowPrivateCliSegment
+     * acknowledgement hold together. Every other SAPI constructs, and
+     * the ini alone (the precondition without the acknowledgement)
+     * refuses exactly like the flag alone without the ini.
      */
-    public static function cliConstructionRefused(string $sapi, bool $underTestRunner): bool
+    public static function cliConstructionRefused(string $sapi, bool $apcEnableCliIni, bool $allowPrivateCliSegment = false): bool
     {
-        return $sapi === 'cli' && !$underTestRunner;
+        if ($sapi !== 'cli') {
+            return false;
+        }
+
+        return !($apcEnableCliIni && $allowPrivateCliSegment);
     }
 
     /**
-     * Whether a test runner owns the process (phpunit loads its
-     * TestCase before constructing storage fixtures). Outside a test
-     * runner the cli SAPI is refused.
+     * The apc.enable_cli ini read, parsed as a boolean the way PHP
+     * stores ini values: on is 1, true, on or yes (case-insensitive);
+     * everything else, including an unset entry (the extension is not
+     * loaded, so ini_get() answers false), is off.
+     *
+     * @param string|false $raw the ini_get('apc.enable_cli') answer
      */
-    private static function underTestRunner(): bool
+    public static function apcEnableCliIni(string|false $raw): bool
     {
-        return \class_exists(\PHPUnit\Framework\TestCase::class, false);
+        if ($raw === false) {
+            return false;
+        }
+
+        return \in_array(strtolower(trim($raw)), ['1', 'true', 'on', 'yes'], true);
     }
 
     public function fetch(string $key): ApcuFetchOutcome

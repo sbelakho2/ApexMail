@@ -348,9 +348,46 @@ final class Configuration implements ConfigurationInterface
                     ->min(10)
                     ->max(Config::MAX_TTL_SECS)
                 ->end()
-                ->scalarNode('storage')
-                    ->info('Service id implementing KiwiCaptcha\StorageInterface. Defaults to the in-memory ArrayStorage, which is only allowed in test/dev environments — in prod a shared storage is required or the container fails to compile. production verification also REQUIRES an atomic backend (KiwiCaptcha\AtomicStorageInterface — e.g. RedisStorage) so strict single-use holds under concurrency; the explicitly-named allow_best_effort_storage: true option is the escape hatch for deliberately weaker semantics. Siteverify additionally ALWAYS requires an atomic backend when siteverify_secrets is configured (its one-success provider contract depends on it).')
+                ->variableNode('storage')
+                    ->info('Service id implementing KiwiCaptcha\StorageInterface (the string form, e.g. "kiwicaptcha.storage.redis"), or the object form of the bundled APCu adapter: storage: { apcu: { single_process_cli: true|false } } builds KiwiCaptcha\Storage\ApcuStorage. Defaults to the in-memory ArrayStorage, which is only allowed in test/dev environments — in prod a shared storage is required or the container fails to compile. production verification also REQUIRES an atomic backend (KiwiCaptcha\AtomicStorageInterface — e.g. RedisStorage) so strict single-use holds under concurrency; the explicitly-named allow_best_effort_storage: true option is the escape hatch for deliberately weaker semantics. Siteverify additionally ALWAYS requires an atomic backend when siteverify_secrets is configured (its one-success provider contract depends on it). On the APCu object form: single_process_cli is the single-process acknowledgement for a CLI host, valid ONLY for one long-lived process (a Swoole server that initialised APCu before fork; RoadRunner never qualifies — every request hops worker processes, so records land in foreign private segments), and apc.enable_cli=1 stays the separate ini precondition that gives a CLI process a segment at all. Under the web SAPI the adapter builds one shared segment per host and the flag stays false.')
                     ->defaultValue('kiwi_captcha.storage.array')
+                    ->validate()
+                        ->always()
+                        ->then(static function (mixed $value): mixed {
+                            // The string form: a service id, possibly a
+                            // %parameter% placeholder. The object form:
+                            // exactly {apcu: {single_process_cli: bool}},
+                            // normalized here so the extension receives
+                            // one shape.
+                            if (\is_string($value)) {
+                                if (trim($value) === '') {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage must be a non-empty service id string, or the object form storage: { apcu: { single_process_cli: bool } }');
+                                }
+
+                                return $value;
+                            }
+                            if (\is_array($value)) {
+                                if (array_keys($value) !== ['apcu']) {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage object form accepts exactly the key "apcu" (a string value is a service id)');
+                                }
+                                $apcu = $value['apcu'];
+                                if (!\is_array($apcu)) {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage.apcu must be a map with the optional boolean key single_process_cli');
+                                }
+                                $unknown = array_diff(array_keys($apcu), ['single_process_cli']);
+                                if ($unknown !== []) {
+                                    throw new InvalidConfigurationException(sprintf('kiwi_captcha.storage.apcu accepts only the key single_process_cli (got "%s")', implode(', ', array_map('strval', $unknown))));
+                                }
+                                $flag = $apcu['single_process_cli'] ?? false;
+                                if (!\is_bool($flag)) {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage.apcu.single_process_cli must be a boolean: true acknowledges the one-long-lived-process CLI segment (Swoole with APCu initialised before fork), false keeps the web-tier shared segment');
+                                }
+
+                                return ['apcu' => ['single_process_cli' => $flag]];
+                            }
+                            throw new InvalidConfigurationException('kiwi_captcha.storage must be a service id string, or the object form storage: { apcu: { single_process_cli: bool } }');
+                        })
+                    ->end()
                 ->end()
                 ->booleanNode('allow_best_effort_storage')
                     ->info('explicitly-named escape hatch accepting non-atomic storage semantics (e.g. Psr6Storage, whose consume is NOT atomic under concurrency — two racing requests can both win). Default false: production verification requires KiwiCaptcha\AtomicStorageInterface. NEVER set true for Siteverify — its one-success contract is impossible on a non-atomic backend and the container refuses the combination regardless.')
@@ -659,6 +696,14 @@ final class Configuration implements ConfigurationInterface
                                             ->thenInvalid('risk.scopes.*.target_field must be a form field name of 1-128 characters of [A-Za-z0-9._:-]')
                                         ->end()
                                     ->end()
+                                    ->scalarNode('email_field')
+                                        ->info('The form field carrying the address this scope\'s step_up_email grant proves (default "email"). A redeemed grant binds to the pseudonym of exactly the address this field submits, so the factor can never be spent by a form that uses a different address than the one the code was delivered to.')
+                                        ->defaultValue('email')
+                                        ->validate()
+                                            ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                            ->thenInvalid('risk.scopes.*.email_field must be a form field name of 1-128 characters of [A-Za-z0-9._:-]')
+                                        ->end()
+                                    ->end()
                                     ->floatNode('stake_usd')
                                         ->info('Per-action stake override in USD (the value of one successful abuse of THIS action, e.g. a comment submission is worth less than a bank transfer). When set it replaces the value_class default for the pricing ceiling check, so low-value submission forms need not carry a step-up minimum.')
                                         ->defaultNull()
@@ -669,6 +714,37 @@ final class Configuration implements ConfigurationInterface
                                         ->defaultValue('standard')
                                         ->values(['low', 'standard', 'high', 'critical'])
                                     ->end()
+                                    ->enumNode('login_step_up')
+                                        ->info('The post-credential step-up policy of this scope when a firewall login resolves to it (default "risk": only a StepUp-or-stronger engine decision withholds the session). "always" withholds the session on EVERY interactive login under the scope, an Allow included, until a principal factor (totp, email_otp, webauthn) completes; the first-attempt gate reads this knob, never the challenge endpoint, so issuance stays a widget flow. Scope "minimum" is deliberately not usable for this: it would demand step-up at issuance and block every login before any credential check.')
+                                        ->defaultValue('risk')
+                                        ->values(['risk', 'always'])
+                                    ->end()
+                                    ->enumNode('carrier')
+                                        ->info('The factor that carries this scope\'s step-up demand when one is raised (default null = no named carrier). "step_up_email" is the anonymous-completable email-ownership grant: the 403 step-up body advertises the begin path and the validator honors the completed grant in place of a solved token. The named factor must be enabled: the doctor FAILs a carrier whose factor the container never wires.')
+                                        ->defaultNull()
+                                        ->values(['step_up_email', 'email_otp', 'totp', 'webauthn'])
+                                    ->end()
+                                    ->integerNode('step_up_above')
+                                        ->info('The decision-score rung above which this scope\'s assessment escalates to the step-up carrier (default null = the composed action alone decides; 0..1000 fixed point). Below the rung the scope stays a plain proof-of-work flow, so an ordinary low-risk submission is never asked for a second factor. The doctor\'s value-class verdict accepts this knob as the escalation carrier for a low-class scope.')
+                                        ->defaultNull()
+                                        ->min(0)
+                                        ->max(1000)
+                                    ->end()
+                                    ->enumNode('operation_identity_source')
+                                        ->info('THE SERVER-AUTHORITATIVE OPERATION IDENTITY SOURCE of this scope\'s step-up binding (default null = none). "request_attribute" binds the step-up to the server-owned logical operation id the application places under KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE (the idempotency key it mints itself — never a raw client value alone), HMAC-split into operationIdentityDigest plus operationContentDigest over the canonical amount/currency/recipient contents. A financial_action scope left on null FAILs the doctor: a high-value config without a server-authoritative operation identity source cannot refuse cross-authorization (a step-up for tx-001 must never authorize tx-002).')
+                                        ->values(['request_attribute', null])
+                                        ->defaultNull()
+                                    ->end()
+                                    ->arrayNode('operation_content_fields')
+                                        ->info('THE PROTECTED-CONTENT RECIPE of this scope\'s operation binding: the named request fields whose submitted values feed the operationContentDigest (the business contents of the protected action, e.g. amount_minor, currency, beneficiary_id). The recipe rides the configured operation resolver, so the demand binds the actual transfer contents and a changed amount, currency or beneficiary can never ride an authorization minted for the original ones. A high or critical value_class scope with an operation identity source but NO recipe refuses the container build and FAILs the doctor: a content digest over nothing would authorize anything.')
+                                        ->defaultValue([])
+                                        ->scalarPrototype()
+                                            ->validate()
+                                                ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                                ->thenInvalid('risk.scopes.*.operation_content_fields entries must be request field names of 1-128 characters of [A-Za-z0-9._:-]')
+                                            ->end()
+                                        ->end()
+                                    ->end()
                                 ->end()
                             ->end()
                             ->defaultValue([
@@ -677,8 +753,27 @@ final class Configuration implements ConfigurationInterface
                                 'login' => ['id' => null, 'base_risk' => 120, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
                                 'password_reset' => ['id' => null, 'base_risk' => 180, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
                                 'admin_login' => ['id' => null, 'base_risk' => 300, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true, 'value_class' => 'standard'],
-                                'financial_action' => ['id' => null, 'base_risk' => 400, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true, 'value_class' => 'standard'],
+                                'financial_action' => ['value_class' => 'high', 'carrier' => 'totp', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
                             ])
+                        ->end()
+                        ->arrayNode('login_scopes')
+                            ->info('The firewall-to-scope map of the post-credential first-attempt gate: each entry maps a Symfony firewall name (the segment of the security.firewall.map.context.<name> request attribute) to the risk scope that firewall\'s interactive logins book under. Every entry arms the gate, so a deployment with a user firewall and an admin firewall carries two independent login policies (novelty, target field, login_step_up) in one container: AuthenticationTokenCreatedEvent resolves the scope per event through this map. An event whose firewall has no entry skips the gate and counts kiwi_login_guard_unmapped_total. The abuse profiles default the map to {main: login}; every other posture arms the gate only through an explicit entry. Each mapped scope name must be a key of risk.scopes.')
+                            ->useAttributeAsKey('firewall')
+                            ->scalarPrototype()
+                                ->cannotBeEmpty()
+                                ->validate()
+                                    ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                    ->thenInvalid('risk.login_scopes values must be scope names of 1-128 characters of [A-Za-z0-9._:-]')
+                                ->end()
+                            ->end()
+                            ->defaultValue([])
+                            ->validate()
+                                ->ifTrue(static fn (array $v): bool => \array_filter(
+                                    \array_keys($v),
+                                    static fn ($k): bool => !\is_string($k) || preg_match('/^[A-Za-z0-9._-]{1,128}$/D', $k) !== 1,
+                                ) !== [])
+                                ->thenInvalid('risk.login_scopes keys must be firewall names of 1-128 characters of [A-Za-z0-9._-]')
+                            ->end()
                         ->end()
                         ->arrayNode('unknown_scope')
                             ->info('Behavior for scopes that are not configured. minimum (default): unknown scopes are assessed under a synthetic policy (base_risk 100, minimum Sha20, degraded Sha20, ladder defaults) — a typo\'d scope string stays fail-safe (never silently weak) without taking the site down. reject: TRUE rejection — the controller returns the risk-denied response (HTTP 429 RISK_DENIED) without issuing any challenge. baseline: the adaptive engine declines to evaluate and the controller issues the default profile (baseline Kiwi verification still applies).')
@@ -997,9 +1092,10 @@ final class Configuration implements ConfigurationInterface
                                     ->cannotBeEmpty()
                                 ->end()
                                 ->integerNode('ttl_secs')
-                                    ->info("Cookie lifetime (default 30 minutes; the spec 15-30 minute window; 0 = session cookie, no Max-Age). This is the BROWSER cookie lifetime only: the server-side risk-state TTL is risk.session_state_ttl_secs and is always positive.")
+                                    ->info("Cookie lifetime (default 30 minutes; the spec 15-30 minute window; 0 = session cookie, no Max-Age). This is the BROWSER cookie lifetime only: the server-side risk-state TTL is risk.session_state_ttl_secs and is always positive. Bounded 0..43200 (12 h): the server-side session tags live 2x this value, and 24 h is the canonical session-tag class ceiling.")
                                     ->defaultValue(1800)
                                     ->min(0)
+                                    ->max(43_200)
                                 ->end()
                                 ->scalarNode('path')
                                     ->defaultValue('/')
@@ -1034,6 +1130,36 @@ final class Configuration implements ConfigurationInterface
                                         && !str_starts_with((string) ($c['name'] ?? ''), '__Host-');
                                 })
                                 ->thenInvalid('risk.continuity_cookie: samesite: none requires an effectively Secure cookie (secure: true, or a __Host- prefixed name) — modern browsers reject a SameSite=None cookie without Secure')
+                            ->end()
+                        ->end()
+                        ->arrayNode('trusted_device')
+                            ->info('First-party trusted-device cookie: a random 16-byte nonce (hex, HttpOnly, SameSite=Lax) that outlives the continuity window so a returning user is not novel on every visit. The engine stores only the HMAC pseudonym under the principal. Tags are capped at 16 per principal and purged by forgetDevices.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->scalarNode('cookie_name')
+                                    ->defaultValue('__Host-kiwi-device')
+                                    ->cannotBeEmpty()
+                                ->end()
+                                ->integerNode('ttl')
+                                    ->info('Cookie lifetime in seconds (default 90 days). Bounded 60..31536000 (365 d): the server-side device tags live exactly this long, and a zero or sub-minute device binding would either never vouch or outlive its class ceiling — 0 is deliberately forbidden (a disabled trusted-device cookie is an operator decision, not a degenerate TTL).')
+                                    ->defaultValue(7_776_000)
+                                    ->min(60)
+                                    ->max(31_536_000)
+                                ->end()
+                                ->scalarNode('path')
+                                    ->defaultValue('/')
+                                ->end()
+                                ->enumNode('samesite')
+                                    ->values(['lax', 'strict', 'none'])
+                                    ->defaultValue('lax')
+                                ->end()
+                                ->booleanNode('http_only')
+                                    ->defaultValue(true)
+                                ->end()
+                                ->enumNode('secure')
+                                    ->values([true, false, null])
+                                    ->defaultNull()
+                                ->end()
                             ->end()
                         ->end()
                         ->scalarNode('region')
@@ -1099,6 +1225,13 @@ final class Configuration implements ConfigurationInterface
                                 ->booleanNode('enabled')->defaultTrue()->end()
                             ->end()
                         ->end()
+                        ->arrayNode('principal_networks')
+                            ->info('The principal first-seen network tag store (continuity, the novel-network gate and device trust). migrate_legacy (default true for one minor release) keeps deployments that already recorded under the pre-cluster-slot shared-tag key form (pnet:{kiwi:<ns>}:<principal>) from losing their history after the key form moved the principal into the hash tag (pnet:{kiwi:<ns>:<principal>}): on a seen or has_trusted miss the store probes the legacy key once per principal, copies its fields into the current key and deletes the legacy one. Turn it off after one release cycle, when no legacy keys remain.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->booleanNode('migrate_legacy')->defaultTrue()->end()
+                            ->end()
+                        ->end()
                         ->arrayNode('outcomes')
                             ->info('The typed outcomes plane (application-reported outcomes onto risk events, the outcome ledger and long-memory marks). auto_bridge (default true) enables the Symfony security auto-bridge: a subscriber that translates LoginSuccessEvent into an authenticationSuccess report on the principal pseudonym, and LoginFailureEvent plus observable CheckPassportEvent errors into authenticationFailure reports on the target pseudonym (when the scope\'s target_field is configured) or the session pseudonym. The bridge never breaks authentication (every report is log-and-continue) and never carries a raw identifier into a handle. scope names the risk scope the auth events book under; the bridge arms only when the risk engine is on, the outcomes surface and the security event classes exist, and this scope is configured, so leaving it null keeps the bridge absent and an advisory names the missing knob.')
                             ->addDefaultsIfNotSet()
@@ -1120,7 +1253,7 @@ final class Configuration implements ConfigurationInterface
                                     ->defaultFalse()
                                 ->end()
                                 ->scalarNode('scope')
-                                    ->info('The risk scope name (a key of risk.scopes) whose policy the framework auth events book under, e.g. "login". Required for the auto-bridge to arm; null (default) leaves the bridge unregistered.')
+                                    ->info('The risk scope name (a key of risk.scopes) whose policy the framework auth events book under, e.g. "login". Null (default) infers the scope when the risk.login_scopes map resolves to exactly one scope; several differing login scopes have no single target, so the bridge then stays unregistered until this knob names the scope explicitly (the doctor fails such a deployment).')
                                     ->defaultNull()
                                     ->validate()
                                         ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
@@ -1168,7 +1301,7 @@ final class Configuration implements ConfigurationInterface
                             ->end()
                         ->end()
                         ->arrayNode('evidence')
-                            ->info('THE PLANE-2 EVIDENCE STAGE of the adaptive engine (interaction_anomaly and solve_anomaly over the telemetry-v1 payload, plus the decoy escalation). The engine composes the stage automatically whenever an assessment carries evidence inputs (the token\'s telemetry payload, the measured solve facts); an absent or rejected payload is the neutral-unknown state and the stage may only raise the composed action. The telemetry knob is the BROWSER ARM SWITCH: it renders data-kiwi-telemetry on the widget container, and the driver\'s collector then attaches to the widget\'s host form and the solved token carries the coarse aggregate payload (event-class counts, one 4-bit entropy value, a focus-transition count, a paste ratio, the sample count; no raw coordinates, no key values, no timing series ever leave the page). Default: "minimal" under every protection profile, "full" under abuse_first and high_abuse. The payload is client-controlled and forgeable: probabilistic evidence for the engine, never the security boundary.')
+                            ->info('THE PLANE-2 EVIDENCE STAGE of the adaptive engine (interaction_anomaly and solve_anomaly over the telemetry-v1 payload, plus the decoy escalation). The engine composes the stage automatically whenever an assessment carries evidence inputs (the token\'s telemetry payload, the measured solve facts); an absent or rejected payload is the neutral-unknown state and the stage may only raise the composed action. The telemetry knob is the BROWSER ARM SWITCH: it renders data-kiwi-telemetry on the widget container, and the driver\'s collector then attaches to the widget\'s host form and the solved token carries the coarse aggregate payload (event-class counts, one 4-bit entropy value, a focus-transition count, a paste ratio, the sample count; no raw coordinates, no key values, no timing series ever leave the page). Default: "off" under every privacy-bearing profile and the profile-less default (behavioral telemetry off by default), "full" under abuse_first and high_abuse; under privacy_strict the arm is pinned off and no operator value re-arms it through the composition. The payload is client-controlled and forgeable: probabilistic evidence for the engine, never the security boundary.')
                             ->addDefaultsIfNotSet()
                             ->children()
                                 ->enumNode('telemetry')
@@ -1205,7 +1338,7 @@ final class Configuration implements ConfigurationInterface
                             ->canBeEnabled()
                             ->children()
                                 ->scalarNode('scope')
-                                    ->info('The risk scope name (a key of risk.scopes) the step-up flow books under, e.g. "login". Required when the plane is enabled; the controller derives the challenge context under this scope.')
+                                    ->info('The fallback risk scope name (a key of risk.scopes) the step-up flow books under when no per-event scope applies: the anonymous email-ownership carrier and a step-up begun outside a login-guard pending token. Null (default) derives the fallback from risk.login_scopes (the first mapped scope, "login" otherwise). The principal step-up plane needs no configured scope: the first-attempt gate stamps the scope it resolved for the login onto the pending token, and the step-up flow books under that scope per event.')
                                     ->defaultNull()
                                     ->validate()
                                         ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
@@ -1237,11 +1370,90 @@ final class Configuration implements ConfigurationInterface
                                     ->defaultFalse()
                                 ->end()
                                 ->scalarNode('hmac_secret')
-                                    ->info('HMAC master of the step-up plane: the ticket signing key, the stored-code hash key and the completion-credit idempotency key all derive from it through purpose-separated HKDF derivations. MUST be a high-entropy secret of at least 32 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter literal is refused at compile time and an env-resolved secret is floor-checked when the services are constructed. When null (default) it derives from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated secret is recommended so a compromise of one never leaks the other.')
+                                    ->info('HMAC master of the step-up plane: the ticket signing key, the stored-code hash key and the completion-credit idempotency key all derive from it through purpose-separated HKDF derivations. MUST be a high-entropy secret of at least 32 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter literal is refused at compile time and an env-resolved secret is floor-checked when the services are constructed. When null (default) it derives from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated secret is recommended so a compromise of one never leaks the other. Superseded by keyring when that is configured.')
                                     ->defaultNull()
                                     ->validate()
                                         ->ifTrue(static fn ($v): bool => self::isShortSecret($v))
                                         ->thenInvalid('risk.step_up.hmac_secret must be a string of at least 32 bytes when configured (the same floor as secret_key): a shorter step-up master weakens the ticket signatures, the code hashes and the credit idempotency at once. An %%env()%% placeholder is length-checked when the step-up services are constructed')
+                                    ->end()
+                                ->end()
+                                ->arrayNode('keyring')
+                                    ->info('THE ROTATION-CAPABLE MASTER SET of the step-up plane (default off: the plane derives its single master from hmac_secret, the risk master_secret or the captcha secret_key, the legacy fallback order). Configuring secrets_by_kid switches the plane onto the keyring: current_kid is the only kid the ticket signing mints with, secrets_by_kid carries the current plus the historical masters (each at least 32 bytes, the same floor as secret_key), and revoked_kids refuses compromised kids even while their secret is still configured. Rotation: keep the superseded kid and its secret in secrets_by_kid for at least the maximum demand lifetime (the challenge, code and demand TTLs of the plane), bump current_kid to the new kid, and drop a historical kid only after no demand of that lifetime can still be outstanding. A ticket whose kid is revoked, unknown or ahead of the newest configured kid fails verification fail-closed. The plane\'s other derivations (the stored-code hashes, the sender-log hash and the completion-credit idempotency) key on the current kid\'s secret. An %%env()%% placeholder is length-checked when the services are constructed.')
+                                    ->addDefaultsIfNotSet()
+                                    ->children()
+                                        ->integerNode('current_kid')
+                                            ->info('The signing kid every fresh ticket is minted with (1..4294967295). Required (and resolved) once secrets_by_kid is configured; it must name a key of secrets_by_kid and must never be revoked.')
+                                            ->defaultNull()
+                                            ->min(1)
+                                            ->max(4294967295)
+                                        ->end()
+                                        ->arrayNode('secrets_by_kid')
+                                            ->info('The step-up masters keyed by canonical kid (map of kid => secret, each >= 32 bytes, the same floor as secret_key). The current kid and every historical kid still inside the maximum demand lifetime live here. Configuring at least one entry switches the plane onto the keyring.')
+                                            ->scalarPrototype()->end()
+                                            ->useAttributeAsKey('kid')
+                                            ->normalizeKeys(false)
+                                            ->defaultValue([])
+                                            ->validate()
+                                                ->ifTrue(static function (array $secrets): bool {
+                                                    // Two distinct map keys that canonicalize
+                                                    // to the same integer would silently
+                                                    // overwrite one historical secret, so
+                                                    // the duplicate is refused before any
+                                                    // shape rule.
+                                                    $seen = [];
+                                                    foreach (\array_keys($secrets) as $kid) {
+                                                        $canonical = (int) $kid;
+                                                        if (isset($seen[$canonical])) {
+                                                            return true;
+                                                        }
+                                                        $seen[$canonical] = true;
+                                                    }
+
+                                                    return false;
+                                                })
+                                                ->thenInvalid('risk.step_up.keyring.secrets_by_kid keys must be distinct canonical kids: two entries that resolve to the same integer would silently overwrite one historical master')
+                                            ->end()
+                                            ->validate()
+                                                ->ifTrue(static function (array $secrets): bool {
+                                                    foreach (\array_keys($secrets) as $kid) {
+                                                        if (\is_int($kid)) {
+                                                            if ($kid < 1 || $kid > 4294967295) {
+                                                                return true;
+                                                            }
+
+                                                            continue;
+                                                        }
+                                                        if (preg_match('/^[1-9][0-9]*$/D', (string) $kid) !== 1) {
+                                                            return true;
+                                                        }
+                                                        $canonical = (int) $kid;
+                                                        if ($canonical < 1 || $canonical > 4294967295) {
+                                                            return true;
+                                                        }
+                                                    }
+
+                                                    return false;
+                                                })
+                                                ->thenInvalid('risk.step_up.keyring.secrets_by_kid keys must be canonical decimal integers in 1..4294967295: a historical kid is written without leading zeros and without text, so "02", "0" and "foo" are all refused')
+                                            ->end()
+                                            ->validate()
+                                                ->ifTrue(static function (array $secrets): bool {
+                                                    foreach ($secrets as $v) {
+                                                        if (!\is_string($v) || self::isShortSecret($v)) {
+                                                            return true;
+                                                        }
+                                                    }
+
+                                                    return false;
+                                                })
+                                                ->thenInvalid('risk.step_up.keyring.secrets_by_kid values must be strings of at least 32 bytes (the same floor as secret_key): a shorter historical master cannot verify and would only surface when a rotation makes it live. Rotate to a randomly generated 32-byte-or-longer secret. An %%env()%% placeholder is length-checked when the step-up services are constructed')
+                                            ->end()
+                                        ->end()
+                                        ->arrayNode('revoked_kids')
+                                            ->info('Compromised step-up kids: verification fails even when the secret is still configured. Revocation always wins over rotation.')
+                                            ->integerPrototype()->min(1)->max(4294967295)->end()
+                                            ->defaultValue([])
+                                        ->end()
                                     ->end()
                                 ->end()
                                 ->scalarNode('begin_path')
@@ -1278,6 +1490,32 @@ final class Configuration implements ConfigurationInterface
                                         ->end()
                                     ->end()
                                 ->end()
+                                ->arrayNode('email_ownership')
+                                    ->info('The anonymous email-ownership factor behind the step_up_email scope carrier (default on when the plane is on): begin answers a 6-digit code delivered to the presented address (10-minute TTL, only an HMAC-derived pseudonym stored), complete answers a single-use grant bound to (scope, continuity session, chain id) that the validator honors in place of a solved token when the step-up demand stands. A code is only sent for a demand the engine raised (the demand id the step-up 403 body carries), each demand funds one delivery plus one resend after 60 s, and the begin bounds apply on top: 3 per hour per address, max_per_domain per hour per address domain, 10 per hour per source and max global per hour. The routes are application-registered at StepUpController::emailBegin / emailComplete; the begin path is the one the step-up 403 body advertises.')
+                                    ->addDefaultsIfNotSet()
+                                    ->children()
+                                        ->booleanNode('enabled')
+                                            ->info('The factor is on whenever the plane is on (default true); disabling it leaves the step_up_email carrier without its factor, so the doctor FAILs any scope that still names the carrier.')
+                                            ->defaultTrue()
+                                        ->end()
+                                        ->scalarNode('sender')
+                                            ->info('Service id of the EmailOwnershipCodeSenderInterface the application binds (the code delivery to the raw presented address; there is no account record to look up). Null (default) wires the logging sender, so a deployment must bind a real one before the carrier carries real traffic.')
+                                            ->defaultNull()
+                                        ->end()
+                                        ->integerNode('code_ttl_secs')
+                                            ->info('Lifetime of the emailed code, its challenge record, the issued grant and the step-up demand in seconds (default 600, bounded 60..1800).')
+                                            ->defaultValue(600)
+                                            ->min(60)
+                                            ->max(1800)
+                                        ->end()
+                                        ->integerNode('max_per_domain')
+                                            ->info('Hourly begin bound per address domain (default 30, bounded 1..1000): the keyed pseudonym of the domain (never the domain itself) is the counter key, so one domain cannot absorb the whole deployment mail budget.')
+                                            ->defaultValue(30)
+                                            ->min(1)
+                                            ->max(1000)
+                                        ->end()
+                                    ->end()
+                                ->end()
                                 ->arrayNode('handlers')
                                     ->info('The handler registry inputs: the built-in reference handlers under their fixed names, plus the application\'s own handlers as name -> service id pairs (each service implements StepUpHandlerInterface; the registry refuses an unknown or non-implementing service at compile time).')
                                     ->addDefaultsIfNotSet()
@@ -1295,7 +1533,7 @@ final class Configuration implements ConfigurationInterface
                                                     ->end()
                                                 ->end()
                                                 ->scalarNode('sender')
-                                                    ->info('Service id of the StepUpCodeSenderInterface the application binds (the code delivery: its mailer mapping the principal pseudonym to the address). Null (default) wires the logging dev sender — production must bind a real sender, the codes are the entire secret of this handler.')
+                                                    ->info('Service id of the StepUpCodeSenderInterface the application binds (the code delivery: its mailer mapping the principal pseudonym to the address). Null (default) auto-wires the bundle\'s own mailer adapter when the symfony/mailer component is installed (the recipient resolves from the pending login\'s authenticated user), and the logging dev sender otherwise. A production build refuses an enabled factor left on the logging sender: the codes are the entire secret of this handler.')
                                                     ->defaultNull()
                                                 ->end()
                                             ->end()
@@ -1374,10 +1612,6 @@ final class Configuration implements ConfigurationInterface
                                         ->end()
                                     ->end()
                                 ->end()
-                            ->end()
-                            ->validate()
-                                ->ifTrue(static fn (array $v): bool => $v['enabled'] && $v['scope'] === null)
-                                ->thenInvalid('risk.step_up.scope is required when the step-up plane is enabled — the controller derives every challenge context under a configured risk scope (add the scope to risk.scopes and name it here)')
                             ->end()
                             ->validate()
                                 ->ifTrue(static function (array $v): bool {

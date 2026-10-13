@@ -46,6 +46,7 @@ final class EvidenceCompositionTestKernel extends TestKernel
                 // decoy-escalation reader.
                 'protection_profile' => 'abuse_first',
                 'risk' => [
+                    'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                     'enabled' => true,
                     'redis_service' => 'kiwi_e2e_redis',
                     'namespace' => 'e2e-evidence',

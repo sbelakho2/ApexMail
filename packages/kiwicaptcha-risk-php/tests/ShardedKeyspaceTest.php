@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk\Tests;
 
+use KiwiCaptcha\Risk\DeploymentNamespace;
 use KiwiCaptcha\Risk\Storage\KeyspaceMode;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use PHPUnit\Framework\TestCase;
@@ -150,5 +151,60 @@ final class ShardedKeyspaceTest extends TestCase
         self::assertSame(KeyspaceMode::Legacy, KeyspaceMode::fromMarker('legacy'));
         self::assertSame(KeyspaceMode::Sharded, KeyspaceMode::fromMarker('sharded'));
         self::assertNull(KeyspaceMode::fromMarker('other'));
+    }
+
+    /**
+     * The legacy consolidated assessment key set shares one cluster
+     * slot, target dimension included. The script touches the ten
+     * observation keys, the two first-seen tag records, the ledger
+     * slot and the three target keys in one invocation, so a target
+     * key on its own family tag would be refused server-side with a
+     * cross-slot error. Pure slot math over the canonical builders.
+     */
+    public function testLegacyConsolidatedKeysWithTargetShareOneSlot(): void
+    {
+        $slotOf = static fn (string $key): int => RedisRiskStateStore::crc16(
+            substr($key, strpos($key, '{') + 1, (int) strpos($key, '}') - (int) strpos($key, '{') - 1),
+        ) & 0x3FFF;
+
+        $ns = 'slotmix';
+        $epoch = 12345;
+        $keys = RedisRiskStateStore::keysFor(
+            $ns,
+            DeploymentNamespace::VERSION_LEGACY,
+            $epoch,
+            str_repeat('b', 32),
+            str_repeat('a', 32),
+            str_repeat('c', 32),
+            $epoch,
+            str_repeat('e', 32),
+            str_repeat('d', 32),
+            str_repeat('f', 32),
+            null,
+            null,
+            str_repeat('7', 32),
+        );
+        $session = str_repeat('0', 32);
+        $keys[] = "{kiwi:{$ns}}:risk:ctx:{$session}";
+        $keys[] = "{kiwi:{$ns}}:risk:tls:{$session}";
+        $keys[] = "{kiwi:{$ns}}:outcome:" . str_repeat('8', 32);
+        $keys = [...$keys, ...KeyspaceMode::targetStateKeys($ns, '5e2a', KeyspaceMode::Legacy)];
+        self::assertCount(16, $keys, 'the consolidated key set is pinned');
+        self::assertSame(
+            '{kiwi:slotmix}:risk:tgt:5e2a',
+            $keys[13],
+            'the legacy target keys ride the shared namespace tag',
+        );
+        $slots = array_map($slotOf, $keys);
+        self::assertCount(1, array_unique($slots), 'every key of one invocation hashes to one slot');
+
+        // The sharded layout keeps the target family on its own tag and
+        // hashes away from the namespace tag (slots 8303 vs 15411 for
+        // this namespace), so the sharded store runs its target op on
+        // the endpoint that owns the family.
+        $sharded = KeyspaceMode::targetStateKeys($ns, '5e2a', KeyspaceMode::Sharded);
+        self::assertSame('{kiwi:slotmix:target:5e}:risk:tgt:5e2a', $sharded[0]);
+        self::assertSame(8303, $slotOf($sharded[0]));
+        self::assertSame(15411, $slotOf($keys[0]));
     }
 }

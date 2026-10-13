@@ -945,12 +945,17 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
 
     /**
      * Store a fresh pending challenge record through the guarded
-     * storage and return it for later consumption.
+     * storage and return it for later consumption. The label derives
+     * the nonce (a 32-byte digest, the record contract) and the prefix
+     * is the derived challenge|salt| spelling, so the fixture is a
+     * record the strict decoder accepts.
      */
     private function storePendingRecord(RedisStorage $storage, string $nonce): \KiwiCaptcha\ChallengeRecord
     {
+        $salt = base64_encode(substr(hash('sha256', $nonce.'-salt', true), 0, 16));
+        $challenge = '0';
         $record = \KiwiCaptcha\ChallengeRecord::fromArray([
-            'nonce' => $nonce,
+            'nonce' => base64_encode(hash('sha256', $nonce, true)),
             'scope' => 'login',
             'binding_tag' => 'b',
             'issued_at' => time(),
@@ -960,9 +965,9 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
             't' => 0,
             'p' => 0,
             'target_bits' => 8,
-            'salt' => '00',
-            'prefix' => '0000',
-            'challenge' => '0',
+            'salt' => $salt,
+            'prefix' => $challenge.'|'.$salt.'|',
+            'challenge' => $challenge,
             'min_duration_ms' => 0,
             'issued_at_ns' => 1234567890123456,
             'protocol_version' => 2,

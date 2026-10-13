@@ -35,18 +35,18 @@ impl RiskKeys {
     pub const INFO_EVENT: &'static [u8] = b"event";
     pub const INFO_TARGET: &'static [u8] = b"target";
 
-    /// The minimum master-secret length: the same 16-byte core contract
-    /// the PHP `RiskKeys::fromMaster` enforces.
-    pub const MIN_MASTER_BYTES: usize = 16;
+    /// The minimum master-secret length: the same 32-byte floor the
+    /// PHP `RiskKeys::fromMaster` enforces.
+    pub const MIN_MASTER_BYTES: usize = 32;
 
     /// Derives the five keys with hkdf-sha256 (salt `kiwicaptcha-risk-v1`,
     /// 32-byte output per info), refusing a master shorter than the
-    /// 16-byte minimum at the derivation boundary.
+    /// 32-byte minimum at the derivation boundary.
     ///
     /// # Errors
     ///
     /// [`RiskError::InvalidMasterLength`] when `master` is shorter than
-    /// 16 bytes.
+    /// 32 bytes.
     pub fn try_from_master(master: &[u8]) -> Result<RiskKeys, RiskError> {
         if master.len() < Self::MIN_MASTER_BYTES {
             return Err(RiskError::InvalidMasterLength(master.len()));
@@ -59,11 +59,11 @@ impl RiskKeys {
     ///
     /// # Panics
     ///
-    /// Panics when the master is shorter than the 16-byte minimum; use
+    /// Panics when the master is shorter than the 32-byte minimum; use
     /// [`RiskKeys::try_from_master`] for a fallible path.
     pub fn from_master(master: &[u8]) -> RiskKeys {
         Self::try_from_master(master)
-            .expect("the risk master secret must be at least 16 bytes; use try_from_master for a fallible path")
+            .expect("the risk master secret must be at least 32 bytes; use try_from_master for a fallible path")
     }
 
     fn derive(master: &[u8]) -> RiskKeys {
@@ -116,7 +116,11 @@ mod tests {
             RiskKeys::try_from_master(&[0x42; 15]),
             Err(RiskError::InvalidMasterLength(15))
         ));
-        assert!(RiskKeys::try_from_master(&[0x42; 16]).is_ok());
+        assert!(matches!(
+            RiskKeys::try_from_master(&[0x42; 31]),
+            Err(RiskError::InvalidMasterLength(31))
+        ));
+        assert!(RiskKeys::try_from_master(&[0x42; 32]).is_ok());
     }
 
     #[test]

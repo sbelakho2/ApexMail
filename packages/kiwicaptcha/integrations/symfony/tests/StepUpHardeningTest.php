@@ -204,7 +204,6 @@ final class StepUpHardeningTest extends TestCase
         return new EmailOtpStepUpHandler(
             $this->store,
             $this->ticket,
-            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             $this->sender,
             self::MASTER,
             maxBegins: 50,
@@ -215,7 +214,24 @@ final class StepUpHardeningTest extends TestCase
 
     private function context(string $principal): StepUpContext
     {
-        return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required');
+        return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required', StepUpContext::MODE_HTML, false, $this->mintDemandId());
+    }
+
+    /** Mint the demand an authorizing challenge must bind. */
+    private function mintDemandId(): string
+    {
+        $demand = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand::mint(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
+            'login',
+            null,
+            null,
+            null,
+            $this->now,
+            600,
+        );
+        $this->store->createDemand($demand, 600);
+
+        return $demand->id;
     }
 
     private const SESSION = 'hardening-test-session-00000000001';

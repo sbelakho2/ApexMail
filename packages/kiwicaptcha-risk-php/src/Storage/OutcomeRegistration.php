@@ -41,6 +41,15 @@ final class OutcomeRegistration
         public readonly RiskV2Weights $v2Weights,
         /** Target pseudonym this assessment protects (null = no target). */
         public readonly ?string $targetId = null,
+        /**
+         * The failing request's source-spread HyperLogLog element (the
+         * engine's keyed HMAC element): PFADDed to the target's source
+         * spread when the assessment itself records a failure (an
+         * AuthenticationFailure observation). Empty = no element.
+         */
+        public readonly string $targetSourceElement = '',
+        /** The failing request's ASN-spread element. Empty = no element. */
+        public readonly string $targetAsnElement = '',
     ) {
     }
 }

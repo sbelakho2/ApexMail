@@ -1142,6 +1142,46 @@
         "source_burst"
       ],
       "expected_action": "deny"
+    },
+    {
+      "why": "the scope step-up rung raises the composed action to step_up at the rung with no extra reason",
+      "score": 600,
+      "weights": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "issuance_capacity": 1000,
+      "argon_capacity": 1000,
+      "global_level": 0,
+      "step_up_above": 600,
+      "expected_reasons": [],
+      "expected_action": "step_up"
     }
   ],
   "consumed_result_vectors": [

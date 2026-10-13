@@ -27,7 +27,7 @@
 --   KEYS[10] dedupe key (string)                 — event_id guard
 --
 -- ARGV:
---   [1]  event             RiskEventKind int (1..21)
+--   [1]  event             RiskEventKind int (1..22)
 --   [2]  scope             int (0 = unknown)
 --   [3]  now_ms            UNUSED — Redis TIME is the distributed state
 --                           clock authority (decay, hysteresis, cooldown and
@@ -239,6 +239,14 @@ local function apply_feedback(s, event, scope)
         -- an actual SolveSuccess repays it). The event kind stays for
         -- observability — the cancellation is a resource-lifecycle
         -- operation, never a debt refund.
+    elseif event == 22 then       -- StepUpCompleted: server-confirmed trust
+        -- Same trust credit as ProtectedActionSuccess (8): a completed
+        -- step-up is a server-verified secondary authentication, so it
+        -- may decrement risk under the trust-source invariant. NOT 18
+        -- (18..20 are the honeypot/decoy kinds). Mixed-version: an older
+        -- script falls through here as a no-op — safe in the trust
+        -- direction only (a missed credit can never add risk).
+        s.trust = s.trust + 800
     end
 end
 
@@ -269,7 +277,7 @@ end
 -- successful authenticated/protected operations build principal_credit;
 -- failures and confirmed abuse accumulate pressure.
 local function apply_principal_event(s, event, scope)
-    if event == 8 or event == 10 or event == 12 then
+    if event == 8 or event == 10 or event == 12 or event == 22 then
         s.trust = s.trust + 2000
     elseif event == 11 then
         s.af = s.af + 2500

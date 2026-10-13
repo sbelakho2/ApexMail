@@ -91,6 +91,7 @@
     "data-kiwi-telemetry",
     "data-kiwi-telemetry-src",
     "data-kiwi-telemetry-integrity",
+    "data-kiwi-step-up-demand",
     "data-kiwi-lang",
   ];
   // W wins over container; unknown names are refused (one gate).
@@ -525,7 +526,7 @@
       badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
       badgeVersionError: "Version Error", badgeUnavailable: "Unavailable", badgeExpired: "Expired",
       statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
-      statusVerified: "Verification complete", statusFailed: "Verification failed",
+      statusVerified: "Check complete", statusFailed: "Verification failed",
       statusExpired: "Verification expired", statusWorkerUnavailable: "Check could not start",
       statusExecutionUnavailable: "Check incomplete",
       statusSolverMismatch: "Solver version mismatch",
@@ -539,7 +540,17 @@
       errConnection: "the connection failed", errMalformed: "the server returned an unexpected response",
       errExhausted: "the check took too long", errExpired: "the challenge expired",
       errGeneric: "the check could not complete",
-      expired: "expired", retryButton: "Retry", checking: "Checking\u2026" },
+      expired: "expired", retryButton: "Retry", checking: "Checking\u2026",
+      statusStepUp: "Additional verification required", badgeStepUp: "Verify",
+      hintStepUp: "This request needs one more proof of identity.",
+      stepUpTitle: "Additional verification",
+      stepUpEmailLabel: "Email address", stepUpEmailHelp: "We will send a 6-digit code to this address.",
+      stepUpCodeLabel: "Verification code", stepUpCodeHelp: "Enter the 6-digit code that was sent to you.",
+      stepUpSend: "Send code", stepUpVerify: "Verify", stepUpCancel: "Cancel",
+      stepUpSending: "Sending code\u2026", stepUpSent: "Code sent",
+      stepUpResend: "Send a new code",
+      stepUpBadCode: "That code was not accepted. Check it and try again.",
+      stepUpFailed: "The verification could not be completed. Close this dialog and try again." },
     // Filled by the lazy widget-locales.js module. Every shipped
     // regional pack needs its own placeholder (without "pt-br" the
     // resolver returns "pt" before the module lands, so two widgets on
@@ -1028,6 +1039,324 @@
         }).catch(function () {});
       } catch (e) {}
     }
+    // ── The typed step-up demand (STEP_UP_REQUIRED) ────────────────
+    // A 403 whose body names STEP_UP_REQUIRED is not a challenge
+    // failure: it is the demand for a second factor. The body carries
+    // the step_up object with the required factor kind, and the
+    // dispatch follows that metadata. The built-in carrier (kind
+    // "email_ownership" with its begin path and demand id) completes
+    // inside the widget: a labelled address input, then the 6-digit
+    // code field; begin consumes the demand id, complete answers the
+    // single-use grant, and the grant is written into the token field
+    // and handed to the success callback, so the form submission
+    // carries it in place of a solved token. Every other factor kind
+    // (email_otp, totp, webauthn, a custom factor) belongs to the
+    // application's own auth flow: the driver dispatches
+    // kiwi:step-up-required with the step_up metadata, so the page
+    // learns which factor the demand requires and routes to its own
+    // step-up page.
+    function kiwiStepUpPost(url, body) {
+      return fetch(url, {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        redirect: "error", referrerPolicy: "no-referrer",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    function kiwiStepUpDialog(close) {
+      var overlay = document.createElement("div");
+      overlay.className = "kiwi-stepup-overlay";
+      overlay.setAttribute("data-kiwi-stepup", "");
+      overlay.setAttribute("style", "position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;");
+      var dialog = document.createElement("div");
+      dialog.className = "kiwi-stepup-dialog";
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      var titleId = "kiwi-stepup-title-" + widgetId;
+      dialog.setAttribute("aria-labelledby", titleId);
+      dialog.setAttribute("style", "background:#fff;color:#111;font-family:system-ui,sans-serif;font-size:16px;line-height:1.4;max-width:22rem;width:calc(100% - 2rem);padding:1.25rem;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.3);");
+      var title = document.createElement("h2");
+      title.id = titleId;
+      title.setAttribute("style", "margin:0 0 .5rem;font-size:1.1rem;");
+      title.textContent = kiwiT("stepUpTitle");
+      var msg = document.createElement("p");
+      msg.setAttribute("data-kiwi-stepup-msg", "");
+      msg.setAttribute("role", "status");
+      msg.setAttribute("style", "margin:0 0 .75rem;");
+      var emailForm = document.createElement("form");
+      emailForm.setAttribute("data-kiwi-stepup-email", "");
+      emailForm.setAttribute("novalidate", "");
+      var emailId = "kiwi-stepup-email-" + widgetId;
+      var emailLabel = document.createElement("label");
+      emailLabel.setAttribute("for", emailId);
+      emailLabel.setAttribute("style", "display:block;font-weight:600;");
+      emailLabel.textContent = kiwiT("stepUpEmailLabel");
+      var emailHelp = document.createElement("p");
+      emailHelp.id = "kiwi-stepup-email-help-" + widgetId;
+      emailHelp.setAttribute("style", "margin:.25rem 0;");
+      emailHelp.textContent = kiwiT("stepUpEmailHelp");
+      var emailInput = document.createElement("input");
+      emailInput.setAttribute("aria-describedby", emailHelp.id);
+      emailInput.id = emailId;
+      emailInput.name = "email";
+      emailInput.type = "email";
+      emailInput.autocomplete = "email";
+      emailInput.required = true;
+      emailInput.setAttribute("style", "display:block;width:100%;box-sizing:border-box;margin:.25rem 0 .75rem;padding:.5rem;border:1px solid #767676;border-radius:6px;font-size:1rem;");
+      var emailSend = document.createElement("button");
+      emailSend.type = "submit";
+      emailSend.textContent = kiwiT("stepUpSend");
+      emailSend.setAttribute("style", "display:inline-block;padding:.5rem .9rem;border:0;border-radius:6px;background:#1a5dad;color:#fff;font-size:1rem;cursor:pointer;");
+      emailForm.appendChild(emailLabel);
+      emailForm.appendChild(emailHelp);
+      emailForm.appendChild(emailInput);
+      emailForm.appendChild(emailSend);
+      var codeForm = document.createElement("form");
+      codeForm.setAttribute("data-kiwi-stepup-code", "");
+      codeForm.hidden = true;
+      codeForm.setAttribute("novalidate", "");
+      var codeId = "kiwi-stepup-code-" + widgetId;
+      var codeLabel = document.createElement("label");
+      codeLabel.setAttribute("for", codeId);
+      codeLabel.setAttribute("style", "display:block;font-weight:600;");
+      codeLabel.textContent = kiwiT("stepUpCodeLabel");
+      var codeHelp = document.createElement("p");
+      codeHelp.setAttribute("style", "margin:.25rem 0;");
+      codeHelp.textContent = kiwiT("stepUpCodeHelp");
+      var codeInput = document.createElement("input");
+      codeInput.id = codeId;
+      codeInput.name = "code";
+      codeInput.type = "text";
+      codeInput.inputMode = "numeric";
+      codeInput.setAttribute("inputmode", "numeric");
+      codeInput.setAttribute("autocomplete", "one-time-code");
+      codeInput.setAttribute("pattern", "[0-9]{6}");
+      codeInput.setAttribute("maxlength", "6");
+      codeInput.required = true;
+      codeInput.setAttribute("style", "display:block;width:100%;box-sizing:border-box;margin:.25rem 0 .75rem;padding:.5rem;border:1px solid #767676;border-radius:6px;font-size:1.25rem;letter-spacing:.3em;");
+      var codeVerify = document.createElement("button");
+      codeVerify.type = "submit";
+      codeVerify.textContent = kiwiT("stepUpVerify");
+      codeVerify.setAttribute("style", "display:inline-block;padding:.5rem .9rem;border:0;border-radius:6px;background:#1a5dad;color:#fff;font-size:1rem;cursor:pointer;");
+      codeForm.appendChild(codeLabel);
+      codeForm.appendChild(codeHelp);
+      codeForm.appendChild(codeInput);
+      codeForm.appendChild(codeVerify);
+      var cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = kiwiT("stepUpCancel");
+      cancel.setAttribute("style", "display:inline-block;margin-left:.5rem;padding:.5rem .9rem;border:1px solid #767676;border-radius:6px;background:#fff;color:#111;font-size:1rem;cursor:pointer;");
+      cancel.addEventListener("click", function () { close(); });
+      overlay.addEventListener("keydown", function (ev) {
+        if (ev && (ev.key === "Escape" || ev.key === "Esc")) { ev.stopPropagation(); close(); }
+      });
+      var buttons = document.createElement("div");
+      buttons.setAttribute("style", "margin-top:.25rem;");
+      buttons.appendChild(codeVerify);
+      buttons.appendChild(cancel);
+      codeForm.appendChild(buttons);
+      dialog.appendChild(title);
+      dialog.appendChild(msg);
+      dialog.appendChild(emailForm);
+      dialog.appendChild(codeForm);
+      overlay.appendChild(dialog);
+      return { overlay: overlay, dialog: dialog, msg: msg, emailForm: emailForm, emailInput: emailInput, emailSend: emailSend, codeForm: codeForm, codeInput: codeInput, codeVerify: codeVerify };
+    }
+    async function kiwiEmailStepUp(stepUp, demandFallback) {
+      // The demand id travels two ways: the 403 body names the demand its
+      // issuer minted, and the widget container carries the demand the
+      // server rendered for this field (data-kiwi-step-up-demand). The
+      // body wins; the rendered attribute is the fallback, so a refused
+      // form still completes even when the 403 mint answered bare.
+      var demandId = (stepUp && typeof stepUp.demand === "string" && stepUp.demand !== "")
+        ? stepUp.demand
+        : String(demandFallback || "");
+      var gen = kiwiWidgets[widgetId] ? kiwiWidgets[widgetId].gen : 0;
+      function gone() { return !kiwiGenerationCurrent(widgetId, gen); }
+      clearInterval(countdownTimer);
+      telemetry.stop();
+      setProgress(0);
+      if (tokenEl) tokenEl.value = "";
+      kiwiRecordState("solving", "");
+      kiwiSetView({ statusKey: "statusStepUp", badgeKey: "badgeStepUp", domState: "solving", hintKey: "hintStepUp" });
+      announce(kiwiT("statusStepUp"));
+      if (typeof document === "undefined" || !document.body) { fail("Challenge failed"); return; }
+      var escDismiss = function (ev) {
+        if (gone()) {
+          // The flow died (reset, destroy, retry re-init) while the
+          // dialog stood: tear the overlay down too, or a stale
+          // full-viewport modal of a dead generation would block the
+          // page with Escape refused.
+          document.removeEventListener("keydown", escDismiss, true);
+          try { overlay.remove(); } catch (e) {}
+          return;
+        }
+        if (ev && (ev.key === "Escape" || ev.key === "Esc")) { ev.stopPropagation(); close(); }
+      };
+      document.addEventListener("keydown", escDismiss, true);
+      var close = function () {
+        document.removeEventListener("keydown", escDismiss, true);
+        try { overlay.remove(); } catch (e) {}
+        if (previousFocus && typeof previousFocus.focus === "function") { try { previousFocus.focus(); } catch (e) {} }
+      };
+      var previousFocus = typeof document !== "undefined" && document.activeElement ? document.activeElement : null;
+      var ui = kiwiStepUpDialog(close);
+      var overlay = ui.overlay;
+      document.body.appendChild(overlay);
+      var completePath = null;
+      var focusRestorer = setInterval(function () {
+        if (gone() || !overlay.isConnected) {
+          clearInterval(focusRestorer);
+          // The generation died while the dialog stood (reset, retry
+          // re-init, destroy): tear the page-blocking overlay down
+          // here, within one tick, instead of stranding it until some
+          // keypress wakes the stale listener.
+          document.removeEventListener("keydown", escDismiss, true);
+          if (overlay.isConnected) { try { overlay.remove(); } catch (e) {} }
+          return;
+        }
+        var active = document.activeElement;
+        if (active && (active === document.body || !overlay.contains(active))) {
+          var target = ui.codeForm.hidden ? ui.emailInput : ui.codeInput;
+          try { target.focus(); } catch (e) {}
+        }
+      }, 400);
+      function say(text) { ui.msg.textContent = text; }
+      function stopFlowWatch() { clearInterval(focusRestorer); }
+      try {
+        // Stage 1: the address. The begin consumes the demand id the
+        // 403 minted; a refused begin answers inside the dialog and
+        // never reports a challenge failure.
+        var granted = false;
+        while (!granted) {
+          if (gone()) return;
+          ui.msg.textContent = kiwiT("stepUpEmailHelp");
+          var address = await new Promise(function (resolve) {
+            ui.emailForm.onsubmit = function (ev) {
+              ev.preventDefault();
+              resolve(ui.emailInput.value);
+            };
+          });
+          if (gone()) return;
+          ui.emailSend.disabled = true;
+          say(kiwiT("stepUpSending"));
+          var beginRes = null;
+          try {
+            beginRes = await kiwiStepUpPost(stepUp.begin, {
+              email: address, scope: scope, demand: demandId || "",
+            });
+          } catch (e) {
+            beginRes = null;
+          }
+          if (gone()) return;
+          ui.emailSend.disabled = false;
+          var beginDoc = null;
+          try { beginDoc = beginRes ? await beginRes.json() : null; } catch (e) { beginDoc = null; }
+          if (beginRes && beginRes.ok && beginDoc && beginDoc.challenge) {
+            completePath = typeof beginDoc.complete_path === "string" && beginDoc.complete_path !== ""
+              ? beginDoc.complete_path
+              : String(stepUp.begin).replace(/\/begin$/, "/complete");
+            say(kiwiT("stepUpSent"));
+            ui.emailForm.hidden = true;
+            ui.codeForm.hidden = false;
+            try { ui.codeInput.focus(); } catch (e) {}
+            // Stage 2: the 6-digit answer. A rejected code keeps the
+            // dialog open with the reason; an exhausted or dead
+            // challenge falls back to the address stage.
+            var attempts = 0;
+            while (!granted) {
+              if (gone()) return;
+              var code = await new Promise(function (resolve) {
+                ui.codeForm.onsubmit = function (ev) {
+                  ev.preventDefault();
+                  resolve(ui.codeInput.value);
+                };
+              });
+              if (gone()) return;
+              attempts++;
+              ui.codeVerify.disabled = true;
+              say(kiwiT("checking"));
+              var completeRes = null;
+              try {
+                completeRes = await kiwiStepUpPost(completePath, {
+                  kiwi_step_up_ticket: beginDoc.challenge,
+                  kiwi_step_up_code: code,
+                  demand: demandId || "",
+                });
+              } catch (e) {
+                completeRes = null;
+              }
+              if (gone()) return;
+              ui.codeVerify.disabled = false;
+              var completeDoc = null;
+              try { completeDoc = completeRes ? await completeRes.json() : null; } catch (e) { completeDoc = null; }
+              if (completeRes && completeRes.ok && completeDoc && completeDoc.grant) {
+                granted = true;
+                break;
+              }
+              if (completeRes && completeRes.status === 401) {
+                say(kiwiT("stepUpBadCode"));
+                try { ui.codeInput.select(); } catch (e) {}
+                continue;
+              }
+              // Unknown challenge, exhausted attempts or a backend
+              // refusal: restart at the address stage (a fresh begin
+              // mints a fresh code), bounded like the solve retries.
+              if (attempts >= 3) break;
+              say(kiwiT("stepUpFailed"));
+              ui.codeForm.hidden = true;
+              ui.emailForm.hidden = false;
+              try { ui.emailInput.focus(); } catch (e) {}
+            }
+          } else {
+            say(stepUpFailedMessage(beginRes, beginDoc));
+            if (beginRes && (beginRes.status === 429 || beginRes.status >= 500)) break;
+          }
+        }
+        stopFlowWatch();
+        if (gone()) {
+          document.removeEventListener("keydown", escDismiss, true);
+          try { overlay.remove(); } catch (e) {}
+          return;
+        }
+        if (!granted) {
+          close();
+          fail("Challenge failed");
+          return;
+        }
+        // The grant IS the submitted value: the validator redeems it
+        // in place of a solved token, so it rides the token field, the
+        // response alias and the success callback exactly like a
+        // completed proof of work.
+        var grant = String(completeDoc.grant);
+        close();
+        retryCount = 0;
+        tokenEl.value = grant;
+        writeResponseAlias(grant);
+        kiwiRecordState("verified", grant);
+        kiwiSetView({ statusKey: "label", badgeKey: "badgeSuccess", domState: "done", hintKey: "hintVerified" });
+        setProgress(100);
+        if (countdownEl) countdownEl.textContent = "";
+        announce(kiwiT("statusVerified"));
+        dispatch("verified", { token: grant, step_up: "email_ownership" });
+        if (options && typeof options.callback === "function") {
+          try { options.callback(grant); } catch (e) {}
+        }
+      } finally {
+        stopFlowWatch();
+        // The exception path: the listener goes with the overlay, and
+        // focus is left where the exception found it (close() would
+        // restore it a second time when it already ran).
+        document.removeEventListener("keydown", escDismiss, true);
+        if (overlay.isConnected) { try { overlay.remove(); } catch (e) {} }
+      }
+    }
+    function stepUpFailedMessage(res, doc) {
+      if (res && res.status === 429) return kiwiT("stepUpFailed");
+      if (doc && doc.error === "invalid_email") return kiwiT("stepUpEmailHelp");
+      if (doc && doc.error === "step_up_rate_limited") return kiwiT("stepUpFailed");
+      return kiwiT("stepUpFailed");
+    }
     // Failure recovery: an error never sticks in "failed" — reset to
     // idle, bounded retries with backoff, then idle until the next
     // interaction (click, Retry button, or page re-init).
@@ -1302,6 +1631,44 @@
         var resp, data;
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers: reqHeaders, body: JSON.stringify(reqBody), signal: abortController.signal });
+          // The typed step-up refusal is a branch, never a failure: the
+          // 403 body names the factor that answers it, and the dispatch
+          // is generic on that metadata. The built-in carrier kind
+          // renders the dialog; every other kind (and a bare body with
+          // no metadata at all) reaches the application through
+          // kiwi:step-up-required, so the flow never reports a
+          // challenge error for a demand it can carry.
+          if (resp.status === 403) {
+            var refused = null;
+            try { refused = await resp.json(); } catch (e) { refused = null; }
+            if (refused && refused.error && refused.error.code === "STEP_UP_REQUIRED") {
+              if (!kiwiGenerationCurrent(widgetId, gen)) return;
+              var stepUp = refused.error.step_up || null;
+              if (stepUp && stepUp.kind === "email_ownership" && typeof stepUp.begin === "string" && stepUp.begin !== "") {
+                // The rendered demand rides the widget container: the
+                // form field whose validation minted the demand carries
+                // it as data-kiwi-step-up-demand (W wins over container).
+                var renderedDemand = kiwiConfigValue(W, container, "data-kiwi-step-up-demand") || "";
+                await kiwiEmailStepUp(stepUp, renderedDemand);
+                return;
+              }
+              clearInterval(countdownTimer);
+              telemetry.stop();
+              setProgress(0);
+              if (tokenEl) tokenEl.value = "";
+              kiwiRecordState("pending", "");
+              kiwiSetView({ statusKey: "statusStepUp", badgeKey: "badgeStepUp", domState: "idle", hintKey: "hintStepUp" });
+              announce(kiwiT("statusStepUp"));
+              // The generic dispatch: the whole step_up object rides the
+              // event, the factor kind inside it (required_factor kind
+              // metadata from the server), so the application can route
+              // by kind to its own step-up surface. A bare body
+              // dispatches with step_up null.
+              dispatch("step-up-required", { step_up: stepUp });
+              return;
+            }
+            throw new Error("Challenge failed");
+          }
           if (!resp.ok) throw new Error("Challenge failed");
           try {
             data = await resp.json();

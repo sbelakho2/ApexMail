@@ -189,7 +189,8 @@ fn rewrite_exposure(glue: &str, sri: &str) -> Result<String, String> {
     let end_rel = glue[pos..]
         .find("};")
         .ok_or_else(|| "kiwicaptcha-wasm.js: exposure assignment is unterminated".to_string())?;
-    let canonical = format!("{EXPOSURE_HEAD}, wasmB64: KIWI_WASM_B64, wasmB64Sha256: \"{sri}\" }};");
+    let canonical =
+        format!("{EXPOSURE_HEAD}, wasmB64: KIWI_WASM_B64, wasmB64Sha256: \"{sri}\" }};");
     let mut out = String::with_capacity(glue.len());
     out.push_str(&glue[..pos]);
     out.push_str(&canonical);
@@ -215,9 +216,9 @@ fn extract_glue_boot(glue: &str) -> Result<String, String> {
     let exp_pos = glue
         .find(EXPOSURE_HEAD)
         .ok_or_else(|| "kiwicaptcha-wasm.js: exposure assignment not found".to_string())?;
-    let close_rel = glue[exp_pos..]
-        .find("\n})();")
-        .ok_or_else(|| "kiwicaptcha-wasm.js: IIFE close not found after the exposure".to_string())?;
+    let close_rel = glue[exp_pos..].find("\n})();").ok_or_else(|| {
+        "kiwicaptcha-wasm.js: IIFE close not found after the exposure".to_string()
+    })?;
     let body_end = exp_pos + close_rel + 1;
     if body_end <= body_start {
         return Err("kiwicaptcha-wasm.js: glue body bounds are inverted".to_string());
@@ -246,10 +247,13 @@ fn regenerate_glue_boot(glue: &str, section: &str) -> Result<String, String> {
     let err = |m: &str| Err(m.to_string());
     match find_line_anchored(glue, GLUE_BOOT_BEGIN) {
         Some(begin_idx) => {
-            let end_idx = find_line_anchored(glue, GLUE_BOOT_END)
-                .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_GLUE_BOOT_END sentinel not found".to_string())?;
+            let end_idx = find_line_anchored(glue, GLUE_BOOT_END).ok_or_else(|| {
+                "kiwicaptcha-wasm.js: KIWI_GLUE_BOOT_END sentinel not found".to_string()
+            })?;
             if begin_idx >= end_idx {
-                return err("kiwicaptcha-wasm.js: glueBoot sentinels out of order (BEGIN must precede END)");
+                return err(
+                    "kiwicaptcha-wasm.js: glueBoot sentinels out of order (BEGIN must precede END)",
+                );
             }
             let between = &glue[begin_idx..end_idx];
             if !between.contains("window.__kiwiCaptchaWasm.glueBoot = \"")
@@ -269,7 +273,9 @@ fn regenerate_glue_boot(glue: &str, section: &str) -> Result<String, String> {
         }
         None => {
             if glue.contains(GLUE_BOOT_END) {
-                return err("kiwicaptcha-wasm.js: KIWI_GLUE_BOOT_END present without KIWI_GLUE_BOOT_BEGIN");
+                return err(
+                    "kiwicaptcha-wasm.js: KIWI_GLUE_BOOT_END present without KIWI_GLUE_BOOT_BEGIN",
+                );
             }
             Ok(format!("{glue}{section}"))
         }
@@ -288,7 +294,7 @@ fn regenerate_glue(glue: &str, worker_src: &str) -> Result<String, String> {
         Some(begin_idx) => {
             let end_idx = glue
                 .find(END)
-                .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_WORKER_SRC_END sentinel not found")?;
+                .ok_or("kiwicaptcha-wasm.js: KIWI_WORKER_SRC_END sentinel not found")?;
             if begin_idx >= end_idx {
                 return err("kiwicaptcha-wasm.js: sentinels out of order (BEGIN must precede END)");
             }
@@ -389,8 +395,8 @@ fn main() {
     let boot = extract_glue_boot(&stamped).unwrap_or_else(|e| die(&e));
 
     let regenerated_glue = regenerate_glue(&stamped, &worker_src).unwrap_or_else(|e| die(&e));
-    let regenerated_glue =
-        regenerate_glue_boot(&regenerated_glue, &glue_boot_section(&boot)).unwrap_or_else(|e| die(&e));
+    let regenerated_glue = regenerate_glue_boot(&regenerated_glue, &glue_boot_section(&boot))
+        .unwrap_or_else(|e| die(&e));
     let regenerated_worker = {
         let span = worker_glue_span(&regenerated_glue);
         if let Some(begin_idx) = find_line_anchored(&worker_asset, WORKER_GLUE_BEGIN) {
@@ -423,7 +429,9 @@ fn main() {
     if check {
         let mut drift = false;
         if regenerated_glue != glue {
-            eprintln!("DRIFT: assets/kiwicaptcha-wasm.js embeds a stale copy of the worker solver source");
+            eprintln!(
+                "DRIFT: assets/kiwicaptcha-wasm.js embeds a stale copy of the worker solver source"
+            );
             drift = true;
         }
         if regenerated_worker != worker_asset {

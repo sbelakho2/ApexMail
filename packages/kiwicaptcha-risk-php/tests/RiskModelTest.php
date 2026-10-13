@@ -21,8 +21,8 @@ final class RiskModelTest extends TestCase
     /** The revision constant exists with the shared cross-language value. */
     public function testRevisionConstantExistsWithTheSharedValue(): void
     {
-        self::assertSame(17, RiskModel::REVISION);
-        self::assertSame(17, $this->decision()->modelRevision);
+        self::assertSame(18, RiskModel::REVISION);
+        self::assertSame(18, $this->decision()->modelRevision);
     }
 
     public function testDecisionCarriesTheModelRevisionInThePublicJson(): void
@@ -32,7 +32,7 @@ final class RiskModelTest extends TestCase
 
         $json = $decision->jsonSerialize();
         self::assertArrayHasKey('model_revision', $json);
-        self::assertSame(17, $json['model_revision']);
+        self::assertSame(18, $json['model_revision']);
         self::assertIsInt($json['model_revision'], 'the revision is a bounded integer');
     }
 
@@ -56,8 +56,8 @@ final class RiskModelTest extends TestCase
             retryAfterMs: 1000,
             band: 10,
         );
-        self::assertSame(17, $decision->modelRevision);
-        self::assertSame(17, $decision->jsonSerialize()['model_revision']);
+        self::assertSame(18, $decision->modelRevision);
+        self::assertSame(18, $decision->jsonSerialize()['model_revision']);
     }
 
     private function decision(): RiskDecision

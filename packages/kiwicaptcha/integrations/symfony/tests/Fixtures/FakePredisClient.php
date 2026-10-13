@@ -22,9 +22,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
      *  - eval/evalsha/script: interprets the bundle's Lua scripts by their
      *    shape — semaphore acquire/release, outstanding-challenge
      *    issue/solve, the rate limiter, the scope-issuance sliding
-     *    window, calibration confirm/correct and
- *    the outcome-ledger confirm/correct, mirroring the scripts'
- *    semantics. It also interprets the kiwicaptcha core's consume,
+     *    window, calibration confirm/correct, the step-up lock arm and
+     *    the outcome-ledger confirm/correct, mirroring the scripts'
+     *    semantics. It also interprets the kiwicaptcha core's consume,
  *    cancel, delete-if-pending and commit-result scripts, so the same
  *    fake drives the core RedisStorage for the cancellation endpoint's
  *    record transitions. `EVALSHA` resolves the sha back to the body
@@ -77,6 +77,9 @@ final class FakePredisClient extends \Predis\Client
 
     /** @var array<string, array<string, float|string>> hashes (hincrbyfloat calibration buckets + hset policy fields) */
     public array $hashes = [];
+
+    /** @var array<string, array<string, true>> the target-dimension spread sets (the HLL fakes) */
+    public array $targetSpreadSets = [];
 
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
@@ -230,6 +233,7 @@ final class FakePredisClient extends \Predis\Client
             'GET' => $this->fakeGet($arguments),
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
+            'EXISTS' => $this->fakeExists($arguments),
             'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
             'HGETALL' => $this->fakeHgetall($arguments),
             'HSET' => $this->fakeHset($arguments),
@@ -326,6 +330,31 @@ final class FakePredisClient extends \Predis\Client
         $key = (string) $arguments[0];
 
         return $this->strings[$key] ?? (isset($this->counters[$key]) ? (string) $this->counters[$key] : null);
+    }
+
+    /**
+     * `EXISTS`: the per-key existence count across the fake's key spaces
+     * (strings, counters, hashes, sorted sets), exactly the answer a
+     * real server gives a live key. Expiry stays lazy here, like every
+     * other read command of this fake: an armed TTL alone never removes
+     * a key.
+     *
+     * @param list<mixed> $arguments
+     */
+    private function fakeExists(array $arguments): int
+    {
+        $found = 0;
+        foreach ($arguments as $key) {
+            $key = (string) $key;
+            if (isset($this->strings[$key])
+                || isset($this->counters[$key])
+                || isset($this->hashes[$key])
+                || isset($this->zsets[$key])) {
+                $found++;
+            }
+        }
+
+        return $found;
     }
 
     /**
@@ -495,6 +524,48 @@ final class FakePredisClient extends \Predis\Client
         return $removed;
     }
 
+    /**
+     * The assurance family a stored challenge kind proves, the same
+     * ladder the factor completion script carries: the anonymous
+     * email-ownership grant answers as the email_otp rung, the weakest
+     * of the ladder. Null for a kind outside the ladder.
+     */
+    private static function challengeKindFamily(string $kind): ?string
+    {
+        return match ($kind) {
+            'totp' => 'totp',
+            'webauthn' => 'webauthn',
+            'email_otp', 'email_ownership' => 'email_otp',
+            default => null,
+        };
+    }
+
+    /** The assurance rank of a stored challenge kind, null outside the ladder. */
+    private static function challengeKindRank(string $kind): ?int
+    {
+        return match ($kind) {
+            'totp' => 2,
+            'webauthn' => 3,
+            'email_otp', 'email_ownership' => 1,
+            default => null,
+        };
+    }
+
+    /**
+     * TTL emulation for a plain string key: the armed lifetime in
+     * whole seconds (the fake stores the pexpire/ex delta), or null
+     * when the key carries no TTL.
+     */
+    private function remainingTtl(string $key): ?int
+    {
+        $ms = $this->expirations[$key] ?? null;
+        if ($ms === null) {
+            return null;
+        }
+
+        return (int) ceil($ms / 1000);
+    }
+
     /** @param list<mixed> $arguments */
     private function fakePexpire(array $arguments): int
     {
@@ -543,6 +614,99 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
+     * The target dimension (target_failure.lua) over the fake's own
+     * state: the leaky failure counter in the target hash, the two
+     * spread sets as plain distinct-element sets, the window TTL on
+     * every write. Answers the Lua's five-slot list.
+     *
+     * @param list<string> $keys [target hash, source spread, asn spread]
+     * @param list<string> $args [op, source element, asn element, ttl]
+     *
+     * @return list<int>
+     */
+    private function fakeTargetFailure(array $keys, array $args): array
+    {
+        $op = $args[0] ?? 'read';
+        $source = $args[1] ?? '';
+        $asn = $args[2] ?? '';
+        $now = (int) $this->clockMs;
+        $hash = $this->hashes[$keys[0]] ?? [];
+        $ts = (int) ($hash['ts'] ?? 0);
+        $fails = (int) ($hash['fails'] ?? 0);
+        // The leak: one failure per elapsed whole minute since the
+        // watermark; the watermark advances only by whole leaked
+        // minutes (the sub-minute remainder stays armed).
+        if ($ts !== 0) {
+            $leaked = intdiv(max(0, $now - $ts), 60000);
+            $fails = max(0, $fails - $leaked);
+            $ts = $ts + $leaked * 60000;
+        }
+        $spreadKey = 'target-spread:'.$keys[0];
+        $set = $this->targetSpreadSets[$spreadKey] ?? [];
+        if ($op === 'fail') {
+            ++$fails;
+            if ($ts === 0) {
+                $ts = $now;
+            }
+            $this->hashes[$keys[0]] = [
+                'ts' => (string) $ts,
+                'fails' => (string) $fails,
+                'last_ms' => (string) $now,
+                'first_ms' => (string) ($hash['first_ms'] ?? $now),
+            ];
+            $this->expirations[$keys[0]] = ((int) ($args[3] ?? 0)) * 1000;
+            if ($source !== '') {
+                $set['src:'.$source] = true;
+            }
+            if ($asn !== '') {
+                $set['asn:'.$asn] = true;
+            }
+            $this->targetSpreadSets[$spreadKey] = $set;
+            $this->expirations[$spreadKey] = ((int) ($args[3] ?? 0)) * 1000;
+
+            return [
+                $fails,
+                $this->countSpread($set, 'src:'),
+                $this->countSpread($set, 'asn:'),
+                (int) $this->hashes[$keys[0]]['first_ms'],
+                $now,
+            ];
+        }
+        if ($op === 'clear') {
+            $this->hashes[$keys[0]] = ['ts' => (string) $now, 'fails' => '0'];
+
+            return [
+                0,
+                $this->countSpread($set, 'src:'),
+                $this->countSpread($set, 'asn:'),
+                (int) ($hash['first_ms'] ?? 0),
+                $now,
+            ];
+        }
+
+        return [
+            $fails,
+            $this->countSpread($set, 'src:'),
+            $this->countSpread($set, 'asn:'),
+            (int) ($hash['first_ms'] ?? 0),
+            (int) ($hash['last_ms'] ?? 0),
+        ];
+    }
+
+    /** @param array<string, true> $set */
+    private function countSpread(array $set, string $prefix): int
+    {
+        $count = 0;
+        foreach (array_keys($set) as $element) {
+            if (str_starts_with($element, $prefix)) {
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
      * `EVALSHA`: resolve the sha back to its body through the `SCRIPT` `LOAD`
      * registry and run it through the same interpreter as EVAL. An
      * unknown sha raises the same `NOSCRIPT` ServerException the server
@@ -576,6 +740,18 @@ final class FakePredisClient extends \Predis\Client
         // so a later `EVALSHA` for the same script succeeds.
         $this->scriptsBySha[sha1($script)] = $script;
 
+        if (str_contains($script, 'Target-account protection state')) {
+            // The target dimension (target_failure.lua): keys[1] the
+            // target state hash, keys[2]/keys[3] the source and asn
+            // spread sets, argv[1] the op, argv[2]/argv[3] the spread
+            // elements and argv[4] the window TTL. The failure counter
+            // leaks one per minute; the spreads are plain distinct
+            // element sets (the HLL cardinality of a set is its size).
+            return $this->fakeTargetFailure(
+                array_map('strval', $keys),
+                array_map('strval', $rest),
+            );
+        }
         if (str_contains($script, 'Step-up attempt accounting')) {
             // RedisStepUpChallengeStore::recordFailure: keys[1] the
             // challenge record JSON string; argv[1] the attempt cap.
@@ -621,6 +797,23 @@ final class FakePredisClient extends \Predis\Client
             return $n;
         }
 
+        if (str_contains($script, 'Step-up lockout')) {
+            // RedisStepUpChallengeStore::armLockout: keys[1] the lock
+            // key; argv[1] the epoch-second deadline, argv[2] the PX
+            // budget in millis. A strictly greater deadline replaces
+            // the stored one with its budget; a shorter or equal
+            // request leaves a live lock untouched. Always answers 1.
+            $key = (string) $keys[0];
+            $deadline = (int) $rest[0];
+            $current = isset($this->strings[$key]) ? (int) $this->strings[$key] : 0;
+            if ($deadline > $current) {
+                $this->strings[$key] = (string) $deadline;
+                $this->fakePexpire([$key, (int) $rest[1]]);
+            }
+
+            return 1;
+        }
+
         if (str_contains($script, 'Step-up totp step')) {
             // RedisStepUpChallengeStore::markTotpStep: keys[1] the
             // per-principal last-used step string; argv[1] the step,
@@ -637,6 +830,491 @@ final class FakePredisClient extends \Predis\Client
             $this->fakePexpire([$key, (int) $rest[1] * 1000]);
 
             return 1;
+        }
+
+        if (str_contains($script, 'Step-up demand transition')) {
+            // RedisStepUpChallengeStore demand lifecycle CAS: keys[1]
+            // the demand record JSON; argv[1] the op, argv[2]/argv[3]
+            // the op arguments. complete moves open to completed (the
+            // record is kept, re-armed with the given TTL); claim moves
+            // completed to finalizing (a stale finalizing claim past
+            // its window is retaken); settle moves finalizing to the
+            // named terminal state (kept within the remaining TTL).
+            // Answers the updated record JSON, nil on a lost race or a
+            // refused transition.
+            $key = (string) $keys[0];
+            $raw = $this->strings[$key] ?? null;
+            if ($raw === null) {
+                return null;
+            }
+            $rec = json_decode($raw, true);
+            if (!\is_array($rec) || !\is_string($rec['state'] ?? null)) {
+                unset($this->strings[$key]);
+
+                return null;
+            }
+            $op = (string) $rest[0];
+            $rearm = function (array $rec, ?int $ttlSecs = null) use ($key): string {
+                $encoded = (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+                $ttl = $ttlSecs ?? $this->remainingTtl($key);
+                if ($ttl === null || $ttl <= 0) {
+                    unset($this->strings[$key], $this->expirations[$key]);
+
+                    return '';
+                }
+                $this->strings[$key] = $encoded;
+                $this->fakePexpire([$key, $ttl * 1000]);
+
+                return $encoded;
+            };
+            $stateAt = \is_int($rec['state_at'] ?? null) ? $rec['state_at'] : 0;
+            if ($op === 'complete') {
+                if (!empty($rec['superseded_by'])) {
+                    return null;
+                }
+                if ($rec['state'] !== 'open') {
+                    return null;
+                }
+                $rec['state'] = 'completed';
+                $rec['state_at'] = (int) $rest[1];
+
+                return $rearm($rec, (int) $rest[2]) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            }
+            if ($op === 'claim') {
+                if (!empty($rec['superseded_by'])) {
+                    return null;
+                }
+                $now = (int) $rest[1];
+                if ($rec['state'] === 'completed') {
+                    $rec['state'] = 'finalizing';
+                    $rec['state_at'] = $now;
+                } elseif ($rec['state'] === 'finalizing') {
+                    if (($now - $stateAt) < (int) $rest[2]) {
+                        return null;
+                    }
+                    $rec['state_at'] = $now;
+                } else {
+                    return null;
+                }
+
+                return $rearm($rec) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            }
+            if ($op === 'settle') {
+                if ($rec['state'] !== 'finalizing') {
+                    return null;
+                }
+                $terminal = (string) $rest[1];
+                if ($terminal !== 'authorized' && $terminal !== 'denied' && $terminal !== 'superseded') {
+                    return null;
+                }
+                if ($terminal === 'authorized' && !empty($rec['superseded_by'])) {
+                    return null;
+                }
+                $rec['state'] = $terminal;
+                $rec['state_at'] = (int) $rest[2];
+                if ($terminal === 'authorized') {
+                    // The authorized terminal books its settlement
+                    // timestamp and its completed factor, exactly like
+                    // the settle op of the demand transition script.
+                    $rec['authorized_at'] = (int) $rest[2];
+                    if ((string) $rest[3] !== '') {
+                        $rec['factor'] = (string) $rest[3];
+                    }
+                }
+
+                return $rearm($rec) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            }
+            if ($op === 'fx') {
+                // The effects journal write: one known effect moves to
+                // its landed stamp, and only the authorized terminal
+                // journals anything. The record keeps its remaining
+                // lifetime exactly.
+                if ($rec['state'] !== 'authorized') {
+                    return null;
+                }
+                $effect = (string) $rest[1];
+                if ($effect !== 'authorization_settled' && $effect !== 'outcome_credited'
+                    && $effect !== 'session_restored' && $effect !== 'trust_written') {
+                    return null;
+                }
+                $fx = \is_array($rec['fx'] ?? null) ? $rec['fx'] : [];
+                $fx[$effect] = (int) $rest[2];
+                $rec['fx'] = $fx;
+
+                return $rearm($rec) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            }
+
+            return null;
+        }
+
+        if (str_contains($script, 'Step-up demand root mint')) {
+            // RedisStepUpChallengeStore::createRootDemand: keys[1] the
+            // demand record, keys[2] the family index; argv[1] the
+            // record JSON, argv[2] the ttl millis, argv[3] the demand
+            // key prefix, argv[4] the demand id. A live family tip is
+            // answered as-is; otherwise the record and the index are
+            // written in this one transaction.
+            $demandKey = (string) $keys[0];
+            $indexKey = (string) $keys[1];
+            $tip = $this->strings[$indexKey] ?? null;
+            if (\is_string($tip) && $tip !== '' && isset($this->strings[(string) $rest[2].$tip])) {
+                return json_encode(['existing' => $tip], JSON_UNESCAPED_SLASHES);
+            }
+            if (isset($this->strings[$demandKey])) {
+                return null;
+            }
+            $this->strings[$demandKey] = (string) $rest[0];
+            $this->fakePexpire([$demandKey, (int) $rest[1]]);
+            $this->strings[$indexKey] = (string) $rest[3];
+            $this->fakePexpire([$indexKey, (int) $rest[1]]);
+
+            return json_encode(['created' => $rest[3]], JSON_UNESCAPED_SLASHES);
+        }
+
+        if (str_contains($script, 'Step-up demand escalation')) {
+            // RedisStepUpChallengeStore::supersedeDemandWithChild:
+            // keys[1] the parent record, keys[2] the child record,
+            // keys[3] the family index; argv[1] the child JSON, argv[2]
+            // the child id. The parent must be present, unsuperseded and
+            // unexpired on the fake server clock; the child key must be
+            // free and inherit the parent expiry exactly; the child is
+            // written within the parent's remaining lifetime, the
+            // parent is marked superseded with the same lifetime and
+            // the index repoints at the child.
+            $parentKey = (string) $keys[0];
+            $childKey = (string) $keys[1];
+            $indexKey = (string) $keys[2];
+            $raw = $this->strings[$parentKey] ?? null;
+            if (!\is_string($raw)) {
+                return null;
+            }
+            $parent = json_decode($raw, true);
+            if (!\is_array($parent) || !\is_int($parent['expires_at'] ?? null)) {
+                return null;
+            }
+            if (!empty($parent['superseded_by'])) {
+                return null;
+            }
+            if (($parent['state'] ?? null) !== 'open' && ($parent['state'] ?? null) !== 'finalizing') {
+                return null;
+            }
+            $nowS = (int) floor($this->timeMs() / 1000);
+            if ($nowS >= $parent['expires_at']) {
+                return null;
+            }
+            if (isset($this->strings[$childKey])) {
+                return null;
+            }
+            $child = json_decode((string) $rest[0], true);
+            if (!\is_array($child) || ($child['expires_at'] ?? null) !== $parent['expires_at']) {
+                return null;
+            }
+            // The lineage is exact in both directions, the same rule
+            // the production script enforces.
+            if (($child['parent_demand_id'] ?? null) !== ($parent['id'] ?? null)) {
+                return null;
+            }
+            $ttlMs = $this->expirations[$parentKey] ?? null;
+            if ($ttlMs === null || $ttlMs <= 0) {
+                return null;
+            }
+            $child['created_at'] = $nowS;
+            $this->strings[$childKey] = (string) json_encode($child, JSON_UNESCAPED_SLASHES);
+            $this->fakePexpire([$childKey, $ttlMs]);
+            // The terminal lands in this one transaction, the same
+            // shape the production script writes: state, stamp and
+            // child link together.
+            $parent['state'] = 'superseded';
+            $parent['state_at'] = $nowS;
+            $parent['superseded_by'] = (string) $rest[1];
+            $this->strings[$parentKey] = (string) json_encode($parent, JSON_UNESCAPED_SLASHES);
+            $this->fakePexpire([$parentKey, $ttlMs]);
+            $this->strings[$indexKey] = (string) $rest[1];
+            $this->fakePexpire([$indexKey, $ttlMs]);
+
+            return json_encode(['superseded' => $parent], JSON_UNESCAPED_SLASHES);
+        }
+
+        if (str_contains($script, 'Step-up demand send lease')) {
+            // RedisStepUpChallengeStore::claimDemandSendLease: keys[1]
+            // the demand record; argv[1] the send cap, argv[2] the
+            // resend spacing seconds, argv[3] the lease millis. Every
+            // clock decision reads the fake server time: a live foreign
+            // lease refuses, an expired one is recovered without a
+            // second credit, the resend spacing answers the refused
+            // wait.
+            $key = (string) $keys[0];
+            $raw = $this->strings[$key] ?? null;
+            if (!\is_string($raw)) {
+                return null;
+            }
+            $rec = json_decode($raw, true);
+            if (!\is_array($rec) || !\is_int($rec['sends'] ?? null) || !\is_int($rec['expires_at'] ?? null)) {
+                unset($this->strings[$key], $this->expirations[$key]);
+
+                return null;
+            }
+            if (!empty($rec['superseded_by']) || ($rec['state'] ?? 'open') !== 'open') {
+                return null;
+            }
+            $nowMs = $this->timeMs();
+            $nowS = (int) floor($nowMs / 1000);
+            if ($nowS >= $rec['expires_at']) {
+                return null;
+            }
+            $ttlMs = $this->expirations[$key] ?? null;
+            if ($ttlMs === null || $ttlMs <= 0) {
+                return null;
+            }
+            $leaseUntil = \is_int($rec['lease_until'] ?? null) ? $rec['lease_until'] : 0;
+            if ($leaseUntil > $nowMs) {
+                return null;
+            }
+            $priorSends = $rec['sends'];
+            $priorLast = \is_int($rec['last_sent_at'] ?? null) ? $rec['last_sent_at'] : null;
+            $recovered = 0;
+            if ($leaseUntil > 0) {
+                $recovered = 1;
+            } else {
+                if ($priorSends >= (int) $rest[0]) {
+                    return null;
+                }
+                if ($priorSends >= 1 && $priorLast !== null) {
+                    $wait = ($priorLast + (int) $rest[1]) - $nowS;
+                    if ($wait > 0) {
+                        return json_encode(['refused' => 'resend_wait', 'wait' => $wait], JSON_UNESCAPED_SLASHES);
+                    }
+                }
+                $rec['sends'] = $priorSends + 1;
+                $rec['last_sent_at'] = $nowS;
+            }
+            $rec['lease_until'] = (int) floor($nowMs) + (int) $rest[2];
+            $this->strings[$key] = (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            $this->fakePexpire([$key, $ttlMs]);
+            $answer = ['claim_at' => $nowS, 'recovered' => $recovered, 'prior_sends' => $priorSends, 'prior_last_sent_at' => $priorLast, 'record' => $rec];
+
+            return json_encode($answer, JSON_UNESCAPED_SLASHES);
+        }
+
+        if (str_contains($script, 'Step-up demand send settlement')) {
+            // RedisStepUpChallengeStore::settleDemandSendLease: keys[1]
+            // the demand record; argv[1] the lease stamp (the
+            // compare-and-set key), argv[2] delivered, argv[3] prior
+            // sends, argv[4] prior last delivery (-1 = null). A stale
+            // stamp settles nothing; a refusal restores the pre-claim
+            // state; the record keeps its remaining lifetime.
+            $key = (string) $keys[0];
+            $raw = $this->strings[$key] ?? null;
+            if (!\is_string($raw)) {
+                return false;
+            }
+            $rec = json_decode($raw, true);
+            if (!\is_array($rec)) {
+                return false;
+            }
+            $stamp = \is_int($rec['lease_until'] ?? null) ? $rec['lease_until'] : 0;
+            if ($stamp !== (int) $rest[0]) {
+                return false;
+            }
+            $rec['lease_until'] = null;
+            if ((string) $rest[1] === '0') {
+                $rec['sends'] = (int) $rest[2];
+                $rec['last_sent_at'] = (string) $rest[3] === '-1' ? null : (int) $rest[3];
+            }
+            $ttlMs = $this->expirations[$key] ?? null;
+            if ($ttlMs === null || $ttlMs <= 0) {
+                unset($this->strings[$key], $this->expirations[$key]);
+
+                return false;
+            }
+            $this->strings[$key] = (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            $this->fakePexpire([$key, $ttlMs]);
+
+            return true;
+        }
+
+        if (str_contains($script, 'Step-up mail quota: reserve')) {
+            // RedisStepUpChallengeStore::reserveMailQuota: keys[1] the
+            // reservation marker, keys[2..] the budget counters;
+            // argv[1] the window seconds, argv[2] the lease seconds,
+            // argv[3] the marker, argv[4..] the per-key limits. Every
+            // budget increments inside its window or the whole call
+            // rolls back.
+            $over = false;
+            $count = count($keys);
+            for ($i = 1; $i < $count; $i++) {
+                $budgetKey = (string) $keys[$i];
+                $n = $this->fakeIncr([$budgetKey]);
+                if ($n === 1) {
+                    $this->fakePexpire([$budgetKey, (int) $rest[0] * 1000]);
+                }
+                if ($n > (int) $rest[3 + ($i - 1)]) {
+                    $over = true;
+                }
+            }
+            if ($over) {
+                for ($i = 1; $i < $count; $i++) {
+                    $budgetKey = (string) $keys[$i];
+                    $n = isset($this->counters[$budgetKey]) ? $this->counters[$budgetKey] : 0;
+                    if ($n > 0) {
+                        $this->fakeDecr([$budgetKey]);
+                    }
+                }
+
+                return false;
+            }
+            $this->strings[(string) $keys[0]] = (string) $rest[2];
+            $this->fakePexpire([(string) $keys[0], (int) $rest[1] * 1000]);
+
+            return true;
+        }
+
+        if (str_contains($script, 'Step-up mail quota settlement')) {
+            // RedisStepUpChallengeStore::commitMailQuota and
+            // releaseMailQuota: keys[1] the reservation marker,
+            // argv[1] commit (1) or release (0). The marker carries the
+            // reservation's own budget counters, so a release decrements
+            // exactly those, while the marker still lives (the lease is
+            // its own TTL); a commit drops the marker only.
+            if ((string) $rest[0] === '1') {
+                unset($this->strings[(string) $keys[0]], $this->expirations[(string) $keys[0]]);
+
+                return true;
+            }
+            $markerKey = (string) $keys[0];
+            if (!isset($this->strings[$markerKey])) {
+                return false;
+            }
+            $saved = json_decode((string) $this->strings[$markerKey], true);
+            if (\is_array($saved) && isset($saved['keys']) && \is_array($saved['keys'])) {
+                foreach ($saved['keys'] as $budgetKey) {
+                    $budgetKey = (string) $budgetKey;
+                    $n = isset($this->counters[$budgetKey]) ? $this->counters[$budgetKey] : 0;
+                    if ($n > 0) {
+                        $this->fakeDecr([$budgetKey]);
+                    }
+                }
+            }
+            unset($this->strings[$markerKey], $this->expirations[$markerKey]);
+
+            return true;
+        }
+
+        if (str_contains($script, 'Step-up factor completion')) {
+            // RedisStepUpChallengeStore completeFactor: keys[1] the
+            // challenge record, keys[2] the demand record, keys[3] the
+            // escalation index; argv[1] the demand id, argv[2] now,
+            // argv[3] the presented binding hash, argv[4] the session
+            // hash hint ('' skips the index write). One atomic
+            // challenge+demand transition: the checks run in the
+            // script's order, and the winner consumes the challenge and
+            // completes the demand in one step. The judged factor
+            // identity is the stored challenge's own server-held
+            // snapshot, never a caller argument.
+            $challengeKey = (string) $keys[0];
+            $demandKey = (string) $keys[1];
+            $indexKey = (string) $keys[2];
+            $demandId = (string) $rest[0];
+            $now = (int) $rest[1];
+            $binding = (string) $rest[2];
+            $hint = (string) $rest[3];
+            $craw = $this->strings[$challengeKey] ?? null;
+            if ($craw === null) {
+                return ['missing_challenge'];
+            }
+            $ch = json_decode((string) $craw, true);
+            if (!\is_array($ch)) {
+                unset($this->strings[$challengeKey], $this->expirations[$challengeKey]);
+
+                return ['corrupt_challenge'];
+            }
+            $draw = $this->strings[$demandKey] ?? null;
+            if ($draw === null) {
+                return ['missing_demand'];
+            }
+            $de = json_decode((string) $draw, true);
+            if (!\is_array($de)) {
+                unset($this->strings[$demandKey], $this->expirations[$demandKey]);
+
+                return ['corrupt_demand'];
+            }
+            if (($ch['demand_id'] ?? null) !== $demandId || ($de['id'] ?? null) !== $demandId) {
+                return ['crossed'];
+            }
+            if (!empty($de['superseded_by'])) {
+                return ['spent'];
+            }
+            if (($de['state'] ?? null) !== 'open') {
+                return ['spent'];
+            }
+            if ((is_numeric($ch['expires_at'] ?? null) ? (int) $ch['expires_at'] : 0) <= $now
+                || (is_numeric($de['expires_at'] ?? null) ? (int) $de['expires_at'] : 0) <= $now) {
+                return ['expired'];
+            }
+            $bound = (($ch['session_hash'] ?? null) === $binding) || (($ch['client_secret_hash'] ?? null) === $binding);
+            if (!$bound) {
+                return ['binding'];
+            }
+            // The factor identity gate, the script's own rule: the
+            // demand's stored requirement is judged against the factor
+            // identity the stored challenge record carries (its
+            // server-held snapshot, resolved at begin), never a caller
+            // argument. The snapshot must agree with its kind's family
+            // and rank, and an incoherent one is a corrupt record,
+            // removed fail-closed; a record without the snapshot (the
+            // pre-snapshot wire shape) falls back to the kind tables. A
+            // rank below the required one refuses, and so does a factor
+            // neither the family nor the exact id the requirement names
+            // at or below that rank; a strictly stronger completion
+            // satisfies a weaker floor. Nothing moves on a refusal.
+            $family = null;
+            $rank = null;
+            $fid = null;
+            if (\is_string($ch['factor_family'] ?? null) && $ch['factor_family'] !== ''
+                && \is_string($ch['factor_id'] ?? null) && $ch['factor_id'] !== ''
+                && \is_int($ch['factor_rank'] ?? null)) {
+                if (self::challengeKindFamily((string) ($ch['kind'] ?? '')) !== $ch['factor_family']
+                    || self::challengeKindRank((string) ($ch['kind'] ?? '')) !== $ch['factor_rank']) {
+                    unset($this->strings[$challengeKey], $this->expirations[$challengeKey]);
+
+                    return ['corrupt_challenge'];
+                }
+                $family = (string) $ch['factor_family'];
+                $rank = (int) $ch['factor_rank'];
+                $fid = (string) $ch['factor_id'];
+            } else {
+                $family = self::challengeKindFamily((string) ($ch['kind'] ?? ''));
+                $rank = self::challengeKindRank((string) ($ch['kind'] ?? ''));
+                $fid = $family;
+            }
+            $requiredRank = \is_int($de['required_rank'] ?? null) ? $de['required_rank'] : null;
+            if ($requiredRank !== null && $requiredRank >= 1 && ($rank === null || $rank < $requiredRank)) {
+                return ['weaker_factor'];
+            }
+            $requiredId = $de['required_factor_id'] ?? null;
+            if (\is_string($requiredId) && $requiredId !== ''
+                && $family !== $requiredId && $fid !== $requiredId
+                && ($requiredRank === null || $rank === null || $rank <= $requiredRank)) {
+                return ['foreign_factor'];
+            }
+            unset($this->strings[$challengeKey], $this->expirations[$challengeKey]);
+            $de['state'] = 'completed';
+            $de['state_at'] = $now;
+            $ttl = max(1, (int) $de['expires_at'] - $now);
+            $encoded = (string) json_encode($de, JSON_UNESCAPED_SLASHES);
+            $this->strings[$demandKey] = $encoded;
+            $this->fakePexpire([$demandKey, $ttl * 1000]);
+            // The escalation index stores the factor identity the record
+            // itself carries, never a caller argument: a completion
+            // cannot poison the future assurance escalation by claiming
+            // a stronger factor than its challenge proves.
+            if ($hint !== '' && ($ch['session_hash'] ?? null) === $hint
+                && \is_string($family) && $family !== '') {
+                $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$de['expires_at'];
+                $this->fakePexpire([$indexKey, $ttl * 1000]);
+            }
+
+            return ['ok', (string) $craw, $encoded];
         }
 
         if (str_contains($script, 'Outstanding challenge issuance')) {

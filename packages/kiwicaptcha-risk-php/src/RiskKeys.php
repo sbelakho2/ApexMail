@@ -40,18 +40,21 @@ final class RiskKeys
 
     /**
      * Derives the six keys from a master secret. The master must carry
-     * at least 16 bytes (the core Config contract): a shorter or empty
-     * secret deterministically derives predictable pseudonyms, so the
-     * derivation boundary refuses it instead of accepting it silently.
+     * at least 32 bytes (the same floor the Rust RiskKeys enforces at
+     * MIN_MASTER_BYTES): a shorter or empty secret deterministically
+     * derives predictable pseudonyms, so the derivation boundary refuses
+     * it instead of accepting it silently. Both sides enforce ONE floor,
+     * so a master accepted by the PHP engine is never one the Rust
+     * engine would refuse (or vice versa).
      *
      * @throws \InvalidArgumentException when the master is shorter than
-     *                                   16 bytes
+     *                                   32 bytes
      */
     public static function fromMaster(string $master): self
     {
-        if (\strlen($master) < 16) {
+        if (\strlen($master) < 32) {
             throw new \InvalidArgumentException(sprintf(
-                'The risk master secret must be at least 16 bytes (got %d)',
+                'The risk master secret must be at least 32 bytes (got %d)',
                 \strlen($master),
             ));
         }

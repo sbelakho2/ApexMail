@@ -329,25 +329,20 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     /**
      * The target-dimension state keys of one target pseudonym: the
-     * failure hash plus the source/asn spread HLLs, on the target id's
-     * own family slot ({kiwi:<ns>:target:<hex2>}) — byte-identical with
+     * failure hash plus the source/asn spread HLLs, on this store's
+     * shared namespace tag ({kiwi:<ns>}). The single-tag layout keeps
+     * every key of one consolidated assessment invocation on one
+     * cluster slot, so the script is Cluster safe. Byte-identical with
      * the keys assess_v2.lua maintains (KEYS[14..16]) and the Rust
-     * `keyspace::target_state_keys`. A stuffing storm against one target
-     * then hits that target's slot, never the shared {kiwi:<ns>}
-     * primary.
+     * `keyspace::target_state_keys` in its Legacy mode.
      *
      * @return list<string>
      */
     private function targetStateKeys(string $targetId): array
     {
         self::assertKeySafeIdentifier('targetId', $targetId);
-        $hex2 = substr($targetId, 0, 2);
 
-        return [
-            "{kiwi:{$this->namespace}:target:{$hex2}}:risk:tgt:{$targetId}",
-            "{kiwi:{$this->namespace}:target:{$hex2}}:risk:tgt:src:{$targetId}",
-            "{kiwi:{$this->namespace}:target:{$hex2}}:risk:tgt:asn:{$targetId}",
-        ];
+        return KeyspaceMode::targetStateKeys($this->namespace, $targetId, KeyspaceMode::Legacy);
     }
 
     /**
@@ -804,13 +799,16 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
                 $registration->honeypotHit ? 1 : 0,
                 ...array_values($registration->weights->toArray()),
                 // The wire still takes exactly three risk-v2 weights at
-                // ARGV[45..47]; the two target weights ride ARGV[52..53].
+                // ARGV[45..47]; the two target weights ride ARGV[52..53]
+                // and the failing request's spread elements ride
+                // ARGV[49..50], PFADDed when the observation itself is a
+                // failure.
                 $v2w->honeypot,
                 $v2w->sessionInconsistency,
                 $v2w->tls,
                 ($registration->targetId !== null && $registration->targetId !== '') ? 1 : 0,
-                '',
-                '',
+                $registration->targetSourceElement,
+                $registration->targetAsnElement,
                 $this->targetTtlSecs,
                 $v2w->targetFailurePressure,
                 $v2w->targetSpread,
@@ -1172,27 +1170,43 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     }
 
     /**
-     * Asserts every key carries a known family hash tag: either the
-     * shared {kiwi:<ns>} tag or the target family {kiwi:<ns>:target:<hex2>}
-     * (the target failure hash and its spread HLLs ride their own slot so
-     * a stuffing storm never hammers the shared primary).
+     * Asserts every key of one script invocation hashes to the same
+     * Redis Cluster slot. The tag between a key's first brace pair is
+     * hashed with the canonical CRC-16 and masked to 14 bits; any
+     * divergent slot throws before the keys can reach a cluster as one
+     * EVALSHA. A cross-slot key set is refused server-side with a
+     * cross-slot error, so the contract is enforced here first. Keys
+     * without a hash tag are refused too.
      *
      * @param list<string> $keys
-     * @throws \LogicException on an unknown or missing hash tag
+     * @throws \LogicException on a slot mismatch or a missing hash tag
      */
     public function assertSameSlot(array $keys): void
     {
-        $shared = "{kiwi:{$this->namespace}}";
-        $targetFamily = "{kiwi:{$this->namespace}:target:";
+        $slot = null;
         foreach ($keys as $key) {
-            if (str_starts_with($key, $shared) || str_starts_with($key, $targetFamily)) {
+            $open = strpos($key, '{');
+            if ($open === false) {
+                throw new \LogicException(sprintf('Key %s has no hash tag', $key));
+            }
+            $close = strpos($key, '}', $open);
+            if ($close === false) {
+                throw new \LogicException(sprintf('Key %s has no closing hash tag', $key));
+            }
+            $tag = substr($key, $open + 1, $close - $open - 1);
+            $keySlot = self::crc16($tag) & 0x3FFF;
+            if ($slot === null) {
+                $slot = $keySlot;
                 continue;
             }
-            throw new \LogicException(sprintf(
-                'Key %s does not carry the %s hash tag or the target family',
-                $key,
-                $shared,
-            ));
+            if ($keySlot !== $slot) {
+                throw new \LogicException(sprintf(
+                    'Key %s slots to %d, expected %d: every key of one script invocation must share one cluster slot',
+                    $key,
+                    $keySlot,
+                    $slot,
+                ));
+            }
         }
     }
 

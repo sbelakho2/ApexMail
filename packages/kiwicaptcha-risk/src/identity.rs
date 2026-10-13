@@ -236,6 +236,17 @@ impl RiskIdentityFactory {
         pseudonym(&self.keys.session, b"sess", 0, raw)
     }
 
+    /// Device pseudonym (context `b"dev"`, no epoch): 16 raw bytes.
+    ///
+    /// The material is the decoded 16-byte trusted-device cookie value.
+    /// The context is distinct from the session one (`b"sess"`), so the
+    /// same hex value can never derive the same pseudonym under both
+    /// identities. Keyed by the session HKDF key like the agent pattern
+    /// (one key, per-purpose context), matching the PHP `deviceId()`.
+    pub fn device_id(&self, raw: &[u8]) -> [u8; 16] {
+        pseudonym(&self.keys.session, b"dev", 0, raw)
+    }
+
     /// Principal pseudonym (context `b"prin"`, no epoch): 16 raw bytes.
     pub fn principal_id(&self, raw: &[u8]) -> [u8; 16] {
         pseudonym(&self.keys.principal, b"prin", 0, raw)

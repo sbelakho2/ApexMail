@@ -17,13 +17,27 @@ pub struct RiskContext<'a> {
     pub session_id: Option<&'a [u8; 16]>,
     /// Application principal id bytes (pseudonymized before storage).
     pub principal_id: Option<&'a [u8]>,
+    /// The raw trusted-device cookie bytes (pseudonymized before
+    /// storage): the decoded 16 bytes of the 32-hex cookie value, under
+    /// the same decode contract as the session cookie. The PHP mirror
+    /// names the field `deviceId`.
+    pub device_id: Option<&'a [u8]>,
     pub event: RiskEventKind,
     pub network_flags: NetworkFlags,
     pub resources: ResourcePressure,
+    /// The request's submitted form field values, empty by default: the
+    /// input the target resolver reads to resolve the assessment's
+    /// target dimension (target-account protection). Only the resolved
+    /// HMAC pseudonym ever leaves the engine; the raw field values are
+    /// never stored, logged or passed to the state backend. The PHP
+    /// mirror names the field `targetFields`.
+    pub target_fields: &'a [(&'a str, &'a str)],
 }
 
 impl<'a> RiskContext<'a> {
-    /// Convenience constructor for tests and simple call sites.
+    /// Convenience constructor for tests and simple call sites: no
+    /// trusted-device cookie. Attach one through
+    /// [`RiskContext::with_device_id`].
     pub fn new(
         scope: u32,
         source_ip: IpAddr,
@@ -38,10 +52,30 @@ impl<'a> RiskContext<'a> {
             source_ip,
             session_id,
             principal_id,
+            device_id: None,
             event,
             network_flags,
             resources,
+            target_fields: &[],
         }
+    }
+
+    /// Builder form carrying the raw trusted-device cookie bytes (the
+    /// decoded 16 bytes of the 32-hex cookie value).
+    pub fn with_device_id(mut self, device_id: Option<&'a [u8]>) -> Self {
+        self.device_id = device_id;
+        self
+    }
+
+    /// Builder form carrying the request's submitted form field values:
+    /// the input the engine's target resolver reads when a resolver is
+    /// wired, so the assessment's target dimension (failure counter and
+    /// spread) rides the decision path. Pass the submitted fields of
+    /// the form being protected: the username field for a login scope,
+    /// the email field for a signup scope.
+    pub fn with_target_fields(mut self, target_fields: &'a [(&'a str, &'a str)]) -> Self {
+        self.target_fields = target_fields;
+        self
     }
 }
 

@@ -13,4 +13,6 @@ enum StepUpChallengeKind: string
     case EmailOtp = 'email_otp';
     case Totp = 'totp';
     case WebAuthn = 'webauthn';
+    /** The anonymous email-ownership challenge of the step_up_email carrier. */
+    case EmailOwnership = 'email_ownership';
 }

@@ -1949,4 +1949,62 @@ final class ConfigurationTest extends TestCase
             self::assertStringContainsString('bare root', $e->getMessage());
         }
     }
+
+    // ── The storage knob: the service id and the apcu object form ────────
+
+    public function testStorageDefaultsToTheArrayServiceId(): void
+    {
+        self::assertSame('kiwi_captcha.storage.array', $this->process()['storage'], 'the default storage is unchanged: the in-memory ArrayStorage service id');
+    }
+
+    public function testStorageStringFormIsAServiceId(): void
+    {
+        self::assertSame('kiwicaptcha.storage.redis', $this->process(['storage' => 'kiwicaptcha.storage.redis'])['storage']);
+        self::assertSame('%env(KIWI_STORAGE_ID)%', $this->process(['storage' => '%env(KIWI_STORAGE_ID)%'])['storage'], 'a %parameter% placeholder service id passes through untouched');
+    }
+
+    public function testStorageObjectFormNormalizesToTheApcuMap(): void
+    {
+        self::assertSame(
+            ['apcu' => ['single_process_cli' => true]],
+            $this->process(['storage' => ['apcu' => ['single_process_cli' => true]]])['storage'],
+            'the object form normalizes to the apcu map: the extension registers the adapter with the flag',
+        );
+        self::assertSame(
+            ['apcu' => ['single_process_cli' => false]],
+            $this->process(['storage' => ['apcu' => []]])['storage'],
+            'an omitted single_process_cli defaults to false: the web-tier shared segment',
+        );
+    }
+
+    public function testStorageObjectFormRejectsUnknownShapes(): void
+    {
+        foreach ([
+            ['redis' => []],
+            ['apcu' => [], 'extra' => 1],
+            ['apcu' => ['single_process_cli' => true, 'extra' => 1]],
+            42,
+        ] as $malformed) {
+            try {
+                $this->process(['storage' => $malformed]);
+                self::fail(sprintf('the malformed storage form must be refused: %s', var_export($malformed, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('storage', $e->getMessage());
+            }
+        }
+
+        try {
+            $this->process(['storage' => ['apcu' => ['single_process_cli' => 'yes']]]);
+            self::fail('a non-boolean single_process_cli must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('single_process_cli', $e->getMessage());
+        }
+
+        try {
+            $this->process(['storage' => '']);
+            self::fail('an empty string storage must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('non-empty', $e->getMessage());
+        }
+    }
 }

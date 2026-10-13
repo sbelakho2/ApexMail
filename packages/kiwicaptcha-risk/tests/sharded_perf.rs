@@ -8,15 +8,16 @@
 //! The harness is self-contained: it spawns its own throwaway
 //! redis-server processes on free ports (stand-ins: one server per
 //! routed slot group), runs the measurement, and shuts every server down
-//! with a nosave final write. Gated behind `KIWI_SHARDING_BENCH=1` so
-//! the regular suite never pays for it; run with:
+//! with a nosave final write. The RISK_REDIS_URLS override (comma
+//! separated, one endpoint per stand-in) hands over external stand-ins
+//! instead, which the harness never shuts down. Gated behind
+//! `KIWI_SHARDING_BENCH=1` so the regular suite never pays for it; run
+//! with:
 //!
 //!   KIWI_SHARDING_BENCH=1 cargo test --release --test sharded_perf -- --nocapture
 
 mod common;
 
-use std::collections::BTreeSet;
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,67 +26,6 @@ use std::time::{Duration, Instant};
 use kiwicaptcha_risk::event::RiskEventKind;
 use kiwicaptcha_risk::sharded::{ShardedOptions, ShardedRedisRiskStateStore};
 use kiwicaptcha_risk::store::RiskStateStore;
-
-fn free_ports(count: usize) -> Vec<u16> {
-    let mut ports = BTreeSet::new();
-    while ports.len() < count {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        ports.insert(listener.local_addr().expect("addr").port());
-    }
-    ports.into_iter().collect()
-}
-
-struct RedisServer {
-    port: u16,
-    child: Child,
-}
-
-impl RedisServer {
-    fn spawn(port: u16) -> RedisServer {
-        let child = Command::new("redis-server")
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--save")
-            .arg("")
-            .arg("--appendonly")
-            .arg("no")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("redis-server spawned (is it on PATH?)");
-        // Wait for the server to answer PING.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}/")) {
-                if let Ok(mut conn) = client.get_connection() {
-                    let pong: Result<String, _> = redis::cmd("PING").query(&mut conn);
-                    if pong.is_ok() {
-                        break;
-                    }
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "redis-server on {port} never came up"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        RedisServer { port, child }
-    }
-}
-
-impl Drop for RedisServer {
-    fn drop(&mut self) {
-        // The nosave shutdown: no persistence artifacts anywhere.
-        if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{}/", self.port)) {
-            if let Ok(mut conn) = client.get_connection() {
-                let _: Result<String, _> = redis::cmd("SHUTDOWN").arg("NOSAVE").query(&mut conn);
-            }
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 fn observation(i: u64) -> kiwicaptcha_risk::event::RiskObservation {
     common::observation(
@@ -182,11 +122,13 @@ fn sharded_throughput_scales_with_slot_standins() {
         eprintln!("skipping the scaling bench: KIWI_SHARDING_BENCH != 1");
         return;
     }
-    let servers: Vec<RedisServer> = free_ports(8).into_iter().map(RedisServer::spawn).collect();
-    let urls: Vec<String> = servers
-        .iter()
-        .map(|s| format!("redis://127.0.0.1:{}/", s.port))
-        .collect();
+    let Some(servers) = common::shard_standins(8) else {
+        eprintln!(
+            "skipping the scaling bench: set RISK_REDIS_URLS to eight comma-separated endpoints or install redis-server"
+        );
+        return;
+    };
+    let urls: Vec<String> = servers.iter().map(|s| s.url().to_string()).collect();
 
     let per_config_secs: u64 = 3;
     let mut rates = Vec::new();
@@ -292,11 +234,13 @@ fn p99_assessment_latency_at_five_times_baseline() {
         eprintln!("skipping the latency bench: KIWI_SHARDING_BENCH != 1");
         return;
     }
-    let servers: Vec<RedisServer> = free_ports(8).into_iter().map(RedisServer::spawn).collect();
-    let urls: Vec<String> = servers
-        .iter()
-        .map(|s| format!("redis://127.0.0.1:{}/", s.port))
-        .collect();
+    let Some(servers) = common::shard_standins(8) else {
+        eprintln!(
+            "skipping the latency bench: set RISK_REDIS_URLS to eight comma-separated endpoints or install redis-server"
+        );
+        return;
+    };
+    let urls: Vec<String> = servers.iter().map(|s| s.url().to_string()).collect();
     let options = ShardedOptions {
         pool_size: 16,
         connection_timeout_ms: 2_000,

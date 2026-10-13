@@ -71,6 +71,7 @@ pub enum RiskReason {
     SpamMarkQuarantine,
     NovelNetwork,
     BreachedCredential,
+    EvidenceUnavailable,
 }
 
 impl RiskReason {
@@ -101,6 +102,7 @@ impl RiskReason {
             RiskReason::SpamMarkQuarantine => "spam_mark_quarantine",
             RiskReason::NovelNetwork => "novel_network",
             RiskReason::BreachedCredential => "breached_credential",
+            RiskReason::EvidenceUnavailable => "evidence_unavailable",
         }
     }
 }
@@ -133,12 +135,20 @@ pub enum PolicyError {
 }
 
 /// Per-scope policy settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScopePolicy {
     pub base_risk: u16,
     pub minimum: RiskAction,
     pub post_solve_check: bool,
     pub degraded: RiskAction,
+    /// The decision-score rung above which the scope's assessment
+    /// escalates to the interactive step-up (`None` = the composed
+    /// action alone decides). Applied straight after the ladder as a
+    /// raise only; PHP mirror: `RiskPolicy::decide()`.
+    pub step_up_above: Option<u16>,
+    /// The factor that carries the scope's step-up demand (`None` = no
+    /// named carrier). The engine reads it for the post-solve raise.
+    pub carrier: Option<String>,
 }
 
 /// Immutable policy snapshot.
@@ -252,6 +262,8 @@ impl RiskPolicy {
                 minimum: RiskAction::Sha20,
                 post_solve_check: false,
                 degraded: RiskAction::Sha20,
+                step_up_above: None,
+                carrier: None,
             },
         };
 
@@ -343,8 +355,28 @@ impl RiskPolicy {
             .map_or(self.default_scope.minimum, |s| s.minimum)
     }
 
+    /// The decision-score rung above which the scope's assessment
+    /// escalates to the interactive step-up (`None` = the composed
+    /// action alone decides): the scope row, else `default_scope`.
+    pub fn step_up_above(&self, scope: u32) -> Option<u16> {
+        self.scopes
+            .get(&scope)
+            .map_or(self.default_scope.step_up_above, |s| s.step_up_above)
+    }
+
+    /// The factor that carries the scope's step-up demand (`None` = no
+    /// named carrier): the scope row, else `default_scope`.
+    pub fn carrier(&self, scope: u32) -> Option<&str> {
+        self.scopes
+            .get(&scope)
+            .map_or(self.default_scope.carrier.as_deref(), |s| {
+                s.carrier.as_deref()
+            })
+    }
+
     /// Full decision: band action, clamped to the scope minimum and the
-    /// global floor, then hard overrides with reasons.
+    /// global floor, raised to the scope's step-up rung when the score
+    /// reaches it, then hard overrides with reasons.
     ///
     /// Convenience wrapper without the scope-action hysteresis map (the
     /// plain band mapping); the engine uses
@@ -375,10 +407,12 @@ impl RiskPolicy {
 
     /// Full decision: band action (with enter/exit hysteresis when the
     /// engine's per-client map is passed), clamped to the scope
-    /// minimum and the global floor, then hard overrides with reasons.
+    /// minimum and the global floor, raised to the scope's step-up rung
+    /// when the score reaches it, then hard overrides with reasons.
     ///
     /// Argon re-escalation order: `action = strongest(band, minimum,
-    /// floor)` first; then, when the final action is Argon and the argon
+    /// floor)` first; then the scope's step-up rung (a raise only); then,
+    /// when the final action is Argon and the argon
     /// capacity is below 300, the action steps UP to `StepUp` — the
     /// capacity check is last, so floors/minimum can never reintroduce
     /// Argon after a demotion.
@@ -411,6 +445,17 @@ impl RiskPolicy {
         let minimum = self.minimum(scope);
         let floor = self.global_floors[(global_level as usize).min(4)];
         let mut action = strongest(band_action, minimum, floor);
+        // The scope's step-up rung: a scored decision at or above the
+        // rung escalates the composed action to the interactive step-up.
+        // The rung is a raise only, applied straight after the ladder,
+        // so the band mapping, the floors and every later override keep
+        // their semantics (a hard deny still outranks it). Mirrors the
+        // PHP `RiskPolicy::decide()` rung application exactly.
+        if let Some(rung) = self.step_up_above(scope) {
+            if score >= rung && action.rank() < RiskAction::StepUp.rank() {
+                action = RiskAction::StepUp;
+            }
+        }
 
         let mut reasons: Vec<RiskReason> = Vec::new();
         let mut deny = false;
@@ -596,7 +641,10 @@ fn strongest(a: RiskAction, b: RiskAction, c: RiskAction) -> RiskAction {
 /// Parses one scope row (a configured scope or `default_scope`): every
 /// field is required, `base_risk` must be an integer within 0..=1000 (a
 /// float or string is a configuration error, never a silent cast) and the
-/// actions are the exact literal strings.
+/// actions are the exact literal strings. `step_up_above` and `carrier`
+/// are optional; present they must be an integer within 0..=1000 and a
+/// non-empty string respectively (the PHP parser rejects the identical
+/// spellings).
 fn parse_scope_row(spec: &Value, label: &str) -> Result<ScopePolicy, PolicyError> {
     let spec_obj = spec
         .as_object()
@@ -613,6 +661,30 @@ fn parse_scope_row(spec: &Value, label: &str) -> Result<ScopePolicy, PolicyError
     if base_risk_value > 1000 {
         return Err(PolicyError::InvalidBaseRisk(label.to_string()));
     }
+    let step_up_above = match spec_obj.get("step_up_above") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let rung = value
+                .as_u64()
+                .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?;
+            if rung > 1000 {
+                return Err(PolicyError::InvalidScope(label.to_string()));
+            }
+            Some(rung as u16)
+        }
+    };
+    let carrier = match spec_obj.get("carrier") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let name = value
+                .as_str()
+                .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?;
+            if name.is_empty() {
+                return Err(PolicyError::InvalidScope(label.to_string()));
+            }
+            Some(name.to_string())
+        }
+    };
     Ok(ScopePolicy {
         base_risk: base_risk_value as u16,
         minimum: parse_action(&spec["minimum"])?,
@@ -620,6 +692,8 @@ fn parse_scope_row(spec: &Value, label: &str) -> Result<ScopePolicy, PolicyError
             .as_bool()
             .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?,
         degraded: parse_action(&spec["degraded"])?,
+        step_up_above,
+        carrier,
     })
 }
 
@@ -763,7 +837,10 @@ mod malformed_vectors {
 
         // The shared reason vectors: identical inputs must surface the
         // identical ordered reason list in PHP and Rust, including the
-        // contributor ordering and the stable tie order.
+        // contributor ordering and the stable tie order. A vector may
+        // carry an optional step_up_above rung; both harnesses build
+        // their scope row from it, so the shared corpus pins the rung
+        // behavior cross-language too.
         let raw = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../protocol/risk-v1/fixtures.json"
@@ -775,12 +852,16 @@ mod malformed_vectors {
             .expect("reason vectors");
         assert!(!reason_vectors.is_empty());
         for vector in reason_vectors {
+            let mut scope_row = serde_json::json!({
+                "base_risk": 100, "minimum": "allow", "post_solve_check": false, "degraded": "allow"
+            });
+            if let Some(rung) = vector.get("step_up_above") {
+                scope_row["step_up_above"] = rung.clone();
+            }
             let config = serde_json::json!({
                 "version": 3,
                 "weights": vector["weights"].clone(),
-                "scopes": { "1": {
-                    "base_risk": 100, "minimum": "allow", "post_solve_check": false, "degraded": "allow"
-                }},
+                "scopes": { "1": scope_row },
                 "global_floors": {"0": "allow", "1": "allow", "2": "allow", "3": "allow", "4": "allow"},
             });
             let policy = RiskPolicy::from_config(3, &config).expect("the vector policy builds");
@@ -1498,7 +1579,7 @@ mod tests {
         assert_eq!(json["action"], "sha20");
         assert_eq!(json["policy_version"], 3);
         // The revision is exposed in the public JSON (bounded).
-        assert_eq!(json["model_revision"], 17);
+        assert_eq!(json["model_revision"], 18);
         assert_eq!(json["global_level"], 2);
         assert_eq!(json["retry_after_ms"], Value::Null);
         assert_eq!(json["band"], 5);
@@ -1508,7 +1589,7 @@ mod tests {
     /// The revision constant is a shared cross-language value.
     #[test]
     fn model_revision_constant_is_seventeen() {
-        assert_eq!(crate::RISK_MODEL_REVISION, 17);
+        assert_eq!(crate::RISK_MODEL_REVISION, 18);
     }
 
     /// Policy-level wiring: an oscillating boundary score
@@ -1597,6 +1678,74 @@ mod tests {
                 now += 2;
             }
         }
+    }
+
+    /// The scope's step-up rung: a scored decision at or above the rung
+    /// escalates the composed action to the interactive step-up, as a
+    /// raise only. Below the rung the band mapping stands, a hard deny
+    /// still outranks the rung, and the rung never weakens anything.
+    #[test]
+    fn step_up_above_rung_raises_the_composed_action() {
+        let mut cfg = config();
+        cfg["scopes"]["1"]["step_up_above"] = json!(600);
+        let p = RiskPolicy::from_config(3, &cfg).expect("config parses");
+        assert_eq!(p.step_up_above(1), Some(600));
+        assert_eq!(p.carrier(1), None);
+        assert_eq!(p.step_up_above(999), None);
+
+        // Score 600 is the Argon16 band; the rung raises it to StepUp.
+        let d = p.decide(1, 600, &zero_vector(), &healthy(), 0, 1_700_000_000_000, 0);
+        assert_eq!(d.action, RiskAction::StepUp);
+        // Below the rung the plain band mapping stands.
+        let d = p.decide(1, 599, &zero_vector(), &healthy(), 0, 1_700_000_000_000, 0);
+        assert_eq!(d.action, RiskAction::Sha20);
+        // A rung raise never weakens a stronger override (score 1000
+        // maps onto Deny by itself here).
+        let d = p.decide(1, 1000, &zero_vector(), &healthy(), 0, 1_700_000_000_000, 0);
+        assert_eq!(d.action, RiskAction::Deny);
+        // The rung is a raise only: an explicit minimum above it wins.
+        cfg["scopes"]["2"]["minimum"] = json!("deny");
+        cfg["scopes"]["2"]["step_up_above"] = json!(600);
+        let p = RiskPolicy::from_config(3, &cfg).expect("config parses");
+        let d = p.decide(2, 600, &zero_vector(), &healthy(), 0, 1_700_000_000_000, 0);
+        assert_eq!(d.action, RiskAction::Deny);
+    }
+
+    /// A malformed step_up_above or carrier in a scope row is rejected
+    /// exactly like the PHP parser rejects it (the shared grammar).
+    #[test]
+    fn malformed_step_up_above_and_carrier_are_rejected() {
+        let mut cfg = config();
+        cfg["scopes"]["1"]["step_up_above"] = json!(1001);
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidScope(_))
+        ));
+        let mut cfg = config();
+        cfg["scopes"]["1"]["step_up_above"] = json!("600");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidScope(_))
+        ));
+        let mut cfg = config();
+        cfg["scopes"]["1"]["carrier"] = json!("");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidScope(_))
+        ));
+        let mut cfg = config();
+        cfg["scopes"]["1"]["carrier"] = json!(7);
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidScope(_))
+        ));
+        // A null rung or carrier parses as absent.
+        let mut cfg = config();
+        cfg["scopes"]["1"]["step_up_above"] = Value::Null;
+        cfg["scopes"]["1"]["carrier"] = Value::Null;
+        let p = RiskPolicy::from_config(3, &cfg).expect("config parses");
+        assert_eq!(p.step_up_above(1), None);
+        assert_eq!(p.carrier(1), None);
     }
 
     /// Hysteresis on the decision path is keyed per client: a bot burst

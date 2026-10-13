@@ -322,9 +322,11 @@ fn engine_context<'a>() -> kiwicaptcha_risk::context::RiskContext<'a> {
         source_ip: "198.51.100.7".parse().unwrap(),
         session_id: None,
         principal_id: None,
+        device_id: None,
         event: kiwicaptcha_risk::event::RiskEventKind::PreIssue,
         network_flags: Default::default(),
         resources: Default::default(),
+        target_fields: &[],
     }
 }
 

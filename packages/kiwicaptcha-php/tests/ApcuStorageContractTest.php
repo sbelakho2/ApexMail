@@ -13,6 +13,7 @@ use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\ApcuBackendInterface;
+use KiwiCaptcha\Storage\ApcuFetchOutcome;
 use KiwiCaptcha\Storage\ApcuStorage;
 use KiwiCaptcha\Storage\ApcuStorageException;
 use KiwiCaptcha\Storage\RealApcuBackend;
@@ -164,20 +165,138 @@ final class ApcuStorageContractTest extends TestCase
     {
         // The default construction path names the remedy instead of a
         // fatal undefined-function call later; where the extension is
-        // present and enabled the same call simply works.
+        // present and enabled the same call simply works. Under the cli
+        // SAPI the segment detection refuses first and names both the
+        // apc.enable_cli precondition and the single-process
+        // acknowledgement, so the actionable message depends on which
+        // check fired. This suite is one long-lived test process, so
+        // the acknowledgement rides the constructor flag.
         if (RealApcuTestEnv::available()) {
-            $storage = new ApcuStorage();
+            $storage = new ApcuStorage(allowPrivateCliSegment: true);
             $storage->establishReplicationFence('probe');
             self::addToAssertionCount(1);
 
             return;
         }
         try {
-            new ApcuStorage();
+            new ApcuStorage(allowPrivateCliSegment: true);
             self::fail('a missing APCu extension must fail construction closed');
         } catch (ApcuStorageException $e) {
-            self::assertStringContainsString('ext-apcu', $e->getMessage());
+            if (\PHP_SAPI === 'cli') {
+                self::assertStringContainsString('apc.enable_cli', $e->getMessage());
+            } else {
+                self::assertStringContainsString('ext-apcu', $e->getMessage());
+            }
         }
+    }
+
+    public function testTheSimulatedCliSapiWithoutTheAcknowledgementRefusesConstruction(): void
+    {
+        // The simulated cli seam drives the same detection the real
+        // process would: a CLI host without the single-process
+        // acknowledgement is refused with the actionable remedy, and
+        // the ini opt-in alone never satisfies it, because
+        // apc.enable_cli=1 is the precondition for a segment at all
+        // and every CLI process that sets it owns a private one.
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '0']);
+            self::fail('the simulated cli SAPI without the acknowledgement must fail construction closed');
+        } catch (ApcuStorageException $e) {
+            self::assertStringContainsString('refuses the cli SAPI', $e->getMessage());
+            self::assertStringContainsString('allowPrivateCliSegment', $e->getMessage());
+            self::assertStringContainsString('apc.enable_cli=1', $e->getMessage());
+        }
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '1']);
+            self::fail('the ini opt-in alone must not pass the cli detection');
+        } catch (ApcuStorageException $e) {
+            self::assertStringContainsString('refuses the cli SAPI', $e->getMessage());
+        }
+    }
+
+    public function testTheSimulatedCliSapiWithTheAcknowledgementPassesTheSegmentDetection(): void
+    {
+        // The acknowledgement plus the ini precondition: the detection
+        // passes and construction proceeds to the extension checks.
+        // Where the extension is absent the refusal is the extension
+        // remedy, never the cli one, and on a provisioned host the
+        // storage simply constructs.
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '1'], true);
+            self::addToAssertionCount(1);
+        } catch (ApcuStorageException $e) {
+            self::assertStringNotContainsString('refuses the cli SAPI', $e->getMessage());
+        }
+    }
+
+    public function testTheFlagWithoutTheIniPreconditionStillRefuses(): void
+    {
+        // The acknowledgement without the precondition: no ini, no
+        // segment, so the refusal stays and names apc.enable_cli.
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '0'], true);
+            self::fail('the acknowledgement without the ini precondition must fail construction closed');
+        } catch (ApcuStorageException $e) {
+            self::assertStringContainsString('refuses the cli SAPI', $e->getMessage());
+            self::assertStringContainsString('apc.enable_cli=1', $e->getMessage());
+        }
+    }
+
+    public function testTheSimulatedWebSapiSkipsTheCliDetection(): void
+    {
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['fpm-fcgi', '0']);
+            self::addToAssertionCount(1);
+        } catch (ApcuStorageException $e) {
+            self::assertStringNotContainsString('refuses the cli SAPI', $e->getMessage());
+        }
+    }
+
+    public function testTheInjectedBackendSkipsTheCliDetection(): void
+    {
+        // An injected backend is the deliberate emulated-seam override:
+        // the cli detection guards the default real segment only, so
+        // the emulation constructs under a simulated cli SAPI too.
+        $storage = new ApcuStorage($this->emulatedBackend(), 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '0']);
+        $storage->establishReplicationFence('probe');
+        self::addToAssertionCount(1);
+    }
+
+    public function testTheAcknowledgementIsVisibleToTheDoctor(): void
+    {
+        // The diagnostic seam the doctor reads: the constructor flag
+        // round-trips, and the injected backend keeps both variants
+        // constructible under a simulated cli SAPI.
+        $plain = new ApcuStorage($this->emulatedBackend(), 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '0']);
+        $flagged = new ApcuStorage($this->emulatedBackend(), 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '1'], true);
+        self::assertFalse($plain->allowsPrivateCliSegment());
+        self::assertTrue($flagged->allowsPrivateCliSegment());
+    }
+
+    /** The do-nothing backend seam standing in for the real segment. */
+    private function emulatedBackend(): ApcuBackendInterface
+    {
+        return new class implements ApcuBackendInterface {
+            public function fetch(string $key): ApcuFetchOutcome
+            {
+                return ApcuFetchOutcome::notFound();
+            }
+
+            public function store(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function add(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function delete(string $key): bool
+            {
+                return true;
+            }
+        };
     }
 
     /**
@@ -1207,7 +1326,10 @@ final class ApcuStorageContractTest extends TestCase
                 self::markTestSkipped('the APCu extension is absent here; the emulated backend leg carries this contract');
             }
 
-            return [new RealApcuBackend(), $prefix];
+            // The phpunit process is one long-lived CLI host the lane
+            // provisioned with apc.enable_cli=1, so the construction
+            // carries the single-process acknowledgement explicitly.
+            return [new RealApcuBackend(null, true), $prefix];
         }
         $backend = SharedMemoryApcuBackend::create();
         $this->ownedBackends[] = $backend;

@@ -21,9 +21,12 @@ use Symfony\Component\HttpFoundation\Response;
  * by default; beyond the bound begin answers a 429 refusal with the
  * window as the retry hint, fail-closed.
  *
- * The completion credit runs through {@see StepUpCompletionCredit} on
- * the one consumed record, so a legitimate user books stepUpCompleted
- * exactly once and is not stepped up twice.
+ * The completion is the verified factor proof: the answered code
+ * consumes the one record single-use, books the factor-plane proof
+ * markers (the enrollment preconditions) and answers
+ * {@see StepUpResult::proved()} naming the demand the challenge was
+ * bound to. The proof books no outcome and restores no session; the
+ * demand finalization owns the authorization and the effects.
  */
 final class EmailOtpStepUpHandler implements StepUpHandlerInterface
 {
@@ -34,6 +37,15 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
 
     private const HKDF_SALT = 'kiwicaptcha/deploy-salt/v1';
 
+    private const PROOF_MARKER_TTL_SECS = 900;
+
+    /**
+     * The delivery-reservation lease: how long a reserved mail slot is
+     * held before a crashed worker's reservation commits by default
+     * (spent is the fail-closed side, never free mail).
+     */
+    private const DELIVERY_LEASE_SECS = 30;
+
     private readonly string $otpKey;
 
     private readonly StepUpTicket $ticket;
@@ -41,7 +53,6 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     public function __construct(
         private readonly StepUpChallengeStore $store,
         StepUpTicket $ticket,
-        private readonly StepUpCompletionCredit $credit,
         private readonly StepUpCodeSenderInterface $sender,
         string $secretMaster,
         private readonly int $ttlSecs = 300,
@@ -63,6 +74,11 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         $this->ticket = $ticket;
     }
 
+    public function assurance(): StepUpFactorAssurance
+    {
+        return StepUpFactorAssurance::emailOtp();
+    }
+
     public function begin(Request $request, StepUpContext $context): Response
     {
         $now = $this->now();
@@ -82,17 +98,16 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
                 ['Retry-After' => (string) $retryAfter],
             );
         }
-        $admissions = $this->store->countBegin($context->principalPseudonym, $this->beginWindowSecs);
-        if ($admissions > $this->maxBegins) {
-            return $this->refusal(
-                $context,
-                Response::HTTP_TOO_MANY_REQUESTS,
-                'step_up_rate_limited',
-                'Too many step-up challenges were begun for this account; retry after the window.',
-                ['Retry-After' => (string) $this->beginWindowSecs],
-            );
-        }
-
+        // The delivery reservation (mail capacity): one delivery
+        // attempt, identified by the challenge id as its
+        // deliveryAttemptId and generation 1 (the OTP handler funds a
+        // single send). The reservation is the per-principal rate bound
+        // AND the deployment budget in one generation-bound quota: it
+        // only exists on an accepted begin — a refused or replayed
+        // begin never reserves, so it can never deplete the mail
+        // capacity. The reservation commits when the handoff is proven
+        // or ambiguous (spent), and releases only on a failure proven
+        // to have happened before the handoff.
         $code = str_pad((string) random_int(0, (10 ** $this->digits) - 1), $this->digits, '0', STR_PAD_LEFT);
         $challenge = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
@@ -109,14 +124,83 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             null,
             StepUpSessionBinding::sessionId($request),
             $context->targetOwned,
+            false,
+            null,
+            $context->demandId,
         );
+        $deliveryAttemptId = $challenge->id;
+        $generation = 1;
+        $reservationId = 'otp.'.$deliveryAttemptId.'.'.$generation;
+        // The budget families carry the store's own bounded spelling:
+        // a three-letter family, a colon, the pseudonym (or none for
+        // the deployment-wide budget of the family). The store
+        // prefixes the deployment namespace on top.
+        $budgetKeys = [
+            'otp:'.$context->principalPseudonym,
+            'otp:',
+        ];
+        $budgetLimits = [$this->maxBegins, max($this->maxBegins, 1000)];
+        try {
+            $reserved = $this->store->reserveMailQuota(
+                $reservationId,
+                $budgetKeys,
+                $budgetLimits,
+                $this->beginWindowSecs,
+                self::DELIVERY_LEASE_SECS,
+            );
+        } catch (\Throwable) {
+            $reserved = false;
+        }
+        if (!$reserved) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_TOO_MANY_REQUESTS,
+                'step_up_rate_limited',
+                'Too many step-up codes were requested; retry after the window.',
+                ['Retry-After' => (string) $this->beginWindowSecs],
+            );
+        }
+
         try {
             $this->store->create($challenge, $this->ttlSecs);
+        } catch (\Throwable $e) {
+            // Proven pre-handoff failure: nothing was handed to the
+            // transport, so the reservation releases (the mail capacity
+            // returns) and no challenge record may outlive an
+            // undelivered code.
+            try {
+                $this->store->releaseMailQuota($reservationId);
+            } catch (\Throwable) {
+            }
+            try {
+                $this->store->consume($challenge->id);
+            } catch (\Throwable) {
+            }
+
+            return $this->refusal(
+                $context,
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                'step_up_delivery_failed',
+                'The verification code could not be delivered; try again.',
+                [],
+                $e,
+            );
+        }
+
+        try {
+            // The handoff. Past this call the outcome can be ambiguous:
+            // the transport may have accepted the message before its
+            // error surfaced.
             $this->sender->send($code, $context, $this->ttlSecs);
         } catch (\Throwable $e) {
-            // Delivery refused: no challenge record may outlive an
-            // undelivered code (a later completion could not be
-            // attributed to a user who never saw it). Fail-closed.
+            // Ambiguous failure at or after the handoff: the
+            // reservation commits (spent; never a free extra send),
+            // and no challenge record survives a code the factor cannot
+            // vouch for. Fail-closed.
+            try {
+                $this->store->commitMailQuota($reservationId);
+            } catch (\Throwable) {
+            }
             try {
                 $this->store->consume($challenge->id);
             } catch (\Throwable) {
@@ -133,7 +217,16 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             );
         }
 
-        return $this->presentation($context, $challenge, $now);
+        // The handoff succeeded: the reservation commits (the delivery
+        // is spent and vouched for).
+        try {
+            $this->store->commitMailQuota($reservationId);
+        } catch (\Throwable) {
+            // The delivery already happened; a failed commit is a
+            // metrics concern, never a reason to refuse the begin.
+        }
+
+        return $this->presentation($context, $challenge, $now, $deliveryAttemptId, $generation);
     }
 
     public function complete(Request $request): StepUpResult
@@ -173,16 +266,37 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             return $this->failedAttempt($challenge, $boundContextKey);
         }
 
-        // The single-use boundary: exactly one completer consumes the
-        // record; a replayed completion answers unknown_challenge and
-        // never reaches the credit.
-        $consumed = $this->store->consume($challenge->id);
-        if ($consumed === null) {
+        // The single-use boundary is one atomic transition: the challenge
+        // consumption and the demand completion are the same script, so
+        // a verified factor can never strand beside a demand that stayed
+        // open, and a lost race consumes nothing. A replayed completion
+        // answers unknown_challenge and never reaches a proof.
+        if (!$this->completeAtomically($request, $challenge, $now)) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
         $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $boundContextKey);
 
-        return $this->credit($challenge, $boundSessionId);
+        return $this->proof($challenge, $boundSessionId);
+    }
+
+    /**
+     * The atomic completion of one verified factor: the store's single
+     * script consumes the challenge and completes its demand. A
+     * challenge that names no demand consumes single-use as before; its
+     * proof carries no demand id and finalizes nothing (the finalizer
+     * refuses an unbound proof, fail closed).
+     */
+    private function completeAtomically(Request $request, StepUpChallenge $challenge, int $now): bool
+    {
+        if ($challenge->demandId === null) {
+            return $this->store->consume($challenge->id) !== null;
+        }
+        $binding = StepUpSessionBinding::presentedBindingHash($request, $challenge);
+        if ($binding === null) {
+            return false;
+        }
+
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash) !== null;
     }
 
     /**
@@ -231,30 +345,16 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         return $this->store->read($payload['challengeId']);
     }
 
-    private function credit(StepUpChallenge $challenge, string $boundSessionId = ''): StepUpResult
+    /**
+     * The factor-plane proof of the consumed record: FactorVerified,
+     * never AuthorizedStepUp. No enrollment marker, no session restore,
+     * no StepUpCompleted is booked here — the shared
+     * {@see StepUpDemandFinalizer} creates those only after the demand
+     * settles authorized.
+     */
+    private function proof(StepUpChallenge $challenge, string $boundSessionId): StepUpResult
     {
-        $result = $this->creditOnce($challenge);
-        if ($result->status === StepUpResultStatus::Succeeded) {
-            $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
-            $this->store->markSessionStepUpSuccess(
-                $boundSessionId,
-                $challenge->principalPseudonym,
-                'email_otp',
-                900,
-                $this->now(),
-            );
-        }
-
-        return $result;
-    }
-
-    private function creditOnce(StepUpChallenge $challenge): StepUpResult
-    {
-        try {
-            return $this->credit->credit($challenge->id, $challenge);
-        } catch (\Throwable) {
-            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $challenge->id);
-        }
+        return StepUpResult::proved($challenge, $this->assurance());
     }
 
     /**
@@ -271,7 +371,12 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
      * begin (no session) also returns its one-time client secret here —
      * the only channel that ever carries the plaintext.
      */
-    private function presentation(StepUpContext $context, StepUpChallenge $challenge, int $now): Response
+    /**
+     * @param string|null $deliveryAttemptId the reserved delivery
+     *                                       attempt this begin funded,
+     *                                       surfaced for auditability
+     */
+    private function presentation(StepUpContext $context, StepUpChallenge $challenge, int $now, ?string $deliveryAttemptId = null, ?int $generation = null): Response
     {
         $ticket = $this->ticket->issue($challenge->id, $challenge->expiresAt);
         $expiresIn = max(0, $challenge->expiresAt - $now);
@@ -284,6 +389,8 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
                 'digits' => $this->digits,
                 'complete_path' => $this->completePath,
                 'client_secret' => $clientSecret,
+                'delivery_attempt_id' => $deliveryAttemptId,
+                'delivery_generation' => $generation,
             ], static fn ($v): bool => $v !== null), JSON_UNESCAPED_SLASHES);
 
             return new Response($body, Response::HTTP_OK, ['Content-Type' => 'application/json', 'Cache-Control' => 'no-store']);

@@ -160,8 +160,11 @@ final class RiskStageCompositionConfigTest extends TestCase
         foreach (['abuse_first', 'high_abuse'] as $profile) {
             self::assertSame('full', RiskStageComposition::resolve($profile, [])['telemetry'], "$profile arms the full telemetry by default");
         }
+        // The public claim is behavioral telemetry off by default: every
+        // privacy-bearing profile and the profile-less default resolve
+        // the arm off.
         foreach (['balanced', 'ha_safe', 'privacy_strict', 'compatibility', null] as $profile) {
-            self::assertSame('minimal', RiskStageComposition::resolve($profile, [])['telemetry'], "$profile arms the minimal telemetry by default");
+            self::assertSame('off', RiskStageComposition::resolve($profile, [])['telemetry'], "$profile keeps behavioral telemetry off by default");
         }
     }
 
@@ -170,6 +173,27 @@ final class RiskStageCompositionConfigTest extends TestCase
         self::assertSame('off', RiskStageComposition::resolve('abuse_first', ['evidence' => ['telemetry' => 'off']])['telemetry']);
         self::assertSame('full', RiskStageComposition::resolve('compatibility', ['evidence' => ['telemetry' => 'full']])['telemetry']);
         self::assertSame('minimal', RiskStageComposition::resolve('abuse_first', ['evidence' => ['telemetry' => 'minimal']])['telemetry']);
+    }
+
+    /**
+     * The privacy contract is stronger than an operator's per-layer
+     * value: under privacy_strict no explicit risk.evidence.telemetry
+     * value re-arms behavioral collection through the composition.
+     */
+    public function testPrivacyStrictPinsTheTelemetryArmOffAgainstAnyOperatorValue(): void
+    {
+        foreach (['minimal', 'full'] as $mode) {
+            self::assertSame(
+                'off',
+                RiskStageComposition::resolve('privacy_strict', ['evidence' => ['telemetry' => $mode]])['telemetry'],
+                "privacy_strict refuses the $mode override: behavioral telemetry stays off",
+            );
+        }
+        self::assertSame('off', RiskStageComposition::resolve('privacy_strict', ['evidence' => ['telemetry' => 'off']])['telemetry']);
+        self::assertSame('off', RiskStageComposition::resolve('privacy_strict', [])['telemetry']);
+        // Every other profile keeps the explicit override.
+        self::assertSame('minimal', RiskStageComposition::resolve('balanced', ['evidence' => ['telemetry' => 'minimal']])['telemetry']);
+        self::assertSame('full', RiskStageComposition::resolve('ha_safe', ['evidence' => ['telemetry' => 'full']])['telemetry']);
     }
 
     public function testTheDecoyReaderFollowsTheServerSideStages(): void

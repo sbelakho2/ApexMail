@@ -8,43 +8,20 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * The cross-challenge brute-force budget of the step-up plane. The
- * per-challenge attempt cap alone allows ~1440 guesses a day. That is
- * 3 begins per 15-minute window times 5 attempts times 96 windows. The verification
- * failures therefore feed an escalating lockout with three budget
- * keys:
- *
- *  - the context key, the pair (principal, requesting session or
- *    network bucket). This is the primary ladder: it locks exactly the
- *    failing context, never the owner's other sessions. An attacker
- *    failing from their own session burns their own budget only.
- *  - the principal key, the account-wide backstop. It escalates on
- *    the same ladder with its thresholds multiplied by
- *    account_BACKSTOP_MULTIPLIER (5 by default), so it arms only under
- *    a sustained cross-context campaign, never under a handful of
- *    typos.
- *  - the target key, the shared target budget, on the same
- *    high-threshold ladder as the account-wide backstop (a shared key
- *    must never be cheap to arm against the owner).
- *
- * A begin (and the matching completion) from the owner's trusted
- * context, a session that recently completed a step-up, or the
- * WebAuthn assertion path (the stronger enrolled factor), bypasses
- * the shared keys (principal + target): the owner can always start a
- * step-up despite an attacker-induced account lock. The requesting
- * context's own budget is never bypassed: the requester's own failures
- * still cost them the per-context wait.
- *
- * Each failure bumps the context key and both shared keys; at every
- * threshold the matching lockout is armed (or extended) and the owner
- * is notified through the configured hook exactly when the ladder rung
- * changes (first arm or an escalation), never on every failure past
- * the threshold. begin() and complete() both refuse while the
- * applicable lockouts hold, so the budget can never be farmed across
- * fresh challenges.
- *
- * The escalation is monotone in the failure count: the more a key
- * fails, the longer it sits out. A completed step-up clears the
- * budgets (the verified owner earned the reset; an attacker has not).
+ * per-challenge attempt cap alone allows about 1440 guesses a day.
+ * That is 3 begins per 15-minute window times 5 attempts times 96
+ * windows. The verification failures feed an escalating lockout with
+ * three budget keys. The context key is the pair of principal and
+ * requesting session or network bucket. That is the primary ladder.
+ * It locks the failing context only. The principal key is the
+ * account-wide backstop. It escalates on the same ladder. Its
+ * thresholds are multiplied by 5. The target key is the shared target
+ * budget. It uses the same high-threshold ladder. A begin from the
+ * owner trusted context bypasses the shared keys. The requesting
+ * context budget is never bypassed. Each failure bumps the context
+ * key and both shared keys. At every threshold the matching lockout
+ * is armed. The owner is notified exactly when the ladder rung
+ * changes.
  */
 final class StepUpLockoutGuard
 {
@@ -54,10 +31,10 @@ final class StepUpLockoutGuard
 
     /**
      * The per-context escalation ladder: [failures within the window,
-     * lockout seconds]. The default walks 5 → 5 min, 15 → 30 min,
-     * 40 → 2 h, 100 → 24 h, so a sustained campaign ends in a full-day
-     * lockout of the failing context while a handful of typos costs
-     * five minutes of that context only.
+     * lockout seconds]. The default ladder walks 5 to 5 minutes, 15 to
+     * 30 minutes, 40 to 2 hours, and 100 to 24 hours. A sustained
+     * campaign ends in a full-day lockout of the failing context. A
+     * handful of typos costs five minutes of that context only.
      */
     public const DEFAULT_LADDER = [
         [5, 300],
@@ -87,9 +64,9 @@ final class StepUpLockoutGuard
 
     /**
      * @param list<array{0: int, 1: int}> $ladder       the per-context
-     *                                             escalation ladder,
-     *                                             ascending in both
-     *                                             fields
+     *                                             escalation ladder. It
+     *                                             is ascending in both
+     *                                             fields.
      * @param StepUpOwnerNotifier|null    $notifyOwner called when the
      *                                             ladder rung changes
      *                                             (a lockout is armed

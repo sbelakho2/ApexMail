@@ -21,6 +21,7 @@ use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\OutcomeMarksStoreInterface;
+use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -86,14 +87,17 @@ final class OutcomesTest extends TestCase
                 self::assertTrue($row->accepts($dimension), sprintf('%s must accept every identity handle', $row->outcome->value));
             }
         }
-        // The vocabulary maps onto the existing channels only: 8, 9, 10,
-        // 11, 12 and 13, each at least once.
+        // The vocabulary maps onto the risk-v1 pressure/auth channels
+        // plus the step-up-completion channel (22). Event 8
+        // (ProtectedActionSuccess) remains a valid state-script channel
+        // but the table no longer selects it: step-up completion has its
+        // own kind at 22.
         $channelValues = array_map(static fn ($k): int => $k->value, $seenChannels);
         sort($channelValues);
         self::assertSame(
-            [8, 9, 10, 11, 12, 13],
+            [9, 10, 11, 12, 13, 22],
             array_values(array_unique($channelValues)),
-            'the mapping must reuse the existing risk-v1 channels',
+            'the mapping must reuse the risk-v1 channels plus step-up completion (22)',
         );
     }
 
@@ -138,17 +142,37 @@ final class OutcomesTest extends TestCase
         self::assertSame(RiskEventKind::AuthenticationFailure, OutcomeMap::for(Outcome::AuthenticationFailure)->channel);
     }
 
+    public function testStepUpCompletedIsEvent22NotTheHoneypotKind(): void
+    {
+        // Mixed-version readiness: StepUpCompleted is the dedicated
+        // contract value 22 (NOT 18 — that is HoneypotTriggered, and
+        // 21 is ChallengeCancelled). An older enum that only knows 1..21
+        // refuses 22 fail-closed via tryFrom; a newer one round-trips it.
+        self::assertSame(22, RiskEventKind::StepUpCompleted->value);
+        self::assertSame(RiskEventKind::StepUpCompleted, RiskEventKind::tryFrom(22));
+        self::assertNull(RiskEventKind::tryFrom(23));
+        self::assertNull(RiskEventKind::tryFrom(0));
+        self::assertNotSame(RiskEventKind::HoneypotTriggered, RiskEventKind::StepUpCompleted);
+        self::assertSame(18, RiskEventKind::HoneypotTriggered->value);
+        self::assertSame(21, RiskEventKind::ChallengeCancelled->value);
+        // The outcome table books the dedicated channel, never the shared
+        // ProtectedActionSuccess (8) and never a honeypot kind.
+        $channel = OutcomeMap::for(Outcome::StepUpCompleted)->channel;
+        self::assertSame(RiskEventKind::StepUpCompleted, $channel);
+        self::assertFalse($channel->isHoneypot());
+    }
+
     public function testChannelPolarityMatchesTheRiskV1Contract(): void
     {
         // The add-only outcomes map only onto channels the state script
         // uses to add pressure (9, 11, 13); the trust outcomes map only
-        // onto the trust channels (8, 10, 12). This is the table-side
+        // onto the trust channels (8, 10, 12, 22). This is the table-side
         // half of the invariant; the Redis-marked test proves the Lua
         // half against the real state script.
         foreach (OutcomeMap::all() as $row) {
             $value = $row->channel->value;
             if ($row->maySubtractRisk) {
-                self::assertContains($value, [8, 10, 12], "{$row->outcome->value} trust channel");
+                self::assertContains($value, [8, 10, 12, 22], "{$row->outcome->value} trust channel");
             } else {
                 self::assertContains($value, [9, 11, 13], "{$row->outcome->value} add-only channel");
             }
@@ -447,6 +471,69 @@ final class OutcomesTest extends TestCase
         self::assertNotNull($store->readMark('principal', self::PRINCIPAL), 'other dimensions stay');
         self::assertSame(0, $outcomes->forget(OutcomeHandle::target(self::TARGET)), 'a second forget is a no-op');
         self::assertSame(0, $outcomes->forget(OutcomeHandle::decisionId(self::DECISION)), 'a ledger handle names no mark');
+    }
+
+    public function testForgetDevicesForUserDerivesThroughTheIdentityFactory(): void
+    {
+        $store = new class extends RiskStateStoreStub implements PrincipalNetworkTagStoreInterface {
+            /** @var list<string> */
+            public array $forgotten = [];
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+
+            public function principalNetworkSeen(string $principalId, string $network): ?bool
+            {
+                return null;
+            }
+
+            public function recordPrincipalNetworkTag(string $principalId, string $network, bool $trusted = false): bool
+            {
+                return true;
+            }
+
+            public function principalHasTrustedNetwork(string $principalId): ?bool
+            {
+                return null;
+            }
+
+            public function tagIsTrusted(string $principalId, string $network): ?bool
+            {
+                return null;
+            }
+
+            public function forgetDevices(string $principalId): void
+            {
+                $this->forgotten[] = $principalId;
+            }
+        };
+        $factory = new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32)));
+        $outcomes = new KiwiOutcomes($this->engine($store), $store, $store, $factory);
+
+        $outcomes->forgetDevicesForUser('user-42');
+
+        self::assertSame(
+            [$factory->principalId('user-42')],
+            $store->forgotten,
+            'the raw user identifier derives through the one keyed identity factory before the store call',
+        );
+    }
+
+    public function testForgetDevicesForUserRefusesToRunUnwired(): void
+    {
+        $store = new class extends RiskStateStoreStub {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+        };
+        // Both nullable seams absent: a silent no-op would leave a
+        // revoked user's devices trusted.
+        $outcomes = new KiwiOutcomes($this->engine($store), $store);
+        $this->expectException(\LogicException::class);
+        $outcomes->forgetDevicesForUser('user-42');
     }
 
     public function testOutcomeFeedbackRidesHandlePseudonymsThroughTheEngine(): void

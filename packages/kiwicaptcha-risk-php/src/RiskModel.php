@@ -31,5 +31,5 @@ namespace KiwiCaptcha\Risk;
 final class RiskModel
 {
     /** The current model generation (monotonic). */
-    public const REVISION = 17;
+    public const REVISION = 18;
 }

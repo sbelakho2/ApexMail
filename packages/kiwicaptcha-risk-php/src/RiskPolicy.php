@@ -17,6 +17,8 @@ namespace KiwiCaptcha\Risk;
  *          'minimum' => 'allow'|'sha16'|...,        // RiskAction string
  *          'post_solve_check' => bool,
  *          'degraded' => 'allow'|...,               // RiskAction string
+ *          'step_up_above' => int,                  // optional, 0..1000
+ *          'carrier' => string,                     // optional
  *        ],
  *     ].
  *     'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
@@ -47,7 +49,7 @@ final class RiskPolicy
     ];
 
     /**
-     * @param array<int, array{base_risk:int, minimum:RiskAction, post_solve_check:bool, degraded:RiskAction}> $scopes
+     * @param array<int, array{base_risk:int, minimum:RiskAction, post_solve_check:bool, degraded:RiskAction, step_up_above:?int, carrier:?string}> $scopes
      * @param array<int, RiskAction> $globalFloors
      */
     private function __construct(
@@ -74,9 +76,9 @@ final class RiskPolicy
      * scope row and validated the same way. The built-in default is
      * deliberately NOT Allow on any axis (100 / sha20 / false / sha20):
      * a scope the operator forgot to list must not be the weakest hole in
-     * the policy.
+     * the policy. It carries no step-up rung and no carrier.
      *
-     * @return array{base_risk:int, minimum:RiskAction, post_solve_check:bool, degraded:RiskAction}
+     * @return array{base_risk:int, minimum:RiskAction, post_solve_check:bool, degraded:RiskAction, step_up_above:null, carrier:null}
      */
     private static function parseDefaultScope(mixed $spec): array
     {
@@ -97,6 +99,8 @@ final class RiskPolicy
             'minimum' => RiskAction::from((string) $spec['minimum']),
             'post_solve_check' => $spec['post_solve_check'],
             'degraded' => RiskAction::from((string) $spec['degraded']),
+            'step_up_above' => null,
+            'carrier' => null,
         ];
     }
 
@@ -153,6 +157,8 @@ final class RiskPolicy
                 'minimum' => RiskAction::from((string) $spec['minimum']),
                 'post_solve_check' => self::requireBool($spec['post_solve_check'], $scope, 'post_solve_check'),
                 'degraded' => RiskAction::from((string) $spec['degraded']),
+                'step_up_above' => self::optionalStepUpAbove($spec, $scope),
+                'carrier' => self::optionalCarrier($spec, $scope),
             ];
         }
 
@@ -205,7 +211,7 @@ final class RiskPolicy
             scopes: $scopes,
             defaultScope: isset($config['default_scope'])
                 ? self::parseDefaultScope($config['default_scope'])
-                : ['base_risk' => 100, 'minimum' => RiskAction::Sha20, 'post_solve_check' => false, 'degraded' => RiskAction::Sha20],
+                : ['base_risk' => 100, 'minimum' => RiskAction::Sha20, 'post_solve_check' => false, 'degraded' => RiskAction::Sha20, 'step_up_above' => null, 'carrier' => null],
             globalFloors: $floors,
         );
     }
@@ -221,11 +227,36 @@ final class RiskPolicy
     }
 
     /**
+     * The decision-score rung above which the scope's assessment
+     * escalates to the interactive step-up (null = the composed action
+     * alone decides). A raise only: the ladder, the floors and the hard
+     * overrides keep their semantics underneath it.
+     */
+    public function stepUpAbove(int $scope): ?int
+    {
+        return $this->scopes[$scope]['step_up_above'] ?? $this->defaultScope['step_up_above'];
+    }
+
+    /**
+     * The factor that carries the scope's step-up demand (null = no
+     * named carrier). The engine uses it for the post-solve raise: a
+     * scope that names a carrier and carries no step_up_above rung
+     * answers its post-solve assessment with the carrier demand, while
+     * issuance stays a plain proof-of-work flow.
+     */
+    public function carrier(int $scope): ?string
+    {
+        return $this->scopes[$scope]['carrier'] ?? $this->defaultScope['carrier'];
+    }
+
+    /**
      * Full decision: band action (with enter/exit hysteresis when the
      * engine's per-client map is passed), clamped to the scope
-     * minimum and the global floor, then hard overrides with reasons.
+     * minimum and the global floor, raised to the scope's step-up rung
+     * when the score reaches it, then hard overrides with reasons.
      *
-     * Argon re-escalation ordering: ladder → strongest(minimum, floor) →
+     * Argon re-escalation ordering: ladder → step-up rung →
+     * strongest(minimum, floor) →
      * capacity. The argon-capacity check is the last step, so the final
      * floor/minimum re-clamp can never reintroduce Argon. A final Argon
      * action with argonCapacity < 300 escalates to StepUp.
@@ -281,6 +312,15 @@ final class RiskPolicy
         $minimum = $this->minimum($scope);
         $floor = $this->globalFloors[min(4, max(0, $globalLevel))] ?? RiskAction::Allow;
         $action = $this->strongest($bandAction, $minimum, $floor);
+        // The scope's step-up rung: a scored decision at or above the
+        // rung escalates the composed action to the interactive step-up.
+        // The rung is a raise only, applied straight after the ladder, so
+        // the band mapping, the floors and every later override keep
+        // their semantics (a hard deny still outranks it).
+        $stepUpAbove = $this->stepUpAbove($scope);
+        if ($stepUpAbove !== null && $score >= $stepUpAbove && $action->rank() < RiskAction::StepUp->rank()) {
+            $action = RiskAction::StepUp;
+        }
 
         $reasons = [];
         $deny = false;
@@ -471,5 +511,49 @@ final class RiskPolicy
         }
 
         return $value;
+    }
+
+    /**
+     * The optional step-up rung of a scope row: absent or null means
+     * the composed action alone decides. Present it must be a real int
+     * within 0..1000 (the decision-score fixed point), never a numeric
+     * string or float, matching the rust parser's as_u64 grammar.
+     *
+     * @param array<string, mixed> $spec
+     */
+    private static function optionalStepUpAbove(array $spec, int $scope): ?int
+    {
+        $rung = $spec['step_up_above'] ?? null;
+        if ($rung === null) {
+            return null;
+        }
+        if (!\is_int($rung) || $rung < 0 || $rung > 1000) {
+            throw new \InvalidArgumentException(
+                sprintf('Scope %d field "step_up_above" must be null or an int within 0..1000 (got %s)', $scope, get_debug_type($rung))
+            );
+        }
+
+        return $rung;
+    }
+
+    /**
+     * The optional carrier of a scope row: absent or null means the
+     * scope names no factor. Present it must be a non-empty string.
+     *
+     * @param array<string, mixed> $spec
+     */
+    private static function optionalCarrier(array $spec, int $scope): ?string
+    {
+        $carrier = $spec['carrier'] ?? null;
+        if ($carrier === null) {
+            return null;
+        }
+        if (!\is_string($carrier) || $carrier === '') {
+            throw new \InvalidArgumentException(
+                sprintf('Scope %d field "carrier" must be null or a non-empty string (got %s)', $scope, get_debug_type($carrier))
+            );
+        }
+
+        return $carrier;
     }
 }

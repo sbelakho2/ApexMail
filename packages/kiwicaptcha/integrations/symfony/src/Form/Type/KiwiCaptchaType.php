@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Form\Type;
 
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandViewRegistry;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
 use Symfony\Component\Form\AbstractType;
@@ -30,6 +31,15 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
  * mode ('off' default; forced 'off' under strict privacy mode) and is
  * rendered as data-kiwi-telemetry on the widget container.
  *
+ * Step-up demand routing: when this field's validation is answered with a
+ * step-up demand, the field's finishView() claims exactly its demand from
+ * the request-scoped {@see StepUpDemandViewRegistry} and exposes it as the
+ * `step_up_demand` view variable. The claim is keyed on this field's own
+ * constraint instance, the stable server-side field-instance identity the
+ * validator shares. On a page with several captcha fields, each refused
+ * form surfaces its own demand id, never a sibling's; a form whose
+ * validation minted none renders no demand at all.
+ *
  * Usage:
  *   $builder->add('captcha', KiwiCaptchaType::class, [
  *       'scope' => 'login',
@@ -43,6 +53,7 @@ class KiwiCaptchaType extends AbstractType
         private readonly string $routePrefix = '/kiwi-captcha',
         private readonly string $telemetry = 'off',
         private readonly ?string $requestBinding = null,
+        private readonly ?StepUpDemandViewRegistry $stepUpDemandViews = null,
     ) {
     }
 
@@ -133,6 +144,33 @@ class KiwiCaptchaType extends AbstractType
     public function getParent(): string
     {
         return HiddenType::class;
+    }
+
+    /**
+     * Claim this field's step-up demand, if its validation minted one.
+     * The claim is keyed on the KiwiCaptcha constraint instance this
+     * field's config carries: the same instance the validator held when
+     * it minted the demand. The entry is therefore exactly this field's.
+     * A second form's field (with its own constraint instance) can claim
+     * nothing here, and an unclaimed field renders no demand.
+     */
+    public function finishView(FormView $view, FormInterface $form, array $options): void
+    {
+        $view->vars['step_up_demand'] = null;
+        if ($this->stepUpDemandViews === null) {
+            return;
+        }
+        $constraints = $form->getConfig()->getOption('constraints');
+        if (!\is_iterable($constraints)) {
+            return;
+        }
+        foreach ($constraints as $constraint) {
+            if ($constraint instanceof KiwiCaptcha) {
+                $view->vars['step_up_demand'] = $this->stepUpDemandViews->claim($constraint);
+
+                return;
+            }
+        }
     }
 
     public function getBlockPrefix(): string

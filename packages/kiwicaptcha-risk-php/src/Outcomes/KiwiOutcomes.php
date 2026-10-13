@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Risk\Outcomes;
 
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
 use KiwiCaptcha\Risk\RiskContext;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\Storage\OutcomeMarksStoreInterface;
 
 /**
@@ -39,7 +40,47 @@ final class KiwiOutcomes
     public function __construct(
         private readonly AdaptiveRiskEngine $engine,
         private readonly OutcomeMarksStoreInterface $marks,
+        private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
+        private readonly ?RiskIdentityFactory $identityFactory = null,
     ) {
+    }
+
+    /**
+     * Deletes every session and device tag for a principal. Wire this
+     * to password change, admin lockout, and sign-out-everywhere.
+     *
+     * @internal takes an already-derived principal pseudonym: call
+     *           {@see self::forgetDevicesForUser()} with the raw user
+     *           identifier so the pseudonym is derived through the one
+     *           keyed identity factory, never by the caller.
+     */
+    public function forgetDevices(string $principalId): void
+    {
+        $this->principalNetworks?->forgetDevices($principalId);
+    }
+
+    /**
+     * The application-facing revocation: derives the principal
+     * pseudonym of the raw user identifier through the identity factory
+     * (the same derivation every other risk surface books under) and
+     * deletes the principal's session and device tags. Wire this to
+     * password change, admin lockout, and sign-out-everywhere.
+     *
+     * @throws \LogicException when the facade was constructed without
+     *                         the principal-network store or the
+     *                         identity factory (a silent no-op would
+     *                         leave a revoked user's devices trusted)
+     */
+    public function forgetDevicesForUser(string $userIdentifier): void
+    {
+        if ($this->principalNetworks === null || $this->identityFactory === null) {
+            throw new \LogicException(
+                'forgetDevicesForUser requires the principal-network tag store and the identity factory; '
+                .'the facade was constructed without them, so revocation cannot run silently',
+            );
+        }
+
+        $this->principalNetworks->forgetDevices($this->identityFactory->principalId($userIdentifier));
     }
 
     /**
@@ -111,7 +152,16 @@ final class KiwiOutcomes
                 // The mark write dedupes on the report's own event id
                 // (the same one the feedback channel books), so a
                 // retried report never double-counts the mark. No
-                // idempotency key yields '' (dedupe disabled).
+                // idempotency key yields '' (dedupe disabled). A target
+                // handle carries the canonical 64-hex digest and the
+                // mark keys follow the 128-bit family shape, so the
+                // mark id projects the digest (a 32-hex handle id
+                // passes through unchanged).
+                $markId = $handle->id;
+                if ($handle->dimension === OutcomeHandleDimension::Target
+                    && preg_match('/^[0-9a-f]{64}$/D', $handle->id) === 1) {
+                    $markId = substr($handle->id, 0, 32);
+                }
                 $markEventId = $this->engine->deriveOutcomeEventId(
                     $idempotencyKey,
                     $context?->scope ?? 0,
@@ -119,7 +169,7 @@ final class KiwiOutcomes
                 );
                 $markCount = $this->marks->writeMark(
                     (string) $handle->dimension->markDimension(),
-                    $handle->id,
+                    $markId,
                     (string) $mapping->markKind(),
                     $nowMs,
                     $markEventId,

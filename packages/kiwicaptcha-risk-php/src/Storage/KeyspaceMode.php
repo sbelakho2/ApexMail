@@ -39,7 +39,13 @@ enum KeyspaceMode: string
     /** The historical single-tag layout: the mode of the classic store. */
     case Legacy = 'legacy';
 
-    /** The horizontally scalable per-family layout; the recommended mode for new namespaces. */
+    /**
+     * The horizontally scalable per-family layout; the recommended mode
+     * for new namespaces. Each family and each scope shard carries its
+     * own hash tag, so assessment writes disperse over cluster slots
+     * and throughput scales with the shard count instead of serializing
+     * on the shared namespace tag.
+     */
     case Sharded = 'sharded';
 
     /**
@@ -271,6 +277,9 @@ enum KeyspaceMode: string
      */
     public static function sessionTagKey(string $encodedNamespace, string $kind, string $sessionHex): string
     {
+        if (preg_match('/^[0-9a-f]{32}$/', $sessionHex) !== 1) {
+            throw new \InvalidArgumentException('A session tag key names the 32-hex session pseudonym');
+        }
         return sprintf(
             '{kiwi:%s:session:%s}:risk:%s:%s',
             $encodedNamespace,
@@ -300,5 +309,37 @@ enum KeyspaceMode: string
     public static function markDedupeKey(string $encodedNamespace, string $eventId): string
     {
         return "mark:{kiwi:{$encodedNamespace}}:dd:{$eventId}";
+    }
+
+    /**
+     * The target-dimension state family of one target pseudonym. In the
+     * Sharded layout the failure hash and the two spread HLLs live on
+     * the target id's own family slot ({kiwi:<ns>:target:<hex2>}), so a
+     * stuffing storm never hammers the primary holding the rest of the
+     * risk state. In the Legacy layout the three keys carry the shared
+     * namespace tag ({kiwi:<ns>}) instead. The consolidated assessment
+     * script touches the observation keys and the target keys in one
+     * invocation, and every key of one invocation must hash to one
+     * cluster slot. Target state carries a 24 h TTL, so a namespace
+     * that later moves to the sharded layout drains the stale
+     * legacy-family records naturally.
+     *
+     * Byte-identical with the Rust mirror
+     * `kiwicaptcha_risk::keyspace::target_state_keys`.
+     *
+     * @return array{0: string, 1: string, 2: string} the failure hash,
+     *         the source-spread HLL and the asn-spread HLL keys
+     */
+    public static function targetStateKeys(string $encodedNamespace, string $hexId, self $mode): array
+    {
+        $tag = $mode === self::Sharded
+            ? '{kiwi:' . $encodedNamespace . ':target:' . self::idPrefix($hexId) . '}'
+            : '{kiwi:' . $encodedNamespace . '}';
+
+        return [
+            $tag . ':risk:tgt:' . $hexId,
+            $tag . ':risk:tgt:src:' . $hexId,
+            $tag . ':risk:tgt:asn:' . $hexId,
+        ];
     }
 }

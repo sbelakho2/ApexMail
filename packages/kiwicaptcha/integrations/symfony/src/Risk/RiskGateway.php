@@ -482,6 +482,9 @@ final class RiskGateway implements LoginDecisionGate
         if ($context->principalId !== null) {
             $names[] = 'principal';
         }
+        if ($context->deviceId !== null) {
+            $names[] = 'device';
+        }
 
         return $names;
     }
@@ -501,12 +504,23 @@ final class RiskGateway implements LoginDecisionGate
      * id. The caller decides whether the solve really was a success and
      * records the confirmation itself with the returned decision id.
      *
+     * $targetFields carries the request's submitted values for the
+     * scope's configured target field(s): the engine's target resolver
+     * reads them here, so the post-solve decision books the target
+     * dimension (failure counter and spread) like every other
+     * decision-bearing path. Empty when the scope declares no target
+     * field or the request submitted none.
+     *
+     * @param array<string, string> $targetFields submitted form field
+     *                                            values keyed by field
+     *                                            name
+     *
      * @return RiskDecision|null the post-solve decision, or null when the
      *                           scope is unknown and the engine declines to
      *                           evaluate (feedback paths must never crash
      *                           on unknown scopes).
      */
-    public function postSolveDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+    public function postSolveDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, array $targetFields = []): ?RiskDecision
     {
         $scopeId = $this->tryScopeId($scope);
         if ($scopeId === null) {
@@ -520,6 +534,7 @@ final class RiskGateway implements LoginDecisionGate
             event: RiskEventKind::SolveSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
+            targetFields: $targetFields,
         );
         $decision = $this->engine->reassess($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
@@ -536,8 +551,26 @@ final class RiskGateway implements LoginDecisionGate
      * pressure) only runs inside the pipeline, so the login path must
      * reach it here — the feedback paths never do. A StepUp decision
      * means the caller must NOT grant the session yet.
+     *
+     * $principal is the raw user identifier, exactly like every other
+     * context-bearing path: the engine derives the keyed principal
+     * pseudonym itself, so the identity the gate judges is the same one
+     * the step-up restore and the reputation paths bind. A pre-derived
+     * pseudonym here would be keyed twice and match nothing.
+     *
+     * The raw continuity and trusted-device cookie values ride the
+     * context ($session / $device). The engine derives the keyed session
+     * and device pseudonyms itself, so the gate judges the browser's
+     * real bound identity instead of the absence of one. Null keeps an
+     * identity out of the observation.
+     *
+     * $targetFields carries the request's submitted values for the
+     * scope's configured target field(s): the engine's target resolver
+     * reads them here, so the first-attempt decision books the target
+     * dimension (failure counter and spread) exactly like the outcome
+     * bridge does. Empty when the scope declares no target field.
      */
-    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null, array $targetFields = []): ?RiskDecision
     {
         $scopeId = $this->tryScopeId($scope);
         if ($scopeId === null) {
@@ -551,6 +584,8 @@ final class RiskGateway implements LoginDecisionGate
             event: RiskEventKind::AuthenticationSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
+            deviceId: $device,
+            targetFields: $targetFields,
         );
         $decision = $this->engine->reassess($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
@@ -568,15 +603,21 @@ final class RiskGateway implements LoginDecisionGate
      * consistency). The v2 weights are the caller-explicit override when
      * given, else the configured weights (risk.v2.*, themselves the
      * contract defaults when unset; an empty context scores identically
-     * to the v1 path). The decision id is recorded on the request-local
-     * decision context, see {@see setCurrentDecisionId()}.
+     * to the v1 path). $targetFields carries the request's submitted
+     * values for the scope's configured target field(s), like
+     * {@see postSolveDecision()}. The decision id is recorded on the
+     * request-local decision context, see {@see setCurrentDecisionId()}.
+     *
+     * @param array<string, string> $targetFields submitted form field
+     *                                            values keyed by field
+     *                                            name
      *
      * @return RiskDecision|null the post-solve decision, or null when the
      *                           scope is unknown and the engine declines to
      *                           evaluate (feedback paths must never crash
      *                           on unknown scopes).
      */
-    public function postSolveDecisionV2(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): ?RiskDecision
+    public function postSolveDecisionV2(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null, array $targetFields = []): ?RiskDecision
     {
         $scopeId = $this->tryScopeId($scope);
         if ($scopeId === null) {
@@ -590,10 +631,56 @@ final class RiskGateway implements LoginDecisionGate
             event: RiskEventKind::SolveSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
+            targetFields: $targetFields,
         );
         $decision = $v2 !== null
             ? $this->engine->reassessV2($context, $v2, $idempotencyKey, $v2Weights ?? $this->v2Weights)
             : $this->engine->reassess($context, $idempotencyKey);
+        $this->setCurrentDecisionId($decision->decisionId);
+        $this->logDecision($scope, $decision);
+
+        return $decision;
+    }
+
+    /**
+     * The step-up completion assessment: a fresh reassessment of the
+     * same context under the completed-step-up event. The event
+     * vocabulary is fixed by the cross-language risk-v1 contract, so
+     * the completed second factor books through the server-confirmed
+     * protected-action channel, the channel the outcomes contract maps
+     * the stepUpCompleted outcome onto. The caller is the validator's
+     * email grant path: a redeemed grant answers the step-up demand,
+     * and this assessment proves the completed factor also satisfies
+     * the engine, on the same (scope, source, session, target) inputs
+     * the refused submission carried. The decision id is recorded on
+     * the request-local decision context, see {@see setCurrentDecisionId()}.
+     *
+     * $targetFields carries the request's submitted values for the
+     * scope's configured target field(s), exactly like
+     * {@see postSolveDecision()}. Null when the scope is unknown and
+     * the engine declines to evaluate.
+     *
+     * @param array<string, string> $targetFields submitted form field
+     *                                            values keyed by field
+     *                                            name
+     */
+    public function stepUpCompletedDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, array $targetFields = []): ?RiskDecision
+    {
+        $scopeId = $this->tryScopeId($scope);
+        if ($scopeId === null) {
+            return null;
+        }
+        $context = new RiskContext(
+            scope: $scopeId,
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $principal ?? $this->resolvePrincipal($scope),
+            event: RiskEventKind::ProtectedActionSuccess,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+            targetFields: $targetFields,
+        );
+        $decision = $this->engine->reassess($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
 
@@ -822,8 +909,8 @@ final class RiskGateway implements LoginDecisionGate
      * verified outcome, computed from the unforgeable issuedAtNs receipt
      * time, never the client-reported durationMs. The risk-v1/v2
      * feedback surface is categorical: RiskEventKind is a fixed
-     * cross-language contract, values 1..21 byte-identical with the Rust
-     * mirror and the canonical risk.lua. The risk-v2 context carries
+     * cross-language contract, values 1..22 byte-identical with the Rust
+     * mirror and the canonical risk.lua (22 = StepUpCompleted). The risk-v2 context carries
      * only categorical fields, honeypot bool and context/TLS tags, and
      * its numeric 0..1000 signals are derived inside the engine, never
      * caller-supplied. A graded fast-solve bucket, e.g. below a

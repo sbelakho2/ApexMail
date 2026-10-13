@@ -75,6 +75,11 @@ pub const CORROBORATION_FLOOR: u16 = 300;
 /// login claiming it sees the interactive step-up (never a lockout).
 pub const TARGET_ATTACK_THRESHOLD: u32 = 5;
 
+/// The distinct-source count at which the target spread signal
+/// saturates: the fail-closed target picture reads the threshold
+/// failure count with the spread saturated on both axes.
+pub const TARGET_SPREAD_SATURATION: u32 = 20;
+
 /// The scope failure-ratio pressure floor for first-attempt login
 /// escalation: at/above this `global_pressure` signal (or global level
 /// [`SCOPE_PRESSURE_LEVEL`]) every login escalates to the interactive
@@ -238,6 +243,12 @@ pub struct MarksRequest {
     /// The principal pseudonym (32 hex chars), or `None` when the request
     /// is unauthenticated.
     pub principal: Option<String>,
+    /// The request's resolved target pseudonym (32-byte hex HMAC), or
+    /// `None` when the assessment carries no target dimension. The
+    /// engine derives it beside the frozen observation wire when a
+    /// target resolver is wired; the reader reads the target dimension's
+    /// attacked-target record from the live failure state.
+    pub target: Option<String>,
 }
 
 /// The first-attempt prevention evidence (D3.5 P0-1): the signals that
@@ -255,11 +266,25 @@ pub struct MarksRequest {
 /// - `scope_pressure`: the scope failure-ratio pressure is running at or
 ///   above [`SCOPE_PRESSURE_FLOOR`] / [`SCOPE_PRESSURE_LEVEL`], so every
 ///   first-attempt login escalates — not only the attacked target's.
+/// - `evidence_unavailable`: a trusted-history probe failed with a
+///   store error, so no read can vouch for the login. Fail closed: the
+///   request counts as novel under enforcement, while learn mode keeps
+///   the plain Allow; the decision carries the evidence-unavailable
+///   reason in both modes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FirstAttemptEvidence {
     pub novel_network: bool,
     pub breached_credential: bool,
     pub scope_pressure: bool,
+    pub evidence_unavailable: bool,
+    /// The unmasked novelty verdict, recorded before the enforcement
+    /// mode is applied. The post-Allow trust minting reads it: an Allow
+    /// that enforce mode would have stepped up records its session and
+    /// device bindings without trust, so a novel (deferred) login
+    /// mints no trust even in learn mode; the repeat visit from
+    /// granted history is the trust-earning event, and a credential
+    /// change revokes the trust mirrors so the gate re-arms.
+    pub would_step_up_under_enforce: bool,
 }
 
 impl FirstAttemptEvidence {
@@ -355,7 +380,10 @@ impl MarksReader for StoreMarksReader {
         if let Some(dataset) = &self.asn {
             own.push((MarkDimension::Asn, dataset.bucket_id(request.source_ip)));
         }
-        MarksView::read(self.store.as_ref(), &own, None)
+        // The target dimension: the attacked-target record is compiled
+        // from the live failure state when no mark was written, so a
+        // stuffed target forces the interactive step-up (rule 3).
+        MarksView::read(self.store.as_ref(), &own, request.target.as_deref())
     }
 
     fn mark_ttl_ms(&self) -> u64 {
@@ -468,6 +496,13 @@ pub fn apply(
         if view.first_attempt.scope_pressure {
             stage_reasons.push(RiskReason::GlobalAttack);
         }
+    }
+    // Unreadable trusted history is its own reason, independent of the
+    // step-up: enforcement escalates a novel verdict carrying it, learn
+    // mode keeps the plain Allow while still reporting why the evidence
+    // plane could not vouch for the login.
+    if view.first_attempt.evidence_unavailable {
+        stage_reasons.push(RiskReason::EvidenceUnavailable);
     }
 
     merge_stage_reasons(&mut decision, stage_reasons);
@@ -1043,6 +1078,7 @@ mod tests {
             source_ip: "192.0.2.10".parse().unwrap(),
             session: Some(SESSION.to_string()),
             principal: None,
+            target: None,
         };
         let view = reader.request_marks(&request).unwrap();
         // No dataset attached: the ASN dimension is absent, the agent is

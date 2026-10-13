@@ -119,4 +119,16 @@ final class ContinuityCookie
             sameSite: $this->sameSite,
         );
     }
+
+    /** The configured cookie name. */
+    public function name(): string
+    {
+        return $this->name;
+    }
+
+    /** The configured TTL in seconds. */
+    public function ttlSecs(): int
+    {
+        return $this->ttlSecs;
+    }
 }

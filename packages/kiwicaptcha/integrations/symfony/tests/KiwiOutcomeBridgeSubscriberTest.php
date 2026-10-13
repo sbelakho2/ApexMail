@@ -67,6 +67,7 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
         array $overrides = [],
         bool $trustRequestIdHeader = false,
         ?\BelConsulting\KiwiCaptchaBundle\Risk\AuthOutcomeWindowInterface $authWindow = null,
+        ?\Symfony\Component\HttpFoundation\RequestStack $requestStack = null,
     ): KiwiOutcomeBridgeSubscriber {
         return new KiwiOutcomeBridgeSubscriber(
             $this->reporter,
@@ -82,6 +83,7 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
             $this->debugLogger(),
             $trustRequestIdHeader,
             $authWindow,
+            requestStack: $requestStack,
         );
     }
 
@@ -391,6 +393,66 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
 
         self::assertCount(0, $this->reporter->reports, 'a resolving passport is the success event\'s business, not a failure report');
         self::assertSame('resolved-user', (string) $request->attributes->get('_kiwi_outcome_target'));
+    }
+
+    public function testCheckPassportWithoutRequestUsesTheRequestStack(): void
+    {
+        // The CheckPassportEvent of this Symfony line carries no request
+        // (its constructor takes the authenticator and the passport
+        // only). The bridge must anchor its lane to the kernel's main
+        // request off the request stack: the claimed identifier is
+        // stashed there and the failure lane of the same request reads
+        // it back.
+        $stack = new \Symfony\Component\HttpFoundation\RequestStack();
+        $request = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_ADDR' => '198.51.100.7', 'REMOTE_PORT' => '54321']);
+        $stack->push($request);
+        $badge = new UserBadge(self::CANARY_USERNAME, static function (string $identifier): object {
+            throw new UsernameNotFoundException();
+        });
+        $subscriber = $this->subscriber(targetFieldConfigured: true, requestStack: $stack);
+        $dispatcher = $this->dispatcher($subscriber);
+
+        // The event exposes getPassport but deliberately no getRequest.
+        $event = new CheckPassportEvent(new Passport([UserBadge::class => $badge]), $request);
+        $dispatcher->dispatch($event, CheckPassportEvent::class);
+
+        self::assertCount(1, $this->reporter->reports, 'the resolution failure reports through the request-stack request');
+        self::assertSame(OutcomeHandleDimension::Target, $this->reporter->reports[0]['handle']->dimension);
+        self::assertSame(self::CANARY_USERNAME, (string) $request->attributes->get('_kiwi_outcome_target'), 'the claimed identifier is stashed on the main request');
+
+        // The failure lane of the same request: the LoginFailure shim
+        // carries the request, the identifier rides the attribute the
+        // CheckPassport lane stashed, and the report dedupes onto the
+        // same idempotency key.
+        $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $request), LoginFailureEvent::class);
+        self::assertCount(2, $this->reporter->reports);
+        self::assertSame(OutcomeHandleDimension::Target, $this->reporter->reports[1]['handle']->dimension);
+        self::assertSame(
+            $this->reporter->reports[0]['idempotencyKey'],
+            $this->reporter->reports[1]['idempotencyKey'],
+            'the two failure lanes of one request collapse onto one report',
+        );
+    }
+
+    public function testLoginFailureReadsTheSessionLastUsernameWhenTheAttributesAreEmpty(): void
+    {
+        // form_login stores the failed identifier in the session, never
+        // in a request attribute. The failure lane reads the session's
+        // '_security.last_username' entry when both attributes are
+        // empty, so a stock form_login books the target dimension.
+        $request = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_ADDR' => '198.51.100.7', 'REMOTE_PORT' => '54321']);
+        $session = new \Symfony\Component\HttpFoundation\Session\Session(new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage());
+        $session->start();
+        $session->set('_security.last_username', self::CANARY_USERNAME);
+        $request->setSession($session);
+        $dispatcher = $this->dispatcher($this->subscriber(targetFieldConfigured: true));
+
+        $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $request), LoginFailureEvent::class);
+
+        self::assertCount(1, $this->reporter->reports);
+        self::assertSame(OutcomeHandleDimension::Target, $this->reporter->reports[0]['handle']->dimension, 'the session-carried identifier addresses the target dimension');
+        $derived = $this->identity->targetId(TargetIdentifierNormalizer::normalize(self::CANARY_USERNAME));
+        self::assertSame($derived, $this->reporter->reports[0]['handle']->id);
     }
 
     public function testAReportingFailureNeverPropagatesIntoTheAuthenticationFlow(): void

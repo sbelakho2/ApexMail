@@ -159,9 +159,33 @@ final class ProtectionProfileDefaults
                 'decoy_v3_enabled' => true,
                 'client_context' => false,
                 'execution_challenge' => 'on',
+                'novelty_enforcement' => 'enforce',
+                // The first-attempt gate maps the conventional main
+                // firewall to the login scope, so the profile arms
+                // novelty enforcement on an interactive login out of the
+                // box. A deployment with other firewall names (or a
+                // second admin firewall) names them explicitly.
+                'login_scopes' => ['main' => 'login'],
                 'hard_limits' => ['process_per_second' => 5000],
                 'max_outstanding_challenges' => 10,
                 'max_outstanding_challenges_global' => 250000,
+                // The step-up plane is on: the email one-time-passcode
+                // handler is the enrollment bootstrap and the time-based
+                // handler is the fallback factor a pending session can
+                // complete with. finalize() composes the WebAuthn handler
+                // and the default over the deployment's canonical public
+                // origin, so the phishing-resistant factor arms itself
+                // wherever the origin is configured. The principal plane
+                // carries no configured scope: the first-attempt gate
+                // stamps the per-event login scope onto the pending token
+                // and the step-up flow books under it.
+                'step_up' => [
+                    'enabled' => true,
+                    'handlers' => [
+                        'email_otp' => ['enabled' => true],
+                        'totp' => ['enabled' => true],
+                    ],
+                ],
                 'weights' => [
                     // The abuse-evidence weights rise so proven abuse
                     // outvotes trust signals sooner; the remaining ten
@@ -170,6 +194,35 @@ final class ProtectionProfileDefaults
                     'malformed' => 340,
                     'replay' => 380,
                     'action_failure' => 160,
+                ],
+                // No always-on step_up floor on any scope: a scope
+                // minimum is the floor of every issuance decision, so a
+                // step_up minimum refuses issuance with the typed step-up 403 at
+                // issuance, before any widget renders, and blocks every
+                // anonymous visitor. Each protected scope carries its
+                // completable enforcement instead. The critical
+                // admin_login names login_step_up always: the
+                // post-credential gate withholds every session until a
+                // principal factor completes. The low signup names the
+                // step_up_email carrier: an anonymous visitor proves
+                // address ownership through the email grant. The low
+                // contact carries step_up_above: only a scored decision
+                // above the rung escalates. The high financial_action
+                // names the email_otp carrier with no step_up_above
+                // rung: issuance stays proof of work, and the carrier
+                // demand appears on the post-solve assessment, where
+                // the principal the action belongs to exists. The
+                // demand is the durable financial binding: the
+                // server-owned logical operation id of the operation id
+                // attribute plus the canonical protected contents, so a
+                // step-up for one transfer can never authorize another.
+                'scopes' => [
+                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
+                    'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
+                    'login' => ['value_class' => 'standard'],
+                    'password_reset' => ['value_class' => 'standard'],
+                    'signup' => ['value_class' => 'low', 'carrier' => 'step_up_email'],
+                    'contact' => ['value_class' => 'low', 'step_up_above' => 600],
                 ],
             ],
         ],
@@ -200,14 +253,67 @@ final class ProtectionProfileDefaults
                 'decoy_v3_enabled' => true,
                 'client_context' => false,
                 'execution_challenge' => 'on',
+                'novelty_enforcement' => 'enforce',
+                // The first-attempt gate maps the conventional main
+                // firewall to the login scope, so the profile arms
+                // novelty enforcement on an interactive login out of the
+                // box. A deployment with other firewall names (or a
+                // second admin firewall) names them explicitly.
+                'login_scopes' => ['main' => 'login'],
                 'hard_limits' => ['process_per_second' => 5000],
                 'max_outstanding_challenges' => 10,
                 'max_outstanding_challenges_global' => 250000,
+                // The step-up plane is on: the email one-time-passcode
+                // handler is the enrollment bootstrap and the time-based
+                // handler is the fallback factor a pending session can
+                // complete with. finalize() composes the WebAuthn handler
+                // and the default over the deployment's canonical public
+                // origin, so the phishing-resistant factor arms itself
+                // wherever the origin is configured. The principal plane
+                // carries no configured scope: the first-attempt gate
+                // stamps the per-event login scope onto the pending token
+                // and the step-up flow books under it.
+                'step_up' => [
+                    'enabled' => true,
+                    'handlers' => [
+                        'email_otp' => ['enabled' => true],
+                        'totp' => ['enabled' => true],
+                    ],
+                ],
                 'weights' => [
                     'bad_proof' => 320,
                     'malformed' => 340,
                     'replay' => 380,
                     'action_failure' => 160,
+                ],
+                // No always-on step_up floor on any scope: a scope
+                // minimum is the floor of every issuance decision, so a
+                // step_up minimum refuses issuance with the typed step-up 403 at
+                // issuance, before any widget renders, and blocks every
+                // anonymous visitor. Each protected scope carries its
+                // completable enforcement instead. The critical
+                // admin_login names login_step_up always: the
+                // post-credential gate withholds every session until a
+                // principal factor completes. The low signup names the
+                // step_up_email carrier: an anonymous visitor proves
+                // address ownership through the email grant. The low
+                // contact carries step_up_above: only a scored decision
+                // above the rung escalates. The high financial_action
+                // names the email_otp carrier with no step_up_above
+                // rung: issuance stays proof of work, and the carrier
+                // demand appears on the post-solve assessment, where
+                // the principal the action belongs to exists. The
+                // demand is the durable financial binding: the
+                // server-owned logical operation id of the operation id
+                // attribute plus the canonical protected contents, so a
+                // step-up for one transfer can never authorize another.
+                'scopes' => [
+                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
+                    'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
+                    'login' => ['value_class' => 'standard'],
+                    'password_reset' => ['value_class' => 'standard'],
+                    'signup' => ['value_class' => 'low', 'carrier' => 'step_up_email'],
+                    'contact' => ['value_class' => 'low', 'step_up_above' => 600],
                 ],
             ],
         ],
@@ -337,6 +443,21 @@ final class ProtectionProfileDefaults
         if ($defaults === []) {
             return $configs;
         }
+        // An explicit risk.enabled=false wins over the whole profile,
+        // the step-up plane included: the plane stores its records in
+        // the risk Redis, so a disabled risk layer must not carry the
+        // profile's enabled step-up default into the tree validation
+        // (enabled plane, disabled engine). The last explicit layer
+        // value is the effective one, exactly like the merge order.
+        $riskEnabled = null;
+        foreach ($configs as $layer) {
+            if (\is_array($layer) && \array_key_exists('enabled', $layer['risk'] ?? [])) {
+                $riskEnabled = (bool) $layer['risk']['enabled'];
+            }
+        }
+        if ($riskEnabled === false) {
+            unset($defaults['risk']['step_up']);
+        }
 
         return array_merge([$defaults], $configs);
     }
@@ -367,6 +488,18 @@ final class ProtectionProfileDefaults
      *    unconditional. An operator who wants the dimension must
      *    change the profile, never an override.
      *
+     * 3. The abuse posture composes the phishing-resistant WebAuthn
+     *    handler and the default handler over the deployment's
+     *    canonical public origin, when the origin is configured and the
+     *    operator named no `risk.step_up` block of their own. The
+     *    relying party id and the allowed origin derive from
+     *    `public_base_url`: the configured canonical origin, never the
+     *    request Host header. The handler then passes the tree's own
+     *    rp_id contract wherever the origin exists. A dev or test
+     *    deployment without a canonical origin keeps the two static
+     *    handlers (the email bootstrap and the time-based fallback).
+     *    An explicit `risk.step_up` key in any raw layer always wins.
+     *
      * @param array<string, mixed>                $config     the processed configuration
      * @param array<int, array<string, mixed>> $rawConfigs the raw stack, for the explicit-setting scan
      *
@@ -377,6 +510,7 @@ final class ProtectionProfileDefaults
         if (self::selectedProfile($rawConfigs) === 'privacy_strict') {
             $config['risk']['execution_challenge'] = 'off';
         }
+        self::composeWebAuthnStepUp($config, $rawConfigs);
         // The abuse posture under either spelling (the specification name
         // abuse_first and the integration name high_abuse share one matrix
         // and one conditional).
@@ -393,5 +527,40 @@ final class ProtectionProfileDefaults
         $config['risk']['chaining']['enabled'] = true;
 
         return $config;
+    }
+
+    /**
+     * The abuse posture's WebAuthn composition: the origin-derived
+     * handler and the webauthn default, applied after the Processor
+     * merge so the composed entry passes the tree's rp_id validation
+     * wherever a canonical public origin exists.
+     *
+     * @param array<string, mixed>              $config     the processed configuration
+     * @param array<int, array<string, mixed>> $rawConfigs the raw stack
+     */
+    private static function composeWebAuthnStepUp(array &$config, array $rawConfigs): void
+    {
+        if (!\in_array(self::selectedProfile($rawConfigs), ['high_abuse', 'abuse_first'], true)) {
+            return;
+        }
+        foreach ($rawConfigs as $layer) {
+            if (\is_array($layer) && isset($layer['risk']['step_up'])) {
+                return;
+            }
+        }
+        if (!($config['risk']['step_up']['enabled'] ?? false)) {
+            return;
+        }
+        $origin = $config['public_base_url'] ?? null;
+        $host = \is_string($origin) && $origin !== '' ? \parse_url($origin, \PHP_URL_HOST) : false;
+        if (!\is_string($host) || $host === '') {
+            return;
+        }
+        $config['risk']['step_up']['handlers']['webauthn'] = [
+            'enabled' => true,
+            'rp_id' => $host,
+            'allowed_origins' => [$origin],
+        ];
+        $config['risk']['step_up']['default_handler'] = 'webauthn';
     }
 }

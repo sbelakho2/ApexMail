@@ -128,4 +128,39 @@ final class OutcomeBridgeKernelTest extends TestCase
         self::assertCount(0, $this->spy($container)->reports);
         self::assertTrue($container->has(OutcomeReporterInterface::class), 'the outcomes facade rides the marks stage, not the bridge');
     }
+
+    public function testFiveFailedFormLoginsBookTheTargetWithoutAnApplicationListener(): void
+    {
+        // The form_login shape: the framework stores the failed
+        // identifier in the session ('_security.last_username'), never
+        // in a request attribute, and this Symfony line's
+        // CheckPassportEvent carries no request. The kernel registers
+        // no listener of its own, so the shipped bridge is the only
+        // writer: its LoginFailure lane must recover the claimed
+        // identifier from the session and book the target dimension.
+        $kernel = new OutcomeBridgeSessionTargetKernel('test', true);
+        $kernel->boot();
+        $container = $kernel->getContainer()->get('test.service_container');
+        $dispatcher = $container->get('event_dispatcher');
+
+        for ($i = 0; $i < 5; ++$i) {
+            $request = Request::create('https://example.com/login_check', 'POST', [], [], [], [
+                'REQUEST_TIME_FLOAT' => 1700000000.0 + $i,
+                'REMOTE_ADDR' => '203.0.113.'.(10 + $i),
+                'REMOTE_PORT' => (string) (55000 + $i),
+            ]);
+            $session = new \Symfony\Component\HttpFoundation\Session\Session(new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage());
+            $session->start();
+            $session->set('_security.last_username', 'form-login-canary@example.com');
+            $request->setSession($session);
+
+            $dispatcher->dispatch(new LoginFailureEvent(new \Exception('bad credentials'), $request), LoginFailureEvent::class);
+        }
+
+        $factory = $container->get('kiwi_captcha.risk.identity_factory');
+        $targetId = $factory->targetId('form-login-canary@example.com');
+        $state = $container->get('kiwi_captcha.risk.store')->readTargetState($targetId);
+        self::assertSame(5, $state['fails'], 'five failed form logins book five target failures through the shipped bridge alone');
+        self::assertSame(5, $state['spread_sources'], 'five distinct sources widen the spread');
+    }
 }

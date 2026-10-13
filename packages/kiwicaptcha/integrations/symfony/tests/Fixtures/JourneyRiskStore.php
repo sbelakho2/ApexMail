@@ -15,14 +15,10 @@ use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
 use KiwiCaptcha\Risk\Storage\TargetStateStoreInterface;
 
 /**
- * The journey's in-memory risk surface: every capability the engine's
- * real pipeline may consult (state, outcome marks, principal network
- * tags, session tags, bucket trust, target state) over one shared
- * store, so the full-journey kernel test runs the real engine, real
- * policy and real marks/first-attempt escalation against a state
- * backend that needs no Redis. The principal network tags double as the
- * step-up session restore's record — the same instance is the
- * kiwi_captcha.risk.principal_networks seam.
+ * The journey in-memory risk surface. It carries every capability the
+ * engine pipeline may consult. That covers state, outcome marks,
+ * principal network tags, session tags, bucket trust, and target
+ * state. All of them share one in-memory map.
  */
 final class JourneyRiskStore implements
     RiskStateStoreInterface,
@@ -38,6 +34,8 @@ final class JourneyRiskStore implements
 
     /** @var array<string, array<string, true>> principal => network tag */
     private array $networks = [];
+    /** @var array<string, array<string, true>> principal => trusted tag */
+    private array $trustedTags = [];
 
     /** @var list<array{0: string, 1: string}> every network-tag write */
     public array $networkWrites = [];
@@ -133,13 +131,16 @@ final class JourneyRiskStore implements
         return isset($this->networks[$principalId][$network]);
     }
 
-    public function recordPrincipalNetworkTag(string $principalId, string $network): bool
+    public function recordPrincipalNetworkTag(string $principalId, string $network, bool $trusted = false): bool
     {
         $this->networkWrites[] = [$principalId, $network];
         if (isset($this->networks[$principalId][$network])) {
             return false;
         }
         $this->networks[$principalId][$network] = true;
+        if ($trusted) {
+            $this->trustedTags[$principalId][$network] = true;
+        }
 
         return true;
     }
@@ -147,6 +148,20 @@ final class JourneyRiskStore implements
     public function principalHasTrustedNetwork(string $principalId): ?bool
     {
         return isset($this->networks[$principalId]) && $this->networks[$principalId] !== [];
+    }
+
+    public function tagIsTrusted(string $principalId, string $network): ?bool
+    {
+        return isset($this->trustedTags[$principalId][$network]);
+    }
+
+    public function forgetDevices(string $principalId): void
+    {
+        foreach (array_keys($this->networks[$principalId] ?? []) as $tag) {
+            if (str_starts_with($tag, 'session:') || str_starts_with($tag, 'device:')) {
+                unset($this->networks[$principalId][$tag], $this->trustedTags[$principalId][$tag]);
+            }
+        }
     }
 
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string

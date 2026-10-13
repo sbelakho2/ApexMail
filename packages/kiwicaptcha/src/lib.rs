@@ -62,7 +62,10 @@ pub use challenge::{
     SOLVER_MAX_HASHES, SOLVER_MAX_TARGET_BITS,
 };
 pub use keys::{DerivedKeys, HKDF_DEPLOY_SALT};
-pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};
+pub use logo::{
+    kiwi_app_icon_svg, kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg,
+    kiwi_stacked_svg, kiwi_wordmark_svg,
+};
 pub use profile::{ChallengeProfile, ProfileError};
 pub use rsw::{derive_base, proof_hex, RswError, RswTrapdoor, MODULUS_BYTES, PROOF_HEX_LENGTH};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken, MAX_TOKEN_RAW_BYTES};

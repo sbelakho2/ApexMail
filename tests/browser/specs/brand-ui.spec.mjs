@@ -14,7 +14,7 @@ test('framework theme classes override the host and OS palettes', async ({ page 
           container.classList.add(`kiwi-theme-${theme}`);
         }, { host, theme });
         await expect(page.locator('[data-kiwi-widget]')).toHaveCSS(
-          'background-color', theme === 'dark' ? 'rgb(22, 27, 34)' : 'rgb(255, 255, 255)',
+          'background-color', theme === 'dark' ? 'rgb(8, 17, 12)' : 'rgb(255, 255, 255)',
         );
       }
     }
@@ -30,7 +30,7 @@ test('a per-widget data-theme pin overrides the host palette', async ({ page }) 
       document.querySelector('.kiwi-container').setAttribute('data-theme', theme);
     }, theme);
     await expect(page.locator('[data-kiwi-widget]')).toHaveCSS(
-      'background-color', theme === 'dark' ? 'rgb(22, 27, 34)' : 'rgb(255, 255, 255)',
+      'background-color', theme === 'dark' ? 'rgb(8, 17, 12)' : 'rgb(255, 255, 255)',
     );
   }
 });

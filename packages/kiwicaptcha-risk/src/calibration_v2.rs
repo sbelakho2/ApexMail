@@ -441,11 +441,7 @@ impl RedisCalibrationStoreV2 {
     /// the bucket window): the identity dimension of the trust-granting
     /// reputation cap.
     fn trust_cap_key(&self, identity: &str) -> String {
-        format!(
-            "{{kiwi:{}}}:trustcap:{}",
-            self.inner.namespace(),
-            identity
-        )
+        format!("{{kiwi:{}}}:trustcap:{}", self.inner.namespace(), identity)
     }
 
     /// path.
@@ -943,8 +939,9 @@ mod tests {
                 true,
                 ProvenanceClass::HumanReview,
                 0,
+                None,
                 None
-            , None)
+            )
             .unwrap(),
             1
         );
@@ -955,8 +952,9 @@ mod tests {
                 true,
                 ProvenanceClass::SecurityEvent,
                 1,
+                None,
                 None
-            , None)
+            )
             .unwrap(),
             1
         );
@@ -967,8 +965,9 @@ mod tests {
                 true,
                 ProvenanceClass::PaymentNetwork,
                 2,
+                None,
                 None
-            , None)
+            )
             .unwrap(),
             1
         );
@@ -1090,8 +1089,15 @@ mod tests {
             .query(&mut conn())
             .expect("receipt rewrite");
         assert_eq!(
-            s.confirm_outcome_with_provenance(id, true, ProvenanceClass::HumanReview, 0, None, None)
-                .unwrap(),
+            s.confirm_outcome_with_provenance(
+                id,
+                true,
+                ProvenanceClass::HumanReview,
+                0,
+                None,
+                None
+            )
+            .unwrap(),
             1
         );
         let bucket = s.inner.bucket_key(1, hour());
@@ -1118,7 +1124,14 @@ mod tests {
             let id = format!("cap-{i}");
             register_v2(&s, &id, 1, 1000);
             let status = s
-                .confirm_outcome_with_provenance(&id, true, ProvenanceClass::HumanReview, 1, None, None)
+                .confirm_outcome_with_provenance(
+                    &id,
+                    true,
+                    ProvenanceClass::HumanReview,
+                    1,
+                    None,
+                    None,
+                )
                 .unwrap();
             // Beyond the caps a trust-granting label reports 4: the
             // volume cap would say 3, but the trust cap of the same
@@ -1144,8 +1157,9 @@ mod tests {
                 true,
                 ProvenanceClass::HumanReview,
                 0,
+                None,
                 None
-            , None)
+            )
             .unwrap(),
             1
         );
@@ -1228,8 +1242,9 @@ mod tests {
                 true,
                 ProvenanceClass::PaymentNetwork,
                 0,
+                None,
                 None
-            , None)
+            )
             .unwrap(),
             1
         );
@@ -1390,8 +1405,9 @@ mod tests {
                     true,
                     ProvenanceClass::PaymentNetwork,
                     0,
+                    None,
                     None
-                , None)
+                )
                 .unwrap(),
             1
         );

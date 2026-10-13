@@ -14,14 +14,17 @@
 //!   scope aggregate  `{kiwi:<ns>:s:<id>:<shard>}:scope:<id>:<shard>`
 //!   shard marker     `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`
 //!   outcome ledger   `{kiwi:<ns>:o:<hex2>}:outcome:<decision_id>`
-//!   target state     `{kiwi:<ns>:target:<hex2>}:risk:tgt[:src|:asn]:<id>`
+//!   target state     sharded: `{kiwi:<ns>:target:<hex2>}:risk:tgt[:src|:asn]:<id>`
+//!                    legacy:  `{kiwi:<ns>}:risk:tgt[:src|:asn]:<id>` (one
+//!                    slot with the assessment keys the script also touches)
 //!   mark dedupe      `mark:{kiwi:<ns>}:dd:<event_id>`
 //!   hysteresis state `{kiwi:<ns>}:risk:hyst`
 //!   mode marker      `{kiwi:<ns>}:mode`
 //!
 //! `<hex2>` is the two hex characters of the identifier's first byte, so
-//! each dimension disperses over 256 slots. `<dim>` is one of the seven
-//! sharded dimensions (src, net, session, principal, asn, target, agent).
+//! each dimension disperses over 256 slots. `<dim>` is one of the eight
+//! sharded dimensions (src, net, session, principal, asn, target, agent,
+//! pnet).
 //! `<shard>` is `fnv1a32(event_id) mod 16` (0..=15), or the caller's
 //! stable fallback hash for an empty event id, so one event increments
 //! exactly one scope shard while the 16 shards spread the aggregate
@@ -47,7 +50,10 @@ pub enum KeyspaceMode {
     /// The historical single-tag layout (the default store mode).
     Legacy,
     /// The horizontally scalable per-family layout; the recommended mode
-    /// for new namespaces.
+    /// for new namespaces. Each family and each scope shard carries its
+    /// own hash tag, so assessment writes disperse over cluster slots
+    /// and throughput scales with the shard count instead of serializing
+    /// on the shared namespace tag.
     Sharded,
 }
 
@@ -97,11 +103,16 @@ pub enum ShardedDimension {
     Asn = 5,
     Target = 6,
     Agent = 7,
+    /// The principal first-seen network tag records
+    /// (`principal_networks.lua`): the family name of the
+    /// `pnet:{kiwi:<ns>:<principal>}` key form, whose hash tag carries
+    /// the whole principal identity (one slot per principal).
+    PrincipalNetworks = 8,
 }
 
 impl ShardedDimension {
     /// The dimension name inside the family tag (`src`, `net`,
-    /// `session`, `principal`, `asn`, `target`, `agent`).
+    /// `session`, `principal`, `asn`, `target`, `agent`, `pnet`).
     pub fn as_name(self) -> &'static str {
         match self {
             ShardedDimension::Source => "src",
@@ -111,6 +122,7 @@ impl ShardedDimension {
             ShardedDimension::Asn => "asn",
             ShardedDimension::Target => "target",
             ShardedDimension::Agent => "agent",
+            ShardedDimension::PrincipalNetworks => "pnet",
         }
     }
 
@@ -229,24 +241,30 @@ pub fn mark_dedupe_key(encoded_namespace: &str, event_id: &str) -> String {
     format!("mark:{{kiwi:{encoded_namespace}}}:dd:{event_id}")
 }
 
-/// The target-dimension state family of one target pseudonym
-/// (`{kiwi:<ns>:target:<hex2>}`): the target's failure hash and its
-/// source/asn spread HLLs live on the target id's own family slot
-/// instead of the shared namespace tag, so a stuffing storm against one
-/// target never hammers the primary that holds the rest of the risk
-/// state.
+/// The target-dimension state family of one target pseudonym in the
+/// sharded layout: `{kiwi:<ns>:target:<hex2>}`. The target's failure
+/// hash and its source/asn spread HLLs live on the target id's own
+/// family slot, so a stuffing storm against one target never hammers
+/// the primary that holds the rest of the risk state.
 pub fn target_state_tag(encoded_namespace: &str, hex_id: &str) -> String {
-    format!(
-        "{{kiwi:{encoded_namespace}:target:{}}}",
-        id_prefix(hex_id)
-    )
+    format!("{{kiwi:{encoded_namespace}:target:{}}}", id_prefix(hex_id))
 }
 
 /// The three target-dimension state keys of one target pseudonym:
-/// the failure hash plus the source/asn spread HLLs, all on the
-/// target's own family slot (`{kiwi:<ns>:target:<hex2>}:risk:tgt...`).
-pub fn target_state_keys(encoded_namespace: &str, hex_id: &str) -> [String; 3] {
-    let tag = target_state_tag(encoded_namespace, hex_id);
+/// the failure hash plus the source/asn spread HLLs. In the
+/// [`KeyspaceMode::Sharded`] layout all three carry the target's own
+/// family tag (`{kiwi:<ns>:target:<hex2>}:risk:tgt...`); in the
+/// [`KeyspaceMode::Legacy`] layout they carry the shared namespace tag
+/// instead, because the consolidated assessment script touches the
+/// observation keys and the target keys in one invocation and every
+/// key of one invocation must hash to one cluster slot. Target state
+/// carries a 24 h TTL, so a namespace that later moves to the sharded
+/// layout drains the legacy-family records naturally.
+pub fn target_state_keys(encoded_namespace: &str, hex_id: &str, mode: KeyspaceMode) -> [String; 3] {
+    let tag = match mode {
+        KeyspaceMode::Sharded => target_state_tag(encoded_namespace, hex_id),
+        KeyspaceMode::Legacy => format!("{{kiwi:{encoded_namespace}}}"),
+    };
     [
         format!("{tag}:risk:tgt:{hex_id}"),
         format!("{tag}:risk:tgt:src:{hex_id}"),
@@ -433,7 +451,11 @@ mod tests {
         for i in 0..64u32 {
             let id = format!("{i:064x}");
             assert!(scope_shard(&id, b"") <= 15);
-            assert_eq!(scope_shard(&id, b""), scope_shard(&id, b""), "deterministic");
+            assert_eq!(
+                scope_shard(&id, b""),
+                scope_shard(&id, b""),
+                "deterministic"
+            );
         }
     }
 
@@ -498,20 +520,22 @@ mod tests {
             outcome_ledger_key(ns, "ab".repeat(16).as_str()),
             format!("{{kiwi:n1:o:ab}}:outcome:{}", "ab".repeat(16))
         );
+        assert_eq!(mark_dedupe_key(ns, "cd"), "mark:{kiwi:n1}:dd:cd");
+        assert_eq!(target_state_tag(ns, "5e2a"), "{kiwi:n1:target:5e}");
         assert_eq!(
-            mark_dedupe_key(ns, "cd"),
-            "mark:{kiwi:n1}:dd:cd"
-        );
-        assert_eq!(
-            target_state_tag(ns, "5e2a"),
-            "{kiwi:n1:target:5e}"
-        );
-        assert_eq!(
-            target_state_keys(ns, "5e2a"),
+            target_state_keys(ns, "5e2a", KeyspaceMode::Sharded),
             [
                 "{kiwi:n1:target:5e}:risk:tgt:5e2a",
                 "{kiwi:n1:target:5e}:risk:tgt:src:5e2a",
                 "{kiwi:n1:target:5e}:risk:tgt:asn:5e2a",
+            ]
+        );
+        assert_eq!(
+            target_state_keys(ns, "5e2a", KeyspaceMode::Legacy),
+            [
+                "{kiwi:n1}:risk:tgt:5e2a",
+                "{kiwi:n1}:risk:tgt:src:5e2a",
+                "{kiwi:n1}:risk:tgt:asn:5e2a",
             ]
         );
         assert_eq!(

@@ -51,6 +51,7 @@ final class KiwiMetricsController
         'denied:limiter' => 'kiwicaptcha_risk_denied_limiter_total',
         'degraded:breaker' => 'kiwicaptcha_risk_degraded_breaker_total',
         'degraded:store' => 'kiwicaptcha_risk_degraded_store_total',
+        'kiwi_step_up_restore_failures_total' => 'kiwi_step_up_restore_failures_total',
     ];
 
     /** The engine latency keys that map onto count/sum series. */

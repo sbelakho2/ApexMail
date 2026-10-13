@@ -88,7 +88,7 @@ final class StepUpKernelTest extends TestCase
         $totp = $container->get(TotpStepUpHandler::class);
         // First enrollment is gated: only a session-scoped step-up
         // completed in the enrolling session authorizes it (the
-        // stuffing-takeover fix), so the test books that proof first.
+        // stuffing-takeover rule), so the test books that proof first.
         $store = $container->get('kiwi_captcha.step_up.store');
         \assert($store instanceof \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore);
         $store->markSessionStepUpSuccess('sess-kernel', $principal, 'email_otp', 900, time());
@@ -144,6 +144,83 @@ final class StepUpKernelTest extends TestCase
         self::assertFalse($container->has(KiwiStepUpHandlerRegistry::class));
         self::assertFalse($container->has(StepUpController::class));
         self::assertFalse($container->has(TotpStepUpHandler::class));
+    }
+
+    public function testAnOutcomeFailureAfterAuthorizationRetriesOnTheSameEndpointWithoutAnotherFactor(): void
+    {
+        $container = $this->container();
+        $principal = $this->principalPseudonym();
+
+        // The pending session of the login: its exact demand identity is
+        // what the begin books and what the effects retry later binds
+        // to, server-side, never a client value.
+        $storage = $container->get('security.token_storage');
+        \assert($storage instanceof \Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface);
+        $pending = new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken(
+            new \Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken(
+                new \Symfony\Component\Security\Core\User\InMemoryUser(StepUpTestKernel::CANARY_PRINCIPAL, null, ['ROLE_USER']),
+                'main',
+            ),
+        );
+        $storage->setToken($pending);
+
+        // The outcome backend is down: the completion authorizes the
+        // demand and then crashes on the credit.
+        $spy = $this->spy();
+        $spy->throwOnReport = new \RuntimeException('outcome backend unavailable');
+
+        $client = $this->client();
+        $client->request('GET', '/kiwi/step-up/begin?mode=json');
+        $begin = $client->getResponse();
+        self::assertSame(200, $begin->getStatusCode());
+        $document = json_decode((string) $begin->getContent(), true);
+        $ticket = (string) $document['challenge'];
+        /** @var CapturingStepUpCodeSender $sender */
+        $sender = $container->get('step_up_code_capturer');
+        $code = $sender->lastCode();
+        self::assertMatchesRegularExpression('/^[0-9]{6}$/D', (string) $code);
+
+        $client->request('POST', '/kiwi/step-up/complete?mode=json', [
+            'kiwi_step_up_ticket' => $ticket,
+            'kiwi_step_up_code' => $code,
+        ]);
+        $crashed = $client->getResponse();
+        self::assertSame(422, $crashed->getStatusCode(), 'a failing credit after the authorization answers the retryable failure');
+        $verdict = json_decode((string) $crashed->getContent(), true);
+        self::assertSame('failed', $verdict['status']);
+        self::assertSame('outcome_unavailable', $verdict['failure_code']);
+        self::assertCount(0, $spy->reports);
+        self::assertInstanceOf(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken::class,
+            $storage->getToken(),
+            'the credit runs before the restore, so the session stays pending for the retry',
+        );
+
+        // The demand-bound retry: the same endpoint, no fresh ticket,
+        // no second factor. The consumed proof cannot answer again; the
+        // authorized demand completes its missing effects instead.
+        $spy->throwOnReport = null;
+        $client->request('POST', '/kiwi/step-up/complete?mode=json', []);
+        $retried = $client->getResponse();
+        self::assertSame(200, $retried->getStatusCode(), 'the retry answers success without another factor');
+        $retriedVerdict = json_decode((string) $retried->getContent(), true);
+        self::assertSame('succeeded', $retriedVerdict['status']);
+        self::assertCount(1, $spy->reports, 'the credit landed exactly once across both attempts');
+        self::assertSame(Outcome::StepUpCompleted, $spy->reports[0]['outcome']);
+        self::assertNotInstanceOf(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken::class,
+            $storage->getToken(),
+            'the pending login restored on the retry',
+        );
+
+        // The durable journal of the authorization rides the demand.
+        $demand = $container->get('kiwi_captcha.step_up.store')->readDemand((string) $pending->demandId());
+        self::assertNotNull($demand);
+        self::assertSame(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState::Authorized, $demand->state);
+        self::assertNotNull($demand->effects);
+        self::assertTrue($demand->effects->complete(), 'the journal carries every landed effect');
+
+        $this->assertNoCanaryInStore();
     }
 
     private function client(): HttpKernelBrowser

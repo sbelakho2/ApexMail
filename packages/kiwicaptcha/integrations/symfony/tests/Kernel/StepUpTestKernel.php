@@ -56,7 +56,7 @@ final class StepUpTestKernel extends TestKernel
                     // test can present the delivered code.
                     $container->setDefinition('step_up_code_capturer', (new Definition(CapturingStepUpCodeSender::class))->setPublic(true));
                     $container->getDefinition(EmailOtpStepUpHandler::class)
-                        ->replaceArgument(3, new Reference('step_up_code_capturer'));
+                        ->replaceArgument(2, new Reference('step_up_code_capturer'));
                 }
             }
         });
@@ -67,6 +67,12 @@ final class StepUpTestKernel extends TestKernel
         $stepUpEnabled = $this->stepUpEnabled;
         $loader->load(function (ContainerBuilder $container) use ($stepUpEnabled): void {
             $container->register('fake_redis', \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient::class)
+                ->setPublic(true);
+            // The security token storage the step-up controller and the
+            // session restorer resolve (the invalid-reference fallback
+            // in a kernel without a firewall): a real instance, so a
+            // kernel test can stage the pending session of a login.
+            $container->register('security.token_storage', \Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage::class)
                 ->setPublic(true);
             $container->register(PrincipalResolverInterface::class, FakePrincipalResolver::class)
                 ->setArgument('$principal', self::CANARY_PRINCIPAL);

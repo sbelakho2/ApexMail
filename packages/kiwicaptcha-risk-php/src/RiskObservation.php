@@ -10,9 +10,10 @@ namespace KiwiCaptcha\Risk;
  * Each source/subnet identity carries its epoch plus the pseudonyms for
  * epoch-1 (previous boundary), the current epoch and epoch+1 (next
  * boundary). Every epoch key uses the pseudonym HMAC'd with its own
- * epoch, never the current-epoch pseudonym. sessionId/principalId are the
- * same 16-byte hex pseudonyms, or null when the request carries no
- * session/principal. eventId is either 16 random bytes in hex (no caller
+ * epoch, never the current-epoch pseudonym. sessionId/principalId/deviceId
+ * are the same 16-byte hex pseudonyms, or null when the request carries no
+ * session/principal/device cookie. eventId is either 16 random bytes in
+ * hex (no caller
  * idempotency key) or the 64-hex HMAC-SHA256 of the event+scope
  * domain-separated caller idempotency key, keyed by the master-derived
  * event key. The raw key never appears in Redis and low-entropy keys are
@@ -37,6 +38,14 @@ final class RiskObservation
         public readonly string $eventId,
         public readonly int $networkRisk,
         public readonly int $nowMs,
+        /**
+         * The keyed device pseudonym (32-hex), or null when the request
+         * presents no trusted-device cookie. Same 16-byte hex contract as
+         * the session pseudonym, derived under the "dev" context. Kept
+         * after the required parameters so every existing positional
+         * construction keeps compiling.
+         */
+        public readonly ?string $deviceId = null,
     ) {
         foreach ([$sourceIdPrev, $sourceId, $sourceIdNext, $subnetIdPrev, $subnetId, $subnetIdNext] as $id) {
             if (!preg_match('/^[0-9a-f]{32}$/', $id)) {
@@ -44,8 +53,9 @@ final class RiskObservation
             }
         }
         if (($sessionId !== null && !preg_match('/^[0-9a-f]{32}$/', $sessionId))
-            || ($principalId !== null && !preg_match('/^[0-9a-f]{32}$/', $principalId))) {
-            throw new \InvalidArgumentException('sessionId/principalId must be 16-byte hex pseudonyms or null');
+            || ($principalId !== null && !preg_match('/^[0-9a-f]{32}$/', $principalId))
+            || ($deviceId !== null && !preg_match('/^[0-9a-f]{32}$/', $deviceId))) {
+            throw new \InvalidArgumentException('sessionId/principalId/deviceId must be 16-byte hex pseudonyms or null');
         }
         if (!preg_match('/^[0-9a-f]{32}$|^[0-9a-f]{64}$/', $eventId)) {
             throw new \InvalidArgumentException('eventId must be 16 random bytes in hex or a normalized 32-byte sha256 in hex');

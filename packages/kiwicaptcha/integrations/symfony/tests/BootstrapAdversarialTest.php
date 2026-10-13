@@ -54,7 +54,7 @@ final class BootstrapAdversarialTest extends TestCase
         $gate->grant($request, $raw);
         $pseudonym = $this->identity()->principalId($raw);
 
-        // enrollBegin: the gate is consulted ONCE and the flag is
+        // enrollBegin: the gate is consulted once and the flag is
         // recorded on the challenge.
         self::assertTrue($gate->allowsFirstEnrollment($request, $pseudonym), 'begin consumes the grant');
         $challenge = StepUpChallenge::begin(
@@ -273,7 +273,7 @@ final class BootstrapAdversarialTest extends TestCase
     /**
      * Full-chain (finding 1): write the challenge, serialize it
      * (toArray), read it back (fromArray), and confirm the bootstrap
-     * flag SURVIVES the store round trip. The in-memory object check
+     * flag survives the store round trip. The in-memory object check
      * is not enough, fromArray() is the real path every store takes.
      */
     public function testTheBootstrapFlagSurvivesTheStoreRoundTrip(): void
@@ -349,7 +349,7 @@ final class BootstrapAdversarialTest extends TestCase
     }
 
     /**
-     * Full-chain (finding 5): the bootstrap flag decodes STRICTLY.
+     * Full-chain (finding 5): the bootstrap flag decodes strictly.
      * Exactly the integer 0 or 1; a stringly-typed "1", "1abc" or
      * true is malformed and refused like every other field.
      */

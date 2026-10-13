@@ -502,11 +502,26 @@ dr_raw=$(json_get "$BASELINES_FILE" "budgets.widget_driver.raw_bytes")
 dr_gz=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_bytes_zlib13")
 dr_br=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_bytes")
 rk_raw=$(json_get "$BASELINES_FILE" "budgets.widget_risk.raw_bytes")
+rk_gz=$(json_get "$BASELINES_FILE" "budgets.widget_risk.gzip_bytes_zlib13")
+rk_br=$(json_get "$BASELINES_FILE" "budgets.widget_risk.brotli_bytes")
 tm_raw=$(json_get "$BASELINES_FILE" "budgets.widget_telemetry.raw_bytes")
+tm_gz=$(json_get "$BASELINES_FILE" "budgets.widget_telemetry.gzip_bytes_zlib13")
+tm_br=$(json_get "$BASELINES_FILE" "budgets.widget_telemetry.brotli_bytes")
 lc_raw=$(json_get "$BASELINES_FILE" "budgets.widget_locales.raw_bytes")
 lc_gz=$(json_get "$BASELINES_FILE" "budgets.widget_locales.gzip_bytes_zlib13")
 lc_br=$(json_get "$BASELINES_FILE" "budgets.widget_locales.brotli_bytes")
 cp_raw=$(json_get "$BASELINES_FILE" "budgets.widget_compat.raw_bytes")
+cp_gz=$(json_get "$BASELINES_FILE" "budgets.widget_compat.gzip_bytes_zlib13")
+cp_br=$(json_get "$BASELINES_FILE" "budgets.widget_compat.brotli_bytes")
+sh_raw=$(json_get "$BASELINES_FILE" "budgets.widget_shims.raw_bytes")
+wk_raw=$(json_get "$BASELINES_FILE" "budgets.widget_worker.raw_bytes")
+wk_gz=$(json_get "$BASELINES_FILE" "budgets.widget_worker.gzip_bytes_zlib13")
+wk_br=$(json_get "$BASELINES_FILE" "budgets.widget_worker.brotli_bytes")
+rt_raw=$(json_get "$BASELINES_FILE" "budgets.widget_runtime.raw_bytes")
+rt_gz=$(json_get "$BASELINES_FILE" "budgets.widget_runtime.gzip_bytes_zlib13")
+rt_br=$(json_get "$BASELINES_FILE" "budgets.widget_runtime.brotli_bytes")
+cs_raw=$(json_get "$BASELINES_FILE" "budgets.widget_css.raw_bytes")
+ce_raw=$(json_get "$BASELINES_FILE" "budgets.webauthn_ceremony.raw_bytes")
 ex_raw=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_bytes")
 ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes_zlib13")
 ex_br=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_bytes")
@@ -515,7 +530,7 @@ MISSING=""
 # The locale-independent comparison: the doc may format the figures
 # with or without thousand separators, so the guard strips the commas
 # and matches the bare digit strings from the record.
-for fig in "$dr_raw" "$dr_gz" "$dr_br" "$rk_raw" "$tm_raw" "$lc_raw" "$lc_gz" "$lc_br" "$cp_raw" "$ex_raw" "$ex_gz" "$ex_br"; do
+for fig in "$dr_raw" "$dr_gz" "$dr_br" "$rk_raw" "$rk_gz" "$rk_br" "$tm_raw" "$tm_gz" "$tm_br" "$lc_raw" "$lc_gz" "$lc_br" "$cp_raw" "$cp_gz" "$cp_br" "$sh_raw" "$wk_raw" "$wk_gz" "$wk_br" "$rt_raw" "$rt_gz" "$rt_br" "$cs_raw" "$ce_raw" "$ex_raw" "$ex_gz" "$ex_br"; do
   # The match runs through a here-string, never a pipe: a piped
   # grep -q exits on the first match while the producer still writes,
   # and under pipefail the producer's write signal flips a successful match

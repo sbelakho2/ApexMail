@@ -8,8 +8,6 @@ use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CapturingStepUpCodeSender;
-use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
-use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JourneyRiskStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\TokenStoragePrincipalResolver;
 use Symfony\Component\Config\Loader\LoaderInterface;
@@ -23,13 +21,17 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage;
  * Kernel for the full-journey gate test. The risk engine and the
  * step-up plane are armed. Novelty enforcement is 'enforce'. An ASN
  * dataset fixture is present. The real TokenStorage is the firewall's
- * storage (security.token_storage),
- * the typical TokenStorage-backed principal resolver ($security->getUser()
- * semantics), and the journey's in-memory risk surface as the engine
- * state store AND the kiwi_captcha.risk.principal_networks seam. The
- * step-up code sender and the outcome reporter are swapped for the
- * capturer and the spy. The outcomes trust gate is fail_closed (the
- * store-backed gate is typed to the concrete Redis store).
+ * storage, the security token storage.
+ * The typical TokenStorage-backed principal resolver is used, with
+ * the getUser semantics. The journey runs on real Redis: the
+ * extension's own RedisRiskStateStore and RedisPrincipalNetworkTagStore
+ * stay wired (no store replacement, no principal-networks alias), so
+ * the engine's novelty read and the step-up restore's record address
+ * exactly the deployment's surfaces. Only the step-up code sender and
+ * the outcome reporter are swapped for the capturer and the spy — the
+ * application's delivery channel and the application's outcome
+ * consumer, both app-side. The outcomes trust gate is fail_closed
+ * (the store-backed gate is typed to the concrete Redis store).
  */
 final class StepUpJourneyTestKernel extends TestKernel
 {
@@ -46,6 +48,18 @@ final class StepUpJourneyTestKernel extends TestKernel
         }
 
         return $path;
+    }
+
+    /**
+     * The real-Redis DSN the journey runs on: KC_REDIS_URL, the same
+     * env the real-Redis integration suite uses. Null when unset (the
+     * test skips).
+     */
+    public static function redisUrl(): ?string
+    {
+        $url = getenv('KC_REDIS_URL');
+
+        return \is_string($url) && $url !== '' ? $url : null;
     }
 
     public function getCacheDir(): string
@@ -70,22 +84,19 @@ final class StepUpJourneyTestKernel extends TestKernel
                 if ($container->hasDefinition(EmailOtpStepUpHandler::class)) {
                     $container->setDefinition('step_up_code_capturer', (new Definition(CapturingStepUpCodeSender::class))->setPublic(true));
                     $container->getDefinition(EmailOtpStepUpHandler::class)
-                        ->replaceArgument(3, new Reference('step_up_code_capturer'));
+                        ->replaceArgument(2, new Reference('step_up_code_capturer'));
                 }
-                // The journey's in-memory risk surface replaces the
-                // Redis-backed state store (the engine's real pipeline
-                // runs against it) and serves as the
-                // kiwi_captcha.risk.principal_networks seam, one
-                // shared instance for the engine's novelty read and the
-                // step-up session restore's record.
-                if ($container->hasDefinition('kiwi_captcha.risk.store')) {
-                    $container->removeDefinition('kiwi_captcha.risk.store');
-                    $container->setDefinition('kiwi_captcha.risk.store', (new Definition(JourneyRiskStore::class))->setPublic(true));
+                // The risk state store and the principal-network store
+                // stay exactly as the extension wired them: the real
+                // RedisRiskStateStore and the real
+                // RedisPrincipalNetworkTagStore over the journey's own
+                // Redis database. No replacement, no alias — a missing
+                // seam is a boot failure, never a fixture swap.
+                foreach (['kiwi_captcha.risk.store', 'kiwi_captcha.risk.principal_networks'] as $id) {
+                    if ($container->hasDefinition($id)) {
+                        $container->getDefinition($id)->setPublic(true);
+                    }
                 }
-                if ($container->hasAlias('kiwi_captcha.risk.principal_networks')) {
-                    $container->removeAlias('kiwi_captcha.risk.principal_networks');
-                }
-                $container->setAlias('kiwi_captcha.risk.principal_networks', 'kiwi_captcha.risk.store')->setPublic(true);
             }
         });
     }
@@ -93,7 +104,12 @@ final class StepUpJourneyTestKernel extends TestKernel
     public function registerContainerConfiguration(LoaderInterface $loader): void
     {
         $loader->load(function (ContainerBuilder $container): void {
-            $container->register('fake_redis', FakePredisClient::class)
+            $redisUrl = self::redisUrl();
+            if ($redisUrl === null) {
+                throw new \LogicException('KC_REDIS_URL is not set: the journey kernel runs the real risk engine on real Redis (the test skips without it)');
+            }
+            $container->register('journey_redis', \Predis\Client::class)
+                ->setArguments([$redisUrl])
                 ->setPublic(true);
             // The firewall's token storage: the services under test
             // (controller, session restorer, principal resolver) all
@@ -115,8 +131,9 @@ final class StepUpJourneyTestKernel extends TestKernel
                 'public_base_url' => 'https://captcha.example.com',
                 'risk' => [
                     'enabled' => true,
-                    'redis_service' => 'fake_redis',
+                    'redis_service' => 'journey_redis',
                     'novelty_enforcement' => 'enforce',
+                    'login_scopes' => ['main' => 'login'],
                     'asn' => ['dataset_path' => self::asnFixturePath()],
                     'scopes' => [
                         'login' => ['id' => 10, 'target_field' => 'username'],

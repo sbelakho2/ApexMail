@@ -25,7 +25,7 @@
 -- KEYS[2] per-dimension dedupe marker (same slot; touched only on write)
 --
 -- ARGV:
---   [1] event        RiskEventKind int (1..21)
+--   [1] event        RiskEventKind int (1..22)
 --   [2] scope        int (0 = unknown)
 --   [3] dimension    1=source, 2=subnet, 3=session, 4=principal,
 --                    5=asn, 6=target, 7=agent
@@ -157,7 +157,10 @@ local function apply_session_event(s, event, scope)
 end
 
 local function apply_principal_event(s, event, scope)
-    if event == 8 or event == 10 or event == 12 then
+    if event == 8 or event == 10 or event == 12 or event == 22 then
+        -- StepUpCompleted (22) is server-confirmed trust, same principal
+        -- credit as ProtectedActionSuccess / AuthenticationSuccess /
+        -- ConfirmedLegitimate. NOT 18 (the honeypot kind).
         s.trust = s.trust + 2000
     elseif event == 11 then
         s.af = s.af + 2500
@@ -211,7 +214,7 @@ end
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
 if event ~= math.floor(event) or event < 1 or event > 21 then
-    return redis.error_reply('risk-v1-sharded: event must be an integer within 1..21')
+    return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
 end
 
 -- ── Per-dimension dedupe: the marker is SET NX inside this script, so

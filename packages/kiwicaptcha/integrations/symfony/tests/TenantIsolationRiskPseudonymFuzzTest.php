@@ -37,7 +37,7 @@ final class TenantIsolationRiskPseudonymFuzzTest extends TestCase
     {
         mt_srand(self::SEED);
         $secrets = [];
-        foreach ([16, 32, 64] as $length) {
+        foreach ([32, 48, 64] as $length) {
             $out = '';
             for ($i = 0; $i < $length; $i++) {
                 $out .= self::WIDE_ALPHABET[mt_rand(0, \strlen(self::WIDE_ALPHABET) - 1)];
@@ -46,9 +46,11 @@ final class TenantIsolationRiskPseudonymFuzzTest extends TestCase
         }
         $secrets[] = str_repeat('0', 32);
         $secrets[] = str_repeat('f', 32);
-        $secrets[] = '租户主密钥0123456789ab';
-        $secrets[] = "tenant-a\x00master\x001234567890";
-        $secrets[] = 'tenant-a|master|0123456789';
+        // Non-ASCII and delimiter-bearing shapes, each at or above the
+        // 32-byte master floor (byte length, not character count).
+        $secrets[] = '租户主密钥0123456789abcdefgh';
+        $secrets[] = "tenant-a\x00master\x0012345678901234567890";
+        $secrets[] = 'tenant-a|master|0123456789abcdef';
 
         return $secrets;
     }

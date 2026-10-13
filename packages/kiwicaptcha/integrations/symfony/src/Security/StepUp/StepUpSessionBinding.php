@@ -7,28 +7,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * The session binding of step-up completion: the completion of a
- * challenge is only ever accepted for the same principal that began it
- * AND under exactly one per-challenge binding. {@see \BelConsulting\KiwiCaptchaBundle\Controller\StepUpController::complete()}
- * re-resolves the principal of the current request and binds it (plus
- * the session id) here before dispatching to a handler. Every handler
- * then requires the bound principal and the challenge's own binding to
- * hold. A stolen ticket presented under another session is refused and
- * never completed. A principal-level success marker alone never
- * authorizes enrollment: that proof is session-scoped.
- *
- * Exactly one binding per challenge, both fail-closed:
- *
- * 1. Session binding (the normal browser case): a challenge begun with
- *    a started session records that session's hash and mints no client
- *    secret, only that session may complete it.
- * 2. Stateless binding (API / SPA): a challenge begun with no session
- *    mints a one-time client secret (returned once at begin, stored
- *    only as its SHA-256 hash), only a request presenting that secret
- *    may complete it.
- *
- * A request that carries no binding (a handler reached without the
- * controller) matches nothing: fail closed, never open.
+ * The session binding of step-up completion. The completion of a
+ * challenge is only accepted for the same principal that began it.
+ * It is also bound to the same PHP session. The controller
+ * re-resolves the principal and binds it before dispatching. Every
+ * handler requires the bound principal and session to match. A stolen
+ * ticket from another session is refused. A request with no binding
+ * matches nothing. That is fail closed.
  */
 final class StepUpSessionBinding
 {
@@ -48,10 +33,10 @@ final class StepUpSessionBinding
     /**
      * Bind the resolved principal pseudonym and the current session id
      * onto the request. The session id is read from the Symfony session
-     * bag when one is started; without a started session the binding
-     * carries an empty session and a session-bound challenge matches
-     * nothing (fail closed), only a stateless challenge may then be
-     * completed, and only with its client secret.
+     * bag when one is started. Without a started session the binding
+     * carries an empty session. A session-bound challenge then matches
+     * nothing. That is fail closed. Only a stateless challenge may then
+     * be completed. It must present its client secret.
      */
     public static function bind(Request $request, string $principalPseudonym): void
     {
@@ -124,5 +109,33 @@ final class StepUpSessionBinding
         }
 
         return false;
+    }
+
+    /**
+     * The presented binding hash of a completion: the SHA-256 of the
+     * bound session id for a session-bound challenge, of the presented
+     * client secret for a stateless one. This is the material the
+     * store's atomic factor completion compares against the stored
+     * hashes, so the binding check runs inside the script and never
+     * from a caller's word. Null when the request presents nothing the
+     * challenge could be bound to, fail closed.
+     */
+    public static function presentedBindingHash(Request $request, StepUpChallenge $challenge): ?string
+    {
+        if ($challenge->sessionHash !== null && $challenge->sessionHash !== '') {
+            $requestSession = self::sessionId($request);
+            if ($requestSession === '') {
+                return null;
+            }
+
+            return StepUpChallenge::sessionHash($requestSession);
+        }
+        if ($challenge->clientSecretHash !== null && $challenge->clientSecretHash !== '') {
+            $presented = (string) $request->request->get(self::CLIENT_SECRET_FIELD, '');
+
+            return $presented === '' ? null : StepUpChallenge::clientSecretHash($presented);
+        }
+
+        return null;
     }
 }

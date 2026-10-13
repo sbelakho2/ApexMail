@@ -1,6 +1,12 @@
 #!/usr/bin/env node
-// The packaged SVG is the source of truth. Generate renderer copies at
+// The packaged SVGs are the source of truth. Generate renderer copies at
 // development time; widgets make no extra request for their brand mark.
+//
+// The lockup, stacked and wordmark masters carry the fixed humanist
+// lettering as outlined absolute paths (Alegreya Sans Bold, positions
+// recorded in design/lettering.json). No <text> element and no
+// font-family survives generation, so the wordmark renders identically
+// without any font dependency.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -16,9 +22,48 @@ if (paths.length !== 2 || !mark.includes('viewBox="0 0 64 64"')
 }
 const inner = mark.replace(/^<svg[^>]*>\s*/, '').replace(/\s*<\/svg>$/, '');
 const compact = mark.replace(/>\s+</g, '><');
+
+// The wordmark master: outlined "kiwi captcha" lettering, kiwi at 100
+// units and captcha at 82 on one baseline, fixed in the master (see
+// design/lettering.json). It must stay pure path artwork.
+const wordmark = read('packages/kiwicaptcha/resources/kiwi-wordmark.svg').trim();
+const wordmarkPaths = [...wordmark.matchAll(/<path d="([^"]+)"\s*\/>/g)].map((m) => m[1]);
+if (wordmarkPaths.length !== 11 || !/<g fill="currentColor">/.test(wordmark)
+  || /<(?:text|script|filter|animate|image)\b|font-family|font-weight/.test(wordmark)) {
+  throw new Error('The wordmark master must remain eleven outlined currentColor paths with no text or font reference.');
+}
+const wordmarkInner = wordmark.replace(/^<svg[^>]*>\s*/, '').replace(/\s*<\/svg>$/, '');
+
+// Lockup composition: the mark's coil baseline sits on the lettering
+// baseline (y=36); the shackle top rises above the k exactly like the
+// approved horizontal signature. The p descender hangs below it.
+const lockupSvg = `<svg viewBox="0 0 226 43" fill="none" xmlns="http://www.w3.org/2000/svg">\n`
+  + `  <g transform="translate(4, 0) scale(0.6)">${inner}</g>\n`
+  + `  <g transform="translate(50, 7.92) scale(0.4)">${wordmarkInner}</g>\n`
+  + `</svg>\n`;
+// Stacked composition: the mark centered above the lettering, generous
+// fixed gap, both optically centered on the lettering width.
+const stackedWidth = 214.58;
+const stackedSvg = `<svg viewBox="0 0 ${stackedWidth} 105" fill="none" xmlns="http://www.w3.org/2000/svg">\n`
+  + `  <g transform="translate(${((stackedWidth - 64 * 0.8) / 2).toFixed(2)}, 0) scale(0.8)">${inner}</g>\n`
+  + `  <g transform="translate(0, 62) scale(0.5)">${wordmarkInner}</g>\n`
+  + `</svg>\n`;
+// App container: the platform tile is a fixed-color container (Ink with
+// the Teal mark), never an extra enclosing shape in the bare mark.
+const appIconSvg = `<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">\n`
+  + `  <rect width="100" height="100" rx="22" fill="#08110C"/>\n`
+  + `  <g transform="translate(29.52, 29.52) scale(0.64)">${inner.replace(/currentColor/g, '#9EDFD4')}</g>\n`
+  + `</svg>\n`;
+for (const [name, svg] of [['lockup', lockupSvg], ['stacked', stackedSvg], ['app icon', appIconSvg]]) {
+  if (/<(?:text|script|filter|animate|image)\b|font-family|font-weight/.test(svg)) {
+    throw new Error(`The generated ${name} must stay outlined artwork with no text or font reference.`);
+  }
+}
+
 const generated = new Map();
-generated.set('packages/kiwicaptcha/resources/kiwi-lockup.svg',
-  `<svg viewBox="0 0 200 40" fill="none" xmlns="http://www.w3.org/2000/svg">\n  <g transform="translate(4, 1) scale(0.56)">${inner}</g>\n  <text x="48" y="27" font-family="Inter,system-ui,sans-serif" font-size="20" font-weight="700" letter-spacing="-0.4" fill="currentColor">KiwiCaptcha</text>\n</svg>\n`);
+generated.set('packages/kiwicaptcha/resources/kiwi-lockup.svg', lockupSvg);
+generated.set('packages/kiwicaptcha/resources/kiwi-stacked.svg', stackedSvg);
+generated.set('packages/kiwicaptcha/resources/kiwi-app-icon.svg', appIconSvg);
 generated.set('packages/kiwicaptcha/resources/kiwi-shield.svg',
   `<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">\n  <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" fill="currentColor" opacity="0.08"/>\n  <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>\n  <g transform="translate(8, 8) scale(0.25)">${inner}</g>\n</svg>\n`);
 generated.set('packages/kiwicaptcha-client-core/src/brand.ts',
@@ -39,10 +84,24 @@ generated.set(twig, template.replace(svgPattern, () => compact));
 
 const preview = 'packages/kiwicaptcha/design/brand-preview.html';
 if (existsSync(join(root, preview))) {
-  generated.set(preview, read(preview).replace(
-    /<!-- kiwi-mark:start -->[\s\S]*?<!-- kiwi-mark:end -->/,
-    () => `<!-- kiwi-mark:start -->\n${mark}\n  <!-- kiwi-mark:end -->`,
-  ));
+  let content = read(preview);
+  const compactify = (svg) => svg.replace(/>\s+</g, '><').trim();
+  // The labelled span carries the accessible name; the artwork stays
+  // out of the accessibility tree.
+  const inlineSvg = (svg) => svg.replace('<svg ', '<svg aria-hidden="true" focusable="false" ');
+  const syncBlock = (name, markup) => {
+    const pattern = new RegExp(`<!-- ${name}:start -->[\\s\\S]*?<!-- ${name}:end -->`);
+    if (!pattern.test(content)) throw new Error(`Missing ${name} block in the brand preview`);
+    content = content.replace(pattern, () => `<!-- ${name}:start -->${markup}<!-- ${name}:end -->`);
+  };
+  const markBlock = new RegExp(`<!-- kiwi-mark:start -->[\\s\\S]*?<!-- kiwi-mark:end -->`);
+  if (!markBlock.test(content)) throw new Error('Missing kiwi-mark block in the brand preview');
+  content = content.replace(markBlock, () => `<!-- kiwi-mark:start -->\n${mark}\n  <!-- kiwi-mark:end -->`);
+  syncBlock('kiwi-lockup', `<span class="lockup" role="img" aria-label="kiwi captcha">${inlineSvg(compactify(lockupSvg))}</span>`);
+  syncBlock('kiwi-lockup-large', `<span class="lockup" aria-hidden="true">${inlineSvg(compactify(lockupSvg))}</span>`);
+  syncBlock('kiwi-stacked', `<span class="stacked" role="img" aria-label="kiwi captcha">${inlineSvg(compactify(stackedSvg))}</span>`);
+  syncBlock('kiwi-wordmark', `<span class="wordmark" role="img" aria-label="kiwi captcha">${inlineSvg(compactify(wordmark))}</span>`);
+  generated.set(preview, content);
 }
 
 // Asset copies ship inside the Rust crate and the Symfony bundle. Keep

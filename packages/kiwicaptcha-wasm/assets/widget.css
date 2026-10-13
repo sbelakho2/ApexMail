@@ -5,21 +5,21 @@
 
 .kiwi-container {
   --kiwi-font-scale: 1;
-  --kiwi-primary: #1663c7;
-  --kiwi-primary-rgb: 22, 99, 199;
+  --kiwi-primary: #145C52;
+  --kiwi-primary-rgb: 20, 92, 82;
   --kiwi-success: #08764f;
   --kiwi-success-rgb: 8, 118, 79;
   --kiwi-error: #c33434;
   --kiwi-error-rgb: 195, 52, 52;
   --kiwi-bg: #ffffff;
-  --kiwi-text: #202733;
-  --kiwi-text-muted: #5b6473;
-  --kiwi-badge-neutral-text: #596273;
-  --kiwi-badge-solving-text: #174c94;
+  --kiwi-text: #08110C;
+  --kiwi-text-muted: #5D625F;
+  --kiwi-badge-neutral-text: #5D625F;
+  --kiwi-badge-solving-text: #145C52;
   --kiwi-badge-success-text: #075438;
   --kiwi-badge-error-text: #992727;
-  --kiwi-border: #dce1e8;
-  --kiwi-track: #edf0f4;
+  --kiwi-border: #dce3dc;
+  --kiwi-track: #edf0ea;
   --kiwi-retry-border: #737373;
   --kiwi-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   display: inline-flex;
@@ -27,7 +27,7 @@
   max-width: 352px;
   min-width: 0;
   position: relative;
-  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--kiwi-text);
   box-sizing: border-box;
   text-align: start;
@@ -37,45 +37,45 @@
 
 @media (prefers-color-scheme: dark) {
   .kiwi-container {
-    --kiwi-bg: #161b22;
-    --kiwi-text: #eff2f6;
-    --kiwi-text-muted: #a9b1bd;
-    --kiwi-badge-neutral-text: #c3cad4;
-    --kiwi-badge-solving-text: #b7d4ff;
+    --kiwi-bg: #08110C;
+    --kiwi-text: #F3F5EF;
+    --kiwi-text-muted: #92AA99;
+    --kiwi-badge-neutral-text: #B7C9BF;
+    --kiwi-badge-solving-text: #9EDFD4;
     --kiwi-badge-success-text: #abebcb;
     --kiwi-badge-error-text: #ffc0c0;
-    --kiwi-primary: #80b5ff;
-    --kiwi-primary-rgb: 128, 181, 255;
+    --kiwi-primary: #9EDFD4;
+    --kiwi-primary-rgb: 158, 223, 212;
     --kiwi-success: #5bd6a2;
     --kiwi-success-rgb: 91, 214, 162;
     --kiwi-error: #f78b8b;
     --kiwi-error-rgb: 247, 139, 139;
-    --kiwi-border: #313945;
-    --kiwi-track: #252e3a;
-    --kiwi-retry-border: #a9b1bd;
+    --kiwi-border: #223128;
+    --kiwi-track: #182420;
+    --kiwi-retry-border: #92AA99;
     color-scheme: dark;
   }
 }
 /* Page themes pin the palette independently of the OS. A widget's own
    data-theme or framework theme class takes precedence over its host. */
 [data-theme="dark"] .kiwi-container {
-  --kiwi-bg: #161b22; --kiwi-text: #eff2f6; --kiwi-text-muted: #a9b1bd;
-  --kiwi-badge-neutral-text: #c3cad4; --kiwi-badge-solving-text: #b7d4ff;
+  --kiwi-bg: #08110C; --kiwi-text: #F3F5EF; --kiwi-text-muted: #92AA99;
+  --kiwi-badge-neutral-text: #B7C9BF; --kiwi-badge-solving-text: #9EDFD4;
   --kiwi-badge-success-text: #abebcb; --kiwi-badge-error-text: #ffc0c0;
-  --kiwi-primary: #80b5ff; --kiwi-primary-rgb: 128, 181, 255;
+  --kiwi-primary: #9EDFD4; --kiwi-primary-rgb: 158, 223, 212;
   --kiwi-success: #5bd6a2; --kiwi-success-rgb: 91, 214, 162;
   --kiwi-error: #f78b8b; --kiwi-error-rgb: 247, 139, 139;
-  --kiwi-border: #313945; --kiwi-track: #252e3a; --kiwi-retry-border: #a9b1bd;
+  --kiwi-border: #223128; --kiwi-track: #182420; --kiwi-retry-border: #92AA99;
   color-scheme: dark;
 }
 [data-theme="light"] .kiwi-container {
-  --kiwi-bg: #ffffff; --kiwi-text: #202733; --kiwi-text-muted: #5b6473;
-  --kiwi-badge-neutral-text: #596273; --kiwi-badge-solving-text: #174c94;
+  --kiwi-bg: #ffffff; --kiwi-text: #08110C; --kiwi-text-muted: #5D625F;
+  --kiwi-badge-neutral-text: #5D625F; --kiwi-badge-solving-text: #145C52;
   --kiwi-badge-success-text: #075438; --kiwi-badge-error-text: #992727;
-  --kiwi-primary: #1663c7; --kiwi-primary-rgb: 22, 99, 199;
+  --kiwi-primary: #145C52; --kiwi-primary-rgb: 20, 92, 82;
   --kiwi-success: #08764f; --kiwi-success-rgb: 8, 118, 79;
   --kiwi-error: #c33434; --kiwi-error-rgb: 195, 52, 52;
-  --kiwi-border: #dce1e8; --kiwi-track: #edf0f4; --kiwi-retry-border: #737373;
+  --kiwi-border: #dce3dc; --kiwi-track: #edf0ea; --kiwi-retry-border: #737373;
   color-scheme: light;
 }
 /* Widget-local theme always wins over the host page's data-theme.
@@ -85,26 +85,26 @@
 .kiwi-container[data-theme="dark"],
 html .kiwi-container.kiwi-theme-dark,
 html .kiwi-container[data-theme="dark"] {
-  --kiwi-bg: #161b22; --kiwi-text: #eff2f6; --kiwi-text-muted: #a9b1bd;
-  --kiwi-badge-neutral-text: #c3cad4; --kiwi-badge-solving-text: #b7d4ff;
+  --kiwi-bg: #08110C; --kiwi-text: #F3F5EF; --kiwi-text-muted: #92AA99;
+  --kiwi-badge-neutral-text: #B7C9BF; --kiwi-badge-solving-text: #9EDFD4;
   --kiwi-badge-success-text: #abebcb; --kiwi-badge-error-text: #ffc0c0;
-  --kiwi-primary: #80b5ff; --kiwi-primary-rgb: 128, 181, 255;
+  --kiwi-primary: #9EDFD4; --kiwi-primary-rgb: 158, 223, 212;
   --kiwi-success: #5bd6a2; --kiwi-success-rgb: 91, 214, 162;
   --kiwi-error: #f78b8b; --kiwi-error-rgb: 247, 139, 139;
-  --kiwi-border: #313945; --kiwi-track: #252e3a; --kiwi-retry-border: #a9b1bd;
+  --kiwi-border: #223128; --kiwi-track: #182420; --kiwi-retry-border: #92AA99;
   color-scheme: dark;
 }
 .kiwi-container.kiwi-theme-light,
 .kiwi-container[data-theme="light"],
 html .kiwi-container.kiwi-theme-light,
 html .kiwi-container[data-theme="light"] {
-  --kiwi-bg: #ffffff; --kiwi-text: #202733; --kiwi-text-muted: #5b6473;
-  --kiwi-badge-neutral-text: #596273; --kiwi-badge-solving-text: #174c94;
+  --kiwi-bg: #ffffff; --kiwi-text: #08110C; --kiwi-text-muted: #5D625F;
+  --kiwi-badge-neutral-text: #5D625F; --kiwi-badge-solving-text: #145C52;
   --kiwi-badge-success-text: #075438; --kiwi-badge-error-text: #992727;
-  --kiwi-primary: #1663c7; --kiwi-primary-rgb: 22, 99, 199;
+  --kiwi-primary: #145C52; --kiwi-primary-rgb: 20, 92, 82;
   --kiwi-success: #08764f; --kiwi-success-rgb: 8, 118, 79;
   --kiwi-error: #c33434; --kiwi-error-rgb: 195, 52, 52;
-  --kiwi-border: #dce1e8; --kiwi-track: #edf0f4; --kiwi-retry-border: #737373;
+  --kiwi-border: #dce3dc; --kiwi-track: #edf0ea; --kiwi-retry-border: #737373;
   color-scheme: light;
 }
 
@@ -146,17 +146,17 @@ html .kiwi-container[data-theme="light"] {
   border-color: rgba(var(--kiwi-error-rgb), 0.4);
 }
 .kiwi-icon-wrapper {
-  flex: 0 0 36px;
-  width: 36px;
-  height: 36px;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
   display: grid;
   place-items: center;
   border: 1px solid rgba(var(--kiwi-state-rgb), 0.12);
-  border-radius: 11px;
+  border-radius: 12px;
   background: rgba(var(--kiwi-state-rgb), 0.07);
   color: var(--kiwi-state-color);
 }
-.kiwi-icon-wrapper svg { display: block; width: 24px; height: 24px; }
+.kiwi-icon-wrapper svg { display: block; width: 40px; height: 40px; }
 .kiwi-main { flex: 1; min-width: 0; }
 .kiwi-top, .kiwi-bottom { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
 .kiwi-label {

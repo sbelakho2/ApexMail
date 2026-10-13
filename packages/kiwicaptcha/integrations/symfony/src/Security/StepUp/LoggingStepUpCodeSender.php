@@ -9,12 +9,18 @@ use Psr\Log\LogLevel;
 
 /**
  * The default code sender: a dev and test lane that logs the code. The
- * production deployment binds its own sender over its mailer, through
- * the risk.step_up.handlers.email_otp.sender service knob of
+ * production deployment binds its own sender over its mailer (or
+ * installs symfony/mailer, which arms the bundle's own mailer adapter)
+ * through the risk.step_up.handlers.email_otp.sender service knob of
  * {@see StepUpCodeSenderInterface}. This default exists so a dev
- * kernel and the test suite observe delivery without a mailer. The
- * configuration info of the sender knob names the production
- * expectation.
+ * kernel and the test suite observe delivery without a mailer.
+ *
+ * The seam receives pseudonyms only, because the context validates the
+ * shapes at construction, so the log line can never carry a raw
+ * identifier or address. The principal rides as the engine's keyed
+ * pseudonym, and the code is the dev lane's whole point. The doctor
+ * FAILs a production deployment whose factor resolves to this sender.
+ * A logged code is a code delivered to nobody.
  */
 final class LoggingStepUpCodeSender implements StepUpCodeSenderInterface
 {
