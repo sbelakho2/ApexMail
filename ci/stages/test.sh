@@ -264,6 +264,19 @@ run_cargo_tests() {
         # bounds the clone disk peak while the suite still completes —
         # override with CI_NEXTEST_JOBS on a bigger runner.
         _nx_jobs="${CI_NEXTEST_JOBS:-4}"
+        # sqlx::migrate! staleness guard (deploy 2026-10-13): the macro's
+        # include_str! set is fixed at EXPANSION time, so a migration file
+        # ADDED after the last build of the migrator is invisible to cargo's
+        # fingerprint and a stale embedded chain ships (the host embedded
+        # 222/250 while the tree carried 223/251 — every template-lookup
+        # test then failed). Fresh checkouts are unaffected; an incremental
+        # tree only needs the touch when a migration is newer than the last
+        # migrator build.
+        _mig_newer=$(find "$WS/migrations" -name '*.sql' -newer "$WS/target/debug/migrator" 2>/dev/null | head -1)
+        if [ -n "$_mig_newer" ]; then
+            ci_info "migrations newer than the last migrator build — touching crates/migrator/src/lib.rs (sqlx::migrate! fingerprint, $ _mig_newer)"
+            touch "$WS/crates/migrator/src/lib.rs"
+        fi
         # Compile the test binaries BEFORE the services + template pre-warm:
         # on a cold target the compile storm (8x rustc for ~15-20 minutes)
         # starves Postgres backends of I/O, and the suite's FIRST database
