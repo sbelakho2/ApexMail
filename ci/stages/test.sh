@@ -812,6 +812,19 @@ run_pre_commit_lane() {
         ci_info "check (dry-run): pre-commit run --all-files"
         return "$CI_EXIT_OK"
     fi
+    # Deploy-host hygiene: the deploy source is the COMMIT, and this lane's
+    # fixer hooks rewrite tracked files on violation. Leftovers from an
+    # interrupted earlier run (or any local dirt) therefore poison the NEXT
+    # run's golden/baseline comparisons — 2026-10-13 a fixer's trailing-
+    # newline churn made the ui-foundation goldens fail two runs in a row.
+    # Restore tracked files BEFORE the lane on the deploy host, loudly.
+    if ci_on_deploy_host; then
+        _pc_preexisting=$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${_pc_preexisting:-0}" -gt 0 ]; then
+            ci_warn "pre-commit lane: restoring $_pc_preexisting tracked file(s) modified before this lane on the deploy host (previous fixer churn or local edits — the deploy source is the commit)"
+            git -C "$REPO_ROOT" checkout -- . 2>/dev/null || true
+        fi
+    fi
     _pc_tree_clean=0
     [ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -1)" ] && _pc_tree_clean=1
     # The fixer hooks rewrite files on violation. Snapshot the dirty set so
