@@ -272,9 +272,14 @@ run_cargo_tests() {
         # test then failed). Fresh checkouts are unaffected; an incremental
         # tree only needs the touch when a migration is newer than the last
         # migrator build.
-        _mig_newer=$(find "$WS/migrations" -name '*.sql' -newer "$WS/target/debug/migrator" 2>/dev/null | head -1)
-        if [ -n "$_mig_newer" ]; then
-            ci_info "migrations newer than the last migrator build — touching crates/migrator/src/lib.rs (sqlx::migrate! fingerprint, $ _mig_newer)"
+        _mig_dir_count=$(find "$WS/migrations" -name '*.sql' 2>/dev/null | wc -l | tr -d ' ')
+        _mig_embedded=''
+        if [ -x "$WS/target/debug/migrator" ]; then
+            _mig_embedded=$("$WS/target/debug/migrator" --dry-run 2>/dev/null \
+                | awk '/embedded migrations:/{print $3; exit}')
+        fi
+        if [ -n "$_mig_embedded" ] && [ "$_mig_embedded" != "$_mig_dir_count" ]; then
+            ci_info "the migrator embeds $_mig_embedded migrations but the tree carries $_mig_dir_count — touching crates/migrator/src/lib.rs (sqlx::migrate! staleness)"
             touch "$WS/crates/migrator/src/lib.rs"
         fi
         # Compile the test binaries BEFORE the services + template pre-warm:
