@@ -957,7 +957,11 @@ mod tests {
         let cm = test_redis_connection()
             .await
             .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
-        let config = RateLimitConfig::new(100).with_burst(3);
+        // Refill 1/s on purpose: at the old 100/s (a token every 10ms) the
+        // three burst requests' own Redis round-trip gaps could refill the
+        // bucket and ALLOW the 4th request under suite load (deploy
+        // 2026-10-13). At 1/s the deny assertion cannot race.
+        let config = RateLimitConfig::new(1).with_burst(3);
         let limiter = RedisLimiter::with_connection(&config, cm, "test:basic:", 1);
 
         // Clean slate
@@ -1074,7 +1078,10 @@ mod tests {
         let cm = test_redis_connection()
             .await
             .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
-        let config = RateLimitConfig::new(100).with_burst(3);
+        // Refill 1/s on purpose (same reasoning as test_redis_basic_allow_deny):
+        // at 100/s the restart round-trip gaps refill the bucket and the
+        // deny assertions race under suite load (deploy 2026-10-13).
+        let config = RateLimitConfig::new(1).with_burst(3);
 
         // "Pod 1" — add requests
         let limiter1 = RedisLimiter::with_connection(&config, cm.clone(), "test:restart:", 60);

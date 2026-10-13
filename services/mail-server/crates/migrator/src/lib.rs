@@ -1794,14 +1794,25 @@ pub mod test_support {
         // …and the SERVER inside must answer: a bare TCP accept can come
         // from a port-forward proxy whose container is already gone, which
         // surfaced as a mid-test "connection driver unexpectedly terminated".
-        let ping = std::process::Command::new("docker")
-            .args(["exec", &name, "redis-cli", "ping"])
-            .output();
-        let answered = ping
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).contains("PONG"))
-            .unwrap_or(false);
+        // Bounded retry: `docker exec` itself queues behind the whole host's
+        // container load, so one slow exec is not a dead server — a genuinely
+        // broken proxy still fails every attempt and the container is
+        // removed (deploy 2026-10-13: a single slow exec flaked this check).
+        let mut answered = false;
+        for _ in 0..5 {
+            let ping = std::process::Command::new("docker")
+                .args(["exec", &name, "redis-cli", "ping"])
+                .output();
+            answered = ping
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).contains("PONG"))
+                .unwrap_or(false);
+            if answered {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
         if !answered {
             let _ = stop_container(&name);
             panic!("throwaway redis on port {port} started but never answered PING");
