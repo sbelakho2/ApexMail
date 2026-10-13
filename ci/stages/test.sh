@@ -557,6 +557,7 @@ run_php_tests() {
                 packages/kiwicaptcha-risk-php \
                 packages/kiwicaptcha/integrations/symfony; do
         provision_composer_vendor "$_pkg" || return "$CI_EXIT_FAIL"
+        refresh_path_package_vendor_copies "$_pkg" || return "$CI_EXIT_FAIL"
         # One bounded retry per suite. The symfony suite carries a known
         # rare flake: on 2026-09-11 one of its 1545 tests
         # (ExecutionChallengeDimensionTest's armed-issuance solve) failed
@@ -590,17 +591,122 @@ triage window) — result recorded, lane continues"
 }
 
 # provision_composer_vendor <pkg-rel-path> — composer install when the
-# checkout carries no vendor/ yet (dry-run safe).
+# checkout carries no vendor/ yet, or when the committed composer.lock has
+# moved past the installed dependency set (dry-run safe).
+#
+# Staleness signal (2026-10-13, the KiwiCaptcha mirror advance): the
+# symfony bundle's lock bumped webauthn-lib ^4.9→^5.3.5 and added
+# symfony/security-core + security/mailer. A vendor/ that predates the lock
+# fails the suite with class-not-found noise (measured: 59 errors / 5
+# failures, agent B report 2026-10-13) — i.e. the lane would report the
+# previous mirror's health. Compare the lock's package/version set against
+# vendor/composer/installed.json and reinstall on any drift.
+_composer_vendor_stale() {
+    _cvs_dir=$1
+    # No lock (kiwicaptcha-risk-php ships none) or no installed.json → nothing
+    # to compare: report "not stale" so the caller skips, never reinstalls.
+    [ -f "$_cvs_dir/composer.lock" ] || return 0
+    [ -f "$_cvs_dir/vendor/composer/installed.json" ] || return 0
+    python3 - "$_cvs_dir/composer.lock" "$_cvs_dir/vendor/composer/installed.json" <<'PY'
+import json, sys
+lock = json.load(open(sys.argv[1]))
+inst = json.load(open(sys.argv[2]))
+want = {}
+for key in ("packages", "packages-dev"):
+    for pkg in lock.get(key, []):
+        want[pkg["name"]] = pkg["version"]
+raw = inst.get("packages", []) if isinstance(inst, dict) else inst
+have = {pkg["name"]: pkg["version"] for pkg in raw}
+drift = {name for name, ver in want.items() if have.get(name) != ver}
+drift |= set(have) - set(want)
+if drift:
+    print(", ".join(sorted(drift)[:4]) + (" …" if len(drift) > 4 else ""))
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 provision_composer_vendor() {
     _cv_dir=$1
-    [ -x "$REPO_ROOT/$_cv_dir/vendor/bin/phpunit" ] && return "$CI_EXIT_OK"
+    _cv_why=''
+    if [ ! -x "$REPO_ROOT/$_cv_dir/vendor/bin/phpunit" ]; then
+        _cv_why='vendor/ absent'
+    elif _cv_drift=$(_composer_vendor_stale "$REPO_ROOT/$_cv_dir"); then
+        _cv_why=''
+    else
+        _cv_why="vendor/ predates composer.lock (drift: ${_cv_drift:-unknown})"
+    fi
+    [ -z "$_cv_why" ] && return "$CI_EXIT_OK"
     if ci_dry; then
-        ci_info "dry-run: composer install --quiet --no-interaction ($_cv_dir)"
+        ci_info "dry-run: composer install --quiet --no-interaction ($_cv_dir, $_cv_why)"
         return "$CI_EXIT_OK"
     fi
-    ci_info "$_cv_dir: vendor/ absent — composer install (cached in the checkout after the first run)"
+    ci_info "$_cv_dir: $_cv_why — composer install (cached in the checkout after the first run)"
     (cd "$REPO_ROOT/$_cv_dir" && composer install --quiet --no-interaction) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "composer install failed in $_cv_dir"; return "$CI_EXIT_FAIL"; }
+}
+
+# refresh_path_package_vendor_copies <bundle-rel-path> — composer "path"
+# repositories with "symlink": false install REAL FILE COPIES under vendor/;
+# a mirror advance updates the source packages while composer install (when
+# the lock itself did not move) leaves those copies stale — the suite and
+# the tests/browser PHP fixture then exercise the PREVIOUS mirror (K1-A2:
+# the 2026-10-09 advance left MAX_EXECUTION_VERSION=5 in the vendored copy
+# and three browser specs failed until it was re-synced). Re-sync every
+# path-repo source over its vendor copy when they differ; vendor/ is
+# git-ignored, so this writes no tracked byte. No-op when vendor/ is absent
+# (the fixture falls back to its own loader in that case).
+refresh_path_package_vendor_copies() {
+    _pv_dir=$REPO_ROOT/$1
+    [ -f "$_pv_dir/composer.json" ] || return "$CI_EXIT_OK"
+    [ -d "$_pv_dir/vendor" ] || return "$CI_EXIT_OK"
+    _pv_pairs=$(python3 - "$_pv_dir" <<'PY'
+import json, os, sys
+bundle = sys.argv[1]
+try:
+    cfg = json.load(open(os.path.join(bundle, "composer.json")))
+except Exception:
+    sys.exit(0)
+for repo in cfg.get("repositories", []):
+    if not isinstance(repo, dict) or repo.get("type") != "path":
+        continue
+    src = os.path.normpath(os.path.join(bundle, repo.get("url", "")))
+    if not os.path.isdir(src):
+        continue
+    name = None
+    versions = (repo.get("options") or {}).get("versions") or {}
+    if versions:
+        name = sorted(versions)[0]
+    if name is None:
+        try:
+            name = json.load(open(os.path.join(src, "composer.json"))).get("name")
+        except Exception:
+            continue
+    dst = os.path.join(bundle, "vendor", *str(name).split("/"))
+    if name and os.path.isdir(dst):
+        print("{}\t{}".format(src, dst))
+PY
+    ) || return "$CI_EXIT_FAIL"
+    [ -n "$_pv_pairs" ] || return "$CI_EXIT_OK"
+    _pv_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-pv.XXXXXX") || return "$CI_EXIT_FAIL"
+    printf '%s\n' "$_pv_pairs" >"$_pv_tmp"
+    _pv_tab=$(printf '\t')
+    _pv_rc=$CI_EXIT_OK
+    while IFS="$_pv_tab" read -r _pv_src _pv_dst; do
+        [ -n "$_pv_src" ] || continue
+        if ! diff -rq --exclude=vendor --exclude=target --exclude=node_modules --exclude=.phpunit.result.cache \
+                "$_pv_src" "$_pv_dst" >/dev/null 2>&1; then
+            ci_info "$1: vendored copy of $(basename "$_pv_src") predates the mirror — re-syncing vendor copy"
+            if ! rsync -a --delete --exclude=vendor --exclude=target --exclude=node_modules --exclude=.phpunit.result.cache \
+                    "$_pv_src/" "$_pv_dst/" >>"$CI_STAGE_LOG" 2>&1; then
+                ci_err "path-package vendor refresh failed for $_pv_src"
+                _pv_rc=$CI_EXIT_FAIL
+                break
+            fi
+        fi
+    done <"$_pv_tmp"
+    rm -f "$_pv_tmp"
+    return "$_pv_rc"
 }
 
 # --- 8. SDK lanes (python / go / java / ruby / php) ------------------------------------
@@ -1143,6 +1249,10 @@ run_browser_suite() {
         skip) return "$CI_EXIT_OK" ;;
     esac
     provision_browser_node_modules || return "$CI_EXIT_FAIL"
+    # The fixture boots the symfony bundle when its vendor/ is present, so a
+    # stale vendored path-package copy must be re-synced here too (no-op when
+    # vendor/ is absent — the fixture then falls back to its own loader).
+    refresh_path_package_vendor_copies packages/kiwicaptcha/integrations/symfony || return "$CI_EXIT_FAIL"
     if ci_dry; then
         ci_info "check (dry-run): browser suite (tests/browser, PHP port + locked chromium)"
         return "$CI_EXIT_OK"
