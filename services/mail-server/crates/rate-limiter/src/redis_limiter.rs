@@ -1109,7 +1109,12 @@ mod tests {
         let cm = test_redis_connection()
             .await
             .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
-        let config = RateLimitConfig::new(100).with_burst(5);
+        // Refill 1/s on purpose: with the old 100/s (a token every 10ms) two
+        // consecutive check_n Redis round-trips under suite load could refill
+        // the bucket past the burst cap and ALLOW the batch that must be
+        // denied (deploy 2026-10-13). At 1/s the assertion needs a full
+        // second of stall between two adjacent awaits to flake.
+        let config = RateLimitConfig::new(1).with_burst(5);
         let limiter = RedisLimiter::with_connection(&config, cm, "test:batchn:", 1);
 
         limiter.reset().await.unwrap();
