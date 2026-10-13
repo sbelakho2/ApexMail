@@ -23,7 +23,8 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::gate_support::TEST_CSRF_SECRET;
 use crate::routing;
@@ -176,6 +177,40 @@ fn deterministic_golden(surface: &str, path: &str) -> String {
     first
 }
 
+/// The COMMITTED content of a golden file.
+///
+/// The gate's subject is the checked-in fixture, i.e. the commit — on the
+/// deploy host the working tree is legitimately churned by other lanes (the
+/// fixtures export regenerates files; the pre-commit fixer hooks add
+/// trailing newlines), and comparing the working tree made this gate fail on
+/// churn unrelated to the code (deploy 2026-10-13). Falls back to the
+/// working tree when git is unavailable (e.g. a source tarball checkout).
+fn expected_golden(file: &PathBuf) -> std::io::Result<String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(repo_root) = manifest.ancestors().nth(4) {
+        if let Ok(rel) = file.strip_prefix(repo_root) {
+            if let Some(rel) = rel.to_str() {
+                if let Ok(out) = Command::new("git")
+                    .args([
+                        "-C",
+                        &repo_root.to_string_lossy(),
+                        "show",
+                        &format!("HEAD:{rel}"),
+                    ])
+                    .output()
+                {
+                    if out.status.success() {
+                        if let Ok(text) = String::from_utf8(out.stdout) {
+                            return Ok(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fs::read_to_string(file)
+}
+
 fn write_golden(file: &PathBuf, content: &str) {
     fs::create_dir_all(file.parent().expect("golden parent directory"))
         .expect("create goldens directory");
@@ -192,7 +227,7 @@ fn golden_suite_for_surface(surface: &str) {
             write_golden(&file, &normalized);
             continue;
         }
-        match fs::read_to_string(&file) {
+        match expected_golden(&file) {
             Ok(expected) => {
                 if expected != normalized {
                     let diff = unified_diff(&expected, &normalized, 60);
