@@ -1,4 +1,4 @@
--- 251: the 2026-10-07 gates-review fixes, applied as a FORWARD migration.
+-- Migration 251: the 2026-10-07 gates-review fixes, applied as a FORWARD migration.
 --
 -- Context (deploy 2026-10-13): the review fixed two REAL data-logic bugs by
 -- editing migrations that had ALREADY been applied to production (002/110's
