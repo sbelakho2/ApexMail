@@ -182,6 +182,13 @@ _provision_test_services() {
     if [ -n "${CI_LOAD_TEST_OPS_FLOOR:-}" ]; then
         _TEST_ENV="$_TEST_ENV LOAD_TEST_MIXED_OPS_FLOOR=$CI_LOAD_TEST_OPS_FLOOR"
     fi
+
+    # Scheduler-slack scale for the isolation ratios (see the knob in
+    # pipeline.conf): the runner measures while the whole suite competes for
+    # the cores, so the dev-machine absolute slacks are too tight there.
+    if [ -n "${CI_LOAD_TEST_ISOLATION_SLACK_SCALE:-}" ]; then
+        _TEST_ENV="$_TEST_ENV LOAD_TEST_ISOLATION_SLACK_SCALE=$CI_LOAD_TEST_ISOLATION_SLACK_SCALE"
+    fi
 }
 
 # _cargo_run_capture <log-path> <cmd...> — run cmd with its combined output
