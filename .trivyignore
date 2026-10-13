@@ -92,3 +92,15 @@ GHSA-r7wm-3cxj-wff9 exp:2026-12-31   # jackson-core maxNumberLength bypass (sdk-
 CVE-2026-54512 exp:2026-12-31        # jackson-databind arbitrary code execution (sdk-java example)
 CVE-2026-54513 exp:2026-12-31        # jackson-databind security bypass (sdk-java example)
 GHSA-5j98-2g5x-46v6   # hickory-resolver 0.24 lookup()/lookup_ip() obscure DNSSEC-validation failures — the advisory's precondition is an ENABLED DNSSEC validator; ApexMail's resolver never enables DNSSEC (no dnssec config anywhere in dns-resolver), and the resolver talks to the system/trusted resolvers. Revisit on the hickory 0.26 upgrade.
+
+# Debian 12 base-image OS packages (2026-10-13, first post-rebuild image scan):
+# gnutls/openssl information-disclosure-class advisories published against
+# the Bookworm base with NO fixed version in the archive yet (trivy shows an
+# empty Fixed column). The affected code paths are library-internal TLS
+# handling; nothing in these images runs a TLS server on the base packages
+# (nginx/certbot carry their own). Each entry carries an exp: date so the
+# findings re-arm automatically — delete the lines once Debian ships the
+# point release and the base image is rebuilt.
+CVE-2026-88647 exp:2026-11-30   # gnutls hostname information disclosure (libgnutls30 3.7.9-2+deb12u7)
+CVE-2026-88648 exp:2026-11-30   # gnutls cross-domain certificate restriction bypass (libgnutls30)
+CVE-2026-84782 exp:2026-11-30   # openssl information disclosure (libssl3 3.0.22-1~deb12u1)
