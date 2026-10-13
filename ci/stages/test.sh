@@ -362,8 +362,8 @@ run_coverage_gate() {
     # cannot hold it, skip LOUDLY — the authoritative gates are unaffected
     # and the baseline calibration happens on a host with the headroom.
     _cov_free_g=$(df -Pk "$RUN_DIR" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}' || echo 0)
-    if [ "${_cov_free_g:-0}" -lt 110 ]; then
-        ci_warn "coverage gate SKIPPED: instrumented pass needs ~90G of scratch on top of the warm target; ${_cov_free_g}G free — reclaim space and re-run (ci/README.md, CI_COVERAGE_CHECK)"
+    if [ "${_cov_free_g:-0}" -lt 150 ]; then
+        ci_warn "coverage gate SKIPPED: the instrumented pass needs ~86G of scratch tree PLUS its own ephemeral-Postgres peak (~45G) on top of the warm debug target; ${_cov_free_g}G free — reclaim space and re-run (ci/README.md, CI_COVERAGE_CHECK)"
         return "$CI_EXIT_OK"
     fi
     ci_info "running cargo llvm-cov nextest --workspace ($(printf '%s' "$_TEST_ENV" | tr ' ' ','))"
