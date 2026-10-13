@@ -10,4 +10,5 @@ FROM prodrigestivill/postgres-backup-local:16-alpine
 # runs on a no-egress network and encrypts backups); alpine micro-versions
 # churn with the base tag and no digest pin exists for these bases.
 # hadolint ignore=DL3018
-RUN apk add --no-cache openssl rsync
+RUN apk upgrade --no-cache \
+    && apk add --no-cache openssl rsync
