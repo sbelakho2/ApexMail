@@ -629,11 +629,6 @@ struct TenantAdyenSettings {
 }
 
 #[derive(Debug, Deserialize)]
-struct AdyenShopperResponse {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct AdyenCheckoutSessionResponse {
     id: String,
     url: Option<String>,
@@ -995,49 +990,46 @@ fn validate_usage_alert_channel(channel: &str) -> bool {
     matches!(channel, "email" | "webhook" | "both")
 }
 
-const DEFAULT_ADYEN_API_VERSION: &str = "2026-04-22.dahlia";
 
 fn adyen_api_base_url() -> String {
     std::env::var("ADYEN_API_BASE_URL").unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
-}
-
-fn adyen_api_version() -> String {
-    std::env::var("ADYEN_API_VERSION")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_ADYEN_API_VERSION.into())
 }
 
 #[derive(Clone)]
 struct AdyenClient {
     http: reqwest::Client,
     base_url: String,
-    api_version: String,
-    secret_key: String,
+    api_key: String,
+    merchant_account: String,
 }
 
 impl AdyenClient {
-    fn from_env(http: &reqwest::Client) -> Result<Self, String> {
-        let secret_key = std::env::var("ADYEN_API_KEY")
-            .map_err(|_| "Adyen secret key is not configured".to_string())?;
+    fn from_env(http: &reqwest::Client, is_production: bool) -> Result<Self, String> {
+        let api_key = std::env::var("ADYEN_API_KEY")
+            .map_err(|_| "Adyen API key is not configured".to_string())?;
+        let merchant_account = std::env::var("ADYEN_MERCHANT_ACCOUNT")
+            .map_err(|_| "ADYEN_MERCHANT_ACCOUNT is not configured".to_string())?;
+        let base_url = adyen_api_base_url();
 
-        // A test-mode key must never silently drive real customer billing.
-        // It is only accepted when the deployment explicitly opts in.
-        if secret_key.starts_with("sk_test_")
+        // Adyen's test endpoint must never silently drive real customer
+        // billing in production; it is only accepted when the deployment
+        // explicitly opts in (a pre-production stack sets
+        // ADYEN_ALLOW_TEST_KEY=true and keeps the test URL).
+        if is_production
+            && base_url.contains("checkout-test")
             && std::env::var("ADYEN_ALLOW_TEST_KEY").as_deref() != Ok("true")
         {
             return Err(
-                "ADYEN_API_KEY is a Adyen test key; set ADYEN_ALLOW_TEST_KEY=true only in non-production development deployments"
+                "ADYEN_API_BASE_URL points at Adyen's test endpoint in production; set the live checkout URL (https://checkout-live.adyen.com/v71) or set ADYEN_ALLOW_TEST_KEY=true deliberately"
                     .to_string(),
             );
         }
 
         Ok(Self {
             http: http.clone(),
-            base_url: adyen_api_base_url(),
-            api_version: adyen_api_version(),
-            secret_key,
+            base_url,
+            api_key,
+            merchant_account,
         })
     }
 
@@ -1045,25 +1037,28 @@ impl AdyenClient {
     fn new(
         http: reqwest::Client,
         base_url: String,
-        api_version: String,
-        secret_key: String,
+        api_key: String,
+        merchant_account: String,
     ) -> Self {
         Self {
             http,
             base_url,
-            api_version,
-            secret_key,
+            api_key,
+            merchant_account,
         }
     }
 
-    async fn form_post<T: DeserializeOwned>(
+    /// Adyen Checkout API call: JSON body, API key in `X-API-Key`, and the
+    /// API version inside the URL path (`.../v71`) — Adyen has no version
+    /// header. Amounts travel in minor units inside the JSON body.
+    async fn json_post<T: DeserializeOwned>(
         &self,
         path: &str,
-        form: &[(&str, String)],
+        body: &serde_json::Value,
         idempotency_key: Option<&str>,
     ) -> Result<T, String> {
         let response = self
-            .form_request(path, form, idempotency_key)
+            .json_request(path, body, idempotency_key)
             .send()
             .await
             .map_err(|error| format!("Adyen request failed: {error}"))?;
@@ -1079,18 +1074,17 @@ impl AdyenClient {
             .map_err(|error| format!("Adyen response decode failed: {error}"))
     }
 
-    fn form_request(
+    fn json_request(
         &self,
         path: &str,
-        form: &[(&str, String)],
+        body: &serde_json::Value,
         idempotency_key: Option<&str>,
     ) -> reqwest::RequestBuilder {
         let mut request = self
             .http
             .post(format!("{}{}", self.base_url, path))
-            .bearer_auth(&self.secret_key)
-            .header("Adyen-Version", &self.api_version)
-            .form(form);
+            .header("X-API-Key", &self.api_key)
+            .json(body);
 
         if let Some(idempotency_key) = idempotency_key {
             request = request.header("Idempotency-Key", idempotency_key);
@@ -1190,18 +1184,10 @@ async fn get_or_create_adyen_shopper_reference(
         return Err("No billing email configured".into());
     };
 
-    let adyen = AdyenClient::from_env(&state.http_client)?;
-    let customer = adyen
-        .form_post::<AdyenShopperResponse>(
-            "/v1/customers",
-            &[
-                ("email", email.clone()),
-                ("name", tenant_name.clone()),
-                ("metadata[tenant_id]", tenant_id.to_string()),
-            ],
-            Some(&format!("customer_create_{tenant_id}")),
-        )
-        .await?;
+    // Adyen has no customer object and no customer-create call: the shopper
+    // reference we choose IS the tenant id, and this row is our own
+    // onboarding record (email/name kept for billing notices).
+    let customer_id = tenant_id.to_string();
 
     sqlx::query(
         r#"
@@ -1213,7 +1199,7 @@ async fn get_or_create_adyen_shopper_reference(
         "#,
     )
     .bind(tenant_id)
-    .bind(&customer.id)
+    .bind(&customer_id)
     .bind(&email)
     .bind(&tenant_name)
     .execute(&mut *tx)
@@ -1222,9 +1208,9 @@ async fn get_or_create_adyen_shopper_reference(
 
     tx.commit()
         .await
-        .map_err(|error| format!("Failed to commit Adyen customer transaction: {error}"))?;
+        .map_err(|error| format!("Failed to commit Adyen shopper transaction: {error}"))?;
 
-    Ok(customer.id)
+    Ok(customer_id)
 }
 
 fn parse_query_date(value: &str) -> Option<chrono::DateTime<Utc>> {
@@ -3115,8 +3101,8 @@ async fn create_checkout_session(
     // customer. The price must map to an active ApexMail plan in our catalog,
     // which prevents cross-product purchases and makes the plan selection
     // independently verifiable when the webhook arrives.
-    let plan_name = match active_plan_name_for_adyen_plan_code(&state.db, price_id).await? {
-        Some(plan_name) => plan_name,
+    let (plan_name, yearly) = match active_plan_checkout_target(&state.db, price_id).await? {
+        Some(target) => target,
         None => {
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -3125,6 +3111,29 @@ async fn create_checkout_session(
                 .into_response())
         }
     };
+    // Adyen sends amounts inline (minor units): the amount is the canonical
+    // platform-catalog price for the matched interval — never a client input,
+    // never a provider-side price object.
+    let Some(plan_row) = platform_catalog::plan_by_name(&plan_name) else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Unsupported priceId" })),
+        )
+            .into_response());
+    };
+    let amount_cents = if yearly {
+        plan_row.price_yearly_cents
+    } else {
+        plan_row.price_monthly_cents
+    };
+    if amount_cents <= 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Plan is not self-serve billable" })),
+        )
+            .into_response());
+    }
+    let interval_label = if yearly { "yearly" } else { "monthly" };
 
     if !is_allowed_billing_redirect_url(&body.success_url, state.config.environment) {
         return Ok((
@@ -3149,7 +3158,10 @@ async fn create_checkout_session(
         }
     };
 
-    let adyen = match AdyenClient::from_env(&state.http_client) {
+    let adyen = match AdyenClient::from_env(
+        &state.http_client,
+        state.config.environment.is_production(),
+    ) {
         Ok(adyen) => adyen,
         Err(error) => {
             tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Adyen client for checkout");
@@ -3158,38 +3170,28 @@ async fn create_checkout_session(
     };
 
     let session = match adyen
-        .form_post::<AdyenCheckoutSessionResponse>(
-            "/v1/checkout/sessions",
-            &[
-                ("customer", customer_id),
-                ("payment_method_types[0]", "card".into()),
-                ("line_items[0][price]", price_id.to_string()),
-                ("line_items[0][quantity]", "1".into()),
-                ("mode", "subscription".into()),
-                ("success_url", body.success_url),
-                ("cancel_url", body.cancel_url),
-                ("metadata[tenant_id]", auth.tenant_id.clone()),
-                ("metadata[plan_name]", plan_name.clone()),
-                (
-                    "subscription_data[metadata][tenant_id]",
-                    auth.tenant_id.clone(),
-                ),
-                ("subscription_data[metadata][plan_name]", plan_name.clone()),
-                ("allow_promotion_codes", "true".into()),
-                ("billing_address_collection", "required".into()),
-                ("tax_id_collection[enabled]", "true".into()),
-                // TAX-TRUTH P0: Adyen Tax is the charging authority for the
-                // actual charge. Address collection is required above; the
-                // customer address is written back so automatic tax can
-                // resolve the place of supply, and the finalized invoice's
-                // tax decision is snapshotted + validated by
-                // billing-service's invoice.paid handler. If Adyen rejects
-                // automatic_tax (e.g. account not yet activated), the
-                // webhook records the local-computation fallback and blocks
-                // any charged total that disagrees with it.
-                ("automatic_tax[enabled]", "true".into()),
-                ("customer_update[address]", "auto".into()),
-            ],
+        .json_post::<AdyenCheckoutSessionResponse>(
+            "/sessions",
+            &serde_json::json!({
+                "amount": { "currency": "EUR", "value": amount_cents },
+                "merchantAccount": adyen.merchant_account.clone(),
+                "reference": format!("checkout:{plan_name}:{interval_label}"),
+                "returnUrl": body.success_url,
+                "shopperReference": customer_id,
+                "metadata": {
+                    "tenant_id": auth.tenant_id.clone(),
+                    "plan_name": plan_name.clone(),
+                    "interval": interval_label,
+                },
+                "recurringProcessingModel": "Subscription",
+                "storePaymentMethod": true,
+                "lineItems": [{
+                    "id": price_id,
+                    "description": plan_row.display_name,
+                    "quantity": 1,
+                    "amountIncludingTax": amount_cents,
+                }],
+            }),
             // Deterministic idempotency key so a retried checkout request
             // (client timeout, network blip) cannot mint duplicate sessions.
             Some(&format!(
@@ -3223,13 +3225,17 @@ async fn create_checkout_session(
 /// Adyen webhooks separately resolve all active catalog prices before
 /// granting an entitlement, so manual Enterprise subscriptions can still be
 /// reconciled through their verified Adyen lifecycle.
-async fn active_plan_name_for_adyen_plan_code(
+/// Resolve a client-supplied priceId to the active plan it identifies and
+/// the billing interval the matched Adyen plan code implies. Adyen has no
+/// price objects: the catalog amount is looked up separately and sent inline
+/// with the checkout session.
+async fn active_plan_checkout_target(
     pool: &sqlx::PgPool,
     price_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar::<_, String>(
+) -> Result<Option<(String, bool)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, bool)>(
         r#"
-        SELECT name
+        SELECT name, adyen_plan_code_yearly = $1 AS yearly
         FROM plans
         WHERE is_active = true
           AND (adyen_plan_code_monthly = $1 OR adyen_plan_code_yearly = $1)
@@ -3239,8 +3245,8 @@ async fn active_plan_name_for_adyen_plan_code(
     .bind(price_id)
     .fetch_optional(pool)
     .await
-    .map(|plan_name| {
-        plan_name.filter(|plan_name| SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan_name.as_str()))
+    .map(|row| {
+        row.filter(|(plan_name, _)| SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan_name.as_str()))
     })
 }
 
@@ -3257,50 +3263,36 @@ async fn create_portal_session(
             .into_response());
     }
 
-    let adyen_shopper_reference = match sqlx::query_scalar::<_, String>(
+    let shopper_exists = sqlx::query_scalar::<_, String>(
         "SELECT adyen_shopper_reference FROM adyen_shoppers WHERE tenant_id = $1",
     )
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
-    {
-        Some(adyen_shopper_reference) => adyen_shopper_reference,
-        None => {
-            tracing::error!(tenant_id = %auth.tenant_id, "Adyen portal requested without a Adyen customer");
-            return Ok(billing_operation_failed_response());
+    .is_some();
+    if !shopper_exists {
+        tracing::error!(tenant_id = %auth.tenant_id, "Adyen portal requested before shopper onboarding");
+        return Ok(billing_operation_failed_response());
+    }
+
+    // Adyen has no hosted billing portal: payment-method management is a
+    // console page (Drop-in against the shopper's stored tokens). Return the
+    // console URL derived from the caller's own validated return URL.
+    let mut console_url = match url::Url::parse(&body.return_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid returnUrl" })),
+            )
+                .into_response())
         }
     };
-
-    let adyen = match AdyenClient::from_env(&state.http_client) {
-        Ok(adyen) => adyen,
-        Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Adyen client for portal session");
-            return Ok(billing_operation_failed_response());
-        }
-    };
-
-    let session = match adyen
-        .form_post::<AdyenPortalSessionResponse>(
-            "/v1/billing_portal/sessions",
-            &[
-                ("customer", adyen_shopper_reference.clone()),
-                ("return_url", body.return_url),
-            ],
-            // Retry-safe without serving a stale expired portal URL for a
-            // full day: the key dedupes within the current hour only.
-            Some(&format!(
-                "portal_{}_{}",
-                auth.tenant_id,
-                chrono::Utc::now().timestamp() / 3600
-            )),
-        )
-        .await
-    {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create Adyen portal session");
-            return Ok(billing_operation_failed_response());
-        }
+    console_url.set_path("/web/billing/portal");
+    console_url.set_query(None);
+    console_url.set_fragment(None);
+    let session = AdyenPortalSessionResponse {
+        url: console_url.to_string(),
     };
 
     Ok(billing_success_response(
@@ -5865,34 +5857,34 @@ mod tests {
     }
 
     #[test]
-    fn billing_routes_adyen_request_builder_pins_api_version_and_idempotency() {
+    fn billing_routes_adyen_request_builder_keys_the_api_key_and_idempotency() {
         let adyen = AdyenClient::new(
             reqwest::Client::new(),
             "https://checkout-test.adyen.com/v71".into(),
-            DEFAULT_ADYEN_API_VERSION.into(),
-            "sk_test_123".into(),
+            "test_api_key".into(),
+            "TestMerchantAccount".into(),
         );
         let request = adyen
-            .form_request(
-                "/v1/customers",
-                &[("email", "billing@example.com".to_string())],
-                Some("customer_create_tenant_123"),
+            .json_request(
+                "/sessions",
+                &serde_json::json!({ "reference": "tenant_123" }),
+                Some("checkout_tenant_123"),
             )
             .build()
             .expect("request should build");
 
         assert_eq!(
             request.url().as_str(),
-            "https://checkout-test.adyen.com/v71/v1/customers"
+            "https://checkout-test.adyen.com/v71/sessions"
         );
         assert_eq!(
             request
                 .headers()
-                .get("adyen-version")
-                .expect("adyen version header")
+                .get("x-api-key")
+                .expect("api key header")
                 .to_str()
-                .expect("adyen version string"),
-            DEFAULT_ADYEN_API_VERSION,
+                .expect("api key string"),
+            "test_api_key",
         );
         assert_eq!(
             request
@@ -7985,7 +7977,10 @@ mod adversarial_tests {
                     .starts_with("Bearer "),
                 "Adyen call must be authenticated: {create}"
             );
-            assert_eq!(create["adyenVersion"], DEFAULT_ADYEN_API_VERSION);
+            assert!(
+                create.get("adyenVersion").is_none(),
+                "Adyen has no version header — the version lives in the URL path"
+            );
             let checkout = state
                 .observed
                 .iter()

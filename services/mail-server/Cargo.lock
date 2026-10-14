@@ -409,6 +409,7 @@ dependencies = [
  "moka",
  "observability-service",
  "parking_lot",
+ "platform-catalog",
  "rand 0.9.4",
  "redis",
  "regex",
