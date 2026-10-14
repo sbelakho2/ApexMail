@@ -3150,14 +3150,9 @@ async fn create_checkout_session(
             .into_response());
     }
 
-    let customer_id = match get_or_create_adyen_shopper_reference(&state, &auth.tenant_id).await {
-        Ok(customer_id) => customer_id,
-        Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve Adyen customer for checkout");
-            return Ok(billing_operation_failed_response());
-        }
-    };
-
+    // Configuration first: a deployment without Adyen credentials must fail
+    // closed BEFORE any local write (no shopper onboarding row for a checkout
+    // that can never reach the provider).
     let adyen = match AdyenClient::from_env(
         &state.http_client,
         state.config.environment.is_production(),
@@ -3165,6 +3160,14 @@ async fn create_checkout_session(
         Ok(adyen) => adyen,
         Err(error) => {
             tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Adyen client for checkout");
+            return Ok(billing_operation_failed_response());
+        }
+    };
+
+    let customer_id = match get_or_create_adyen_shopper_reference(&state, &auth.tenant_id).await {
+        Ok(customer_id) => customer_id,
+        Err(error) => {
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve Adyen shopper for checkout");
             return Ok(billing_operation_failed_response());
         }
     };
