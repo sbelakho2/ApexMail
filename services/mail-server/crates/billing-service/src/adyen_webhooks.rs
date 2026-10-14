@@ -73,7 +73,7 @@ const ADYEN_ACCEPTED_RESPONSE: &str = "[accepted]";
 /// is validated against ApexMail's own computation. Migration 218's CHECK
 /// constraint allows only ('stripe_tax', 'apexmail_local'); `apexmail_local`
 /// is the allowed value that truthfully means "ApexMail's local computation
-/// validated against the charge" (the pre-cutover `stripe_tax` value named a
+/// validated against the charge" (the pre-cutover `stripe_tax` check value named a
 /// processor ApexMail no longer uses).
 const ADYEN_TAX_AUTHORITY_LOCAL: &str = "apexmail_local";
 

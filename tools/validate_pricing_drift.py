@@ -873,7 +873,7 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
     for unsafe in ("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3", "Subscription cancelled immediately"):
         check(unsafe not in billing, f"billing route contains direct local mutation {unsafe!r}", errors)
 
-    # The safety boundary the old Stripe-era reconciliation encoded (entitlement
+    # The safety boundary the old pre-cutover reconciliation encoded (entitlement
     # only from verified provider state, cross-tenant events refused, amounts
     # never invented) is carried by DIFFERENT constructs under the Adyen wire
     # (2026-10-14): HMAC verification per notification item, settlement keyed

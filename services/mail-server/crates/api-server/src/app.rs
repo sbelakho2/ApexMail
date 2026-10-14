@@ -7247,7 +7247,7 @@ mod tests {
 
     /// The Adyen ingest wire shape: a `notificationItems` envelope whose
     /// `NotificationRequestItem.additionalData.hmacSignature` carries a
-    /// garbage HMAC (Adyen's HMAC lives in the body — the Stripe-era
+    /// garbage HMAC (Adyen's HMAC lives in the body — the pre-cutover
     /// `…-hmac-signature` header with a `t=…,v1=…` value has no Adyen
     /// analog and is never sent).
     fn adyen_notification_with_garbage_hmac() -> String {

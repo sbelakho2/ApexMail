@@ -8732,7 +8732,7 @@ mod coverage_adversarial {
         // is a LOCAL transition for every row — stale stored references
         // included (they are activation pspReferences now, not deletable
         // items). The old two-step failure matrix (500 rolls back, 404
-        // succeeds) pinned a Stripe mechanic with no Adyen analog.
+        // succeeds) pinned a pre-cutover mechanic with no Adyen analog.
         seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
         sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
