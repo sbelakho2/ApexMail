@@ -229,7 +229,7 @@ curl -X POST https://api.apexmail.ee/v1/account/export \
 | **AWS (Amazon Web Services)** | SES email delivery | eu-west-1 (Ireland) | Email content in transit only | DPA executed, SCCs |
 | **Redis Ltd** | Caching / rate limiting | Same as primary infra | Ephemeral cache data | No persistent storage |
 | **ClickHouse Inc** | Analytics database | Same as primary infra | Aggregated analytics data | EU-hosted |
-| **Adyen Inc** | Payment processing | US (PCI-DSS compliant) | Billing data only | DPA executed, SCCs |
+| **Adyen N.V.** | Payment processing | Netherlands (EEA), PCI-DSS compliant | Billing data only | DPA executed, EU-based |
 | **Elastic.co** | Log aggregation | Same as primary infra | Operational logs | EU-hosted |
 
 ### Sub-processor Changes
@@ -253,7 +253,7 @@ Where data is processed within the EEA (Finland, Germany, Estonia), no SCCs are 
 | Destination | Legal Basis | Mechanism |
 |-------------|-------------|-----------|
 | AWS Ireland (eu-west-1) | Adequacy decision | EEA-based processing |
-| Adyen (US) | SCCs | Module 2 (processor-to-processor) |
+| Adyen N.V. (Netherlands) | Adequacy decision | EEA-based processing |
 | Hetzner Finland/Germany | Adequacy decision | EEA-based processing |
 
 ### SCC Execution

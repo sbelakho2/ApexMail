@@ -45,14 +45,17 @@ See `docs/pricing.md` for the user-facing plan summary.
 
 ### Checkout and activation
 
-- `checkout.session.completed` is recorded as an informational event only; it
-	does not change tenant status or grant an entitlement.
-- `customer.subscription.created` and `customer.subscription.updated` upsert
-	`adyen_subscriptions` after signature, tenant-binding, catalog-price, and
-	status-transition checks.
-- The live `plans` table persists monthly and yearly Adyen price IDs. A
-	generic public Checkout request is accepted only for an active Starter, Pro,
-	Growth, or Scale price; Enterprise and PAYG use managed flows.
+- An `AUTHORISATION` notification is recorded as an informational event only;
+  it does not change tenant status or grant an entitlement.
+- `RECURRING_CONTRACT` (`recurring.token.created`) notifications bind the
+  stored recurring detail and upsert `adyen_subscriptions` after signature,
+  tenant-binding, catalog-price, and status-transition checks; later
+  successful recurring `AUTHORISATION` notifications reconcile the state
+  changes.
+- The live `plans` table persists the monthly and yearly Adyen plan codes;
+  amounts come inline from the platform catalog. A generic public Checkout
+  request is accepted only for an active Starter, Pro, Growth, or Scale plan;
+  Enterprise and PAYG use managed flows.
 - Only verified `active` and `trialing` Adyen subscriptions grant the mapped
 	paid tenant plan. Incomplete, delinquent, paused, unpaid, and canceled
 	states resolve the tenant to `free`.
@@ -62,16 +65,15 @@ See `docs/pricing.md` for the user-facing plan summary.
 ### Plan changes
 
 `POST /checkout` is the only self-service plan-change entry point. It accepts
-only a Adyen price ID that maps to an active self-service ApexMail plan and
-adds the tenant and resolved plan ID to Adyen Checkout and subscription
-metadata.
+only an Adyen plan code that maps to an active self-service ApexMail plan and
+adds the tenant and resolved plan name to the Adyen Checkout session metadata.
 
 - Checkout creation does not change the tenant plan.
-- `customer.subscription.created` and `customer.subscription.updated` map the
-	confirmed Adyen price back to the active ApexMail plan and update the tenant
-	in a transaction.
+- A verified `RECURRING_CONTRACT` and successful recurring `AUTHORISATION`
+  notifications map the confirmed charge back to the active ApexMail plan and
+  update the tenant in a transaction.
 - `POST /switch-plan` is a retained compatibility endpoint that always returns
-	`409 CHECKOUT_REQUIRED`; it cannot update tenant or subscription records.
+  `409 CHECKOUT_REQUIRED`; it cannot update tenant or subscription records.
 - Plan-change proration is calculated and applied by Adyen. Any ApexMail
   proration preview is informational only and never changes a subscription or
   tenant entitlement.
@@ -82,8 +84,9 @@ metadata.
 `409 BILLING_PORTAL_REQUIRED`. A cancellation must be initiated through a
 Adyen billing portal session, then reconciled from a verified Adyen webhook.
 
-Adyen `customer.subscription.deleted` events mark the known Adyen
-subscription canceled and downgrade the matching tenant to `free`.
+A reconciled cancellation marks the known Adyen subscription canceled and
+downgrades the matching tenant to `free` only after reconciliation confirms
+it.
 
 ### Enterprise contracts
 
@@ -196,8 +199,8 @@ VAT is calculated in `calculate_vat()`:
 
 Adyen webhooks drive the current invoice state transitions:
 
-- `invoice.paid` marks matching invoices as paid and sets `paid_at`
-- `invoice.payment_failed` records dunning state and enqueues a `payment_failed` notification
+- a successful `AUTHORISATION` marks matching invoices as paid and sets `paid_at`
+- a failed `AUTHORISATION` records dunning state and enqueues a `payment_failed` notification
 
 ## Operational Notes
 

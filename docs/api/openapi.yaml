@@ -11271,11 +11271,11 @@ components:
           description: Monthly API call quota (not per-minute)
         features:
           $ref: '#/components/schemas/BillingPlanFeatures'
-        adyenPriceIdMonthly:
+        adyenPlanCodeMonthly:
           oneOf:
             - type: string
             - type: 'null'
-        adyenPriceIdYearly:
+        adyenPlanCodeYearly:
           oneOf:
             - type: string
             - type: 'null'

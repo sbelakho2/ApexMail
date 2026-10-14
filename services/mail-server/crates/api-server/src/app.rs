@@ -7245,16 +7245,41 @@ mod tests {
         );
     }
 
+    /// The Adyen ingest wire shape: a `notificationItems` envelope whose
+    /// `NotificationRequestItem.additionalData.hmacSignature` carries a
+    /// garbage HMAC (Adyen's HMAC lives in the body — the Stripe-era
+    /// `…-hmac-signature` header with a `t=…,v1=…` value has no Adyen
+    /// analog and is never sent).
+    fn adyen_notification_with_garbage_hmac() -> String {
+        serde_json::json!({
+            "notificationItems": [{
+                "NotificationRequestItem": {
+                    "pspReference": "8815393379066089",
+                    "originalReference": "",
+                    "merchantReference": "mount-probe",
+                    "eventCode": "AUTHORISATION",
+                    "success": "false",
+                    "paymentMethod": "visa",
+                    "amount": { "currency": "EUR", "value": 1000 },
+                    "eventDate": "2026-10-14T12:00:00+02:00",
+                    "additionalData": { "hmacSignature": "deadbeef" }
+                }
+            }]
+        })
+        .to_string()
+    }
+
     #[tokio::test]
     async fn adyen_webhook_ingest_mounts_when_secret_configured() {
         // Dogfood finding A (2026-10-05): /webhooks/adyen was mounted only
         // by the billing-service binary, which has no container in any
         // deployed topology — every provider delivery 404'd. The route is
-        // now ALWAYS mounted: with a secret a garbage signature is refused
-        // (400); without a secret the handler answers a retryable 503 (Adyen
-        // keeps replaying across the misconfiguration window) and NEVER 404.
-        // nextest runs one process per test, so the env pin is isolated.
-        std::env::set_var("ADYEN_HMAC_KEY", "whsec_dogfood_mount_probe");
+        // now ALWAYS mounted: with a secret a garbage body HMAC is refused
+        // as a client error (never accepted); without a secret the handler
+        // answers a retryable 503 (Adyen keeps replaying across the
+        // misconfiguration window) and NEVER 404. nextest runs one process
+        // per test, so the env pin is isolated.
+        std::env::set_var("ADYEN_HMAC_KEY", "0f1e2d3c4b5a69788796a5b4c3d2e1f0");
         let app = test_app().await;
         let resp = app
             .clone()
@@ -7263,8 +7288,7 @@ mod tests {
                     .method("POST")
                     .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
-                    .header("adyen-hmac-signature", "t=1,v1=deadbeef")
-                    .body(Body::from("{\"id\":\"evt_probe\"}"))
+                    .body(Body::from(adyen_notification_with_garbage_hmac()))
                     .unwrap(),
             )
             .await
@@ -7274,10 +7298,10 @@ mod tests {
             StatusCode::NOT_FOUND,
             "ingest route must be mounted when ADYEN_HMAC_KEY is set"
         );
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "a garbage signature must be signature-refused"
+        assert!(
+            resp.status().is_client_error(),
+            "a garbage body HMAC must be signature-refused as a client error (never [accepted]), got {}",
+            resp.status()
         );
 
         // Unconfigured secret: still mounted, retryable 503 — never 404.
@@ -7289,8 +7313,7 @@ mod tests {
                     .method("POST")
                     .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
-                    .header("adyen-hmac-signature", "t=1,v1=deadbeef")
-                    .body(Body::from("{\"id\":\"evt_probe\"}"))
+                    .body(Body::from(adyen_notification_with_garbage_hmac()))
                     .unwrap(),
             )
             .await

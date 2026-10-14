@@ -369,7 +369,9 @@ pub(crate) async fn seed_tenant(pool: &PgPool, tenant: &str, plan: &str) {
     .expect("seed tenant");
 }
 
-pub(crate) async fn seed_plan(pool: &PgPool, name: &str, price_id: &str) {
+/// Seed a plan with a merchant-defined Adyen `plan_code` (the monthly
+/// catalog key Adyen checkout quotes; there are no provider price objects).
+pub(crate) async fn seed_plan(pool: &PgPool, name: &str, plan_code: &str) {
     sqlx::query(
         "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit,
                             adyen_plan_code_monthly, is_active)
@@ -379,7 +381,7 @@ pub(crate) async fn seed_plan(pool: &PgPool, name: &str, price_id: &str) {
     )
     .bind(format!("plan_{name}"))
     .bind(name)
-    .bind(price_id)
+    .bind(plan_code)
     .execute(pool)
     .await
     .expect("seed plan");

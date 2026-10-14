@@ -162,8 +162,8 @@ ufw allow from 10.0.0.0/24 to any port 8474 comment 'Toxiproxy'
 NODE_ENV=staging
 DATABASE_URL=postgresql://apexmail:${DB_PASSWORD}@10.0.0.3:5432/apexmail
 REDIS_URL=redis://:${REDIS_PASSWORD}@10.0.0.3:6379/0
-ADYEN_API_KEY=sk_test_...
-ADYEN_HMAC_KEY=whsec_...
+ADYEN_API_KEY=<adyen-api-key>
+ADYEN_HMAC_KEY=<64-hex-characters>
 SES_REGION=eu-west-1
 SES_CONFIGURATION_SET=apexmail-staging-sim
 RECIPIENT_ALLOWLIST=@example.com,@test.apexmail.dev
@@ -551,42 +551,39 @@ Historical implementation example removed. Refer to the current Rust services an
 
 ## 8. Adyen Billing Simulation
 
-### 8.1 Adyen Webhook Feed (CLI)
+### 8.1 Adyen Webhook Feed
 
-Run on API server to forward Adyen events to webhook handler:
+Adyen delivers notifications directly to the configured endpoint
+(`/webhooks/adyen`); there is no provider CLI forwarder. For local runs, POST
+an HMAC-signed `notificationItems` body to
+`http://127.0.0.1:3000/webhooks/adyen`.
 
 ```bash
-# Start webhook forwarding
-adyen listen --forward-to http://127.0.0.1:3000/webhooks/adyen
-
-# The webhook handler MUST verify the signing secret emitted by adyen listen
-# ADYEN_HMAC_KEY will be printed when adyen listen starts
+# The signing key must match this deployment's ADYEN_HMAC_KEY (hex-decoded);
+# the recipe and the Accepted answer are in ../tool-contracts/adyen.md.
+# The Customer Area's test-webhook tool emits a fixed AUTHORISATION
+# notification for connectivity checks.
 ```
 
-### 8.2 Trigger Realistic Billing Events
+### 8.2 Trigger Realistic Billing Notifications
 
 ```bash
-# Standard lifecycle events
-adyen trigger customer.subscription.created
-adyen trigger invoice.payment_succeeded
-adyen trigger invoice.payment_failed
-adyen trigger customer.subscription.deleted
+# Standard lifecycle notifications (eventCode)
+#   AUTHORISATION (success true)   — payment confirmed
+#   AUTHORISATION (success false)  — payment refused
+#   RECURRING_CONTRACT             — recurring.token.created
+#   REFUND / REFUND_FAILED         — refund reconciliation
+#   CHARGEBACK / CHARGEBACK_REVERSED — dispute reconciliation
 
-# Trial-to-active conversion
-adyen trigger customer.subscription.trial_will_end
-adyen trigger invoice.paid
-
-# Upgrade/downgrade scenarios (via API)
-adyen subscriptions update sub_xxx --price price_premium
-adyen subscriptions update sub_xxx --price price_basic
+# Upgrade/downgrade scenarios are driven through the Checkout and billing
+# portal endpoints; direct local mutations are refused with
+# 409 CHECKOUT_REQUIRED / 409 BILLING_PORTAL_REQUIRED.
 
 # Past due + recovery
-adyen trigger invoice.payment_failed
-adyen trigger invoice.payment_action_required
-adyen trigger invoice.paid
+#   AUTHORISATION (success false), then a successful AUTHORISATION
 
 # Dispute scenario
-adyen trigger charge.dispute.created
+#   CHARGEBACK, then CHARGEBACK_REVERSED when the dispute is reversed
 ```
 
 ### 8.3 Automated Billing Churn Script

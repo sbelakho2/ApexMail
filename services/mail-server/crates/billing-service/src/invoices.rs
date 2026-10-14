@@ -982,18 +982,25 @@ pub enum InvoiceVoidError {
     Db(#[from] sqlx::Error),
     #[error("invoice not found: {0}")]
     InvoiceNotFound(Uuid),
-    /// Only draft/open (here: `draft`/`pending`) invoices void. Paid
-    /// invoices are refunded with a credit note instead; the refusal carries
-    /// the refusing state verbatim.
-    #[error("invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided")]
-    NotVoidable { invoice_id: Uuid, status: String },
-    /// The invoice carries a Adyen-side invoice (`adyen_psp_reference`) but
-    /// this deployment cannot reach Adyen (no `ADYEN_API_KEY`): refused
-    /// HONESTLY — the local row is left untouched rather than drifting from
-    /// the provider state.
+    /// Only draft/pending invoices void locally. A PAID invoice voids as a
+    /// provider refund of its bound payment; without a bound payment
+    /// (`adyen_psp_reference`) there is nothing provider-side to return, so
+    /// the refusal carries the refusing state verbatim — a wallet-settled
+    /// paid invoice is refunded with a credit note instead.
     #[error(
-        "invoice {invoice_id} has a Adyen-side invoice ({adyen_psp_reference}) but Adyen is not \
-         configured (ADYEN_API_KEY): the provider-side invoice cannot be voided from this \
+        "invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can \
+         be voided, and a paid invoice only when it is bound to a Adyen payment \
+         (adyen_psp_reference)"
+    )]
+    NotVoidable { invoice_id: Uuid, status: String },
+    /// The invoice carries a Adyen payment (`adyen_psp_reference`) whose
+    /// refund is required, but this deployment cannot reach Adyen (no
+    /// `ADYEN_API_KEY`/`ADYEN_MERCHANT_ACCOUNT`): refused HONESTLY — the
+    /// local row is left untouched rather than drifting from the provider
+    /// state.
+    #[error(
+        "invoice {invoice_id} is bound to Adyen payment {adyen_psp_reference} but Adyen is not \
+         configured (ADYEN_API_KEY/ADYEN_MERCHANT_ACCOUNT): the refund cannot be issued from this \
          deployment, so the local invoice was left in status '{status}'"
     )]
     AdyenUnavailable {
@@ -1001,8 +1008,8 @@ pub enum InvoiceVoidError {
         adyen_psp_reference: String,
         status: String,
     },
-    /// Adyen was configured but refused/completed-with-error on the void.
-    #[error("Adyen refused the invoice void: {message}")]
+    /// Adyen was configured but refused/completed-with-error on the refund.
+    #[error("Adyen refused the invoice refund: {message}")]
     AdyenFailed { message: String },
     #[error("audit log failure: {0}")]
     Audit(String),
@@ -1013,50 +1020,82 @@ pub enum InvoiceVoidError {
     Readback(#[from] InvoiceError),
 }
 
-/// One Adyen-side invoice void, isolated for testability (tests point
-/// `ADYEN_API_BASE_URL` at a local mock). `Err(AdyenVoidError::Unavailable)`
-/// means the deployment lacks Adyen credentials; `Err(Failed)` means Adyen
-/// itself refused or the exchange failed.
+/// The Adyen Checkout credentials a provider refund needs, isolated for
+/// testability (tests point `ADYEN_API_BASE_URL` at a local mock).
+/// `Err(())` means the deployment lacks Adyen credentials; the caller maps
+/// that to the honest [`InvoiceVoidError::AdyenUnavailable`] refusal.
 #[derive(Debug, Clone)]
 pub struct AdyenVoidConfig {
     pub base_url: String,
-    pub secret_key: String,
+    pub api_key: String,
+    pub merchant_account: String,
 }
 
 fn adyen_void_config_from_env() -> Result<AdyenVoidConfig, ()> {
-    let secret_key = std::env::var("ADYEN_API_KEY")
+    let api_key = std::env::var("ADYEN_API_KEY")
         .ok()
-        .filter(|key| !key.trim().is_empty())
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .ok_or(())?;
+    let merchant_account = std::env::var("ADYEN_MERCHANT_ACCOUNT")
+        .ok()
+        .map(|account| account.trim().to_string())
+        .filter(|account| !account.is_empty())
         .ok_or(())?;
     Ok(AdyenVoidConfig {
         base_url: std::env::var("ADYEN_API_BASE_URL")
             .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into()),
-        secret_key,
+        api_key,
+        merchant_account,
     })
 }
 
-async fn adyen_void_invoice(
+/// The new `pspReference` Adyen minted for the refund (when the response
+/// carries one), recorded on the audit event.
+#[derive(Debug, serde::Deserialize)]
+struct AdyenRefundResponse {
+    #[serde(rename = "pspReference")]
+    psp_reference: Option<String>,
+}
+
+/// One Adyen refund of a captured payment, isolated for testability.
+///
+/// `POST {base}/payments/{paymentPspReference}/refunds` with the JSON body
+/// Adyen expects — `merchantAccount` + the amount in MINOR UNITS + a
+/// `reference` — the API key in `X-API-Key` (the version lives in the base
+/// URL path, there is no version header) and a deterministic
+/// `Idempotency-Key`. The refund outcome is ASYNC at Adyen: a 2xx means the
+/// refund request is accepted, the webhook settles the final state.
+async fn adyen_refund_payment(
     config: &AdyenVoidConfig,
-    adyen_psp_reference: &str,
+    payment_psp_reference: &str,
+    amount_cents: i64,
+    currency: &str,
+    reference: &str,
     idempotency_key: &str,
-) -> Result<(), InvoiceVoidError> {
+) -> Result<Option<String>, InvoiceVoidError> {
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
-            "{}/v1/invoices/{}/void",
+            "{}/payments/{}/refunds",
             config.base_url.trim_end_matches('/'),
             // Adyen ids are `[a-zA-Z0-9_]+`; the path segment is still built
             // through the typed client URL, never a raw string concat of
             // user input (the id comes from our own DB column).
-            adyen_psp_reference,
+            payment_psp_reference,
         ))
-        .bearer_auth(&config.secret_key)
+        .header("X-API-Key", &config.api_key)
         .header("Idempotency-Key", idempotency_key)
+        .json(&serde_json::json!({
+            "merchantAccount": config.merchant_account,
+            "amount": { "currency": currency.trim().to_uppercase(), "value": amount_cents },
+            "reference": reference,
+        }))
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|error| InvoiceVoidError::AdyenFailed {
-            message: format!("Adyen void request failed: {error}"),
+            message: format!("Adyen refund request failed: {error}"),
         })?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -1071,42 +1110,58 @@ async fn adyen_void_invoice(
             message: format!("Adyen returned {status}: {message}"),
         });
     }
-    Ok(())
+    Ok(serde_json::from_str::<AdyenRefundResponse>(&body)
+        .ok()
+        .and_then(|refund| refund.psp_reference))
 }
 
-/// The voidable pre-states: `draft` and `pending` (the platform's
-/// open/unpaid states — a pending invoice is issued but unsettled). `paid`
-/// refuses (refund via credit note instead); `uncollectible` refuses (a
-/// deliberate write-off state, not an open obligation); `void` is the
-/// idempotent success replay.
+/// The locally-voidable pre-states: `draft` and `pending` (the platform's
+/// open/unpaid states — a pending invoice is issued but unsettled). Adyen
+/// has no provider-side invoice object, so an unpaid invoice's provider-side
+/// "void" is a no-op and these transition locally with NO provider call.
+/// `uncollectible` refuses (a deliberate write-off state, not an open
+/// obligation); `void` is the idempotent success replay.
 fn is_voidable_status(status: &str) -> bool {
     matches!(status, "draft" | "pending")
 }
 
-/// Void an open/draft invoice **idempotently** (DF-5 finding B).
+/// Void an invoice **idempotently** (DF-5 finding B).
 ///
 /// * `draft`/`pending` → `void` with `closed_at` pinned, audited on the
-///   canonical 7-segment chain (`billing.invoice_voided`).
+///   canonical 7-segment chain (`billing.invoice_voided`). Adyen has no
+///   provider-side invoice to void (no invoice/customer/subscription
+///   objects exist provider-side), so this is a LOCAL transition — no
+///   provider call, no Adyen configuration required.
 /// * An already-`void` invoice returns the SAME invoice unchanged — the
 ///   requested end-state — and writes nothing further (retries and duplicate
 ///   submissions are never duplicate rows or duplicate audit events).
-/// * `paid` (and `uncollectible`) refuse with [`InvoiceVoidError::
-///   NotVoidable`] naming the current status; a paid invoice is refunded via
-///   a credit note (`credit_notes::create_credit_note`), never voided.
-/// * When the invoice carries a `adyen_psp_reference`, the provider-side
-///   invoice is voided FIRST (Adyen idempotency key derived from the local
-///   operation identity, so a retried void replays the same provider
-///   request); a Adyen refusal or an unconfigured Adyen deployment leaves
-///   the local row untouched — never a fake local-only success.
+/// * `paid` with a bound payment (`adyen_psp_reference`) voids as a
+///   REFUND: `POST /payments/{paymentPspReference}/refunds` for the local
+///   invoice's full amount/currency is issued FIRST (deterministic
+///   `Idempotency-Key`, so a retried void replays the same refund), then the
+///   local rows flip to `void`. A Adyen refusal or an unconfigured Adyen
+///   deployment leaves the local row untouched — never a fake local-only
+///   success. The refund outcome is async at Adyen; the webhook settles it.
+/// * `paid` with NO bound payment (e.g. wallet settlement) and
+///   `uncollectible` refuse with [`InvoiceVoidError::NotVoidable`] naming
+///   the current status; a wallet-paid invoice is refunded via a credit
+///   note (`credit_notes::create_credit_note`) instead.
 pub async fn void_invoice(
     pool: &PgPool,
     input: VoidInvoiceInput,
 ) -> Result<Invoice, InvoiceVoidError> {
     // ── 1. Lock + validate the current state ────────────────────────────
-    let (status, adyen_psp_reference): (String, Option<String>) = {
+    let (status, adyen_psp_reference, total_cents, currency): (
+        String,
+        Option<String>,
+        i64,
+        String,
+    ) = {
         let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
-        let row: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT status::text, adyen_psp_reference FROM invoices
+        let row: Option<(String, Option<String>, i64, String)> = sqlx::query_as(
+            "SELECT status::text, adyen_psp_reference,
+                    COALESCE(total, amount, 0)::bigint, currency
+             FROM invoices
              WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
         )
         .bind(input.invoice_id)
@@ -1114,10 +1169,9 @@ pub async fn void_invoice(
         .fetch_optional(&mut *tx)
         .await
         .map_err(InvoiceVoidError::Db)?;
-        let Some(row) = row else {
+        let Some((status, adyen_psp_reference, total_cents, currency)) = row else {
             return Err(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         };
-        let (status, adyen_psp_reference) = row;
         if status == "void" {
             // Idempotent replay: the requested end-state is already the
             // stored state — return it, write nothing.
@@ -1126,7 +1180,14 @@ pub async fn void_invoice(
                 .await?
                 .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         }
-        if !is_voidable_status(&status) {
+        // Unpaid (draft/pending) invoices void LOCALLY — Adyen has no
+        // provider-side invoice object to void. A PAID invoice voids as a
+        // provider refund, but only when a payment is BOUND
+        // (`adyen_psp_reference`): without one (e.g. wallet settlement)
+        // there is nothing provider-side to return and the void refuses,
+        // exactly like every other non-voidable state.
+        let paid_refund = status == "paid" && adyen_psp_reference.is_some();
+        if !is_voidable_status(&status) && !paid_refund {
             return Err(InvoiceVoidError::NotVoidable {
                 invoice_id: input.invoice_id,
                 status,
@@ -1136,31 +1197,39 @@ pub async fn void_invoice(
         // transaction is held across provider I/O. The post-Adyen append
         // re-locks and re-validates below.
         tx.rollback().await.map_err(InvoiceVoidError::Db)?;
-        (status, adyen_psp_reference)
+        (status, adyen_psp_reference, total_cents, currency)
     };
 
-    // ── 2. Adyen-side void FIRST (when a provider invoice exists) ──────
-    let mut adyen_voided = false;
-    if let Some(adyen_psp_reference) = adyen_psp_reference.as_deref() {
-        // Idempotency on the provider call is derived from the immutable
-        // local operation identity, never from a caller-supplied value
-        // alone — a retried void replays the SAME Adyen request.
-        let key = format!(
-            "invoice-void:{}:{}",
-            input.invoice_id.simple(),
-            input.idempotency_key
-        );
+    // ── 2. Adyen refund FIRST (only a paid invoice has provider money) ──
+    let mut refund_psp_reference: Option<String> = None;
+    if status == "paid" {
+        let payment_psp_reference = adyen_psp_reference
+            .clone()
+            .expect("paid refund path requires a bound payment");
         match adyen_void_config_from_env() {
             Ok(config) => {
-                adyen_void_invoice(&config, adyen_psp_reference, &key).await?;
-                adyen_voided = true;
+                // Idempotency on the provider call is derived from the
+                // immutable local operation identity — one refund per
+                // invoice, so a retried void replays the SAME Adyen request
+                // (the provider key stays within Adyen's 64-char bound).
+                let key = format!("invoice-refund:{}", input.invoice_id.simple());
+                let reference = format!("invoice:{}", input.invoice_id);
+                refund_psp_reference = adyen_refund_payment(
+                    &config,
+                    &payment_psp_reference,
+                    total_cents,
+                    &currency,
+                    &reference,
+                    &key,
+                )
+                .await?;
             }
-            // Honest degradation: without provider credentials the void
-            // cannot complete both sides, so NEITHER side moves.
+            // Honest degradation: without provider credentials the refund
+            // cannot be issued, so the local row does NOT move either.
             Err(()) => {
                 return Err(InvoiceVoidError::AdyenUnavailable {
                     invoice_id: input.invoice_id,
-                    adyen_psp_reference: adyen_psp_reference.to_string(),
+                    adyen_psp_reference: payment_psp_reference,
                     status,
                 });
             }
@@ -1173,11 +1242,12 @@ pub async fn void_invoice(
     let result = sqlx::query(
         "UPDATE invoices
          SET status = 'void', closed_at = $3, updated_at = $3
-         WHERE id = $1 AND tenant_id = $2 AND status IN ('draft', 'pending')",
+         WHERE id = $1 AND tenant_id = $2 AND status::text = $4",
     )
     .bind(input.invoice_id)
     .bind(&input.tenant_id)
     .bind(now)
+    .bind(&status)
     .execute(&mut *tx)
     .await
     .map_err(InvoiceVoidError::Db)?;
@@ -1219,8 +1289,11 @@ pub async fn void_invoice(
             "invoiceId": input.invoice_id,
             "reason": input.reason,
             "idempotencyKey": input.idempotency_key,
-            "adyenVoided": adyen_voided,
-            "adyenInvoiceId": adyen_psp_reference,
+            // A paid void returned provider money via an async refund; an
+            // unpaid void needed no provider call at all.
+            "adyenRefunded": status == "paid",
+            "adyenRefundPspReference": refund_psp_reference,
+            "adyenPaymentPspReference": adyen_psp_reference,
         }),
         now,
     )
@@ -2240,6 +2313,15 @@ mod coverage_adversarial {
         fn last_body(&self, path: &str) -> Option<String> {
             self.last_call(path).map(|call| call.body)
         }
+
+        fn call_count(&self, path: &str) -> usize {
+            self.calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|call| call.path == path)
+                .count()
+        }
     }
 
     async fn mock_handler(
@@ -2277,7 +2359,7 @@ mod coverage_adversarial {
         });
         (
             axum::http::StatusCode::from_u16(status).expect("status"),
-            [(axum::http::header::CONTENT_TYPE, "application/pdf")],
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
             response_body,
         )
             .into_response()
@@ -2978,7 +3060,9 @@ mod coverage_adversarial {
             .expect("pending voids");
         assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
 
-        // paid → REFUSED, the state named: refunds go through credit notes.
+        // paid WITHOUT a bound Adyen payment → REFUSED, the state named:
+        // there is nothing provider-side to refund, so a wallet-settled
+        // paid invoice is refunded with a credit note instead.
         let paid = seed_invoice_status(env, tenant, "paid", 9_000, None).await;
         let error = void_invoice(&env.pool, void_input(tenant, paid, "k-paid"))
             .await
@@ -3104,10 +3188,21 @@ mod coverage_adversarial {
 
         assert_eq!(resource, "invoice");
         assert_eq!(resource_id.as_deref(), Some(draft.to_string().as_str()));
+        // An unpaid local void issues NO provider refund (Adyen has no
+        // provider-side invoice object): the audit row records the honest
+        // adyenRefunded=false and no refund pspReference.
         assert_eq!(
-            details["adyenVoided"],
+            details["adyenRefunded"],
             serde_json::Value::Bool(false),
-            "a local-only invoice records an honest adyenVoided=false"
+            "a local-only void records an honest adyenRefunded=false"
+        );
+        assert!(
+            details["adyenRefundPspReference"].is_null(),
+            "no refund pspReference without provider money to return: {details}"
+        );
+        assert!(
+            details["adyenPaymentPspReference"].is_null(),
+            "a draft carries no bound Adyen payment: {details}"
         );
 
         // Byte-exact re-derivation: the canonical 7-segment formula over the
@@ -3155,104 +3250,179 @@ mod coverage_adversarial {
         drop(guard);
     });
 
-    // Adyen honesty: an invoice WITH a provider id must refuse the void
-    // when Adyen is unconfigured (status untouched — never a fake local
-    // success), and void BOTH sides when a Adyen (mock) accepts.
+    // Adyen honesty, both directions of the frozen checkout contract:
+    // * an UNPAID (draft/pending) invoice voids LOCALLY — Adyen has no
+    //   provider-side invoice object, so no provider call and no Adyen
+    //   configuration is involved, even when a pspReference is recorded;
+    // * a PAID invoice voids as an async REFUND of its bound payment
+    //   (`POST /payments/{pspReference}/refunds`): refused honestly when
+    //   Adyen is unconfigured, refused when Adyen declines, and both sides
+    //   moved when the refund request is accepted.
     env_test!(void_with_a_adyen_payment_is_honest_both_sides, |env| {
         let guard = ENV_LOCK.lock().await;
         let previous = (
             std::env::var("ADYEN_API_KEY").ok(),
             std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
+
+        let mock = Mock::default();
+        // The PAID refund path's payment: a separate binding from the
+        // unpaid arm's (the schema keeps pspReferences unique).
+        mock.route(
+            "/payments/psp_void_paid/refunds",
+            200,
+            r#"{"pspReference":"psp_void_refund","resultCode":"Received"}"#,
+        );
+        let base = spawn_mock(mock.clone()).await;
 
         let tenant = "ivcov_voidadyen";
         seed_tenant(env, tenant).await;
-        let invoice =
-            seed_invoice_status(env, tenant, "pending", 6_000, Some("in_test_void_cov")).await;
 
-        // 1. Adyen UNCONFIGURED: refused, nothing changed, audit empty.
+        // 1. UNPAID with a bound pspReference and Adyen UNCONFIGURED: the
+        // void still succeeds LOCALLY (no provider object exists to void),
+        // and no provider call is made.
         std::env::remove_var("ADYEN_API_KEY");
         std::env::remove_var("ADYEN_API_BASE_URL");
-        let error = void_invoice(&env.pool, void_input(tenant, invoice, "k-adyen-unconf"))
+        std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
+        let unpaid = seed_invoice_status(env, tenant, "pending", 6_000, Some("psp_void_cov")).await;
+        let voided = void_invoice(&env.pool, void_input(tenant, unpaid, "k-local-unconf"))
             .await
-            .expect_err("unconfigured Adyen refuses");
+            .expect("an unpaid void needs no provider call");
+        assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
+        assert_eq!(
+            mock.call_count("/payments/psp_void_cov/refunds"),
+            0,
+            "an unpaid void must not touch the provider"
+        );
+        let details: serde_json::Value = sqlx::query_scalar(
+            "SELECT details FROM audit_logs
+             WHERE action = 'billing.invoice_voided' AND resource_id = $1",
+        )
+        .bind(unpaid.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .expect("local void audit");
+        assert_eq!(details["adyenRefunded"], serde_json::Value::Bool(false));
+        assert_eq!(
+            details["adyenPaymentPspReference"],
+            serde_json::json!("psp_void_cov"),
+            "the bound payment is recorded even when nothing was refunded"
+        );
+        assert!(details["adyenRefundPspReference"].is_null());
+
+        // 2. PAID with a bound payment and Adyen UNCONFIGURED: the refund
+        // cannot be issued, so the refusal is honest and the row stands.
+        let unconfigured =
+            seed_invoice_status(env, tenant, "paid", 6_100, Some("psp_void_unconf")).await;
+        let error = void_invoice(
+            &env.pool,
+            void_input(tenant, unconfigured, "k-adyen-unconf"),
+        )
+        .await
+        .expect_err("unconfigured Adyen refuses the refund");
         match &error {
             InvoiceVoidError::AdyenUnavailable {
                 adyen_psp_reference,
                 status,
                 ..
             } => {
-                assert_eq!(adyen_psp_reference, "in_test_void_cov");
-                assert_eq!(status, "pending");
+                assert_eq!(adyen_psp_reference, "psp_void_unconf");
+                assert_eq!(status, "paid");
             }
             other => panic!("expected AdyenUnavailable, got {other:?}"),
         }
         let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
-            .bind(invoice)
+            .bind(unconfigured)
             .fetch_one(&env.pool)
             .await
             .expect("status");
-        assert_eq!(
-            status, "pending",
-            "the local row never moves without Adyen"
-        );
+        assert_eq!(status, "paid", "the local row never moves without Adyen");
         let audit_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.invoice_voided'",
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'billing.invoice_voided' AND resource_id = $1",
         )
+        .bind(unconfigured.to_string())
         .fetch_one(&env.pool)
         .await
         .expect("audit count");
         assert_eq!(audit_rows, 0, "a refused void writes no audit event");
 
-        // 2. Adyen CONFIGURED (local mock accepting the void): both sides
-        // move, and the provider call carries the derived idempotency key.
-        let mock = Mock::default();
-        mock.route(
-            "/v1/invoices/in_test_void_cov/void",
-            200,
-            r#"{"id":"in_test_void_cov","status":"void"}"#,
-        );
-        let base = spawn_mock(mock.clone()).await;
-        std::env::set_var("ADYEN_API_KEY", "sk_test_ivcov");
+        // 3. PAID + Adyen CONFIGURED (local mock accepting the refund):
+        // both sides move. The provider call is the refund contract —
+        // X-API-Key, deterministic Idempotency-Key, JSON body with the
+        // merchant account, minor-unit amount and `invoice:{id}` reference.
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
-        let voided = void_invoice(&env.pool, void_input(tenant, invoice, "k-adyen-ok"))
+        let paid = seed_invoice_status(env, tenant, "paid", 6_200, Some("psp_void_paid")).await;
+        let voided = void_invoice(&env.pool, void_input(tenant, paid, "k-adyen-ok"))
             .await
             .expect("voids both sides");
         assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
 
         let call = mock
-            .last_call("/v1/invoices/in_test_void_cov/void")
-            .expect("Adyen void called");
+            .last_call("/payments/psp_void_paid/refunds")
+            .expect("Adyen refund called");
         assert_eq!(call.method, "POST");
         assert_eq!(
-            call.headers.get("idempotency-key").map(String::as_str),
-            Some(format!("invoice-void:{}:k-adyen-ok", invoice.simple()).as_str()),
-            "the provider idempotency key derives from the local operation identity"
+            call.headers.get("x-api-key").map(String::as_str),
+            Some("AQEohONJaaPk33yRwggDP5DPc2s"),
+            "auth is the API key header, never a bearer token"
         );
-        let audit_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.invoice_voided'",
+        assert_eq!(
+            call.headers.get("idempotency-key").map(String::as_str),
+            Some(format!("invoice-refund:{}", paid.simple()).as_str()),
+            "the refund idempotency key derives from the local operation identity"
+        );
+        let body: serde_json::Value = serde_json::from_str(&call.body).expect("refund body JSON");
+        assert_eq!(
+            body["merchantAccount"],
+            serde_json::json!("ApexMailTestECOM")
+        );
+        assert_eq!(body["amount"]["currency"], serde_json::json!("EUR"));
+        assert_eq!(
+            body["amount"]["value"],
+            serde_json::json!(6_200),
+            "the amount travels in minor units (cents)"
+        );
+        assert_eq!(
+            body["reference"],
+            serde_json::json!(format!("invoice:{paid}")),
+            "the merchant reference binds the refund to OUR invoice row"
+        );
+
+        let details: serde_json::Value = sqlx::query_scalar(
+            "SELECT details FROM audit_logs
+             WHERE action = 'billing.invoice_voided' AND resource_id = $1",
         )
+        .bind(paid.to_string())
         .fetch_one(&env.pool)
         .await
-        .expect("audit count");
-        assert_eq!(audit_rows, 1);
+        .expect("paid void audit");
+        assert_eq!(details["adyenRefunded"], serde_json::Value::Bool(true));
+        assert_eq!(
+            details["adyenRefundPspReference"],
+            serde_json::json!("psp_void_refund"),
+            "the accepted refund's pspReference is recorded"
+        );
 
-        // 3. Adyen REFUSES (e.g. provider-side state): honest 4xx-shaped
+        // 4. Adyen REFUSES the refund (e.g. provider-side state): honest
         // error, local row untouched.
         let refused =
-            seed_invoice_status(env, tenant, "pending", 6_100, Some("in_test_refused")).await;
+            seed_invoice_status(env, tenant, "paid", 6_300, Some("psp_void_refused")).await;
         mock.route(
-            "/v1/invoices/in_test_refused/void",
+            "/payments/psp_void_refused/refunds",
             400,
-            r#"{"error":{"message":"Invoice is already voided"}}"#,
+            r#"{"errorCode":"refund.failed","message":"refund already requested"}"#,
         );
         let error = void_invoice(&env.pool, void_input(tenant, refused, "k-adyen-refused"))
             .await
             .expect_err("Adyen refusal propagates");
         assert!(
             matches!(&error, InvoiceVoidError::AdyenFailed { message }
-                if message.contains("already voided")),
+                if message.contains("refund already requested")),
             "{error:?}"
         );
         let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
@@ -3260,24 +3430,27 @@ mod coverage_adversarial {
             .fetch_one(&env.pool)
             .await
             .expect("status");
-        assert_eq!(status, "pending", "a Adyen refusal leaves the row pending");
+        assert_eq!(status, "paid", "a Adyen refusal leaves the row paid");
+        let audit_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'billing.invoice_voided' AND resource_id = $1",
+        )
+        .bind(refused.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_rows, 0, "a refused refund writes no void audit event");
 
         match &previous {
-            (Some(key), Some(base_url)) => {
+            (Some(key), Some(base_url), Some(merchant)) => {
                 std::env::set_var("ADYEN_API_KEY", key);
                 std::env::set_var("ADYEN_API_BASE_URL", base_url);
+                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
             }
-            (Some(key), None) => {
-                std::env::set_var("ADYEN_API_KEY", key);
-                std::env::remove_var("ADYEN_API_BASE_URL");
-            }
-            (None, Some(base_url)) => {
-                std::env::remove_var("ADYEN_API_KEY");
-                std::env::set_var("ADYEN_API_BASE_URL", base_url);
-            }
-            (None, None) => {
+            _ => {
                 std::env::remove_var("ADYEN_API_KEY");
                 std::env::remove_var("ADYEN_API_BASE_URL");
+                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
             }
         }
         drop(guard);

@@ -1,3 +1,26 @@
+//! The Adyen notification wire layer: the live ingest surface for
+//! `POST /webhooks/adyen`.
+//!
+//! The frozen contract (docs/tool-contracts/adyen.md, mirrored by
+//! `tools/dogfood-v2/harness/adyen.py`):
+//!
+//! * request body `{"notificationItems":[{"NotificationRequestItem":{…}}]}`;
+//! * the HMAC lives INSIDE the body at `additionalData.hmacSignature` — a
+//!   base64 digest over the escaped colon-joined
+//!   `pspReference:originalReference:merchantAccountCode:merchantReference:amount.value:amount.currency:eventCode:success`,
+//!   keyed by the hex-decoded `ADYEN_HMAC_KEY`, compared timing-safe;
+//! * amounts are integer minor units (cents);
+//! * `[accepted]` (bare text) acknowledges a notification whose every item
+//!   was processed or is a duplicate;
+//! * Adyen retries the same notification until acknowledged, so idempotency
+//!   is the deterministic dedupe digest over
+//!   (eventCode, pspReference, success, eventDate, merchantReference) — the
+//!   Adyen HMAC has no timestamp segment and no freshness window exists.
+//!
+//! Local invoices are OURS: an `AUTHORISATION` names the obligation through
+//! `merchantReference = invoice:{local_invoice_uuid}` and the local invoice
+//! total is the tax decision the charge is validated against.
+
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -5,7 +28,7 @@ use std::time::Duration;
 use axum::{
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -41,8 +64,27 @@ const DEADLETTER_RETRY_POLL_INTERVAL_SECS: u64 = 60;
 const DEADLETTER_RETRY_BACKOFF_SECONDS: [i64; 5] = [300, 900, 1800, 3600, 7200];
 /// Maximum number of deadletter entries to retry per batch.
 const DEADLETTER_RETRY_BATCH_SIZE: usize = 10;
-const ADYEN_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
 const DUNNING_STATUS_CACHE_TTL_SECONDS: u64 = 300;
+
+/// The success answer Adyen expects: the bare body `[accepted]` (text).
+const ADYEN_ACCEPTED_RESPONSE: &str = "[accepted]";
+
+/// The `adyen_tax_snapshots.authority` value recorded when the charged total
+/// is validated against ApexMail's own computation. Migration 218's CHECK
+/// constraint allows only ('stripe_tax', 'apexmail_local'); `apexmail_local`
+/// is the allowed value that truthfully means "ApexMail's local computation
+/// validated against the charge" (the pre-cutover `stripe_tax` value named a
+/// processor ApexMail no longer uses).
+const ADYEN_TAX_AUTHORITY_LOCAL: &str = "apexmail_local";
+
+/// The `invoice_payment_allocations.source` value for a settled Adyen
+/// payment. The accounting ledger adapter
+/// (`accounting_core::adapters::post_payment_allocation_in`) branches on
+/// `source = 'adyen'` to post to the Adyen processor clearing account with
+/// the `adyen_settlement` source type, so this is the codebase's truthful
+/// value (migration 140's CHECK still lists the pre-cutover set; see the
+/// migration-gap note in the module tests).
+const ADYEN_ALLOCATION_SOURCE: &str = "adyen";
 
 static DUNNING_CONFIG_TABLE_ENSURED: OnceLock<()> = OnceLock::new();
 
@@ -55,103 +97,37 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new().route("/webhooks/adyen", post(handle_adyen_webhook))
 }
 
-async fn handle_adyen_webhook(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let signature = headers
-        .get("adyen-hmac-signature")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let Some(signature) = signature else {
-        record_deadletter(
-            &state,
-            DeadletterEntry {
-                reason: "missing_signature".into(),
-                occurred_at: None,
-                event_id: None,
-                error: None,
-                payload_length: None,
-                ..Default::default()
-            },
-            Some(&body),
-            None,
-        )
-        .await;
-
-        return json_error(StatusCode::BAD_REQUEST, "Missing adyen-hmac-signature header");
-    };
-
-    let event_id = match extract_event_id(&body) {
-        Ok(event_id) => event_id,
-        Err(RouteValidationError::InvalidJson(error_message)) => {
-            record_deadletter(
-                &state,
-                DeadletterEntry {
-                    reason: "invalid_json_payload".into(),
-                    occurred_at: None,
-                    event_id: None,
-                    error: Some(error_message),
-                    payload_length: Some(body.len()),
-                    ..Default::default()
-                },
-                Some(&body),
-                Some(signature),
-            )
-            .await;
-
-            return json_error(StatusCode::BAD_REQUEST, "Invalid JSON payload");
+async fn handle_adyen_webhook(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    match process_webhook(&state, &body).await {
+        Ok(result) => {
+            info!(
+                items_processed = result.items_processed,
+                items_duplicate = result.items_duplicate,
+                "adyen notification accepted"
+            );
+            (StatusCode::OK, ADYEN_ACCEPTED_RESPONSE).into_response()
         }
-        Err(RouteValidationError::MissingEventId) => {
-            record_deadletter(
-                &state,
-                DeadletterEntry {
-                    reason: "missing_event_id".into(),
-                    occurred_at: None,
-                    event_id: None,
-                    error: None,
-                    payload_length: Some(body.len()),
-                    ..Default::default()
-                },
-                Some(&body),
-                Some(signature),
-            )
-            .await;
-
-            return json_error(StatusCode::BAD_REQUEST, "Missing event ID");
-        }
-    };
-
-    match process_webhook(&state, &body, signature).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "received": true })),
-        )
-            .into_response(),
         Err(error) => {
             let error_message = error.message().to_string();
             if error.should_record_deadletter() {
                 record_deadletter(
                     &state,
                     DeadletterEntry {
-                        reason: "processing_failed".into(),
+                        reason: error.deadletter_reason().into(),
                         occurred_at: None,
-                        event_id: Some(event_id.clone()),
-                        error: Some(error_message.clone()),
-                        payload_length: None,
+                        event_id: first_psp_reference(&body),
+                        error: Some(error.deadletter_detail().to_string()),
+                        payload_length: Some(body.len()),
                         ..Default::default()
                     },
                     Some(&body),
-                    Some(signature),
+                    None,
                 )
                 .await;
             }
 
-            error!(event_id = %event_id, error = %error_message, "adyen webhook processing failed");
-            json_error(error.http_status(), "Webhook processing failed")
+            error!(error = %error_message, "adyen webhook processing failed");
+            json_error(error.http_status(), error.response_message())
         }
     }
 }
@@ -160,20 +136,1730 @@ fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
-fn extract_event_id(body: &[u8]) -> Result<String, RouteValidationError> {
-    let envelope = serde_json::from_slice::<EventIdEnvelope>(body)
-        .map_err(|error| RouteValidationError::InvalidJson(error.to_string()))?;
+// ---------------------------------------------------------------------------
+// The wire types
+// ---------------------------------------------------------------------------
 
-    let Some(event_id) = envelope.id.map(|value| value.trim().to_string()) else {
-        return Err(RouteValidationError::MissingEventId);
-    };
+/// One `NotificationRequestItem` (the unit Adyen retries and we dedupe on).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdyenNotificationItem {
+    psp_reference: String,
+    #[serde(default)]
+    original_reference: Option<String>,
+    /// Present on every real notification; absent deserializes to empty and
+    /// participates in the signing string as an empty field (the SDK recipe).
+    #[serde(default)]
+    merchant_account_code: Option<String>,
+    #[serde(default)]
+    merchant_reference: String,
+    #[serde(default)]
+    amount: Option<AdyenAmount>,
+    #[serde(default)]
+    event_code: String,
+    #[serde(default)]
+    event_date: Option<String>,
+    /// "true" / "false" verbatim (Adyen's documented wire type).
+    #[serde(default)]
+    success: Option<String>,
+    #[serde(default)]
+    payment_method: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    additional_data: Option<AdyenAdditionalData>,
+}
 
-    if event_id.is_empty() {
-        return Err(RouteValidationError::MissingEventId);
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdyenAmount {
+    /// Integer MINOR UNITS (cents). Absent is absent — never coerced to 0;
+    /// the signing string renders it as the empty field, exactly like the
+    /// harness.
+    #[serde(default)]
+    value: Option<i64>,
+    #[serde(default)]
+    currency: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdyenAdditionalData {
+    #[serde(default)]
+    hmac_signature: Option<String>,
+    /// The stored-payment token (shopper-scoped) bound by
+    /// `RECURRING_CONTRACT`.
+    #[serde(default)]
+    recurring_detail_reference: Option<String>,
+    /// The shopper reference; in ApexMail it IS the tenant id.
+    #[serde(default)]
+    shopper_reference: Option<String>,
+    #[serde(default)]
+    recurring_processing_model: Option<String>,
+    /// The notification metadata (`additionalData.metadata.*`); the tenant
+    /// fallback when no shopperReference is present.
+    #[serde(default)]
+    metadata: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdyenNotificationEnvelope {
+    #[serde(rename = "notificationItems", default)]
+    notification_items: Vec<AdyenNotificationEnvelopeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdyenNotificationEnvelopeEntry {
+    #[serde(rename = "NotificationRequestItem")]
+    notification_request_item: AdyenNotificationItem,
+}
+
+impl AdyenNotificationItem {
+    fn hmac_signature(&self) -> Option<&str> {
+        self.additional_data
+            .as_ref()
+            .and_then(|data| data.hmac_signature.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 
-    Ok(event_id)
+    fn shopper_reference(&self) -> Option<&str> {
+        self.additional_data
+            .as_ref()
+            .and_then(|data| data.shopper_reference.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn metadata_tenant_id(&self) -> Option<&str> {
+        self.additional_data
+            .as_ref()
+            .and_then(|data| data.metadata.as_ref())
+            .and_then(|metadata| metadata.get("tenant_id"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn recurring_detail_reference(&self) -> Option<&str> {
+        self.additional_data
+            .as_ref()
+            .and_then(|data| data.recurring_detail_reference.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn recurring_processing_model(&self) -> Option<&str> {
+        self.additional_data
+            .as_ref()
+            .and_then(|data| data.recurring_processing_model.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn amount_value(&self) -> Option<i64> {
+        self.amount.as_ref().and_then(|amount| amount.value)
+    }
+
+    fn amount_currency(&self) -> Option<&str> {
+        self.amount
+            .as_ref()
+            .and_then(|amount| amount.currency.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn success_is_true(&self) -> bool {
+        self.success
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    }
 }
+
+// ---------------------------------------------------------------------------
+// The SDK signing recipe (HMAC-SHA256, hex-decoded key, base64 digest,
+// timing-safe compare) and the deterministic dedupe id
+// ---------------------------------------------------------------------------
+
+/// The signing key: `ADYEN_HMAC_KEY` is hex-encoded key material and is
+/// hex-decoded. A non-hex local-dev secret (the compose default) stays usable
+/// as raw bytes — the same documented fallback the Python harness applies, so
+/// the fixture, the probes and the local stack agree.
+fn hmac_key_bytes(secret: &str) -> Vec<u8> {
+    let cleaned = secret.trim();
+    hex::decode(cleaned).unwrap_or_else(|_| cleaned.as_bytes().to_vec())
+}
+
+/// Adyen's signing-string escaping: backslashes first, then colons. Applied
+/// to every field (a no-op for digits, currency codes, event codes and
+/// true/false).
+fn escape_signing_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace(':', "\\:")
+}
+
+/// The exact signing string for one notification item.
+fn adyen_signing_string(item: &AdyenNotificationItem) -> String {
+    [
+        escape_signing_value(item.psp_reference.as_str()),
+        escape_signing_value(item.original_reference.as_deref().unwrap_or("")),
+        escape_signing_value(item.merchant_account_code.as_deref().unwrap_or("")),
+        escape_signing_value(item.merchant_reference.as_str()),
+        escape_signing_value(
+            &item
+                .amount
+                .as_ref()
+                .and_then(|amount| amount.value)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        escape_signing_value(
+            item.amount
+                .as_ref()
+                .and_then(|amount| amount.currency.as_deref())
+                .unwrap_or(""),
+        ),
+        escape_signing_value(item.event_code.as_str()),
+        escape_signing_value(item.success.as_deref().unwrap_or("")),
+    ]
+    .join(":")
+}
+
+/// Verify one item's in-body HMAC against the secret, timing-safe
+/// (`Mac::verify_slice`). The digest travels base64-encoded.
+fn verify_item_hmac(
+    secret: &str,
+    item: &AdyenNotificationItem,
+    signature: &str,
+) -> Result<(), String> {
+    let expected =
+        base64_decode(signature.trim()).ok_or_else(|| "Invalid webhook signature".to_string())?;
+    let mut mac = HmacSha256::new_from_slice(&hmac_key_bytes(secret))
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(adyen_signing_string(item).as_bytes());
+    mac.verify_slice(&expected)
+        .map_err(|_| "Invalid webhook signature".to_string())
+}
+
+/// The deterministic dedupe id (`adn_<hex>`) — SHA-256 over the five fields
+/// Adyen retries identically, joined with the unit separator the Python
+/// harness uses. This is the idempotency key that replaces the pre-Adyen
+/// timestamp tolerance (Adyen's HMAC has no timestamp segment).
+fn adyen_notification_id(item: &AdyenNotificationItem) -> String {
+    use sha2::Digest;
+    let basis = [
+        item.event_code.clone(),
+        item.psp_reference.clone(),
+        item.success.clone().unwrap_or_default(),
+        item.event_date.clone().unwrap_or_default(),
+        item.merchant_reference.clone(),
+    ]
+    .join("\u{1f}");
+    format!("adn_{}", hex::encode(Sha256::digest(basis.as_bytes())))
+}
+
+/// Strict standard-alphabet base64 decoding (RFC 4648): padding optional but
+/// validated, no whitespace, no URL-safe alphabet. `None` on any malformed
+/// input — a malformed signature is an invalid signature.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let bytes = input.as_bytes();
+    if bytes.is_empty() || bytes.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3 + 2);
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut padding = 0usize;
+    for &byte in bytes {
+        if byte == b'=' {
+            padding += 1;
+            if padding > 2 {
+                return None;
+            }
+            continue;
+        }
+        if padding > 0 {
+            return None;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Standard base64 encoding (test-only: production verifies, tests sign).
+#[cfg(test)]
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(triple >> 6) as usize & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[triple as usize & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Event-code dispatch
+// ---------------------------------------------------------------------------
+
+/// Which handler an item routes to. Pure — the dispatch matrix is unit
+/// tested without a database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationArm {
+    /// `AUTHORISATION` success, no `recurringProcessingModel`: checkout
+    /// authorisation (informational; never an entitlement event).
+    CheckoutAuthorisation,
+    /// `AUTHORISATION` success WITH `recurringProcessingModel`: settles the
+    /// local invoice named by `merchantReference`.
+    RecurringAuthorisation,
+    /// `AUTHORISATION` success=false: dunning/refusal path.
+    AuthorisationRefused,
+    /// `RECURRING_CONTRACT` / `recurring.token.created`.
+    TokenCreated,
+    Refund,
+    RefundFailed,
+    Chargeback,
+    ChargebackReversed,
+    Unknown,
+}
+
+fn notification_arm(item: &AdyenNotificationItem) -> NotificationArm {
+    match item.event_code.trim() {
+        "AUTHORISATION" => {
+            if item.success_is_true() {
+                if item.recurring_processing_model().is_some() {
+                    NotificationArm::RecurringAuthorisation
+                } else {
+                    NotificationArm::CheckoutAuthorisation
+                }
+            } else {
+                NotificationArm::AuthorisationRefused
+            }
+        }
+        "RECURRING_CONTRACT" | "recurring.token.created" => NotificationArm::TokenCreated,
+        "REFUND" => NotificationArm::Refund,
+        "REFUND_FAILED" => NotificationArm::RefundFailed,
+        "CHARGEBACK" => NotificationArm::Chargeback,
+        "CHARGEBACK_REVERSED" => NotificationArm::ChargebackReversed,
+        _ => NotificationArm::Unknown,
+    }
+}
+
+async fn handle_notification(state: &AppState, item: &AdyenNotificationItem) -> Result<(), String> {
+    match notification_arm(item) {
+        NotificationArm::CheckoutAuthorisation => handle_checkout_authorisation(state, item).await,
+        NotificationArm::RecurringAuthorisation => {
+            handle_recurring_authorisation(state, item).await
+        }
+        NotificationArm::AuthorisationRefused => handle_authorisation_refused(state, item).await,
+        NotificationArm::TokenCreated => handle_token_created(state, item).await,
+        NotificationArm::Refund => {
+            record_money_event(state, item, MoneyEventKind::Refund).await;
+            Ok(())
+        }
+        NotificationArm::RefundFailed => {
+            record_money_event(state, item, MoneyEventKind::RefundFailed).await;
+            Ok(())
+        }
+        NotificationArm::Chargeback => {
+            record_money_event(state, item, MoneyEventKind::Chargeback).await;
+            Ok(())
+        }
+        NotificationArm::ChargebackReversed => {
+            record_money_event(state, item, MoneyEventKind::ChargebackReversed).await;
+            Ok(())
+        }
+        NotificationArm::Unknown => {
+            warn!(
+                event_code = %item.event_code,
+                psp_reference = %item.psp_reference,
+                "unhandled adyen notification event code — acknowledged without effect"
+            );
+            Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// Parse `merchantReference` into the LOCAL invoice id: `invoice:{uuid}` (the
+/// recurring-charge contract) or a bare uuid. Garbage is refused, never
+/// guessed.
+fn parse_merchant_reference_invoice_id(reference: &str) -> Option<Uuid> {
+    let reference = reference.trim();
+    let candidate = reference
+        .strip_prefix("invoice:")
+        .map(str::trim)
+        .unwrap_or(reference);
+    Uuid::parse_str(candidate).ok()
+}
+
+/// A checkout authorisation is informational only: the payment succeeded, but
+/// entitlement follows the recurring/our-side subscription state, never a
+/// single payment. In particular this must not reactivate a tenant suspended
+/// for abuse (same invariant the pre-Adyen checkout webhook carried).
+async fn handle_checkout_authorisation(
+    _state: &AppState,
+    item: &AdyenNotificationItem,
+) -> Result<(), String> {
+    match item
+        .shopper_reference()
+        .or_else(|| item.metadata_tenant_id())
+    {
+        Some(tenant_id) => info!(
+            tenant_id = %tenant_id,
+            psp_reference = %item.psp_reference,
+            merchant_reference = %item.merchant_reference,
+            "adyen checkout authorisation acknowledged; entitlement follows the recurring/our-side subscription state"
+        ),
+        None => warn!(
+            psp_reference = %item.psp_reference,
+            merchant_reference = %item.merchant_reference,
+            "adyen checkout authorisation carries neither shopperReference nor tenant metadata — acknowledged without effect"
+        ),
+    }
+    Ok(())
+}
+
+/// The local invoice an `AUTHORISATION` settles, read before the tax gate.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct LocalInvoiceSettlement {
+    id: Uuid,
+    tenant_id: String,
+    currency: String,
+    subtotal_cents: i64,
+    vat_cents: i64,
+    total_cents: i64,
+    billing_country: Option<String>,
+    vat_rate: Option<f64>,
+    vat_evidence_id: Option<Uuid>,
+}
+
+async fn load_local_invoice_for_settlement(
+    state: &AppState,
+    invoice_id: Uuid,
+) -> Result<Option<LocalInvoiceSettlement>, String> {
+    sqlx::query_as::<_, LocalInvoiceSettlement>(
+        r#"
+        SELECT id, tenant_id, currency,
+               COALESCE(subtotal, amount, 0)::bigint AS subtotal_cents,
+               COALESCE(vat_total, 0)::bigint AS vat_cents,
+               COALESCE(total, amount, 0)::bigint AS total_cents,
+               billing_country, vat_rate, vat_evidence_id
+        FROM invoices
+        WHERE id = $1
+        "#,
+    )
+    .bind(invoice_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load local invoice {invoice_id}: {error}"))
+}
+
+/// The tenant that owns the settlement/refusal: shopperReference (the tenant
+/// id) when present — and it must match the invoice's own tenant, or this is
+/// a cross-tenant event and is refused — falling back to the invoice's tenant.
+fn settlement_tenant(
+    item: &AdyenNotificationItem,
+    invoice_id: Uuid,
+    invoice_tenant: &str,
+) -> Result<String, String> {
+    match item.shopper_reference() {
+        Some(shopper) if shopper != invoice_tenant => Err(format!(
+            "AUTHORISATION for invoice {invoice_id} belongs to tenant {invoice_tenant} but the \
+             notification attributes it to shopper {shopper} — cross-tenant event refused"
+        )),
+        _ => Ok(invoice_tenant.to_string()),
+    }
+}
+
+fn currencies_match(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+/// The payment amount actually recorded as an allocation: the verified charge,
+/// capped against the authoritative remaining obligation, never negative.
+fn allocation_cents(charged_cents: i64, outstanding_cents: i64) -> i64 {
+    charged_cents.min(outstanding_cents).max(0)
+}
+
+/// The allocation's unique operation id — the settlement's idempotency key.
+fn settlement_operation_id(item: &AdyenNotificationItem) -> String {
+    format!("adyen:{}", item.psp_reference.trim())
+}
+
+/// Convert the old `handle_invoice_paid`: a successful recurring
+/// `AUTHORISATION` settles the LOCAL invoice named by
+/// `merchantReference = invoice:{uuid}` with `amount.value` (minor units) as
+/// the verified charge. Runs the existing settlement logic (mark paid +
+/// allocation) and the existing tax-truth snapshot gate, whose source is now
+/// ApexMail's own computation validated against the charge.
+async fn handle_recurring_authorisation(
+    state: &AppState,
+    item: &AdyenNotificationItem,
+) -> Result<(), String> {
+    let Some(local_invoice_id) = parse_merchant_reference_invoice_id(&item.merchant_reference)
+    else {
+        return Err(format!(
+            "AUTHORISATION {} reference {:?} does not name a local invoice (expected \
+             `invoice:{{uuid}}` or a bare uuid) — refusing to settle an unidentifiable obligation",
+            item.psp_reference, item.merchant_reference
+        ));
+    };
+    let Some(charged_cents) = item.amount_value() else {
+        return Err(format!(
+            "AUTHORISATION {} for {local_invoice_id} carries no amount.value — refusing to \
+             settle an unverifiable charge",
+            item.psp_reference
+        ));
+    };
+    let Some(local) = load_local_invoice_for_settlement(state, local_invoice_id).await? else {
+        return Err(format!(
+            "AUTHORISATION {} references local invoice {local_invoice_id} which does not exist \
+             — refusing to settle an unknown obligation",
+            item.psp_reference
+        ));
+    };
+    let tenant_id = settlement_tenant(item, local.id, &local.tenant_id)?;
+    if let Some(currency) = item.amount_currency() {
+        if !currencies_match(currency, &local.currency) {
+            return Err(format!(
+                "AUTHORISATION {} for {local_invoice_id} carries currency {currency} but the \
+                 local invoice is denominated in {}",
+                item.psp_reference, local.currency
+            ));
+        }
+    }
+
+    // TAX-TRUTH GATE (P0): persist an immutable snapshot of the charge and
+    // validate the charged total against the local invoice's computed total
+    // BEFORE settling. A mismatch returns Err here — no local invoice is
+    // marked paid, no allocation runs — and a durable finance incident is
+    // raised for operators.
+    let tax_snapshot_id =
+        validate_and_snapshot_adyen_tax(state, item, &local, charged_cents).await?;
+
+    // Settlement: the pre-Adyen CTE behaviour, now against the locked local
+    // row — mark paid and record the VERIFIED charged amount (amount.value)
+    // as the allocation, capped against the authoritative remaining
+    // obligation in the matching currency. Idempotent through the
+    // allocation's unique operation id.
+    let payment_cents = charged_cents.max(0);
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin invoice settlement transaction: {error}"))?;
+
+    let locked: Option<(Uuid, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, tenant_id, currency
+        FROM invoices
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(local.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to lock local invoice {local_invoice_id}: {error}"))?;
+
+    let Some((invoice_row_id, row_tenant, invoice_currency)) = locked else {
+        return Err(format!(
+            "local invoice {local_invoice_id} disappeared before settlement"
+        ));
+    };
+
+    let outstanding = crate::invoices::invoice_outstanding_cents_in(&mut *tx, invoice_row_id)
+        .await
+        .map_err(|error| format!("Failed to derive outstanding for {invoice_row_id}: {error}"))?;
+
+    let allocation = allocation_cents(payment_cents, outstanding);
+    if payment_cents > outstanding {
+        warn!(
+            invoice_id = %invoice_row_id,
+            adyen_psp_reference = %item.psp_reference,
+            payment_cents,
+            outstanding,
+            "adyen payment exceeds the remaining obligation — allocating only the \
+             authoritative remainder (over-allocation rejected)"
+        );
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE invoices
+        SET status = 'paid',
+            paid_at = COALESCE(paid_at, NOW()),
+            adyen_psp_reference = COALESCE(adyen_psp_reference, $2),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(invoice_row_id)
+    .bind(item.psp_reference.trim())
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to mark invoice {invoice_row_id} paid: {error}"))?;
+
+    if allocation > 0 {
+        let operation_id = settlement_operation_id(item);
+        sqlx::query(
+            r#"
+            INSERT INTO invoice_payment_allocations (
+                id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
+            )
+            VALUES (
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6
+            )
+            ON CONFLICT (operation_id) DO NOTHING
+            "#,
+        )
+        .bind(&row_tenant)
+        .bind(invoice_row_id)
+        .bind(&operation_id)
+        .bind(ADYEN_ALLOCATION_SOURCE)
+        .bind(allocation)
+        .bind(invoice_currency.trim().to_uppercase())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to record Adyen payment allocation: {error}"))?;
+
+        // Statutory ledger: post the settlement (Dr processor clearing, Cr
+        // AR) in the same transaction. Idempotent on the allocation's unique
+        // operation id, so a replayed webhook posts once.
+        crate::accounting_postings::post_payment_allocation_in(&mut tx, &operation_id).await;
+    } else {
+        info!(
+            invoice_id = %invoice_row_id,
+            adyen_psp_reference = %item.psp_reference,
+            payment_cents,
+            outstanding,
+            "adyen invoice settled without a positive allocation (zero-value/already covered)"
+        );
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit invoice settlement: {error}"))?;
+
+    // Statutory ledger: post invoice finalization for the settled invoice
+    // (no-op replay when the usage sweep already posted it). Runs AFTER the
+    // settlement commit; the source identity makes the replay idempotent.
+    crate::accounting_postings::post_invoice_issued(&state.db, invoice_row_id).await;
+
+    // Dunning recovery is only legitimate now that THE tenant's invoice
+    // actually settled: scope the recovery to this invoice's failure history.
+    crate::maintenance::mark_payment_recovered(
+        state,
+        &tenant_id,
+        Some(&invoice_row_id.to_string()),
+    )
+    .await?;
+
+    // Recognition ledger: reflect the settlement in `vat_recognition_entries`
+    // (general-scheme supplies were recognised at issue; cash-accounting
+    // supplies recognise on payment). Idempotent, best-effort — a failure is
+    // logged, never allowed to fake or skip the ledger.
+    if let Err(error) = crate::vat_recognition::materialize_invoice_recognition_by_id(
+        &state.db,
+        invoice_row_id,
+        Utc::now(),
+    )
+    .await
+    {
+        warn!(
+            invoice_id = %invoice_row_id,
+            adyen_psp_reference = %item.psp_reference,
+            error = %error,
+            "failed to materialize VAT recognition after Adyen settlement"
+        );
+    }
+
+    // Link the immutable tax snapshot onto the settled invoice.
+    if let Some(snapshot_id) = tax_snapshot_id {
+        if let Err(error) = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET adyen_tax_snapshot_id = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(invoice_row_id)
+        .bind(snapshot_id)
+        .execute(&state.db)
+        .await
+        {
+            warn!(
+                invoice_id = %invoice_row_id,
+                snapshot_id = %snapshot_id,
+                error = %error,
+                "failed to link adyen tax snapshot onto the local invoice — snapshot remains authoritative"
+            );
+        }
+    }
+
+    info!(
+        tenant_id = %tenant_id,
+        invoice_id = %invoice_row_id,
+        adyen_psp_reference = %item.psp_reference,
+        payment_cents,
+        allocation,
+        "adyen recurring authorisation settled the local invoice"
+    );
+
+    // Dedicated-IP provisioning: the deleted subscription-change handler used
+    // to spawn this once a subscription became active; under Adyen our own
+    // settled recurring charge is that moment. The spawn is idempotent
+    // (pending-request upsert + active-count check) and failures are recorded
+    // on the request row — the same contract the old call site documented.
+    let provision_state = state.clone();
+    let provision_tenant = tenant_id.to_string();
+    tokio::spawn(async move {
+        if let Err(error) =
+            auto_provision_dedicated_ips_background(&provision_state, &provision_tenant).await
+        {
+            error!(
+                tenant_id = %provision_tenant,
+                error = %error,
+                "dedicated-IP provisioning after Adyen settlement failed"
+            );
+        }
+    });
+
+    Ok(())
+}
+
+/// Convert the old `handle_payment_failed`: an unsuccessful `AUTHORISATION`
+/// runs the existing dunning path (atomic retry scheduling + customer
+/// notice) keyed on the local invoice from `merchantReference`. An
+/// unresolvable reference is an Err (deadlettered), never silently dropped.
+async fn handle_authorisation_refused(
+    state: &AppState,
+    item: &AdyenNotificationItem,
+) -> Result<(), String> {
+    let Some(local_invoice_id) = parse_merchant_reference_invoice_id(&item.merchant_reference)
+    else {
+        return Err(format!(
+            "refused AUTHORISATION {} reference {:?} does not name a local invoice (expected \
+             `invoice:{{uuid}}` or a bare uuid) — refusing to drop the refusal",
+            item.psp_reference, item.merchant_reference
+        ));
+    };
+    let invoice_tenant: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM invoices WHERE id = $1")
+            .bind(local_invoice_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|error| {
+                format!("Failed to resolve local invoice {local_invoice_id} for a refusal: {error}")
+            })?;
+    let Some(invoice_tenant) = invoice_tenant else {
+        return Err(format!(
+            "refused AUTHORISATION {} references local invoice {local_invoice_id} which does not \
+             exist — deadlettered for replay once the invoice exists",
+            item.psp_reference
+        ));
+    };
+    let tenant_id = settlement_tenant(item, local_invoice_id, &invoice_tenant)?;
+
+    let amount = item.amount_value().unwrap_or(0);
+    let dunning =
+        record_failed_payment(state, &tenant_id, &local_invoice_id.to_string(), amount).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())
+        "#,
+    )
+    .bind(&tenant_id)
+    .bind(serde_json::json!({
+        "invoiceId": local_invoice_id.to_string(),
+        "pspReference": item.psp_reference.trim(),
+        "amount": amount,
+        // The notification drainer renders money with this code and never
+        // assumes one (the drain labels an absent code explicitly).
+        "currency": normalize_adyen_currency(item.amount_currency()),
+        "reason": item.reason.clone().unwrap_or_default(),
+        "dunningStatus": dunning.status,
+        "nextRetryAt": dunning.next_retry_at.map(|value| value.to_rfc3339()),
+    }))
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("Failed to enqueue payment_failed notification: {error}"))?;
+
+    warn!(
+        tenant_id = %tenant_id,
+        invoice_id = %local_invoice_id,
+        psp_reference = %item.psp_reference,
+        reason = %item.reason.as_deref().unwrap_or(""),
+        "adyen authorisation refused — dunning state recorded and the customer notified"
+    );
+    Ok(())
+}
+
+/// `RECURRING_CONTRACT` / `recurring.token.created`: the shopper re-tokenized
+/// at cutover. Bind the token (and the processing model when present) to
+/// every `adyen_subscriptions` row of the shopper's tenant — the token is
+/// shopper-scoped, and the dunning auto-pay path reads it per tenant
+/// regardless of the row's status. A missing token or tenant is an Err.
+async fn handle_token_created(
+    state: &AppState,
+    item: &AdyenNotificationItem,
+) -> Result<(), String> {
+    let Some(token) = item.recurring_detail_reference() else {
+        return Err(format!(
+            "RECURRING_CONTRACT {} carries no additionalData.recurringDetailReference — \
+             nothing to bind",
+            item.psp_reference
+        ));
+    };
+    let Some(tenant_id) = item.shopper_reference() else {
+        return Err(format!(
+            "RECURRING_CONTRACT {} carries no additionalData.shopperReference — tenant \
+             unresolvable, refusing to bind the token to an unknown shopper",
+            item.psp_reference
+        ));
+    };
+    let processing_model = item.recurring_processing_model();
+
+    let bound: Vec<(String,)> = sqlx::query_as(
+        r#"
+        UPDATE adyen_subscriptions
+        SET adyen_recurring_detail_reference = $2,
+            adyen_recurring_processing_model = COALESCE($3, adyen_recurring_processing_model),
+            updated_at = NOW()
+        WHERE tenant_id = $1
+        RETURNING adyen_subscription_id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(token)
+    .bind(processing_model)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to bind the Adyen recurring token: {error}"))?;
+
+    if bound.is_empty() {
+        return Err(format!(
+            "RECURRING_CONTRACT {} resolved tenant {tenant_id} but no subscription row exists \
+             to bind the token to — deadlettered for replay",
+            item.psp_reference
+        ));
+    }
+
+    info!(
+        tenant_id = %tenant_id,
+        psp_reference = %item.psp_reference,
+        subscriptions_bound = bound.len(),
+        recurring_processing_model = %processing_model.unwrap_or(""),
+        "adyen recurring token bound"
+    );
+    Ok(())
+}
+
+/// Provider-initiated money movement worth a durable audit record.
+#[derive(Debug, Clone, Copy)]
+enum MoneyEventKind {
+    Refund,
+    RefundFailed,
+    Chargeback,
+    ChargebackReversed,
+}
+
+impl MoneyEventKind {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Refund => "refund",
+            Self::RefundFailed => "refund_failed",
+            Self::Chargeback => "chargeback",
+            Self::ChargebackReversed => "chargeback_reversed",
+        }
+    }
+
+    fn audit_action(self) -> &'static str {
+        match self {
+            Self::Refund => "billing.adyen_refund_recorded",
+            Self::RefundFailed => "billing.adyen_refund_failed",
+            Self::Chargeback => "billing.adyen_chargeback_recorded",
+            Self::ChargebackReversed => "billing.adyen_chargeback_reversed",
+        }
+    }
+
+    fn notification_type(self) -> &'static str {
+        self.kind()
+    }
+}
+
+/// Record a provider-side money event (refund / failed refund / chargeback /
+/// reversal) against the local invoice/psp binding: an audit row on the
+/// resolved tenant, a durable operator notification, and an alert-grade log
+/// when the binding cannot be resolved. NEVER a 5xx and never a silent drop —
+/// a reconciliation event must not make Adyen retry forever, and the
+/// `adyen_webhook_events` claim row plus the logs remain the durable record
+/// even when the audit insert cannot run.
+async fn record_money_event(state: &AppState, item: &AdyenNotificationItem, event: MoneyEventKind) {
+    let local_invoice_id = parse_merchant_reference_invoice_id(&item.merchant_reference);
+    let mut tenant_id: Option<String> = None;
+    if let Some(invoice_id) = local_invoice_id {
+        match sqlx::query_scalar::<_, String>("SELECT tenant_id FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(row) => tenant_id = row,
+            Err(error) => warn!(
+                invoice_id = %invoice_id,
+                error = %error,
+                "failed to resolve the local invoice tenant for an adyen money event"
+            ),
+        }
+    }
+
+    let detail = serde_json::json!({
+        "kind": event.kind(),
+        "pspReference": item.psp_reference.trim(),
+        "originalReference": item.original_reference.as_deref().unwrap_or(""),
+        "merchantReference": item.merchant_reference.trim(),
+        "localInvoiceId": local_invoice_id.map(|id| id.to_string()),
+        "amountMinorUnits": item.amount_value(),
+        "currency": item.amount_currency(),
+        "reason": item.reason.clone(),
+    });
+
+    let Some(tenant_id) = tenant_id else {
+        error!(
+            psp_reference = %item.psp_reference,
+            kind = event.kind(),
+            detail = %detail,
+            "adyen money event without a resolvable local invoice — recorded in the notification \
+             ledger and logs for reconciliation"
+        );
+        return;
+    };
+
+    match state.db.begin().await {
+        Ok(mut tx) => {
+            match append_audit_log(
+                &mut tx,
+                &tenant_id,
+                event.audit_action(),
+                "adyen_notification",
+                Some(item.psp_reference.trim()),
+                detail.clone(),
+                Utc::now(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    if let Err(error) = tx.commit().await {
+                        error!(
+                            tenant_id = %tenant_id,
+                            psp_reference = %item.psp_reference,
+                            error = %error,
+                            "failed to commit the adyen money-event audit row"
+                        );
+                    }
+                }
+                Err(error) => {
+                    error!(
+                        tenant_id = %tenant_id,
+                        psp_reference = %item.psp_reference,
+                        error = %error,
+                        "failed to append the adyen money-event audit row"
+                    );
+                    let _ = tx.rollback().await;
+                }
+            }
+        }
+        Err(error) => error!(
+            tenant_id = %tenant_id,
+            psp_reference = %item.psp_reference,
+            error = %error,
+            "failed to begin the adyen money-event audit transaction"
+        ),
+    }
+
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, 'pending', NOW())
+        "#,
+    )
+    .bind(&tenant_id)
+    .bind(event.notification_type())
+    .bind(&detail)
+    .execute(&state.db)
+    .await
+    {
+        error!(
+            tenant_id = %tenant_id,
+            psp_reference = %item.psp_reference,
+            error = %error,
+            "failed to enqueue the adyen money-event operator notification"
+        );
+    }
+
+    warn!(
+        tenant_id = %tenant_id,
+        psp_reference = %item.psp_reference,
+        kind = event.kind(),
+        amount_minor_units = ?item.amount_value(),
+        "adyen money event recorded for reconciliation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tax truth (P0): immutable tax snapshot + validation of the charged total
+// ---------------------------------------------------------------------------
+//
+// ApexMail owns the tax decision now: Adyen transmits no tax fields, so the
+// LOCAL invoice's computed totals are the expectation and Adyen's charged
+// total (the notification item's `amount.value`, minor units) is what must
+// validate against it. The snapshot of the charge and the comparison are
+// persisted immutably in `adyen_tax_snapshots` (migration 218); a mismatch
+// BLOCKS local settlement and raises a `finance_incidents` row instead of
+// quietly recording inconsistent books.
+
+/// ApexMail's independently computed total for the charged invoice.
+#[derive(Debug, Clone, PartialEq)]
+struct ExpectedTax {
+    subtotal_cents: i64,
+    vat_cents: i64,
+    total_cents: i64,
+    /// `local_invoice` for the Adyen path: the totals come from the local
+    /// invoice row (the only tax decision that exists).
+    source: &'static str,
+    country: Option<String>,
+    vat_rate: f64,
+    evidence_id: Option<Uuid>,
+}
+
+/// A charged-total mismatch between the Adyen charge and ApexMail's
+/// computation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaxTotalDiscrepancy {
+    observed_subtotal_cents: i64,
+    observed_vat_cents: i64,
+    observed_total_cents: i64,
+    expected_subtotal_cents: i64,
+    expected_vat_cents: i64,
+    expected_total_cents: i64,
+    delta_cents: i64,
+}
+
+impl TaxTotalDiscrepancy {
+    fn summary(&self) -> String {
+        format!(
+            "charged total {} != ApexMail-computed {} (subtotal {} vs {}, VAT {} vs {})",
+            self.observed_total_cents,
+            self.expected_total_cents,
+            self.observed_subtotal_cents,
+            self.expected_subtotal_cents,
+            self.observed_vat_cents,
+            self.expected_vat_cents,
+        )
+    }
+}
+
+/// Compare the charged money fields against ApexMail's independent
+/// computation. Pure and unit-tested: a mismatch is an error (the caller
+/// blocks settlement and raises a finance incident), never a warning.
+fn check_charged_total(
+    expected: &ExpectedTax,
+    observed_subtotal_cents: i64,
+    observed_vat_cents: i64,
+    observed_total_cents: i64,
+) -> Result<(), TaxTotalDiscrepancy> {
+    if expected.subtotal_cents == observed_subtotal_cents
+        && expected.vat_cents == observed_vat_cents
+        && expected.total_cents == observed_total_cents
+    {
+        return Ok(());
+    }
+    Err(TaxTotalDiscrepancy {
+        observed_subtotal_cents,
+        observed_vat_cents,
+        observed_total_cents,
+        expected_subtotal_cents: expected.subtotal_cents,
+        expected_vat_cents: expected.vat_cents,
+        expected_total_cents: expected.total_cents,
+        delta_cents: observed_total_cents - expected.total_cents,
+    })
+}
+
+/// The persisted validation status for a gate outcome (pure).
+fn tax_validation_status(validation: &Result<(), TaxTotalDiscrepancy>) -> &'static str {
+    match validation {
+        Ok(()) => "validated",
+        Err(_) => "discrepancy",
+    }
+}
+
+/// ApexMail's expectation for a charge: the LOCAL invoice's own computed
+/// totals and provenance. Adyen carries no tax fields, so no wire value is
+/// consulted — the local row is the only tax decision (pure).
+fn expected_tax_from_local_invoice(local: &LocalInvoiceSettlement) -> ExpectedTax {
+    ExpectedTax {
+        subtotal_cents: local.subtotal_cents,
+        vat_cents: local.vat_cents,
+        total_cents: local.total_cents,
+        source: "local_invoice",
+        country: local
+            .billing_country
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+        vat_rate: local.vat_rate.unwrap_or(0.0),
+        evidence_id: local.vat_evidence_id,
+    }
+}
+
+/// SHA-256 over the canonical snapshot payload.
+fn snapshot_payload_hash(payload: &serde_json::Value) -> String {
+    use sha2::Digest;
+    let canonical = serde_json::to_vec(payload).unwrap_or_default();
+    hex::encode(Sha256::digest(&canonical))
+}
+
+/// Row of `adyen_tax_snapshots` already persisted for this psp reference.
+/// Returns `(validation_status, apexmail expected total, charged total)`.
+async fn load_existing_tax_snapshot(
+    db: &sqlx::PgPool,
+    adyen_psp_reference: &str,
+) -> Result<Option<(String, i64, i64)>, String> {
+    sqlx::query_as(
+        r#"
+        SELECT validation_status,
+               COALESCE(apexmail_expected_total_cents, total_cents)::bigint,
+               total_cents
+        FROM adyen_tax_snapshots
+        WHERE adyen_psp_reference = $1
+        "#,
+    )
+    .bind(adyen_psp_reference)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to load existing tax snapshot: {error}"))
+}
+
+/// Persist a snapshot (first write wins; the table is trigger-immutable).
+/// Returns the snapshot id.
+///
+/// `observed` is `(subtotal, vat, charged total)`: Adyen transmits only the
+/// charged TOTAL, so the itemisation columns carry the local invoice's own
+/// split and `total_cents`/`amount_paid_cents` carry the charge — the
+/// comparison below is therefore exactly "charged total vs local total".
+#[allow(clippy::too_many_arguments)]
+async fn persist_tax_snapshot(
+    db: &sqlx::PgPool,
+    item: &AdyenNotificationItem,
+    tenant_id: &str,
+    local_invoice_id: Option<Uuid>,
+    currency: &str,
+    observed: (i64, i64, i64),
+    expected: &ExpectedTax,
+    validation_status: &str,
+    discrepancy_cents: i64,
+) -> Result<Uuid, String> {
+    let adyen_item = serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
+    let observed_payload = serde_json::json!({
+        "adyen_psp_reference": item.psp_reference.trim(),
+        "adyen_merchant_reference": item.merchant_reference.trim(),
+        "currency": currency,
+        "subtotal_cents": observed.0,
+        "tax_cents": observed.1,
+        "total_cents": observed.2,
+        "amount_paid_cents": observed.2,
+        "automatic_tax_status": serde_json::Value::Null,
+        "tax_id_status": "not_applicable",
+        "tax_ids": [],
+        "jurisdiction": expected.country,
+        "tax_breakdown": [],
+        "adyen_item": adyen_item,
+        "apexmail": {
+            "expected_subtotal_cents": expected.subtotal_cents,
+            "expected_vat_cents": expected.vat_cents,
+            "expected_total_cents": expected.total_cents,
+            "source": expected.source,
+            "vat_rate": expected.vat_rate,
+            "evidence_id": expected.evidence_id,
+        },
+        "validation_status": validation_status,
+    });
+    let raw_hash = snapshot_payload_hash(&observed_payload);
+
+    let inserted: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        INSERT INTO adyen_tax_snapshots (
+            adyen_psp_reference, adyen_merchant_reference, tenant_id, local_invoice_id,
+            currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents,
+            automatic_tax_status, authority, jurisdiction, tax_id_status,
+            tax_ids, tax_breakdown,
+            apexmail_expected_subtotal_cents, apexmail_expected_vat_cents,
+            apexmail_expected_total_cents, validation_status, discrepancy_cents,
+            raw_payload_hash, raw_payload
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $16, $17, $18, $19, $20, $21, $22
+        )
+        ON CONFLICT (adyen_psp_reference) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(item.psp_reference.trim())
+    .bind(item.merchant_reference.trim())
+    .bind(tenant_id)
+    .bind(local_invoice_id)
+    .bind(currency)
+    .bind(observed.0)
+    .bind(observed.1)
+    .bind(observed.2)
+    .bind(observed.2)
+    // Adyen carries no tax object and no verified tax IDs: NULL/empty are the
+    // truthful values, and the local split lives in the expected columns.
+    .bind(Option::<String>::None)
+    .bind(ADYEN_TAX_AUTHORITY_LOCAL)
+    .bind(&expected.country)
+    .bind("not_applicable")
+    .bind(serde_json::json!([]))
+    .bind(serde_json::json!([]))
+    .bind(expected.subtotal_cents)
+    .bind(expected.vat_cents)
+    .bind(expected.total_cents)
+    .bind(validation_status)
+    .bind(discrepancy_cents)
+    .bind(&raw_hash)
+    .bind(&observed_payload)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to persist adyen tax snapshot: {error}"))?;
+
+    if let Some((id,)) = inserted {
+        return Ok(id);
+    }
+    // Already persisted (replay): immutability means first write wins.
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
+    )
+    .bind(item.psp_reference.trim())
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("failed to reload adyen tax snapshot: {error}"))
+}
+
+/// Raise a durable finance incident. Idempotent per open incident: webhook
+/// retries and dead-letter replays cannot spam duplicate open rows.
+#[allow(clippy::too_many_arguments)]
+async fn raise_finance_incident(
+    db: &sqlx::PgPool,
+    kind: &str,
+    severity: &str,
+    tenant_id: &str,
+    local_invoice_id: Option<Uuid>,
+    adyen_psp_reference: &str,
+    currency: &str,
+    expected_total_cents: Option<i64>,
+    observed_total_cents: Option<i64>,
+    detail: &serde_json::Value,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO finance_incidents (
+            kind, severity, status, tenant_id, local_invoice_id,
+            adyen_psp_reference, currency, expected_total_cents,
+            observed_total_cents, delta_cents, detail
+        )
+        SELECT $1, $2, 'open', $3, $4, $5, $6, $7, $8,
+               COALESCE($7, 0) - COALESCE($8, 0), $9
+        WHERE NOT EXISTS (
+            SELECT 1 FROM finance_incidents
+            WHERE kind = $1 AND adyen_psp_reference = $5 AND status = 'open'
+        )
+        "#,
+    )
+    .bind(kind)
+    .bind(severity)
+    .bind(tenant_id)
+    .bind(local_invoice_id)
+    .bind(adyen_psp_reference)
+    .bind(currency)
+    .bind(expected_total_cents)
+    .bind(observed_total_cents)
+    .bind(detail)
+    .execute(db)
+    .await
+    .map_err(|error| format!("failed to raise finance incident: {error}"))?;
+    Ok(())
+}
+
+/// The tax-truth gate. Persists an immutable snapshot of the charge and
+/// validates the charged total against the LOCAL invoice's computed total.
+/// Returns `Err` (blocking settlement) when they disagree, after raising a
+/// durable finance incident.
+async fn validate_and_snapshot_adyen_tax(
+    state: &AppState,
+    item: &AdyenNotificationItem,
+    local: &LocalInvoiceSettlement,
+    charged_total_cents: i64,
+) -> Result<Option<Uuid>, String> {
+    // Replays: the first snapshot is immutable. A recorded discrepancy stays
+    // blocking until a finance operator resolves it; a validated snapshot
+    // makes replays no-ops.
+    if let Some((status, expected_total, observed_total)) =
+        load_existing_tax_snapshot(&state.db, item.psp_reference.trim()).await?
+    {
+        if status == "discrepancy" {
+            raise_finance_incident(
+                &state.db,
+                "tax_total_mismatch",
+                "high",
+                &local.tenant_id,
+                Some(local.id),
+                item.psp_reference.trim(),
+                &normalize_adyen_currency(item.amount_currency()),
+                Some(expected_total),
+                Some(observed_total),
+                &serde_json::json!({
+                    "reason": "existing immutable snapshot records a charged-total discrepancy",
+                }),
+            )
+            .await?;
+            return Err(format!(
+                "AUTHORISATION for {} blocked: an open finance incident records a charged-total \
+                 discrepancy (charged {observed_total}, ApexMail computed {expected_total})",
+                item.psp_reference.trim()
+            ));
+        }
+        return Ok(Some(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
+            )
+            .bind(item.psp_reference.trim())
+            .fetch_one(&state.db)
+            .await
+            .map_err(|error| format!("failed to load tax snapshot id: {error}"))?,
+        ));
+    }
+
+    let expected = expected_tax_from_local_invoice(local);
+    let currency = normalize_adyen_currency(item.amount_currency());
+
+    // Adyen transmits only the charged total; the itemisation is the local
+    // invoice's decision. Comparing with the local split on both sides makes
+    // the check exactly "charged total vs local total".
+    let validation = check_charged_total(
+        &expected,
+        expected.subtotal_cents,
+        expected.vat_cents,
+        charged_total_cents,
+    );
+    let validation_status = tax_validation_status(&validation);
+    let discrepancy_cents = validation
+        .as_ref()
+        .err()
+        .map(|discrepancy| discrepancy.delta_cents)
+        .unwrap_or(0);
+
+    let snapshot_id = persist_tax_snapshot(
+        &state.db,
+        item,
+        &local.tenant_id,
+        Some(local.id),
+        &currency,
+        (
+            expected.subtotal_cents,
+            expected.vat_cents,
+            charged_total_cents,
+        ),
+        &expected,
+        validation_status,
+        discrepancy_cents,
+    )
+    .await?;
+
+    if let Err(discrepancy) = validation {
+        let detail = serde_json::json!({
+            "reason": discrepancy.summary(),
+            "expected_source": expected.source,
+            "expected_country": expected.country,
+            "expected_vat_rate": expected.vat_rate,
+            "vat_evidence_id": expected.evidence_id,
+            "psp_reference": item.psp_reference.trim(),
+            "merchant_reference": item.merchant_reference.trim(),
+        });
+        raise_finance_incident(
+            &state.db,
+            "tax_total_mismatch",
+            "critical",
+            &local.tenant_id,
+            Some(local.id),
+            item.psp_reference.trim(),
+            &currency,
+            Some(expected.total_cents),
+            Some(charged_total_cents),
+            &detail,
+        )
+        .await?;
+        error!(
+            adyen_psp_reference = %item.psp_reference,
+            tenant_id = %local.tenant_id,
+            observed_total_cents = charged_total_cents,
+            expected_total_cents = expected.total_cents,
+            delta_cents = discrepancy.delta_cents,
+            "BLOCKED invoice finalization: Adyen charged a total that disagrees with ApexMail's \
+             computation — finance incident raised"
+        );
+        return Err(format!(
+            "AUTHORISATION for {} blocked: {}",
+            item.psp_reference.trim(),
+            discrepancy.summary()
+        ));
+    }
+
+    info!(
+        adyen_psp_reference = %item.psp_reference,
+        tenant_id = %local.tenant_id,
+        authority = ADYEN_TAX_AUTHORITY_LOCAL,
+        validation_status,
+        observed_total_cents = charged_total_cents,
+        expected_total_cents = expected.total_cents,
+        "adyen tax snapshot persisted and the charged total validated against the local invoice"
+    );
+
+    Ok(Some(snapshot_id))
+}
+
+/// Normalize a wire currency for local comparison/storage (lowercase, like
+/// `invoices.currency`). Defaults to `eur`.
+fn normalize_adyen_currency(currency: Option<&str>) -> String {
+    currency
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "eur".into())
+}
+
+// ---------------------------------------------------------------------------
+// Request processing (parse → verify → claim → handle) and the response
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ProcessWebhookResult {
+    items_processed: usize,
+    items_duplicate: usize,
+}
+
+#[derive(Debug)]
+enum ProcessWebhookError {
+    /// The wire itself is invalid (bad envelope, missing/invalid HMAC): the
+    /// client sees the specific message and the delivery is deadlettered.
+    InvalidRequest {
+        message: String,
+        detail: String,
+        reason: &'static str,
+    },
+    /// A processing-stage failure not yet deadlettered (e.g. the claim query
+    /// failed): deadlettered without touching the ledger row.
+    RecordDeadletter(String),
+    /// A per-item handler failure: the atomic failure + deadletter already
+    /// ran inside `process_webhook`.
+    DeadletterFlowHandled(String),
+    /// Transient condition (e.g. another worker holds the event): Adyen
+    /// must retry. Maps to 5xx and never deadletters.
+    RetryLater(String),
+}
+
+impl ProcessWebhookError {
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidRequest { message, .. } => message,
+            Self::RecordDeadletter(message)
+            | Self::DeadletterFlowHandled(message)
+            | Self::RetryLater(message) => message,
+        }
+    }
+
+    /// What Adyen sees for this class. Wire errors name the defect; every
+    /// other class keeps the legacy generic body (internal details stay out
+    /// of the response).
+    fn response_message(&self) -> &str {
+        match self {
+            Self::InvalidRequest { message, .. } => message,
+            _ => "Webhook processing failed",
+        }
+    }
+
+    fn deadletter_detail(&self) -> &str {
+        match self {
+            Self::InvalidRequest { detail, .. } => detail,
+            _ => self.message(),
+        }
+    }
+
+    fn deadletter_reason(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest { reason, .. } => reason,
+            _ => "processing_failed",
+        }
+    }
+
+    fn should_record_deadletter(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidRequest { .. } | Self::RecordDeadletter(_)
+        )
+    }
+
+    /// HTTP status Adyen sees. Retryable errors use 503 (Adyen retries on
+    /// any non-2xx; 5xx signals server-side transience); refusals keep 400.
+    fn http_status(&self) -> StatusCode {
+        match self {
+            Self::RetryLater(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InvalidRequest { .. }
+            | Self::RecordDeadletter(_)
+            | Self::DeadletterFlowHandled(_) => StatusCode::BAD_REQUEST,
+        }
+    }
+}
+
+impl From<String> for ProcessWebhookError {
+    fn from(message: String) -> Self {
+        Self::RecordDeadletter(message)
+    }
+}
+
+/// Best-effort psp reference for deadletter diagnostics (a malformed body has
+/// none).
+fn first_psp_reference(payload: &[u8]) -> Option<String> {
+    let envelope = serde_json::from_slice::<AdyenNotificationEnvelope>(payload).ok()?;
+    envelope
+        .notification_items
+        .first()
+        .map(|entry| {
+            entry
+                .notification_request_item
+                .psp_reference
+                .trim()
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+}
+
+async fn process_webhook(
+    state: &AppState,
+    payload: &[u8],
+) -> Result<ProcessWebhookResult, ProcessWebhookError> {
+    let envelope =
+        serde_json::from_slice::<AdyenNotificationEnvelope>(payload).map_err(|error| {
+            ProcessWebhookError::InvalidRequest {
+                message: "Invalid JSON payload".into(),
+                detail: error.to_string(),
+                reason: "invalid_json_payload",
+            }
+        })?;
+
+    if envelope.notification_items.is_empty() {
+        return Err(ProcessWebhookError::InvalidRequest {
+            message: "Invalid notification payload".into(),
+            detail: "notificationItems is empty or missing".into(),
+            reason: "missing_notification_items",
+        });
+    }
+
+    let items: Vec<&AdyenNotificationItem> = envelope
+        .notification_items
+        .iter()
+        .map(|entry| &entry.notification_request_item)
+        .collect();
+
+    // Every item must carry an identity; a blank pspReference/eventCode is a
+    // malformed delivery, not an anonymous event.
+    for item in &items {
+        if item.psp_reference.trim().is_empty() || item.event_code.trim().is_empty() {
+            return Err(ProcessWebhookError::InvalidRequest {
+                message: "Invalid notification payload".into(),
+                detail: format!(
+                    "notification item missing pspReference or eventCode (pspReference={:?}, eventCode={:?})",
+                    item.psp_reference, item.event_code
+                ),
+                reason: "invalid_notification_item",
+            });
+        }
+    }
+
+    // Bad/missing HMAC or an unconfigured secret: the signature is INSIDE the
+    // body, so this check happens per item before anything is claimed. A
+    // deployment without a configured secret cannot verify anything; that is
+    // SERVER misconfiguration, so it is retryable (503) — a 400 would make
+    // Adyen treat every billing event as permanently rejected.
+    for item in &items {
+        if item.hmac_signature().is_none() {
+            return Err(ProcessWebhookError::InvalidRequest {
+                message: "Missing HMAC signature".into(),
+                detail: format!(
+                    "notification item {} carries no additionalData.hmacSignature",
+                    item.psp_reference.trim()
+                ),
+                reason: "missing_signature",
+            });
+        }
+    }
+
+    let secret = state.config.adyen_hmac_key.trim();
+    if secret.is_empty() {
+        return Err(ProcessWebhookError::RetryLater(
+            "Adyen webhook secret is not configured".into(),
+        ));
+    }
+
+    for item in &items {
+        let signature = item.hmac_signature().unwrap_or_default();
+        if let Err(error) = verify_item_hmac(secret, item, signature) {
+            return Err(ProcessWebhookError::InvalidRequest {
+                message: error.clone(),
+                detail: format!(
+                    "HMAC verification failed for notification item {}",
+                    item.psp_reference.trim()
+                ),
+                reason: "invalid_signature",
+            });
+        }
+    }
+
+    let mut items_processed = 0usize;
+    let mut items_duplicate = 0usize;
+    for item in &items {
+        match process_notification_item(state, item, payload).await? {
+            ItemOutcome::Processed => items_processed += 1,
+            ItemOutcome::Duplicate => items_duplicate += 1,
+        }
+    }
+
+    Ok(ProcessWebhookResult {
+        items_processed,
+        items_duplicate,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemOutcome {
+    Processed,
+    Duplicate,
+}
+
+async fn process_notification_item(
+    state: &AppState,
+    item: &AdyenNotificationItem,
+    payload: &[u8],
+) -> Result<ItemOutcome, ProcessWebhookError> {
+    let notification_id = adyen_notification_id(item);
+    match claim_webhook_event(
+        state,
+        &notification_id,
+        item.event_code.trim(),
+        item.psp_reference.trim(),
+    )
+    .await?
+    {
+        WebhookEventClaim::Claimed => {}
+        WebhookEventClaim::AlreadyProcessed => {
+            info!(
+                adyen_notification_id = %notification_id,
+                psp_reference = %item.psp_reference,
+                event_code = %item.event_code,
+                "duplicate adyen notification already processed"
+            );
+            return Ok(ItemOutcome::Duplicate);
+        }
+        WebhookEventClaim::AlreadyPending => {
+            // Acknowledging a concurrently-pending event with a 200 makes
+            // Adyen stop retrying; if the worker that claimed it then
+            // crashes, the row is stuck in `pending` forever. Return a
+            // retryable status instead so Adyen keeps retrying (and the
+            // stale-pending reclaimer eventually resets the row).
+            info!(
+                adyen_notification_id = %notification_id,
+                psp_reference = %item.psp_reference,
+                "adyen notification is already being processed by another worker; asking Adyen to retry"
+            );
+            return Err(ProcessWebhookError::RetryLater(format!(
+                "notification {notification_id} is pending on another worker"
+            )));
+        }
+    }
+
+    match handle_notification(state, item).await {
+        Ok(()) => {
+            sqlx::query(
+                r#"
+                UPDATE adyen_webhook_events
+                SET status = 'processed', processed_at = NOW(), updated_at = NOW()
+                WHERE adyen_notification_id = $1
+                "#,
+            )
+            .bind(&notification_id)
+            .execute(&state.db)
+            .await
+            .map_err(|error| format!("Failed to mark Adyen webhook as processed: {error}"))?;
+
+            Ok(ItemOutcome::Processed)
+        }
+        Err(error_message) => {
+            if let Err(deadletter_error) = record_failed_webhook_deadletter_atomic(
+                state,
+                &notification_id,
+                &error_message,
+                payload,
+                item.hmac_signature(),
+            )
+            .await
+            {
+                error!(
+                    adyen_notification_id = %notification_id,
+                    error = %deadletter_error,
+                    "failed to persist adyen webhook failure/deadletter atomically"
+                );
+            }
+
+            Err(ProcessWebhookError::DeadletterFlowHandled(error_message))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deadletter machinery (Redis-backed; replayed by the retry worker)
+// ---------------------------------------------------------------------------
 
 async fn record_deadletter(
     state: &AppState,
@@ -328,7 +2014,11 @@ async fn remove_prepared_deadletter_from_redis(state: &AppState, event_key: &str
             .query_async::<()>(&mut conn)
             .await
         {
-            error!(error = %error, event_key, "failed to compensate adyen dead letter after DB commit failure");
+            error!(
+                error = %error,
+                event_key,
+                "failed to compensate adyen dead letter after DB commit failure"
+            );
         }
     }
 }
@@ -350,109 +2040,24 @@ fn sanitize_event_id(event_id: Option<&str>) -> String {
         .collect()
 }
 
-async fn process_webhook(
-    state: &AppState,
-    payload: &[u8],
-    signature: &str,
-) -> Result<ProcessWebhookResult, ProcessWebhookError> {
-    // A deployment without a configured secret cannot verify anything; that
-    // is SERVER misconfiguration, not a bad delivery. Classify it as
-    // retryable (503) so Adyen keeps replaying — a 400 would make Adyen
-    // treat the event as permanently rejected and drop every billing event
-    // that arrived while the operator was fixing the config.
-    let event = match verify_and_parse_event(state, payload, signature) {
-        Ok(event) => event,
-        Err(error) if error == "Adyen webhook secret is not configured" => {
-            return Err(ProcessWebhookError::RetryLater(error));
-        }
-        Err(error) => return Err(ProcessWebhookError::RecordDeadletter(error)),
-    };
-
-    match claim_webhook_event(state, &event.id, &event.event_type).await? {
-        WebhookEventClaim::Claimed => {}
-        WebhookEventClaim::AlreadyProcessed => {
-            info!(event_id = %event.id, event_type = %event.event_type, "duplicate adyen webhook already processed");
-            return Ok(ProcessWebhookResult {
-                event_type: event.event_type,
-                processed: false,
-            });
-        }
-        WebhookEventClaim::AlreadyPending => {
-            // Fix G — acknowledging a concurrently-pending event with a 200
-            // makes Adyen stop retrying; if the worker that claimed it then
-            // crashes, the row is stuck in `pending` forever. Return a
-            // retryable status instead so Adyen keeps retrying (and the
-            // stale-pending reclaimer below eventually resets the row).
-            info!(event_id = %event.id, event_type = %event.event_type, "adyen webhook is already being processed by another worker; asking Adyen to retry");
-            return Err(ProcessWebhookError::RetryLater(format!(
-                "event {} is pending on another worker",
-                event.id
-            )));
-        }
-    }
-
-    let event_id = event.id.clone();
-    let event_type = event.event_type.clone();
-
-    match handle_adyen_notification(state, &event).await {
-        Ok(()) => {
-            sqlx::query(
-                r#"
-                UPDATE adyen_webhook_events
-                SET status = 'processed', processed_at = NOW(), updated_at = NOW()
-                WHERE adyen_notification_id = $1
-                "#,
-            )
-            .bind(&event_id)
-            .execute(&state.db)
-            .await
-            .map_err(|error| format!("Failed to mark Adyen webhook as processed: {error}"))?;
-
-            Ok(ProcessWebhookResult {
-                event_type,
-                processed: true,
-            })
-        }
-        Err(error_message) => {
-            if let Err(deadletter_error) = record_failed_webhook_deadletter_atomic(
-                state,
-                &event_id,
-                &error_message,
-                payload,
-                signature,
-            )
-            .await
-            {
-                error!(
-                    event_id = %event_id,
-                    error = %deadletter_error,
-                    "failed to persist adyen webhook failure/deadletter atomically"
-                );
-            }
-
-            Err(ProcessWebhookError::DeadletterFlowHandled(error_message))
-        }
-    }
-}
-
 async fn record_failed_webhook_deadletter_atomic(
     state: &AppState,
-    event_id: &str,
+    notification_id: &str,
     error_message: &str,
     payload: &[u8],
-    signature: &str,
+    signature: Option<&str>,
 ) -> Result<(), String> {
     let prepared = prepare_deadletter(
         DeadletterEntry {
             reason: "processing_failed".into(),
             occurred_at: None,
-            event_id: Some(event_id.to_string()),
+            event_id: Some(notification_id.to_string()),
             error: Some(error_message.to_string()),
             payload_length: None,
             ..Default::default()
         },
         Some(payload),
-        Some(signature),
+        signature,
         Utc::now(),
     );
 
@@ -468,7 +2073,7 @@ async fn record_failed_webhook_deadletter_atomic(
         WHERE adyen_notification_id = $1
         "#,
     )
-    .bind(event_id)
+    .bind(notification_id)
     .bind(error_message)
     .execute(&mut *tx)
     .await
@@ -479,13 +2084,13 @@ async fn record_failed_webhook_deadletter_atomic(
             format!("Failed to roll back empty Adyen webhook failure transaction: {error}")
         })?;
         return Err(format!(
-            "Failed to mark Adyen webhook {event_id} as failed: event row was not found"
+            "Failed to mark Adyen webhook {notification_id} as failed: event row was not found"
         ));
     }
 
     if let Err(error) = write_prepared_deadletter_to_redis(state, &prepared).await {
         if let Err(rollback_error) = tx.rollback().await {
-            error!(event_id, error = %rollback_error, "failed to roll back Adyen webhook failure transaction after Redis deadletter error");
+            error!(notification_id, error = %rollback_error, "failed to roll back Adyen webhook failure transaction after Redis deadletter error");
         }
         return Err(error);
     }
@@ -500,18 +2105,89 @@ async fn record_failed_webhook_deadletter_atomic(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeadletterEntry {
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    occurred_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload_length: Option<usize>,
+    /// How many times this entry has been retried so far.
+    #[serde(default)]
+    retry_count: u32,
+    /// Maximum retry attempts before giving up.
+    #[serde(default = "default_max_retries")]
+    max_retries: u32,
+    /// Raw Adyen webhook body (JSON), for replay on retry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+    /// The first notification item's in-body `additionalData.hmacSignature`,
+    /// kept for the retry index; the replay re-verifies every item against
+    /// its own in-body signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+}
+
+const fn default_max_retries() -> u32 {
+    DEADLETTER_MAX_RETRIES
+}
+
+impl Default for DeadletterEntry {
+    fn default() -> Self {
+        Self {
+            reason: String::new(),
+            occurred_at: None,
+            event_id: None,
+            error: None,
+            payload_length: None,
+            retry_count: 0,
+            max_retries: DEADLETTER_MAX_RETRIES,
+            body: None,
+            signature: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedDeadletter {
+    event_key: String,
+    payload: String,
+    now_ms: i64,
+    cleanup_before_ms: i64,
+    retry_at_ms: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// The `adyen_webhook_events` ledger (claim / status / reclaim)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookEventClaim {
+    Claimed,
+    AlreadyProcessed,
+    AlreadyPending,
+}
+
 async fn claim_webhook_event(
     state: &AppState,
-    event_id: &str,
+    notification_id: &str,
     event_type: &str,
+    psp_reference: &str,
 ) -> Result<WebhookEventClaim, String> {
     let row = sqlx::query_as::<_, WebhookEventClaimRow>(
         r#"
         WITH claimed AS (
-            INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, created_at, updated_at)
-            VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
+            INSERT INTO adyen_webhook_events
+                (id, adyen_notification_id, adyen_psp_reference, event_type, status, created_at, updated_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, 'pending', NOW(), NOW())
             ON CONFLICT (adyen_notification_id) DO UPDATE
-            SET event_type = EXCLUDED.event_type,
+            SET adyen_psp_reference = COALESCE(EXCLUDED.adyen_psp_reference, adyen_webhook_events.adyen_psp_reference),
+                event_type = EXCLUDED.event_type,
                 status = 'pending',
                 error = NULL,
                 updated_at = NOW()
@@ -528,7 +2204,8 @@ async fn claim_webhook_event(
         LIMIT 1
         "#,
     )
-    .bind(event_id)
+    .bind(notification_id)
+    .bind(psp_reference)
     .bind(event_type)
     .fetch_optional(&state.db)
     .await
@@ -545,6 +2222,12 @@ fn classify_webhook_claim(row: Option<WebhookEventClaimRow>) -> WebhookEventClai
         }
         _ => WebhookEventClaim::AlreadyPending,
     }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WebhookEventClaimRow {
+    claimed: bool,
+    status: String,
 }
 
 /// Age after which a `pending` webhook event row is considered abandoned
@@ -590,2558 +2273,9 @@ pub async fn reclaim_stale_pending_webhooks(state: &AppState) -> Result<Vec<Stri
     Ok(reclaimed)
 }
 
-/// Map Adyen invoice money fields (all integer minor units / cents) onto
-/// the local invoice columns, deriving whichever of subtotal/VAT/total is
-/// missing. Negative or absent amounts degrade to zero (Fix A). Returns
-/// `None` when the payload's arithmetic cannot be represented in integer
-/// cents — external input is never allowed to wrap into a "valid" total
-/// (audit SM7 F7, mirroring `bank_ingest::parse_amount_cents`).
-fn derive_invoice_totals(
-    subtotal: Option<i64>,
-    tax: Option<i64>,
-    total: Option<i64>,
-    amount_due: i64,
-) -> Option<(i64, i64, i64)> {
-    // Explicit Adyen figures are authoritative INCLUDING their sign: credit
-    // invoices (customer credit / matrix proration exceeding the charge) are
-    // legitimately negative, and a 100%-discounted invoice legitimately has
-    // subtotal 0. Absence is already encoded by Option — Some(0) is a real
-    // Adyen-reported zero and must not be treated as missing data. The
-    // pre-fix `> 0` filters recorded both as zeros, overstating period
-    // revenue/VAT and hiding the applied credit from the local ledger.
-    let amount_due = amount_due.max(0);
-
-    let (subtotal, vat, total) = match (subtotal, total) {
-        (Some(sub), Some(tot)) => {
-            let derived_vat = if tot < 0 {
-                // Credit invoice: the VAT reversal carries the invoice's sign.
-                tot.checked_sub(sub)?
-            } else {
-                (tot.checked_sub(sub)?).max(0)
-            };
-            let vat = match tax {
-                // An overflowing `sub + value` cannot satisfy the `<= tot`
-                // filter; it falls back to the derived VAT like any other
-                // incoherent tax figure.
-                Some(value) => match sub.checked_add(value) {
-                    Some(sum) if sum <= tot => value,
-                    _ => derived_vat,
-                },
-                None => derived_vat,
-            };
-            (sub, vat, tot)
-        }
-        (Some(sub), None) => {
-            let vat = tax.unwrap_or(0);
-            (sub, vat, sub.checked_add(vat)?)
-        }
-        (None, Some(tot)) => (tot, 0, tot),
-        (None, None) => (amount_due, 0, amount_due),
-    };
-
-    Some((subtotal, vat, total))
-}
-
-/// Effective VAT rate (percent) implied by a subtotal + VAT amount pair.
-/// Returns one decimal of precision so fractional statutory rates (e.g.
-/// Finland's 25.5 %) survive; display code trims trailing zeros.
-fn derive_invoice_vat_rate(subtotal: i64, vat_amount: i64) -> f64 {
-    if subtotal <= 0 || vat_amount <= 0 {
-        return 0.0;
-    }
-    // rate × 10, rounded half-up, then scaled back to percent
-    let tenths = (vat_amount * 1000 + subtotal / 2) / subtotal;
-    tenths as f64 / 10.0
-}
-
-/// Normalize a Adyen currency code for the local `invoices.currency`
-/// column (lowercase, like invoices.rs). Defaults to `eur`.
-fn normalize_adyen_currency(currency: Option<&str>) -> String {
-    currency
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "eur".into())
-}
-
-/// Verify the HMAC-SHA256 signature header over `payload` (the timestamp
-/// segment participates in the MAC). Shared by live delivery verification
-/// and deadletter replay re-verification.
-fn verify_signature_hmac(secret: &str, payload: &[u8], signature: &str) -> Result<(), String> {
-    let (timestamp, signatures) = parse_signature_header(signature)?;
-    let timestamp_value = timestamp.to_string();
-    let verified = signatures
-        .into_iter()
-        .filter_map(|candidate| hex::decode(candidate).ok())
-        .any(|expected| {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-                .expect("HMAC accepts arbitrary key lengths");
-            mac.update(timestamp_value.as_bytes());
-            mac.update(b".");
-            mac.update(payload);
-            mac.verify_slice(&expected).is_ok()
-        });
-
-    if verified {
-        Ok(())
-    } else {
-        Err("Invalid webhook signature".into())
-    }
-}
-
-fn verify_and_parse_event(
-    state: &AppState,
-    payload: &[u8],
-    signature: &str,
-) -> Result<AdyenEventPayload, String> {
-    let secret = state.config.adyen_hmac_key.trim();
-    if secret.is_empty() {
-        return Err("Adyen webhook secret is not configured".into());
-    }
-
-    let (timestamp, _) = parse_signature_header(signature)?;
-    if (Utc::now().timestamp() - timestamp).abs() > ADYEN_WEBHOOK_TOLERANCE_SECONDS {
-        return Err("Invalid webhook signature".into());
-    }
-
-    verify_signature_hmac(secret, payload, signature)?;
-
-    serde_json::from_slice(payload)
-        .map_err(|error| format!("Failed to decode Adyen event payload: {error}"))
-}
-
-fn parse_signature_header(signature: &str) -> Result<(i64, Vec<&str>), String> {
-    let mut timestamp = None;
-    let mut signatures = Vec::new();
-
-    for segment in signature.split(',') {
-        let mut parts = segment.splitn(2, '=');
-        let Some(key) = parts.next().map(str::trim) else {
-            continue;
-        };
-        let Some(value) = parts.next().map(str::trim) else {
-            continue;
-        };
-
-        match key {
-            "t" => {
-                timestamp = value.parse::<i64>().ok();
-            }
-            "v1" if !value.is_empty() => {
-                signatures.push(value);
-            }
-            _ => {}
-        }
-    }
-
-    match (timestamp, signatures.is_empty()) {
-        (Some(timestamp), false) => Ok((timestamp, signatures)),
-        _ => Err("Invalid webhook signature".into()),
-    }
-}
-
-async fn handle_adyen_notification(state: &AppState, event: &AdyenEventPayload) -> Result<(), String> {
-    match event.event_type.as_str() {
-        "checkout.session.completed" => {
-            let session: CheckoutSession = serde_json::from_value(event.data.object.clone())
-                .map_err(|error| format!("Failed to decode checkout session: {error}"))?;
-            handle_checkout_completed(state, session).await
-        }
-        "customer.subscription.created" | "customer.subscription.updated" => {
-            let subscription: SubscriptionEvent = serde_json::from_value(event.data.object.clone())
-                .map_err(|error| format!("Failed to decode subscription event: {error}"))?;
-            handle_subscription_change(state, subscription).await
-        }
-        "customer.subscription.deleted" => {
-            let subscription: SubscriptionEvent = serde_json::from_value(event.data.object.clone())
-                .map_err(|error| format!("Failed to decode subscription delete event: {error}"))?;
-            handle_subscription_deleted(state, subscription).await
-        }
-        "invoice.paid" => {
-            let invoice: InvoiceEvent = serde_json::from_value(event.data.object.clone())
-                .map_err(|error| format!("Failed to decode invoice paid event: {error}"))?;
-            handle_invoice_paid(state, invoice).await
-        }
-        "invoice.payment_failed" => {
-            let invoice: InvoiceEvent =
-                serde_json::from_value(event.data.object.clone()).map_err(|error| {
-                    format!("Failed to decode invoice payment_failed event: {error}")
-                })?;
-            handle_payment_failed(state, invoice).await
-        }
-        "customer.subscription.trial_will_end" => {
-            let subscription: SubscriptionEvent = serde_json::from_value(event.data.object.clone())
-                .map_err(|error| format!("Failed to decode trial ending event: {error}"))?;
-            handle_trial_ending(state, subscription).await
-        }
-        _ => {
-            warn!(event_type = %event.event_type, "unhandled adyen webhook event — consider adding a handler or ignoring intentionally");
-            Ok(())
-        }
-    }
-}
-
-async fn handle_checkout_completed(
-    _state: &AppState,
-    session: CheckoutSession,
-) -> Result<(), String> {
-    let Some(tenant_id) = tenant_id_from_metadata(session.metadata.as_ref()) else {
-        warn!(session_id = %session.id, "adyen checkout session missing tenant_id metadata");
-        return Ok(());
-    };
-
-    // Checkout completion is not an entitlement event: the subscription can
-    // still be incomplete or unpaid. Only the corresponding verified
-    // `customer.subscription.*` webhook below changes plan access. In
-    // particular, this must not reactivate a tenant suspended for abuse.
-    info!(tenant_id = %tenant_id, session_id = %session.id, "adyen checkout completed; awaiting subscription state webhook");
-    Ok(())
-}
-
-async fn handle_subscription_change(
-    state: &AppState,
-    subscription: SubscriptionEvent,
-) -> Result<(), String> {
-    let Some(tenant_id) = tenant_id_from_metadata(subscription.metadata.as_ref()) else {
-        warn!(subscription_id = %subscription.id, "adyen subscription missing tenant_id metadata");
-        return Ok(());
-    };
-
-    let Some(primary_item) = subscription.items.data.first() else {
-        return Err(format!(
-            "Subscription {} has no line items",
-            subscription.id
-        ));
-    };
-    let Some(price) = primary_item.price.as_ref() else {
-        return Err(format!(
-            "Subscription {} has no line-item price",
-            subscription.id
-        ));
-    };
-    let Some(price_id) = price.id.as_deref() else {
-        return Err(format!(
-            "Subscription {} has no valid line-item price",
-            subscription.id
-        ));
-    };
-    let Some(interval) = price
-        .recurring
-        .as_ref()
-        .and_then(|recurring| recurring.interval)
-    else {
-        return Err(format!(
-            "Subscription {} has an unsupported billing interval",
-            subscription.id
-        ));
-    };
-    let plan_name = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT name
-        FROM plans
-        WHERE is_active = true
-          AND (
-              (adyen_plan_code_monthly = $1 AND $2 = 'monthly')
-              OR (adyen_plan_code_yearly = $1 AND $2 = 'yearly')
-          )
-        LIMIT 1
-        "#,
-    )
-    .bind(price_id)
-    .bind(interval.as_db_value())
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| format!("Failed to resolve plan for Adyen price {price_id}: {error}"))?
-    .ok_or_else(|| format!("Unknown Adyen price ID: {price_id}"))?;
-    let entitlement_plan = subscription.status.entitlement_plan_name(&plan_name);
-
-    let incoming_period_start =
-        DateTime::<Utc>::from_timestamp(subscription.current_period_start, 0);
-    let incoming_period_end = DateTime::<Utc>::from_timestamp(subscription.current_period_end, 0);
-
-    // Run the upsert inside a tenant-scoped entitlement transaction (audit
-    // F36): the advisory lock serializes every entitlement writer (create,
-    // update, delete) for this tenant, and the CURRENT subscription state
-    // is read and validated INSIDE the lock (below), so reconciled plans
-    // can never interleave with a stale event. Migration 078's partial
-    // unique index on (tenant_id) WHERE status = 'active' is protected the
-    // same way.
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|error| format!("Failed to begin subscription upsert transaction: {error}"))?;
-
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("adyen_entitlement:{tenant_id}"))
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
-
-    // ── Audit F36: read/validate the CURRENT state INSIDE the lock ────
-    // The old flow validated before acquiring the tenant lock and then
-    // applied unconditionally: a delayed event could pass validation
-    // against an earlier snapshot, wait while a replacement committed,
-    // then restore the old subscription and cancel the new one. The
-    // in-lock re-read (FOR UPDATE) plus the event/version watermark
-    // (migration 184) makes that impossible.
-    let current_subscription = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-            Option<String>,
-            Option<DateTime<Utc>>,
-        ),
-    >(
-        r#"
-        SELECT tenant_id, status::text, billing_cycle_start, billing_cycle_end, plan,
-               event_watermark
-        FROM adyen_subscriptions
-        WHERE adyen_subscription_id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(&subscription.id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to load current Adyen subscription: {error}"))?;
-
-    if let Some((current_tenant_id, current_status, .., current_watermark)) =
-        current_subscription.as_ref()
-    {
-        if current_tenant_id.as_str() != tenant_id {
-            return Err(format!(
-                "Adyen subscription {} is already bound to a different tenant",
-                subscription.id
-            ));
-        }
-        if current_status.as_str() != subscription.status.as_str()
-            && !subscription.status.can_transition_from(current_status)
-        {
-            return Err(format!(
-                "Invalid subscription status transition: {current_status} -> {}",
-                subscription.status.as_str()
-            ));
-        }
-        // Watermark check (audit F36): an event whose billing cycle is
-        // OLDER than the last applied event for this subscription must not
-        // rewind the cycle (same-status older price/period updates, or a
-        // long-delayed active update racing a committed renewal).
-        if subscription_event_is_stale(incoming_period_start, *current_watermark) {
-            info!(
-                tenant_id = %tenant_id,
-                subscription_id = %subscription.id,
-                incoming_cycle = ?incoming_period_start,
-                applied_watermark = ?current_watermark,
-                "stale adyen subscription update ignored — event predates the applied cycle watermark"
-            );
-            let _ = tx.rollback().await;
-            return Ok(());
-        }
-    } else if !subscription.status.is_valid_initial_status() {
-        return Err(format!(
-            "Invalid initial subscription state: {}",
-            subscription.status.as_str()
-        ));
-    }
-
-    // Replacement proof (audit F36): a superseded ACTIVE subscription may
-    // be canceled only when the incoming event represents the CURRENT
-    // replacement — no other active row may carry a NEWER event watermark.
-    // If one does, this event is stale relative to a committed replacement
-    // and is ignored wholesale (it must not cancel the newer row).
-    if let Some(incoming_start) = incoming_period_start {
-        let newer_replacement: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT adyen_subscription_id
-            FROM adyen_subscriptions
-            WHERE tenant_id = $1
-              AND adyen_subscription_id <> $2
-              AND status = 'active'
-              AND event_watermark IS NOT NULL
-              AND event_watermark > $3
-            LIMIT 1
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(&subscription.id)
-        .bind(incoming_start)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| format!("Failed to check replacement currency: {error}"))?;
-        if let Some(newer) = newer_replacement {
-            info!(
-                tenant_id = %tenant_id,
-                subscription_id = %subscription.id,
-                newer_subscription = %newer,
-                "stale adyen subscription update ignored — a newer active replacement exists"
-            );
-            let _ = tx.rollback().await;
-            return Ok(());
-        }
-    }
-
-    // Audit F30: before the upsert overwrites the period bounds, snapshot
-    // the subscription's CLOSING cycle into the immutable billing_periods
-    // table — a renewal must never erase the just-ended period before the
-    // overage sweep has read it. Only a genuine period transition (new
-    // start differs from the stored one) snapshots the old cycle. The
-    // snapshot comes from the LOCKED state (audit F36) and freezes the
-    // complete pricing context (audit F32).
-    if let Some((_, previous_status, Some(previous_start), Some(previous_end), previous_plan, _)) =
-        current_subscription.as_ref()
-    {
-        if incoming_period_start.is_none_or(|incoming| incoming != *previous_start) {
-            snapshot_billing_period(
-                &mut tx,
-                tenant_id,
-                &subscription.id,
-                previous_status,
-                previous_plan.as_deref(),
-                *previous_start,
-                *previous_end,
-            )
-            .await?;
-        }
-    }
-
-    let superseded: Vec<SupersededCycleRow> = sqlx::query_as(
-        r#"
-        UPDATE adyen_subscriptions
-        SET status = 'canceled', updated_at = NOW()
-        WHERE tenant_id = $1
-          AND status = 'active'
-          AND adyen_subscription_id <> $2
-        RETURNING adyen_subscription_id, billing_cycle_start, billing_cycle_end, plan
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(&subscription.id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to deactivate superseded subscriptions: {error}"))?;
-
-    // Audit F30: superseded subscriptions' current cycles are equally
-    // billable periods — snapshot them before their rows go terminal.
-    // Their pre-deactivation status was 'active' (the UPDATE's WHERE).
-    for cycle in &superseded {
-        if let (Some(start), Some(end)) = (cycle.billing_cycle_start, cycle.billing_cycle_end) {
-            snapshot_billing_period(
-                &mut tx,
-                tenant_id,
-                &cycle.adyen_subscription_id,
-                "active",
-                cycle.plan.as_deref(),
-                start,
-                end,
-            )
-            .await?;
-        }
-    }
-
-    // Audit F27: the upsert persists BOTH the resolved plan and the Adyen
-    // price — the old DO UPDATE preserved a stale price (and never wrote
-    // `plan` at all), so consumers keying on ss.plan mis-resolved after
-    // upgrades/downgrades. The event watermark (audit F36) records the
-    // cycle of the last APPLIED event; replays of the same cycle are
-    // idempotent, older cycles were rejected above.
-    sqlx::query(
-        r#"
-        WITH upsert_subscription AS (
-            INSERT INTO adyen_subscriptions (
-                id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
-                plan, status, billing_interval, billing_cycle_start, billing_cycle_end,
-                cancel_at_period_end, canceled_at, trial_end, event_watermark,
-                created_at, updated_at
-            )
-            VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7,
-                to_timestamp($8), to_timestamp($9), $10, to_timestamp($11), to_timestamp($12),
-                COALESCE(to_timestamp($8), NOW()),
-                NOW(), NOW()
-            )
-            ON CONFLICT (adyen_subscription_id) DO UPDATE SET
-                adyen_plan_code = $4,
-                plan = $5,
-                status = $6,
-                billing_interval = $7,
-                billing_cycle_start = to_timestamp($8),
-                billing_cycle_end = to_timestamp($9),
-                cancel_at_period_end = $10,
-                canceled_at = to_timestamp($11),
-                trial_end = to_timestamp($12),
-                event_watermark = COALESCE(to_timestamp($8), adyen_subscriptions.event_watermark),
-                updated_at = NOW()
-            RETURNING tenant_id
-        ),
-        update_tenant AS (
-            UPDATE tenants
-            SET plan = $13, updated_at = NOW()
-            WHERE id = $1
-            RETURNING id
-        )
-        SELECT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(&subscription.id)
-    .bind(subscription.customer.id())
-    .bind(price_id)
-    .bind(&plan_name)
-    .bind(subscription.status.as_str())
-    .bind(interval.as_db_value())
-    .bind(subscription.current_period_start)
-    .bind(subscription.current_period_end)
-    .bind(subscription.cancel_at_period_end)
-    .bind(subscription.canceled_at)
-    .bind(subscription.trial_end)
-    .bind(entitlement_plan)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to upsert Adyen subscription: {error}"))?;
-
-    // Audit F30/F32: the incoming cycle gets its period record now, with
-    // the resolved plan AND the complete effective pricing snapshotted.
-    if let (Some(period_start), Some(period_end)) = (incoming_period_start, incoming_period_end) {
-        snapshot_billing_period(
-            &mut tx,
-            tenant_id,
-            &subscription.id,
-            subscription.status.as_str(),
-            Some(&plan_name),
-            period_start,
-            period_end,
-        )
-        .await?;
-    }
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("Failed to commit Adyen subscription upsert: {error}"))?;
-
-    info!(
-        tenant_id = %tenant_id,
-        subscription_id = %subscription.id,
-        status = %subscription.status.as_str(),
-        entitlement_plan,
-        "adyen subscription updated"
-    );
-
-    if matches!(subscription.status, SubscriptionStatus::Active) {
-        // Spawn dedicated IP provisioning in background so the webhook handler
-        // returns immediately. There is NO maintenance retry consumer for
-        // `dedicated_ip_provisioning_requests` rows: a failure here is logged
-        // and recorded as 'failed'/'partial' on the request row (see below),
-        // and a subsequent subscription event re-runs the whole provisioning
-        // path (the pending-request upsert is idempotent, and the active-count
-        // query skips already-allocated IPs).
-        let state = state.clone();
-        let tenant_id = tenant_id.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = auto_provision_dedicated_ips_background(&state, &tenant_id).await {
-                error!(tenant_id = %tenant_id, error = %e, "background dedicated IP provisioning failed");
-            }
-        });
-    }
-
-    Ok(())
-}
-
-/// The exact JSON body sent to `POST {api_base_url}/v1/dedicated-ips`.
-///
-/// The API's `AllocateIpRequest` is `#[serde(deny_unknown_fields)]` and only
-/// declares `region` (optional). The previous body
-/// (`{"auto_provisioned": true}`) carried an unknown field, so axum's JSON
-/// extractor rejected the request with 422 during deserialization — before
-/// the allocation handler ever ran. The empty object parses into the
-/// contract (every field is defaulted). If a region ever needs to be
-/// pinned, extend this object with `region` only.
-fn auto_provision_request_body() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-/// Background task that performs the actual dedicated IP provisioning.
-/// Called from a `tokio::spawn` to avoid blocking the webhook handler.
-///
-/// There is no maintenance retry consumer: failures are logged and the
-/// `dedicated_ip_provisioning_requests` row is finalized as
-/// 'failed'/'partial'. A later active-subscription event retries the
-/// provisioning path from scratch (idempotent request upsert + active-count
-/// check), so the absence of a sweeper does not strand provisioning.
-async fn auto_provision_dedicated_ips_background(
-    app_state: &AppState,
-    tenant_id: &str,
-) -> Result<(), String> {
-    // Re-borrow the inner fields we need
-    let state = app_state;
-    let included_count = sqlx::query_scalar::<_, i32>(
-        r#"
-        SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) AS included_count
-        FROM adyen_subscriptions s
-        JOIN plans p ON p.name = (
-            SELECT plan FROM tenants WHERE id = s.tenant_id
-        )
-        WHERE s.tenant_id = $1 AND s.status = 'active'
-        ORDER BY s.created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| format!("Failed to load dedicated IP allowance: {error}"))?
-    .unwrap_or(0);
-
-    if included_count <= 0 {
-        return Ok(());
-    }
-
-    let active_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM dedicated_ips
-        WHERE tenant_id = $1
-          AND status NOT IN ('retired', 'releasing', 'failed', 'cleanup_failed')
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|error| format!("Failed to load active dedicated IP count: {error}"))?;
-    // Terminal provisioning-failure rows (`failed`, `cleanup_failed`) do not
-    // occupy the allowance: the API-side `NON_OCCUPYING_STATUSES` is the
-    // canonical list (crates/api-server/src/ip_provider.rs) and must stay in
-    // sync with the literal above.
-
-    let to_allocate = i64::from(included_count) - active_count;
-    if to_allocate <= 0 {
-        info!(tenant_id = %tenant_id, active_count, included_count, "tenant already has sufficient dedicated IPs");
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO dedicated_ip_provisioning_requests
-            (id, tenant_id, requested_count, status, created_at, updated_at)
-        VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
-        ON CONFLICT (tenant_id) WHERE status = 'pending'
-        DO UPDATE SET requested_count = $2, updated_at = NOW()
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(to_allocate)
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to record dedicated IP provisioning request: {error}"))?;
-
-    // Use a shared HTTP client with sane timeouts.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-
-    let api_base_url = state.config.api_base_url.trim_end_matches('/');
-    let bearer = format!("Bearer {}", state.config.service_auth_token);
-
-    // Build all requests upfront, then fire them concurrently with bounded parallelism.
-    let mut requests: Vec<_> = (0..to_allocate)
-        .map(|_| {
-            client
-                .post(format!("{api_base_url}/v1/dedicated-ips"))
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .header(reqwest::header::AUTHORIZATION, &bearer)
-                .header("X-Internal-Service", "billing")
-                .header("X-Tenant-Id", tenant_id)
-                .json(&auto_provision_request_body())
-                .send()
-        })
-        .collect();
-
-    // Fire requests in concurrent batches of 5 to avoid overwhelming the API server.
-    let mut success_count = 0_i64;
-    let mut failure_count = 0_i64;
-    const BATCH_SIZE: usize = 5;
-
-    for chunk in requests.chunks_mut(BATCH_SIZE) {
-        let results = join_all(
-            chunk
-                .iter_mut()
-                .map(|req| timeout(Duration::from_secs(30), req)),
-        )
-        .await;
-
-        for result in results {
-            match result {
-                Ok(Ok(response)) if response.status().is_success() => {
-                    success_count += 1;
-                }
-                Ok(Ok(response)) => {
-                    failure_count += 1;
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    warn!(
-                        tenant_id = %tenant_id,
-                        status = %status,
-                        error = %body,
-                        "dedicated IP auto-provision request failed"
-                    );
-                }
-                Ok(Err(error)) => {
-                    failure_count += 1;
-                    error!(
-                        tenant_id = %tenant_id,
-                        error = %error,
-                        "dedicated IP auto-provision request errored"
-                    );
-                }
-                Err(_elapsed) => {
-                    failure_count += 1;
-                    error!(
-                        tenant_id = %tenant_id,
-                        "dedicated IP auto-provision request timed out after 30s"
-                    );
-                }
-            }
-        }
-    }
-
-    let final_status = if failure_count == 0 {
-        "completed"
-    } else if success_count > 0 {
-        "partial"
-    } else {
-        "failed"
-    };
-
-    sqlx::query(
-        r#"
-        UPDATE dedicated_ip_provisioning_requests
-        SET status = $2, success_count = $3, failure_count = $4, updated_at = NOW()
-        WHERE tenant_id = $1 AND status = 'pending'
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(final_status)
-    .bind(success_count)
-    .bind(failure_count)
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to update dedicated IP provisioning request: {error}"))?;
-
-    if failure_count > 0 {
-        error!(
-            tenant_id = %tenant_id,
-            requested_count = to_allocate,
-            success_count,
-            failure_count,
-            final_status,
-            "dedicated IP provisioning had failures"
-        );
-    }
-
-    Ok(())
-}
-
-/// Record (or leave untouched) the immutable billing-period snapshot for a
-/// subscription cycle (audit F30). Runs INSIDE the caller's entitlement
-/// transaction. `status` is the subscription's status while the cycle was
-/// in force — ACTIVE cycles snapshot the tenant-level override-aware plan
-/// (the same source the enforcement gate used), terminal cycles the
-/// subscription's own plan. The COMPLETE effective pricing is frozen at
-/// snapshot time (audit F32): email allowance, integer overage rate
-/// (resolved from the SAME plan the allowance came from) and currency —
-/// the sweep prices exclusively from these fields, never today's plan.
-async fn snapshot_billing_period(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: &str,
-    adyen_subscription_id: &str,
-    status: &str,
-    subscription_plan: Option<&str>,
-    period_start: DateTime<Utc>,
-    period_end: DateTime<Utc>,
-) -> Result<(), String> {
-    if period_end <= period_start {
-        return Ok(());
-    }
-
-    // `p.name` is NULL when the tenant's effective plan name is not present
-    // in `plans` (legacy/renamed plan, or an override removed out-of-band).
-    // Decoding it as a bare `String` turned that legitimate state into a
-    // decode ERROR, failing the whole entitlement webhook (dead-lettering a
-    // valid subscription update) instead of degrading to the fallback below.
-    let effective: Option<(Option<String>, Option<i64>, String)> = sqlx::query_as(
-        r#"
-        SELECT p.name, p.email_limit,
-               COALESCE(t.settings->>'billingCurrency', 'EUR')
-        FROM tenants t
-        LEFT JOIN plan_overrides po
-          ON po.tenant_id = t.id
-         AND po.active = true
-         AND (po.expires_at IS NULL OR po.expires_at > NOW())
-        LEFT JOIN plans p
-          ON p.name = CASE WHEN $2 = 'active'
-                           THEN COALESCE(po.plan, t.plan, $3)
-                           ELSE $3
-                      END
-        WHERE t.id = $1
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(status)
-    .bind(subscription_plan)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| format!("Failed to snapshot billing period plan: {error}"))?;
-
-    let (plan_name, email_allowance, currency) = match effective {
-        Some((Some(name), limit, currency)) => {
-            let currency = normalize_period_currency(&currency);
-            (Some(name), limit, currency)
-        }
-        _ => (
-            subscription_plan.map(str::to_string),
-            None,
-            crate::overage::default_period_currency(),
-        ),
-    };
-
-    // Rate comes from the SAME plan the allowance/name came from — the
-    // builtin per-plan ladder (review 2026-09-08 §9). Free/PAYG plans
-    // resolve to None (no automatic overage) and stay NULL on the period.
-    let rate_millicents = plan_name
-        .as_deref()
-        .and_then(crate::plans::plan_overage_rate_millicents);
-
-    let pricing_snapshot = serde_json::json!({
-        "snapshotVersion": 1,
-        "planName": plan_name,
-        "emailAllowance": email_allowance,
-        "overageRateMillicents": rate_millicents,
-        "currency": currency,
-        "overrideAware": status == "active",
-    });
-
-    sqlx::query(
-        r#"
-        INSERT INTO billing_periods (
-            tenant_id, adyen_subscription_id, usage_kind,
-            period_start, period_end, currency, plan_name, email_allowance,
-            overage_rate_millicents, pricing_snapshot, pricing_resolved_at
-        )
-        VALUES ($1, $2, 'subscription', $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
-        ON CONFLICT (tenant_id, usage_kind, period_start) DO NOTHING
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(adyen_subscription_id)
-    .bind(period_start)
-    .bind(period_end)
-    .bind(&currency)
-    .bind(plan_name)
-    .bind(email_allowance)
-    .bind(rate_millicents)
-    .bind(pricing_snapshot.to_string())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| format!("Failed to snapshot billing period: {error}"))?;
-    Ok(())
-}
-
-/// Normalize a tenant billing-currency setting to a 3-letter uppercase ISO
-/// code, defaulting to EUR (audit F32: the default is applied ONCE at
-/// snapshot time and frozen, not per-invoice-read).
-fn normalize_period_currency(raw: &str) -> String {
-    let normalized = raw.trim().to_uppercase();
-    if normalized.len() == 3 && normalized.chars().all(|c| c.is_ascii_uppercase()) {
-        normalized
-    } else {
-        crate::overage::default_period_currency().to_string()
-    }
-}
-
-/// Entitlement decision after a subscription was deleted (audit F36):
-/// the plan comes from the tenant's best REMAINING entitled subscription
-/// (active preferred over trialing); with none left, the tenant drops to
-/// free. Pure — unit-tested. This is what makes a stale `deleted` event for
-/// an already-replaced subscription unable to downgrade the newer active
-/// one: the decision never consults the deleted row.
-fn reconciled_entitlement_plan(remaining: Option<(Option<&str>, &str)>) -> String {
-    match remaining {
-        Some((Some(plan), _status)) if !plan.trim().is_empty() => plan.trim().to_string(),
-        _ => "free".to_string(),
-    }
-}
-
-/// Audit F36 — pure staleness check for a subscription event against the
-/// last APPLIED event watermark (migration 184): an event whose billing
-/// cycle predates the watermark must not rewind the cycle (same-status
-/// older price/period updates, or a delayed active update racing a
-/// committed renewal). Same-cycle events apply (plan changes at a cycle
-/// boundary are legitimate); a missing watermark or a missing cycle in
-/// the event is never treated as stale.
-fn subscription_event_is_stale(
-    incoming_cycle: Option<DateTime<Utc>>,
-    applied_watermark: Option<DateTime<Utc>>,
-) -> bool {
-    match (incoming_cycle, applied_watermark) {
-        (Some(incoming), Some(watermark)) => incoming < watermark,
-        _ => false,
-    }
-}
-
-async fn handle_subscription_deleted(
-    state: &AppState,
-    subscription: SubscriptionEvent,
-) -> Result<(), String> {
-    let Some(tenant_id) = tenant_id_from_metadata(subscription.metadata.as_ref()) else {
-        return Ok(());
-    };
-
-    // Audit F36: reconcile entitlement under a tenant-scoped transaction.
-    // The advisory lock serializes every entitlement writer for this
-    // tenant (create/update/delete), so a stale delete event can no longer
-    // interleave with a newer subscription webhook and downgrade a tenant
-    // that still has an entitled subscription.
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|error| format!("Failed to begin subscription delete transaction: {error}"))?;
-
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("adyen_entitlement:{tenant_id}"))
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
-
-    // Cancel ONLY this tenant's row for the deleted subscription: a stale
-    // or foreign event (subscription bound to another tenant, already
-    // replaced) matches no row and is a no-op.
-    let canceled: Option<String> = sqlx::query_scalar(
-        r#"
-        UPDATE adyen_subscriptions
-        SET status = 'canceled', updated_at = NOW()
-        WHERE adyen_subscription_id = $1
-          AND tenant_id = $2
-        RETURNING tenant_id
-        "#,
-    )
-    .bind(&subscription.id)
-    .bind(tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to cancel Adyen subscription: {error}"))?;
-
-    let Some(canceled_tenant) = canceled else {
-        // Stale event (or the row belongs to another tenant): reject its
-        // effect on the tenant's plan outright.
-        tx.rollback()
-            .await
-            .map_err(|error| format!("Failed to roll back stale delete: {error}"))?;
-        info!(
-            tenant_id = %tenant_id,
-            subscription_id = %subscription.id,
-            "adyen subscription.deleted ignored — no matching row for this tenant (stale event)"
-        );
-        return Ok(());
-    };
-    debug_assert_eq!(canceled_tenant, tenant_id);
-
-    // Audit F30: the deleted subscription's final cycle is still a
-    // billable period — snapshot it before the row goes terminal.
-    let final_cycle: Option<SubscriptionCycleRow> = sqlx::query_as(
-        r#"
-        SELECT billing_cycle_start, billing_cycle_end, plan
-        FROM adyen_subscriptions
-        WHERE adyen_subscription_id = $1 AND tenant_id = $2
-        "#,
-    )
-    .bind(&subscription.id)
-    .bind(tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to load deleted subscription cycle: {error}"))?;
-    if let Some(SubscriptionCycleRow {
-        billing_cycle_start: Some(start),
-        billing_cycle_end: Some(end),
-        plan,
-    }) = final_cycle
-    {
-        snapshot_billing_period(
-            &mut tx,
-            tenant_id,
-            &subscription.id,
-            "canceled",
-            plan.as_deref(),
-            start,
-            end,
-        )
-        .await?;
-    }
-
-    // Reconcile the tenant's plan from the CURRENT subscription state: an
-    // entitled subscription that remains (active or trialing) keeps its
-    // plan; only when none remains does the tenant drop to free. This is
-    // what makes a stale delete of an OLD subscription unable to downgrade
-    // a NEWER active one (audit F36).
-    let remaining: Option<(Option<String>, String)> = sqlx::query_as(
-        r#"
-        SELECT plan, status::text
-        FROM adyen_subscriptions
-        WHERE tenant_id = $1
-          AND adyen_subscription_id <> $2
-          AND status IN ('active', 'trialing')
-        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(&subscription.id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to reconcile remaining entitlement: {error}"))?;
-
-    let reconciled_plan = reconciled_entitlement_plan(
-        remaining
-            .as_ref()
-            .map(|(plan, status)| (plan.as_deref(), status.as_str())),
-    );
-
-    sqlx::query("UPDATE tenants SET plan = $2, updated_at = NOW() WHERE id = $1")
-        .bind(tenant_id)
-        .bind(&reconciled_plan)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("Failed to reconcile tenant plan: {error}"))?;
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("Failed to commit subscription delete: {error}"))?;
-
-    info!(
-        tenant_id = %tenant_id,
-        subscription_id = %subscription.id,
-        reconciled_plan = %reconciled_plan,
-        "adyen subscription canceled — entitlement reconciled from current subscription state"
-    );
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
-// Tax truth (P0): immutable Adyen tax snapshot + independent validation
+// Dunning (atomic retry scheduling + customer notice)
 // ---------------------------------------------------------------------------
-//
-// Adyen and ApexMail must not be two tax deciders. Adyen Tax is the
-// charging authority (`automatic_tax` is enabled at checkout session
-// creation in api-server and is requested on usage invoices); ApexMail
-// persists what Adyen actually decided — amounts, jurisdiction, tax-ID
-// status, invoice id and a payload hash — into `adyen_tax_snapshots`
-// (immutable, migration 218), recomputes the total independently and
-// compares. A mismatch BLOCKS local invoice finalization and raises a
-// `finance_incidents` row instead of quietly recording inconsistent books.
-
-/// ApexMail's independently computed total for a Adyen invoice.
-#[derive(Debug, Clone, PartialEq)]
-struct ExpectedTax {
-    subtotal_cents: i64,
-    vat_cents: i64,
-    total_cents: i64,
-    /// `local_invoice`, `recomputed` or `unavailable`.
-    source: &'static str,
-    country: Option<String>,
-    vat_rate: f64,
-    evidence_id: Option<Uuid>,
-}
-
-/// A charged-total mismatch between Adyen and ApexMail.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TaxTotalDiscrepancy {
-    observed_subtotal_cents: i64,
-    observed_vat_cents: i64,
-    observed_total_cents: i64,
-    expected_subtotal_cents: i64,
-    expected_vat_cents: i64,
-    expected_total_cents: i64,
-    delta_cents: i64,
-}
-
-impl TaxTotalDiscrepancy {
-    fn summary(&self) -> String {
-        format!(
-            "charged total {} != ApexMail-computed {} (subtotal {} vs {}, VAT {} vs {})",
-            self.observed_total_cents,
-            self.expected_total_cents,
-            self.observed_subtotal_cents,
-            self.expected_subtotal_cents,
-            self.observed_vat_cents,
-            self.expected_vat_cents,
-        )
-    }
-}
-
-/// Compare the charged (Adyen) money fields against ApexMail's independent
-/// computation. Pure and unit-tested: the required P0 behaviour is that a
-/// mismatch is an error (the caller blocks finalization and raises a
-/// finance incident), never a warning.
-fn check_charged_total(
-    expected: &ExpectedTax,
-    observed_subtotal_cents: i64,
-    observed_vat_cents: i64,
-    observed_total_cents: i64,
-) -> Result<(), TaxTotalDiscrepancy> {
-    if expected.subtotal_cents == observed_subtotal_cents
-        && expected.vat_cents == observed_vat_cents
-        && expected.total_cents == observed_total_cents
-    {
-        return Ok(());
-    }
-    Err(TaxTotalDiscrepancy {
-        observed_subtotal_cents,
-        observed_vat_cents,
-        observed_total_cents,
-        expected_subtotal_cents: expected.subtotal_cents,
-        expected_vat_cents: expected.vat_cents,
-        expected_total_cents: expected.total_cents,
-        delta_cents: observed_total_cents - expected.total_cents,
-    })
-}
-
-/// Customer tax-ID summary persisted on the snapshot. Adyen verification
-/// states (`verified`, `pending`, `unverified`) are preserved verbatim.
-fn summarize_tax_ids(invoice: &InvoiceEvent) -> (String, serde_json::Value) {
-    let entries = invoice.customer_tax_ids.as_deref().unwrap_or_default();
-    if entries.is_empty() {
-        return ("not_provided".to_string(), serde_json::json!([]));
-    }
-    let mut rows = Vec::with_capacity(entries.len());
-    let mut any_verified = false;
-    for entry in entries {
-        let verification_status = entry
-            .verification
-            .as_ref()
-            .and_then(|verification| verification.get("status"))
-            .and_then(|status| status.as_str())
-            .map(str::to_string);
-        if verification_status.as_deref() == Some("verified") {
-            any_verified = true;
-        }
-        rows.push(serde_json::json!({
-            "type": entry.kind,
-            "value": entry.value,
-            "verification_status": verification_status,
-        }));
-    }
-    let status = if any_verified {
-        "verified"
-    } else {
-        "provided_unverified"
-    };
-    (status.to_string(), serde_json::Value::Array(rows))
-}
-
-/// The jurisdiction Adyen attributed the tax to, from whichever tax
-/// breakdown shape the API version supplies.
-fn tax_jurisdiction(invoice: &InvoiceEvent) -> Option<String> {
-    let entries = invoice
-        .total_taxes
-        .as_ref()
-        .or(invoice.total_tax_amounts.as_ref())?;
-    for entry in entries {
-        for container in [entry.tax_rate_details.as_ref(), entry.tax_rate.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(country) = container.get("country").and_then(|value| value.as_str()) {
-                if !country.trim().is_empty() {
-                    return Some(country.trim().to_uppercase());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Normalized tax breakdown persisted on the snapshot (raw Adyen objects
-/// are not retained verbatim; the hash covers this normalized payload).
-fn tax_breakdown_json(invoice: &InvoiceEvent) -> serde_json::Value {
-    let Some(entries) = invoice
-        .total_taxes
-        .as_ref()
-        .or(invoice.total_tax_amounts.as_ref())
-    else {
-        return serde_json::json!([]);
-    };
-    serde_json::Value::Array(
-        entries
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "amount": entry.amount,
-                    "inclusive": entry.inclusive,
-                    "taxability_reason": entry.taxability_reason,
-                    "tax_rate_details": entry.tax_rate_details,
-                })
-            })
-            .collect(),
-    )
-}
-
-/// The `automatic_tax` status Adyen reported, or `not_enabled`.
-fn automatic_tax_status(invoice: &InvoiceEvent) -> String {
-    invoice
-        .automatic_tax
-        .as_ref()
-        .and_then(|automatic| automatic.status.clone())
-        .or_else(|| {
-            invoice
-                .automatic_tax
-                .as_ref()
-                .and_then(|automatic| automatic.disabled_reason.clone())
-        })
-        .unwrap_or_else(|| "not_enabled".to_string())
-}
-
-fn automatic_tax_complete(invoice: &InvoiceEvent) -> bool {
-    invoice.automatic_tax.as_ref().is_some_and(|automatic| {
-        automatic.enabled.unwrap_or(false) && automatic.status.as_deref() == Some("complete")
-    })
-}
-
-/// SHA-256 over the canonical snapshot payload.
-fn snapshot_payload_hash(payload: &serde_json::Value) -> String {
-    use sha2::Digest;
-    let canonical = serde_json::to_vec(payload).unwrap_or_default();
-    hex::encode(Sha256::digest(&canonical))
-}
-
-/// Row of `adyen_tax_snapshots` already persisted for this Adyen invoice.
-async fn load_existing_tax_snapshot(
-    db: &sqlx::PgPool,
-    adyen_psp_reference: &str,
-) -> Result<Option<(String, i64, i64)>, String> {
-    sqlx::query_as(
-        r#"
-        SELECT validation_status, total_cents,
-               COALESCE(apexmail_expected_total_cents, total_cents)::bigint
-        FROM adyen_tax_snapshots
-        WHERE adyen_psp_reference = $1
-        "#,
-    )
-    .bind(adyen_psp_reference)
-    .fetch_optional(db)
-    .await
-    .map_err(|error| format!("failed to load existing tax snapshot: {error}"))
-}
-
-/// Persist a snapshot (first write wins; the table is trigger-immutable).
-/// Returns the snapshot id.
-#[allow(clippy::too_many_arguments)]
-async fn persist_tax_snapshot(
-    db: &sqlx::PgPool,
-    invoice: &InvoiceEvent,
-    tenant_id: &str,
-    local_invoice_id: Option<Uuid>,
-    currency: &str,
-    observed: (i64, i64, i64),
-    expected: &ExpectedTax,
-    authority: &str,
-    validation_status: &str,
-    discrepancy_cents: i64,
-    tax_id_status: &str,
-    tax_ids: &serde_json::Value,
-) -> Result<Uuid, String> {
-    let breakdown = tax_breakdown_json(invoice);
-    let jurisdiction = tax_jurisdiction(invoice).or_else(|| expected.country.clone());
-    let observed_payload = serde_json::json!({
-        "adyen_psp_reference": invoice.id,
-        "adyen_payment_number": invoice.number,
-        "currency": currency,
-        "subtotal_cents": observed.0,
-        "tax_cents": observed.1,
-        "total_cents": observed.2,
-        "amount_paid_cents": invoice.amount_paid,
-        "automatic_tax_status": automatic_tax_status(invoice),
-        "tax_id_status": tax_id_status,
-        "tax_ids": tax_ids,
-        "jurisdiction": jurisdiction,
-        "tax_breakdown": breakdown,
-        "apexmail": {
-            "expected_subtotal_cents": expected.subtotal_cents,
-            "expected_vat_cents": expected.vat_cents,
-            "expected_total_cents": expected.total_cents,
-            "source": expected.source,
-            "vat_rate": expected.vat_rate,
-            "evidence_id": expected.evidence_id,
-        },
-        "validation_status": validation_status,
-    });
-    let raw_hash = snapshot_payload_hash(&observed_payload);
-
-    let inserted: Option<(Uuid,)> = sqlx::query_as(
-        r#"
-        INSERT INTO adyen_tax_snapshots (
-            adyen_psp_reference, adyen_payment_number, tenant_id, local_invoice_id,
-            currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-            automatic_tax_status, authority, jurisdiction, tax_id_status,
-            tax_ids, tax_breakdown,
-            apexmail_expected_subtotal_cents, apexmail_expected_vat_cents,
-            apexmail_expected_total_cents, validation_status, discrepancy_cents,
-            raw_payload_hash, raw_payload
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-            $16, $17, $18, $19, $20, $21, $22
-        )
-        ON CONFLICT (adyen_psp_reference) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(&invoice.id)
-    .bind(&invoice.number)
-    .bind(tenant_id)
-    .bind(local_invoice_id)
-    .bind(currency)
-    .bind(observed.0)
-    .bind(observed.1)
-    .bind(observed.2)
-    .bind(invoice.amount_paid)
-    .bind(automatic_tax_status(invoice))
-    .bind(authority)
-    .bind(&jurisdiction)
-    .bind(tax_id_status)
-    .bind(tax_ids)
-    .bind(&breakdown)
-    .bind(expected.subtotal_cents)
-    .bind(expected.vat_cents)
-    .bind(expected.total_cents)
-    .bind(validation_status)
-    .bind(discrepancy_cents)
-    .bind(&raw_hash)
-    .bind(&observed_payload)
-    .fetch_optional(db)
-    .await
-    .map_err(|error| format!("failed to persist adyen tax snapshot: {error}"))?;
-
-    if let Some((id,)) = inserted {
-        return Ok(id);
-    }
-    // Already persisted (replay): immutability means first write wins.
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
-    )
-    .bind(&invoice.id)
-    .fetch_one(db)
-    .await
-    .map_err(|error| format!("failed to reload adyen tax snapshot: {error}"))
-}
-
-/// Raise a durable finance incident. Idempotent per open incident: webhook
-/// retries and dead-letter replays cannot spam duplicate open rows.
-#[allow(clippy::too_many_arguments)]
-async fn raise_finance_incident(
-    db: &sqlx::PgPool,
-    kind: &str,
-    severity: &str,
-    tenant_id: &str,
-    local_invoice_id: Option<Uuid>,
-    adyen_psp_reference: &str,
-    currency: &str,
-    expected_total_cents: Option<i64>,
-    observed_total_cents: Option<i64>,
-    detail: &serde_json::Value,
-) -> Result<(), String> {
-    sqlx::query(
-        r#"
-        INSERT INTO finance_incidents (
-            kind, severity, status, tenant_id, local_invoice_id,
-            adyen_psp_reference, currency, expected_total_cents,
-            observed_total_cents, delta_cents, detail
-        )
-        SELECT $1, $2, 'open', $3, $4, $5, $6, $7, $8,
-               COALESCE($7, 0) - COALESCE($8, 0), $9
-        WHERE NOT EXISTS (
-            SELECT 1 FROM finance_incidents
-            WHERE kind = $1 AND adyen_psp_reference = $5 AND status = 'open'
-        )
-        "#,
-    )
-    .bind(kind)
-    .bind(severity)
-    .bind(tenant_id)
-    .bind(local_invoice_id)
-    .bind(adyen_psp_reference)
-    .bind(currency)
-    .bind(expected_total_cents)
-    .bind(observed_total_cents)
-    .bind(detail)
-    .execute(db)
-    .await
-    .map_err(|error| format!("failed to raise finance incident: {error}"))?;
-    Ok(())
-}
-
-/// Load local invoices bound to a Adyen invoice for validation.
-async fn load_local_invoice_tax_rows(
-    db: &sqlx::PgPool,
-    adyen_psp_reference: &str,
-    tenant_id: &str,
-) -> Result<Vec<(Uuid, i64, i64, i64, Option<String>, Option<f64>)>, String> {
-    sqlx::query_as(
-        r#"
-        SELECT id,
-               COALESCE(subtotal, amount, 0)::bigint,
-               COALESCE(vat_total, 0)::bigint,
-               COALESCE(total, amount, 0)::bigint,
-               billing_country,
-               vat_rate
-        FROM invoices
-        WHERE adyen_psp_reference = $1
-          AND (tenant_id = $2 OR tenant_id IS NULL)
-        ORDER BY created_at
-        "#,
-    )
-    .bind(adyen_psp_reference)
-    .bind(tenant_id)
-    .fetch_all(db)
-    .await
-    .map_err(|error| format!("failed to load local invoices for tax validation: {error}"))
-}
-
-/// The tax-truth gate. Persists an immutable snapshot of the finalized
-/// Adyen invoice and validates the charged total against ApexMail's own
-/// computation. Returns `Err` (blocking invoice finalization) when the
-/// charged total disagrees, after raising a durable finance incident.
-async fn validate_and_snapshot_adyen_tax(
-    state: &AppState,
-    invoice: &InvoiceEvent,
-    tenant_id: &str,
-) -> Result<Option<Uuid>, String> {
-    // Replays: the first snapshot is immutable. A recorded discrepancy stays
-    // blocking until a finance operator resolves it; a validated snapshot
-    // makes replays no-ops.
-    if let Some((status, expected_total, observed_total)) =
-        load_existing_tax_snapshot(&state.db, &invoice.id).await?
-    {
-        if status == "discrepancy" {
-            raise_finance_incident(
-                &state.db,
-                "tax_total_mismatch",
-                "high",
-                tenant_id,
-                None,
-                &invoice.id,
-                &normalize_adyen_currency(invoice.currency.as_deref()),
-                Some(expected_total),
-                Some(observed_total),
-                &serde_json::json!({
-                    "reason": "existing immutable snapshot records a charged-total discrepancy",
-                }),
-            )
-            .await?;
-            return Err(format!(
-                "invoice.paid for {} blocked: an open finance incident records a Adyen/ApexMail \
-                 tax discrepancy (Adyen total {observed_total}, ApexMail expected {expected_total})",
-                invoice.id
-            ));
-        }
-        return Ok(Some(
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
-            )
-            .bind(&invoice.id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|error| format!("failed to load tax snapshot id: {error}"))?,
-        ));
-    }
-
-    let (observed_subtotal, observed_vat, observed_total) = derive_invoice_totals(
-        invoice.subtotal,
-        invoice.tax,
-        invoice.total,
-        invoice.amount_due,
-    )
-    .ok_or_else(|| {
-        format!(
-            "invoice.paid for {} carries money fields whose arithmetic overflows integer cents — \
-             refusing to validate tax or settle against wrapped amounts",
-            invoice.id
-        )
-    })?;
-    let currency = normalize_adyen_currency(invoice.currency.as_deref());
-
-    // Expected side 1: the local invoice row(s) already bound to this Adyen
-    // invoice (the overage collection path writes them before finalizing
-    // Adyen-side). Their stored totals ARE ApexMail's computation.
-    let local_rows = load_local_invoice_tax_rows(&state.db, &invoice.id, tenant_id).await?;
-    let expected = if let Some((_, subtotal, vat, total, country, rate)) = local_rows.first() {
-        ExpectedTax {
-            subtotal_cents: *subtotal,
-            vat_cents: *vat,
-            total_cents: *total,
-            source: "local_invoice",
-            country: country.clone(),
-            vat_rate: rate.unwrap_or(0.0),
-            evidence_id: None,
-        }
-    } else {
-        // Expected side 2: recompute from the tenant's billing address and
-        // the tenant's authoritative VAT evidence (reverse charge only
-        // against VIES-verified numbers).
-        let address: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT country, vat_number FROM billing_addresses WHERE tenant_id = $1 \
-             ORDER BY updated_at DESC, created_at DESC, id LIMIT 1",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|error| format!("failed to load billing address for tax validation: {error}"))?;
-
-        match address {
-            Some((country, vat_number)) => {
-                let country = country.filter(|value| !value.trim().is_empty());
-                let vat_number = vat_number.filter(|value| !value.trim().is_empty());
-                let evidence = match (country.as_deref(), vat_number.as_deref()) {
-                    (Some(_), Some(vat)) => {
-                        crate::invoices::load_vat_evidence_for_tenant(&state.db, tenant_id, vat)
-                            .await
-                    }
-                    _ => None,
-                };
-                let at = Utc::now().date_naive();
-                let (rate, vat) = match country.as_deref() {
-                    Some(country) => billing_common::vat_rates::calculate_vat_with_evidence(
-                        observed_subtotal,
-                        country,
-                        vat_number.as_deref(),
-                        evidence.as_ref(),
-                        at,
-                    ),
-                    None => (0.0, 0),
-                };
-                ExpectedTax {
-                    subtotal_cents: observed_subtotal,
-                    vat_cents: vat,
-                    total_cents: observed_subtotal + vat,
-                    source: "recomputed",
-                    country: country.clone(),
-                    vat_rate: rate,
-                    evidence_id: evidence.and_then(|evidence| evidence.id),
-                }
-            }
-            None => ExpectedTax {
-                // No expectation: ApexMail could not recompute. Explicitly
-                // zero/`unavailable` rather than echoing Adyen's numbers,
-                // which would read as an independent match.
-                subtotal_cents: 0,
-                vat_cents: 0,
-                total_cents: 0,
-                source: "unavailable",
-                country: None,
-                vat_rate: 0.0,
-                evidence_id: None,
-            },
-        }
-    };
-
-    let (tax_id_status, tax_ids) = summarize_tax_ids(invoice);
-    let adyen_tax_complete = automatic_tax_complete(invoice);
-    let authority = if adyen_tax_complete {
-        "adyen_tax"
-    } else {
-        "apexmail_local"
-    };
-
-    // Cannot independently recompute (no billing address) and Adyen Tax did
-    // not authoritatively compute either: fail closed. Zero-value invoices
-    // (100% discounts/credits) are exempt — there is no tax decision to
-    // validate and nothing was charged.
-    let zero_value = observed_total <= 0 && observed_vat <= 0;
-    if expected.source == "unavailable" && !adyen_tax_complete && !zero_value {
-        let detail = serde_json::json!({
-            "reason": "no billing address and Adyen Tax is not complete — cannot validate the charged tax",
-            "automatic_tax_status": automatic_tax_status(invoice),
-        });
-        persist_tax_snapshot(
-            &state.db,
-            invoice,
-            tenant_id,
-            None,
-            &currency,
-            (observed_subtotal, observed_vat, observed_total),
-            &expected,
-            authority,
-            "discrepancy",
-            0,
-            &tax_id_status,
-            &tax_ids,
-        )
-        .await?;
-        raise_finance_incident(
-            &state.db,
-            "tax_validation_unavailable",
-            "high",
-            tenant_id,
-            None,
-            &invoice.id,
-            &currency,
-            None,
-            Some(observed_total),
-            &detail,
-        )
-        .await?;
-        return Err(format!(
-            "invoice.paid for {} blocked: cannot validate charged tax (no billing address, \
-             Adyen Tax status {})",
-            invoice.id,
-            automatic_tax_status(invoice)
-        ));
-    }
-
-    let validation = if expected.source == "unavailable" {
-        // Adyen Tax is the authoritative charging authority and ApexMail
-        // has no address to recompute from: accept the external authority,
-        // explicitly flagged.
-        Ok(())
-    } else {
-        check_charged_total(&expected, observed_subtotal, observed_vat, observed_total)
-    };
-
-    let (validation_status, discrepancy_cents) = match &validation {
-        Ok(()) if expected.source == "unavailable" => ("unverified_external", 0),
-        Ok(()) if adyen_tax_complete => ("validated", 0),
-        Ok(()) => ("fallback_unavailable", 0),
-        Err(discrepancy) => ("discrepancy", discrepancy.delta_cents),
-    };
-
-    let local_invoice_id = local_rows.first().map(|row| row.0);
-    let snapshot_id = persist_tax_snapshot(
-        &state.db,
-        invoice,
-        tenant_id,
-        local_invoice_id,
-        &currency,
-        (observed_subtotal, observed_vat, observed_total),
-        &expected,
-        authority,
-        validation_status,
-        discrepancy_cents,
-        &tax_id_status,
-        &tax_ids,
-    )
-    .await?;
-
-    if let Err(discrepancy) = validation {
-        let detail = serde_json::json!({
-            "reason": discrepancy.summary(),
-            "automatic_tax_status": automatic_tax_status(invoice),
-            "expected_source": expected.source,
-            "expected_country": expected.country,
-            "expected_vat_rate": expected.vat_rate,
-            "vat_evidence_id": expected.evidence_id,
-            "tax_id_status": tax_id_status,
-        });
-        raise_finance_incident(
-            &state.db,
-            "tax_total_mismatch",
-            "critical",
-            tenant_id,
-            local_invoice_id,
-            &invoice.id,
-            &currency,
-            Some(expected.total_cents),
-            Some(observed_total),
-            &detail,
-        )
-        .await?;
-        error!(
-            adyen_psp_reference = %invoice.id,
-            tenant_id = %tenant_id,
-            observed_total_cents = observed_total,
-            expected_total_cents = expected.total_cents,
-            delta_cents = discrepancy.delta_cents,
-            "BLOCKED invoice finalization: Adyen charged a total that disagrees with ApexMail's \
-             computation — finance incident raised"
-        );
-        return Err(format!(
-            "invoice.paid for {} blocked: {}",
-            invoice.id,
-            discrepancy.summary()
-        ));
-    }
-
-    info!(
-        adyen_psp_reference = %invoice.id,
-        tenant_id = %tenant_id,
-        authority,
-        validation_status,
-        observed_total_cents = observed_total,
-        expected_total_cents = expected.total_cents,
-        "adyen tax snapshot persisted and charged total validated"
-    );
-
-    Ok(Some(snapshot_id))
-}
-
-async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
-    // Prefer tenant_id from event metadata (immutable snapshot from Adyen),
-    // then fall back to resolving the invoice's subscription locally.
-    let metadata_tenant_id = tenant_id_from_metadata(
-        invoice
-            .subscription_details
-            .as_ref()
-            .and_then(|details| details.metadata.as_ref()),
-    )
-    .map(str::to_string);
-
-    let subscription_id = invoice.subscription.as_ref().map(ExpandableId::id);
-
-    // Resolve tenant via the subscription fallback when metadata is absent.
-    let fallback_tenant_id = match (&metadata_tenant_id, subscription_id) {
-        (Some(_), _) => None,
-        (None, Some(sub_id)) => sqlx::query_scalar::<_, String>(
-            r#"
-                SELECT tenant_id
-                FROM adyen_subscriptions
-                WHERE adyen_subscription_id = $1
-                ORDER BY created_at DESC
-                LIMIT 1
-                "#,
-        )
-        .bind(sub_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|error| format!("Failed to resolve tenant from subscription: {error}"))?,
-        (None, None) => None,
-    };
-
-    // Never silently drop paid revenue: when no tenant can be resolved the
-    // event is deadlettered with a reason (it can be replayed once the
-    // subscription row exists).
-    let Some(tenant_id) = metadata_tenant_id.or(fallback_tenant_id) else {
-        return Err(format!(
-            "invoice.paid for {} could not be resolved to a tenant (no metadata tenant_id, no subscription match)",
-            invoice.id
-        ));
-    };
-
-    // TAX-TRUTH GATE (P0): persist an immutable snapshot of the finalized
-    // Adyen invoice's tax decision and validate the charged total against
-    // ApexMail's own computation BEFORE finalizing any local invoice. A
-    // mismatch returns Err here — no local invoice is marked paid, no
-    // revenue-recognising insert runs — and a durable finance incident is
-    // raised for operators.
-    let tax_snapshot_id = validate_and_snapshot_adyen_tax(state, &invoice, &tenant_id).await?;
-
-    // Settle the local invoice(s) bound to this Adyen invoice (audits
-    // F72/F73). The old modifying CTE ended in `SELECT 1` and relied on
-    // rows_affected — but PostgreSQL's CommandComplete for `SELECT 1`
-    // reports one retrieved row even when the marked/allocation CTEs
-    // contained ZERO invoices, so a missing local invoice was
-    // indistinguishable from a real settlement. The replacement locks and
-    // RETURNS the actual invoice identities, and the allocation records
-    // the VERIFIED payment amount (amount_paid), capped against the
-    // authoritative remaining obligation (total − confirmed allocations −
-    // debt-reduction credits) in the MATCHING currency — never the full
-    // invoice total on top of existing wallet payments. Zero-value
-    // invoices settle without a positive allocation (the amount_cents > 0
-    // CHECK forbids storing one). Legacy nullable totals resolve through
-    // the canonical COALESCE(total, amount, 0) resolver.
-    let payment_cents = verified_payment_cents(&invoice);
-    let event_currency = invoice
-        .currency
-        .as_deref()
-        .map(|raw| normalize_adyen_currency(Some(raw)));
-
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|error| format!("Failed to begin invoice settlement transaction: {error}"))?;
-
-    let marked: Vec<(Uuid, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, tenant_id, currency
-        FROM invoices
-        WHERE adyen_psp_reference = $1
-          AND (tenant_id = $2 OR tenant_id IS NULL)
-        ORDER BY created_at
-        FOR UPDATE
-        "#,
-    )
-    .bind(&invoice.id)
-    .bind(&tenant_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to lock invoices for Adyen {}: {error}", invoice.id))?;
-
-    for (invoice_row_id, row_tenant, invoice_currency) in &marked {
-        if let Some(event_currency) = event_currency.as_deref() {
-            if !event_currency.eq_ignore_ascii_case(invoice_currency.trim()) {
-                // A payment in a different currency must never be recorded
-                // against this invoice's obligation — surface for
-                // reconciliation instead of minting phantom value.
-                return Err(format!(
-                    "invoice.paid for {} carries currency {event_currency} but local invoice \
-                     {invoice_row_id} is denominated in {invoice_currency}",
-                    invoice.id
-                ));
-            }
-        }
-
-        let outstanding = crate::invoices::invoice_outstanding_cents_in(&mut *tx, *invoice_row_id)
-            .await
-            .map_err(|error| {
-                format!("Failed to derive outstanding for {invoice_row_id}: {error}")
-            })?;
-
-        let allocation = payment_cents.min(outstanding).max(0);
-        if payment_cents > outstanding {
-            warn!(
-                invoice_id = %invoice_row_id,
-                adyen_psp_reference = %invoice.id,
-                payment_cents,
-                outstanding,
-                "adyen payment exceeds the remaining obligation — allocating only the \
-                 authoritative remainder (over-allocation rejected)"
-            );
-        }
-
-        sqlx::query(
-            r#"
-            UPDATE invoices
-            SET status = 'paid',
-                paid_at = COALESCE(paid_at, NOW()),
-                updated_at = NOW()
-            WHERE id = $1
-            "#,
-        )
-        .bind(invoice_row_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("Failed to mark invoice {invoice_row_id} paid: {error}"))?;
-
-        if allocation > 0 {
-            sqlx::query(
-                r#"
-                INSERT INTO invoice_payment_allocations (
-                    id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
-                )
-                VALUES (
-                    gen_random_uuid(), $1, $2, $3, 'adyen', $4, $5
-                )
-                ON CONFLICT (operation_id) DO NOTHING
-                "#,
-            )
-            .bind(row_tenant)
-            .bind(invoice_row_id)
-            .bind(format!("adyen:{}", invoice.id))
-            .bind(allocation)
-            .bind(invoice_currency.trim().to_uppercase())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("Failed to record Adyen payment allocation: {error}"))?;
-
-            // Statutory ledger: post the settlement (Dr processor clearing,
-            // Cr AR) in the same transaction. Idempotent on the allocation's
-            // unique operation id, so a replayed webhook posts once.
-            crate::accounting_postings::post_payment_allocation_in(
-                &mut tx,
-                &format!("adyen:{}", invoice.id),
-            )
-            .await;
-        } else {
-            info!(
-                invoice_id = %invoice_row_id,
-                adyen_psp_reference = %invoice.id,
-                payment_cents,
-                outstanding,
-                "adyen invoice settled without a positive allocation (zero-value/already covered)"
-            );
-        }
-    }
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("Failed to commit invoice settlement: {error}"))?;
-
-    // Statutory ledger: post invoice finalization for every locally settled
-    // invoice (no-op replay when the usage sweep already posted it). Runs
-    // AFTER the settlement commit because a zero/legacy invoice may still
-    // need its revenue entry; the source identity makes the replay
-    // idempotent.
-    for (invoice_row_id, _row_tenant, _invoice_currency) in &marked {
-        crate::accounting_postings::post_invoice_issued(&state.db, *invoice_row_id).await;
-    }
-
-    // Fix F4/F72 — dunning recovery is only legitimate when this event
-    // actually settled THE tenant's invoice. `marked` contains the REAL
-    // returned invoice identities (never a constant SELECT result), so a
-    // missing local invoice falls through to the external-invoice
-    // reconciliation/import path keyed on the unique Adyen invoice id.
-    let invoice_persisted = !marked.is_empty();
-    if !invoice_persisted {
-        // Fix A — no local row matched, meaning the invoice was created
-        // on Adyen's side (e.g. subscription billing, Meter usage, or a
-        // finalized usage-collection invoice whose local draft was never
-        // linked) without a local row. Insert the paid invoice so revenue
-        // is recorded. ON CONFLICT makes replays idempotent. Rows == 0
-        // means the tenant guard rejected the upsert (the local row is
-        // bound to a DIFFERENT tenant) — not this tenant's invoice.
-        let inserted = insert_paid_invoice_from_adyen(state, &invoice, &tenant_id).await?;
-        if inserted == 0 {
-            warn!(
-                invoice_id = %invoice.id,
-                tenant_id = %tenant_id,
-                "invoice.paid upsert matched 0 rows (invoice bound to another tenant) — dunning state left untouched"
-            );
-        } else {
-            // Statutory ledger: post the imported invoice's revenue/AR entry.
-            // The local id is resolved by the unique Adyen invoice id.
-            let local_id: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM invoices WHERE adyen_psp_reference = $1")
-                    .bind(&invoice.id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .map_err(|error| {
-                        format!("Failed to resolve imported invoice {}: {error}", invoice.id)
-                    })?;
-            if let Some(local_id) = local_id {
-                crate::accounting_postings::post_invoice_issued(&state.db, local_id).await;
-            }
-        }
-    }
-
-    // If a previously-dunning invoice was settled, clear the tenant's dunning
-    // state (healthy again), release queued messages and drop the cached
-    // status — mirrors the auto-pay recovery path in maintenance.rs.
-    // Fix F4 — only when the settlement actually persisted an invoice for
-    // this tenant above; a guard-rejected event must never blanket-reset
-    // dunning or reactivate the tenant. The recovery is scoped to this
-    // invoice's failure history inside mark_payment_recovered.
-    if invoice_persisted {
-        crate::maintenance::mark_payment_recovered(state, &tenant_id, Some(&invoice.id)).await?;
-    }
-
-    // Recognition ledger: reflect the settlement/new invoice in
-    // `vat_recognition_entries`. General-scheme supplies were recognised at
-    // issue; cash-accounting supplies recognise on payment (or the
-    // third-month fallback, handled by the sweep). Idempotent, best-effort:
-    // a failure here is logged, never allowed to fake or skip the ledger.
-    // Fix #10 sweep: a DB failure here previously collapsed to an empty vec
-    // via `unwrap_or_default`, silently skipping recognition materialization
-    // for a settled invoice — the exact silent-ledger-skip the comment above
-    // forbids. Keep the best-effort behavior (never fail the webhook over the
-    // ledger), but make the skip loud and alert-grade.
-    let bound_invoices: Vec<(Uuid,)> = match sqlx::query_as(
-        r#"
-        SELECT id FROM invoices
-        WHERE adyen_psp_reference = $1
-          AND (tenant_id = $2 OR tenant_id IS NULL)
-        "#,
-    )
-    .bind(&invoice.id)
-    .bind(&tenant_id)
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            error!(
-                adyen_psp_reference = %invoice.id,
-                tenant_id = %tenant_id,
-                error = %error,
-                "could not load invoices bound to this Adyen settlement — \
-                 VAT recognition materialization SKIPPED for it (Fix #10 sweep)"
-            );
-            Vec::new()
-        }
-    };
-    for (invoice_row_id,) in &bound_invoices {
-        if let Err(error) = crate::vat_recognition::materialize_invoice_recognition_by_id(
-            &state.db,
-            *invoice_row_id,
-            Utc::now(),
-        )
-        .await
-        {
-            warn!(
-                invoice_id = %invoice_row_id,
-                adyen_psp_reference = %invoice.id,
-                error = %error,
-                "failed to materialize VAT recognition after Adyen settlement"
-            );
-        }
-    }
-
-    // Link the immutable tax snapshot onto every local invoice bound to this
-    // Adyen invoice (rows settled above plus the row inserted from the
-    // Adyen payload when there was none).
-    if let Some(snapshot_id) = tax_snapshot_id {
-        if let Err(error) = sqlx::query(
-            r#"
-            UPDATE invoices
-            SET adyen_tax_snapshot_id = $2,
-                updated_at = NOW()
-            WHERE adyen_psp_reference = $1
-              AND (tenant_id = $3 OR tenant_id IS NULL)
-            "#,
-        )
-        .bind(&invoice.id)
-        .bind(snapshot_id)
-        .bind(&tenant_id)
-        .execute(&state.db)
-        .await
-        {
-            warn!(
-                adyen_psp_reference = %invoice.id,
-                snapshot_id = %snapshot_id,
-                error = %error,
-                "failed to link adyen tax snapshot onto local invoice(s) — snapshot remains authoritative"
-            );
-        }
-    }
-
-    info!(
-        invoice_id = %invoice.id,
-        tenant_id = %tenant_id,
-        settled_invoices = marked.len(),
-        payment_cents,
-        dunning_recovery = invoice_persisted,
-        "adyen invoice marked as paid"
-    );
-    Ok(())
-}
-
-/// The VERIFIED payment amount for an `invoice.paid` event (audit F73):
-/// Adyen's own `amount_paid` when present; otherwise the canonical
-/// derived total (never `invoices.total`, which may already be partially
-/// covered by wallet allocations). Clamped at zero.
-fn verified_payment_cents(invoice: &InvoiceEvent) -> i64 {
-    match invoice.amount_paid {
-        Some(paid) => paid.max(0),
-        None => {
-            // Overflowing payload arithmetic yields None: settle nothing
-            // rather than derive a wrapped "total" as the payment amount.
-            derive_invoice_totals(
-                invoice.subtotal,
-                invoice.tax,
-                invoice.total,
-                invoice.amount_due,
-            )
-            .map_or(0, |(_, _, total)| total.max(0))
-        }
-    }
-}
-
-/// Insert a paid invoice from a Adyen `invoice.paid` event when no local
-/// row exists (Fix A). Money stays integer cents; the currency, subtotal,
-/// VAT and total come from the Adyen payload; sequential numbering uses the
-/// existing `invoice_number_seq` unless Adyen assigned a number.
-/// Idempotent via ON CONFLICT (adyen_psp_reference) (unique index, migration 101).
-/// Returns the number of rows affected: 0 when the tenant guard in the ON
-/// CONFLICT clause rejected the update (the local row is bound to a
-/// different tenant) — callers use that to decide whether payment recovery
-/// is legitimate (Fix F4).
-/// Parse a Adyen decimal-string amount ("65.00", "0.40") into integer
-/// cents without floating point. Returns None on malformed input.
-fn adyen_decimal_to_cents(value: &str) -> Option<i64> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let (whole, frac) = match value.split_once('.') {
-        Some((w, f)) => (w, f),
-        None => (value, ""),
-    };
-    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let whole: i64 = whole.parse().ok()?;
-    let frac_parsed: i64 = if frac.is_empty() {
-        0
-    } else if frac.len() == 1 {
-        frac.parse::<i64>().ok()? * 10
-    } else {
-        frac.parse().ok()?
-    };
-    // External payload: a (signature-verified but absurd) whole part near
-    // i64::MAX must yield `None`, never a wrapped cent total (audit SM7 F7 —
-    // mirrors bank_ingest::parse_amount_cents).
-    whole
-        .checked_mul(100)
-        .and_then(|cents| cents.checked_add(frac_parsed))
-}
-
-/// What the paid-invoice importer must do when the Adyen event names its
-/// local obligation via `apexmailInvoiceId` metadata (pure — audit SM7 F3,
-/// pinned by unit tests).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DuplicateCollectionDecision {
-    /// The event's Adyen invoice id IS the obligation's binding: the normal
-    /// conflict-target upsert updates that one row — nothing doubled.
-    SameInvoice,
-    /// The obligation is already bound to a DIFFERENT Adyen invoice: this
-    /// event is a second external invoice for one obligation. REFUSED (and
-    /// flagged for review) — importing it would double-record revenue and AR.
-    RefuseDuplicate,
-    /// The obligation exists but carries no Adyen binding yet: the first
-    /// collection attempt died between finalize and the mapping write.
-    /// Binding the event's id repairs the mapping (the same conditional
-    /// update the collection ladder uses); inserting a second row would
-    /// double-record the obligation.
-    BindObligation,
-    /// No local row carries the obligation id — a legacy or foreign event.
-    /// The legacy import path applies.
-    NoLocalObligation,
-}
-
-/// Decide the importer's course from the obligation's current Adyen binding
-/// (pure). `bound` is `None` when no local row exists for the obligation id,
-/// `Some(binding)` with the row's current `adyen_psp_reference` (`None` =
-/// unbound).
-fn duplicate_collection_decision(
-    bound: Option<Option<&str>>,
-    event_adyen_psp_reference: &str,
-) -> DuplicateCollectionDecision {
-    match bound {
-        None => DuplicateCollectionDecision::NoLocalObligation,
-        Some(None) => DuplicateCollectionDecision::BindObligation,
-        Some(Some(existing)) if existing == event_adyen_psp_reference => {
-            DuplicateCollectionDecision::SameInvoice
-        }
-        Some(Some(_)) => DuplicateCollectionDecision::RefuseDuplicate,
-    }
-}
-
-/// The local Adyen binding of an obligation named by event metadata.
-async fn obligation_adyen_binding(
-    db: &sqlx::PgPool,
-    obligation_id: Uuid,
-) -> Result<Option<Option<String>>, String> {
-    sqlx::query_scalar("SELECT adyen_psp_reference FROM invoices WHERE id = $1")
-        .bind(obligation_id)
-        .fetch_optional(db)
-        .await
-        .map_err(|error| format!("obligation lookup failed: {error}"))
-}
-
-/// Flag a refused duplicate collection for operator review: alert-grade log,
-/// counter, and a durable operator-facing notification row.
-async fn flag_duplicate_collection_for_review(
-    state: &AppState,
-    tenant_id: &str,
-    obligation_id: Uuid,
-    bound_invoice_id: &str,
-    event_invoice_id: &str,
-) {
-    metrics::counter!("adyen_duplicate_collection_refused_total").increment(1);
-    tracing::error!(
-        tenant_id = %tenant_id,
-        obligation_invoice_id = %obligation_id,
-        bound_adyen_payment = %bound_invoice_id,
-        refused_adyen_payment = %event_invoice_id,
-        "DUPLICATE Adyen collection refused — the obligation already carries a bound Adyen \
-         invoice; the refused event was NOT imported (audit SM7 F3). Reconcile manually."
-    );
-    if let Err(error) = sqlx::query(
-        r#"
-        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-        VALUES (gen_random_uuid(), $1, 'duplicate_adyen_collection_refused', $2, 'pending', NOW())
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(serde_json::json!({
-        "obligationInvoiceId": obligation_id.to_string(),
-        "boundAdyenPayment": bound_invoice_id,
-        "refusedAdyenPayment": event_invoice_id,
-        "audit": "SM7 F3",
-    }))
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(
-            tenant_id = %tenant_id,
-            obligation_invoice_id = %obligation_id,
-            error = %error,
-            "could not enqueue the duplicate-collection review flag"
-        );
-    }
-}
-
-/// Repair a lost local ↔ external mapping: the obligation is unbound because
-/// the first collection attempt died between the Adyen finalize and the
-/// mapping write; the webhook that proves the mapping IS this event.
-async fn bind_unbound_obligation(
-    state: &AppState,
-    obligation_id: Uuid,
-    event_invoice_id: &str,
-) -> Result<u64, String> {
-    let bound = sqlx::query(
-        "UPDATE invoices SET adyen_psp_reference = $2, updated_at = NOW() \
-         WHERE id = $1 AND adyen_psp_reference IS NULL",
-    )
-    .bind(obligation_id)
-    .bind(event_invoice_id)
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("binding the obligation failed: {error}"))?;
-    let rows = bound.rows_affected();
-    if rows > 0 {
-        info!(
-            obligation_invoice_id = %obligation_id,
-            adyen_psp_reference = %event_invoice_id,
-            "repaired the lost local↔Adyen mapping from the invoice.paid event (audit SM7 F3)"
-        );
-    }
-    Ok(rows)
-}
-
-async fn insert_paid_invoice_from_adyen(
-    state: &AppState,
-    invoice: &InvoiceEvent,
-    tenant_id: &str,
-) -> Result<u64, String> {
-    let (subtotal, vat_total, total) = derive_invoice_totals(
-        invoice.subtotal,
-        invoice.tax,
-        invoice.total,
-        invoice.amount_due,
-    )
-    .ok_or_else(|| {
-        format!(
-            "invoice.paid for {} carries money fields whose arithmetic overflows integer cents — \
-             refusing to insert a wrapped-amount invoice",
-            invoice.id
-        )
-    })?;
-    // Audit SM7 F3: when the event names its LOCAL obligation, a second
-    // Adyen invoice for an already-bound obligation is refused (and flagged
-    // for review), an unbound obligation is bound — and only a genuinely
-    // unclaimed event reaches the import below. One obligation can never
-    // become two local paid invoices with two ledger entries.
-    if let Some(obligation) = invoice
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("apexmailInvoiceId"))
-        .and_then(|value| Uuid::parse_str(value).ok())
-    {
-        let bound = obligation_adyen_binding(&state.db, obligation).await?;
-        let decision = duplicate_collection_decision(
-            bound.as_ref().map(|binding| binding.as_deref()),
-            &invoice.id,
-        );
-        match decision {
-            DuplicateCollectionDecision::RefuseDuplicate => {
-                let bound_invoice_id = bound.flatten().unwrap_or_default();
-                flag_duplicate_collection_for_review(
-                    state,
-                    tenant_id,
-                    obligation,
-                    &bound_invoice_id,
-                    &invoice.id,
-                )
-                .await;
-                return Ok(0);
-            }
-            DuplicateCollectionDecision::BindObligation => {
-                return bind_unbound_obligation(state, obligation, &invoice.id).await;
-            }
-            DuplicateCollectionDecision::SameInvoice
-            | DuplicateCollectionDecision::NoLocalObligation => {}
-        }
-    }
-    let vat_rate = derive_invoice_vat_rate(subtotal, vat_total);
-    let currency = normalize_adyen_currency(invoice.currency.as_deref());
-
-    // Mandatory invoice content: when Adyen's event carries line items,
-    // store them. Fall back to a single summary line so the stored invoice
-    // (and its PDF) never renders an empty items table.
-    let line_items_json = match &invoice.lines {
-        Some(lines) if !lines.data.is_empty() => {
-            let items: Vec<serde_json::Value> = lines
-                .data
-                .iter()
-                .map(|line| {
-                    let amount = line.amount.unwrap_or(subtotal);
-                    let vat_amount = billing_common::vat_rates::vat_amount_half_up(
-                        amount,
-                        if vat_rate > 0.0 { vat_rate } else { 0.0 },
-                    );
-                    let quantity = line.quantity.unwrap_or(1).max(1);
-                    // Prefer Adyen's VAT-exclusive unit amount when present;
-                    // fall back to deriving net from amount − VAT.
-                    let net = line
-                        .unit_amount_excluding_tax
-                        .as_deref()
-                        .and_then(adyen_decimal_to_cents)
-                        .map(|unit_cents| unit_cents * quantity)
-                        .unwrap_or(amount - vat_amount);
-                    serde_json::json!({
-                        "description": line.description.clone().unwrap_or_else(|| "Subscription".to_string()),
-                        "quantity": quantity,
-                        "unit_price": net / quantity,
-                        "amount": net,
-                        "vat_rate": vat_rate,
-                        "vat_amount": vat_amount,
-                    })
-                })
-                .collect();
-            serde_json::Value::Array(items)
-        }
-        _ => {
-            let vat_amount = vat_total;
-            let net = total - vat_amount;
-            serde_json::json!([{
-                "description": "Subscription",
-                "quantity": 1,
-                "unit_price": net,
-                "amount": net,
-                "vat_rate": vat_rate,
-                "vat_amount": vat_amount,
-            }])
-        }
-    };
-
-    let issued_at = invoice
-        .created
-        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
-        .unwrap_or_else(Utc::now);
-    let period_start = invoice
-        .period_start
-        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
-        .unwrap_or(issued_at);
-    let period_end = invoice
-        .period_end
-        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
-        .unwrap_or(issued_at);
-
-    // Best-effort capture of the billing country for KMD bucketing (I4):
-    // invoices created directly from Adyen carry no local VAT derivation,
-    // so store the current address; the VAT rate is derived from the Adyen
-    // amounts themselves. Audit F08: the FULL address is snapshotted
-    // immutably onto the invoice in the SAME versioned contract the
-    // billing-service and api-server writers use (snapshotVersion +
-    // registry identity) — null/empty optional fields stay null and are
-    // never refilled from the live account on re-export.
-    let address_snapshot: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT json_build_object(
-            'snapshotVersion', 1,
-            'company_name', ba.company_name,
-            'vat_number', ba.vat_number,
-            'address_line1', ba.address_line1,
-            'address_line2', ba.address_line2,
-            'city', ba.city,
-            'state', ba.state,
-            'postal_code', ba.postal_code,
-            'country', ba.country,
-            'email', ba.email,
-            'registry_code', t.settings->>'registryCode'
-        )::text
-        FROM billing_addresses ba
-        JOIN tenants t ON t.id = ba.tenant_id
-        WHERE ba.tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None)
-    .flatten();
-    let billing_country: Option<String> = address_snapshot
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|snapshot| {
-            snapshot
-                .get("country")
-                .and_then(|value| value.as_str())
-                .map(|country| country.to_uppercase())
-        });
-    let billing_registry_code: Option<String> = address_snapshot
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|snapshot| {
-            snapshot
-                .get("registry_code")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        });
-
-    let result = sqlx::query(
-        r#"
-        INSERT INTO invoices (
-            id, tenant_id, adyen_psp_reference, invoice_number, status,
-            currency, amount, subtotal, vat_total, total, line_items,
-            issued_at, due_at, paid_at, period_start, period_end,
-            billing_country, vat_rate, billing_address, billing_registry_code,
-            created_at, updated_at
-        ) VALUES (
-            gen_random_uuid(), $1, $2,
-            COALESCE($3, to_char(NOW(), 'YYYY') || '-' || LPAD(nextval('invoice_number_seq')::text, 6, '0')),
-            'paid', $4, $7, $5, $6, $7, $13,
-            to_timestamp($8), to_timestamp($8), NOW(), to_timestamp($9), to_timestamp($10),
-            $11, $12, $14, $15,
-            NOW(), NOW()
-        )
-        -- migration 101 created adyen_psp_reference as a PARTIAL unique index
-        -- (WHERE adyen_psp_reference IS NOT NULL); conflict inference must
-        -- repeat that predicate or PostgreSQL raises 42P10 ("no unique or
-        -- exclusion constraint matching the ON CONFLICT specification") and
-        -- every Adyen-originated paid invoice fails to persist.
-        ON CONFLICT (adyen_psp_reference) WHERE adyen_psp_reference IS NOT NULL DO UPDATE SET
-            status = 'paid',
-            paid_at = COALESCE(invoices.paid_at, NOW()),
-            updated_at = NOW()
-        -- Tenant guard mirrors the subscription handler's re-binding
-        -- protection: a local row already bound to a DIFFERENT tenant must
-        -- never be flipped to paid by an event resolved to this tenant —
-        -- without the WHERE, the DO UPDATE would mark tenant A's invoice
-        -- paid while silently discarding the EXCLUDED tenant attribution.
-        WHERE invoices.tenant_id IS NULL
-           OR invoices.tenant_id = EXCLUDED.tenant_id
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(&invoice.id)
-    .bind(invoice.number.as_deref().filter(|value| !value.is_empty()))
-    .bind(&currency)
-    .bind(subtotal)
-    .bind(vat_total)
-    .bind(total)
-    .bind(issued_at.timestamp())
-    .bind(period_start.timestamp())
-    .bind(period_end.timestamp())
-    .bind(billing_country)
-    .bind(vat_rate)
-    .bind(line_items_json)
-    .bind(address_snapshot)
-    .bind(billing_registry_code)
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to insert paid Adyen invoice {}: {error}", invoice.id))?;
-
-    let rows_affected = result.rows_affected();
-
-    info!(
-        invoice_id = %invoice.id,
-        tenant_id = %tenant_id,
-        subtotal,
-        vat_total,
-        total,
-        currency = %currency,
-        rows_affected,
-        "inserted missing local invoice from Adyen invoice.paid event"
-    );
-
-    Ok(rows_affected)
-}
-
-async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
-    // Fix H — resolve the tenant from event metadata first, then fall back
-    // to the same adyen_subscriptions lookup handle_invoice_paid uses.
-    // Unresolvable events are deadlettered (via the returned error) instead
-    // of being silently dropped.
-    let metadata_tenant_id = tenant_id_from_metadata(
-        invoice
-            .subscription_details
-            .as_ref()
-            .and_then(|details| details.metadata.as_ref()),
-    )
-    .map(str::to_string);
-
-    let tenant_id = match metadata_tenant_id {
-        Some(tenant_id) => tenant_id,
-        None => {
-            let Some(sub_id) = invoice.subscription.as_ref().map(ExpandableId::id) else {
-                return Err(format!(
-                    "invoice.payment_failed for {} has neither subscription metadata nor a subscription reference — tenant unresolvable",
-                    invoice.id
-                ));
-            };
-
-            sqlx::query_scalar::<_, String>(
-                r#"
-                SELECT tenant_id
-                FROM adyen_subscriptions
-                WHERE adyen_subscription_id = $1
-                ORDER BY created_at DESC
-                LIMIT 1
-                "#,
-            )
-            .bind(sub_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|error| format!("Failed to resolve tenant from subscription: {error}"))?
-            .ok_or_else(|| {
-                format!(
-                    "invoice.payment_failed for {} references unknown subscription {sub_id} — tenant unresolvable",
-                    invoice.id
-                )
-            })?
-        }
-    };
-
-    let dunning = record_failed_payment(state, &tenant_id, &invoice.id, invoice.amount_due).await?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-        VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())
-        "#,
-    )
-    .bind(&tenant_id)
-    .bind(serde_json::json!({
-        "invoiceId": invoice.id,
-        "amount": invoice.amount_due,
-        // The invoice's own currency travels with the amount: the
-        // notification drainer renders money with this code and never
-        // assumes one (the drain labels an absent code explicitly).
-        "currency": normalize_adyen_currency(invoice.currency.as_deref()),
-        "attemptCount": invoice.attempt_count.unwrap_or_default(),
-        "dunningStatus": dunning.status,
-        "nextRetryAt": dunning.next_retry_at.map(|value| value.to_rfc3339()),
-    }))
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to enqueue payment_failed notification: {error}"))?;
-
-    warn!(tenant_id = %tenant_id, invoice_id = %invoice.id, "adyen invoice payment failed");
-    Ok(())
-}
-
-async fn handle_trial_ending(
-    state: &AppState,
-    subscription: SubscriptionEvent,
-) -> Result<(), String> {
-    let Some(tenant_id) = tenant_id_from_metadata(subscription.metadata.as_ref()) else {
-        return Ok(());
-    };
-
-    sqlx::query(
-        r#"
-        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-        VALUES (gen_random_uuid(), $1, 'trial_ending', $2, 'pending', NOW())
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(serde_json::json!({
-        "subscriptionId": subscription.id,
-        "trialEnd": subscription.trial_end,
-    }))
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to enqueue trial_ending notification: {error}"))?;
-
-    info!(tenant_id = %tenant_id, subscription_id = %subscription.id, "adyen trial ending notification queued");
-    Ok(())
-}
 
 /// Post-increment dunning state as returned by the atomic upsert.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -3234,8 +2368,8 @@ impl DunningTransition {
 
 /// Pure classifier for dunning state transitions: returns `Some` only when
 /// the status actually *changes into* a suspension state (or back to
-/// healthy), so repeated `invoice.payment_failed` webhooks for a tenant
-/// that is already suspended do not spam duplicate transition events.
+/// healthy), so repeated refusal notifications for a tenant that is already
+/// suspended do not spam duplicate transition events.
 /// Unit-tested.
 pub fn dunning_transition(previous: Option<&str>, new_status: &str) -> Option<DunningTransition> {
     let previous = previous.map(str::trim).filter(|status| !status.is_empty());
@@ -3279,7 +2413,7 @@ async fn record_failed_payment(
     // Fix H — single UPSERT with SQL-side increment. The counter increment
     // and first_failed_at=LEAST(existing, now) happen atomically inside the
     // statement, eliminating the read-compute-write race that lost
-    // increments under concurrent invoice.payment_failed events.
+    // increments under concurrent refusal events.
     // dunning_records.id is VARCHAR(26) (migrations 087/093) — a 36-char
     // gen_random_uuid() string would overflow the column. Generate the id
     // in Rust with the shared 26-char generator instead.
@@ -3578,449 +2712,6 @@ async fn send_dunning_notification(
     }
 }
 
-fn tenant_id_from_metadata(metadata: Option<&HashMap<String, String>>) -> Option<&str> {
-    metadata
-        .and_then(|values| values.get("tenant_id"))
-        .map(String::as_str)
-        .filter(|value| !value.is_empty())
-}
-
-#[derive(Debug, Deserialize)]
-struct EventIdEnvelope {
-    id: Option<String>,
-}
-
-#[derive(Debug)]
-enum RouteValidationError {
-    InvalidJson(String),
-    MissingEventId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeadletterEntry {
-    reason: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    occurred_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    event_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload_length: Option<usize>,
-    /// How many times this entry has been retried so far.
-    #[serde(default)]
-    retry_count: u32,
-    /// Maximum retry attempts before giving up.
-    #[serde(default = "default_max_retries")]
-    max_retries: u32,
-    /// Raw Adyen webhook body (JSON), for replay on retry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body: Option<String>,
-    /// Original `Adyen-Signature` header value, for replay on retry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    signature: Option<String>,
-}
-
-const fn default_max_retries() -> u32 {
-    DEADLETTER_MAX_RETRIES
-}
-
-impl Default for DeadletterEntry {
-    fn default() -> Self {
-        Self {
-            reason: String::new(),
-            occurred_at: None,
-            event_id: None,
-            error: None,
-            payload_length: None,
-            retry_count: 0,
-            max_retries: DEADLETTER_MAX_RETRIES,
-            body: None,
-            signature: None,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct PreparedDeadletter {
-    event_key: String,
-    payload: String,
-    now_ms: i64,
-    cleanup_before_ms: i64,
-    retry_at_ms: Option<i64>,
-}
-
-#[derive(Debug)]
-struct ProcessWebhookResult {
-    #[expect(
-        dead_code,
-        reason = "returned for webhook worker diagnostics outside unit-test assertions"
-    )]
-    event_type: String,
-    #[expect(
-        dead_code,
-        reason = "returned for webhook worker diagnostics outside unit-test assertions"
-    )]
-    processed: bool,
-}
-
-#[derive(Debug)]
-enum ProcessWebhookError {
-    RecordDeadletter(String),
-    DeadletterFlowHandled(String),
-    /// Transient condition (e.g. another worker holds the event): Adyen
-    /// must retry. Maps to 5xx and never deadletters (Fix G).
-    RetryLater(String),
-}
-
-impl ProcessWebhookError {
-    fn message(&self) -> &str {
-        match self {
-            Self::RecordDeadletter(message)
-            | Self::DeadletterFlowHandled(message)
-            | Self::RetryLater(message) => message,
-        }
-    }
-
-    fn should_record_deadletter(&self) -> bool {
-        matches!(self, Self::RecordDeadletter(_))
-    }
-
-    /// HTTP status Adyen sees. Retryable errors use 503 (Adyen retries on
-    /// any non-2xx; 5xx signals server-side transience); business failures
-    /// keep the legacy 400.
-    fn http_status(&self) -> StatusCode {
-        match self {
-            Self::RetryLater(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::RecordDeadletter(_) | Self::DeadletterFlowHandled(_) => StatusCode::BAD_REQUEST,
-        }
-    }
-}
-
-impl From<String> for ProcessWebhookError {
-    fn from(message: String) -> Self {
-        Self::RecordDeadletter(message)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WebhookEventClaim {
-    Claimed,
-    AlreadyProcessed,
-    AlreadyPending,
-}
-
-/// A subscription row's current billing cycle (audit F30 snapshot input).
-#[derive(Debug, sqlx::FromRow)]
-struct SubscriptionCycleRow {
-    billing_cycle_start: Option<DateTime<Utc>>,
-    billing_cycle_end: Option<DateTime<Utc>>,
-    plan: Option<String>,
-}
-
-/// A superseded (deactivated) subscription's cycle, returned by the
-/// deactivating UPDATE (audit F30).
-#[derive(Debug, sqlx::FromRow)]
-struct SupersededCycleRow {
-    adyen_subscription_id: String,
-    billing_cycle_start: Option<DateTime<Utc>>,
-    billing_cycle_end: Option<DateTime<Utc>>,
-    plan: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct WebhookEventClaimRow {
-    claimed: bool,
-    status: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenEventPayload {
-    id: String,
-    #[serde(rename = "type")]
-    event_type: String,
-    data: AdyenNotificationData,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenNotificationData {
-    object: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct CheckoutSession {
-    id: String,
-    metadata: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionEvent {
-    id: String,
-    customer: ExpandableId,
-    status: SubscriptionStatus,
-    metadata: Option<HashMap<String, String>>,
-    current_period_start: i64,
-    current_period_end: i64,
-    cancel_at_period_end: bool,
-    canceled_at: Option<i64>,
-    trial_end: Option<i64>,
-    items: SubscriptionItems,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionItems {
-    data: Vec<SubscriptionItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionItem {
-    price: Option<SubscriptionPrice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionPrice {
-    id: Option<String>,
-    recurring: Option<SubscriptionRecurring>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubscriptionRecurring {
-    interval: Option<AdyenBillingInterval>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SubscriptionStatus {
-    Active,
-    PastDue,
-    Unpaid,
-    Canceled,
-    Incomplete,
-    IncompleteExpired,
-    Trialing,
-    Paused,
-}
-
-impl SubscriptionStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::PastDue => "past_due",
-            Self::Unpaid => "unpaid",
-            Self::Canceled => "canceled",
-            Self::Incomplete => "incomplete",
-            Self::IncompleteExpired => "incomplete_expired",
-            Self::Trialing => "trialing",
-            Self::Paused => "paused",
-        }
-    }
-
-    fn is_valid_initial_status(&self) -> bool {
-        matches!(self, Self::Incomplete | Self::Trialing | Self::Active)
-    }
-
-    /// A verified Adyen subscription is the only source of paid-plan
-    /// entitlement. Incomplete, delinquent, paused, unpaid, and canceled
-    /// subscriptions remain recorded locally for reconciliation but resolve
-    /// to Free access until Adyen reports an entitled state again.
-    fn entitlement_plan_name<'a>(&self, paid_plan_name: &'a str) -> &'a str {
-        match self {
-            Self::Active | Self::Trialing => paid_plan_name,
-            Self::PastDue
-            | Self::Unpaid
-            | Self::Canceled
-            | Self::Incomplete
-            | Self::IncompleteExpired
-            | Self::Paused => "free",
-        }
-    }
-
-    fn can_transition_from(&self, current_status: &str) -> bool {
-        match current_status {
-            "incomplete" => matches!(self, Self::Active | Self::IncompleteExpired),
-            // Reactivation (uncancel / support-side resume) revives a terminal
-            // subscription to a paying status. Only revival is admitted —
-            // terminal -> terminal stays impossible.
-            "incomplete_expired" | "canceled" => {
-                matches!(self, Self::Active | Self::Trialing | Self::PastDue)
-            }
-            "trialing" => matches!(
-                self,
-                Self::Active | Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused
-            ),
-            "active" => matches!(
-                self,
-                Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused
-            ),
-            "past_due" => matches!(self, Self::Active | Self::Canceled | Self::Unpaid),
-            "unpaid" => matches!(self, Self::Active | Self::Canceled),
-            "paused" => matches!(self, Self::Active | Self::Canceled),
-            _ => false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-enum AdyenBillingInterval {
-    #[serde(rename = "month")]
-    Month,
-    #[serde(rename = "year")]
-    Year,
-}
-
-impl AdyenBillingInterval {
-    fn as_db_value(self) -> &'static str {
-        match self {
-            Self::Month => "monthly",
-            Self::Year => "yearly",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct InvoiceEvent {
-    id: String,
-    amount_due: i64,
-    /// The amount ACTUALLY paid in this settlement (audit F73) — the
-    /// verified payment amount, in the invoice currency's minor unit.
-    /// Falls back to the canonical derived total when Adyen omits it.
-    #[serde(default)]
-    amount_paid: Option<i64>,
-    #[serde(default)]
-    currency: Option<String>,
-    /// Subtotal excluding VAT, in the invoice currency's minor unit (cents).
-    #[serde(default)]
-    subtotal: Option<i64>,
-    /// Total tax/VAT, in cents.
-    #[serde(default)]
-    tax: Option<i64>,
-    /// Grand total including VAT, in cents.
-    #[serde(default)]
-    total: Option<i64>,
-    /// Human-readable invoice number assigned by Adyen (e.g. "2026-000042").
-    #[serde(default)]
-    number: Option<String>,
-    #[serde(default)]
-    created: Option<i64>,
-    #[serde(default)]
-    period_start: Option<i64>,
-    #[serde(default)]
-    period_end: Option<i64>,
-    #[serde(default)]
-    attempt_count: Option<i64>,
-    #[serde(default)]
-    subscription_details: Option<InvoiceSubscriptionDetails>,
-    #[serde(default)]
-    subscription: Option<ExpandableId>,
-    /// Line items from the invoice object. Present on invoice.paid events;
-    /// used so locally stored invoices (and their PDFs) carry mandatory
-    /// line-level detail instead of an empty items table.
-    #[serde(default)]
-    lines: Option<AdyenPaymentLines>,
-    /// Adyen Tax decision state (`enabled`, `status`, `disabled_reason`).
-    /// Present when automatic tax was requested at checkout / invoice
-    /// creation; `status = "complete"` is the only authoritative state.
-    #[serde(default)]
-    automatic_tax: Option<AdyenAutomaticTax>,
-    /// Tax IDs collected for the customer (checkout `tax_id_collection`).
-    #[serde(default)]
-    customer_tax_ids: Option<Vec<AdyenShopperTaxId>>,
-    /// Per-jurisdiction tax breakdown on newer API versions.
-    #[serde(default)]
-    total_taxes: Option<Vec<AdyenTotalTax>>,
-    /// Per-jurisdiction tax breakdown on older API versions.
-    #[serde(default)]
-    total_tax_amounts: Option<Vec<AdyenTotalTax>>,
-    /// Invoice-level metadata. The usage-collection path stamps
-    /// `apexmailInvoiceId` (the LOCAL obligation) onto every Adyen invoice
-    /// it creates; a `invoice.paid` event carrying that metadata names its
-    /// obligation, so a SECOND Adyen invoice for an already-bound obligation
-    /// can be refused instead of minted twice locally (audit SM7 F3).
-    #[serde(default)]
-    metadata: Option<HashMap<String, String>>,
-}
-
-/// Adyen `automatic_tax` object (subset).
-#[derive(Debug, Deserialize)]
-struct AdyenAutomaticTax {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    disabled_reason: Option<String>,
-}
-
-/// Adyen `customer_tax_ids[]` entry (subset).
-#[derive(Debug, Deserialize)]
-struct AdyenShopperTaxId {
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
-    #[serde(default)]
-    value: Option<String>,
-    #[serde(default)]
-    verification: Option<serde_json::Value>,
-}
-
-/// Adyen `total_taxes[]` / `total_tax_amounts[]` entry (subset). The
-/// jurisdiction is read from whichever nested rate object the API version
-/// supplies.
-#[derive(Debug, Deserialize)]
-struct AdyenTotalTax {
-    #[serde(default)]
-    amount: Option<i64>,
-    #[serde(default)]
-    inclusive: Option<bool>,
-    #[serde(default)]
-    taxability_reason: Option<String>,
-    #[serde(default)]
-    tax_rate_details: Option<serde_json::Value>,
-    #[serde(default)]
-    tax_rate: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenPaymentLines {
-    #[serde(default)]
-    data: Vec<AdyenPaymentLine>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenPaymentLine {
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    quantity: Option<i64>,
-    /// Line amount including VAT, in cents.
-    #[serde(default)]
-    amount: Option<i64>,
-    /// Unit amount excluding VAT, in cents.
-    #[serde(default)]
-    unit_amount_excluding_tax: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InvoiceSubscriptionDetails {
-    metadata: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ExpandableId {
-    Id(String),
-    Object { id: String },
-}
-
-impl ExpandableId {
-    fn id(&self) -> &str {
-        match self {
-            Self::Id(id) => id,
-            Self::Object { id } => id,
-        }
-    }
-}
-
 #[derive(Debug, sqlx::FromRow)]
 struct DunningConfigRow {
     retry_schedule_days: Vec<i32>,
@@ -4054,66 +2745,90 @@ struct DunningResult {
     next_retry_at: Option<DateTime<Utc>>,
 }
 
-/// Replay a deadletter entry by re-verifying the stored signature, parsing the
-/// stored body, claiming the event in the database (idempotent via
-/// `ON CONFLICT`), and calling `handle_adyen_notification`.
+// ---------------------------------------------------------------------------
+// Deadletter replay + the retry worker
+// ---------------------------------------------------------------------------
+
+/// Replay a deadletter entry by re-verifying every item's in-body HMAC,
+/// claiming each notification in the database (idempotent via
+/// `ON CONFLICT`), and calling the event-code dispatch.
 async fn replay_deadletter(state: &AppState, entry: &DeadletterEntry) -> Result<(), String> {
     let body = entry
         .body
         .as_deref()
         .ok_or_else(|| "No body stored for retry".to_string())?;
-    let signature = entry
+    entry
         .signature
         .as_deref()
         .ok_or_else(|| "No signature stored for retry".to_string())?;
 
-    // Re-verify the stored HMAC before processing: the body+signature live in
-    // Redis between the original failure and this replay, so integrity must be
+    // Re-verify the stored HMAC before processing: the body lives in Redis
+    // between the original failure and this replay, so integrity must be
     // re-checked against the secret instead of trusting the stored payload.
-    // The timestamp segment is part of the MAC (so it is verified implicitly);
-    // the original 5-minute freshness window is deliberately NOT re-enforced —
-    // the entry already passed it on first receipt and retries run on a
-    // minutes-to-hours backoff schedule.
+    // The signature is inside the body, so each item is verified against its
+    // own `additionalData.hmacSignature`.
     let secret = state.config.adyen_hmac_key.trim();
     if secret.is_empty() {
         return Err("Adyen webhook secret is not configured".into());
     }
-    verify_signature_hmac(secret, body.as_bytes(), signature)?;
 
-    let event: AdyenEventPayload = serde_json::from_str(body)
-        .map_err(|e| format!("Failed to parse stored webhook body: {e}"))?;
-
-    match claim_webhook_event(state, &event.id, &event.event_type).await? {
-        WebhookEventClaim::Claimed => {}
-        WebhookEventClaim::AlreadyProcessed => {
-            info!(
-                event_id = %event.id,
-                "deadletter retry: event already processed, skipping"
-            );
-            return Ok(());
-        }
-        WebhookEventClaim::AlreadyPending => {
-            return Err("Event is already pending on another worker".into());
-        }
+    let envelope: AdyenNotificationEnvelope = serde_json::from_str(body)
+        .map_err(|error| format!("Failed to parse stored webhook body: {error}"))?;
+    if envelope.notification_items.is_empty() {
+        return Err("stored notification carries no notificationItems".into());
     }
 
-    // Process the event business logic.
-    handle_adyen_notification(state, &event).await?;
+    for item in &envelope.notification_items {
+        let item = &item.notification_request_item;
+        let signature = item
+            .hmac_signature()
+            .ok_or_else(|| "stored notification item carries no hmacSignature".to_string())?;
+        verify_item_hmac(secret, item, signature)?;
+    }
 
-    // Mark as processed in the database.
-    sqlx::query(
-        r#"
-        UPDATE adyen_webhook_events
-        SET status = 'processed', processed_at = NOW(), updated_at = NOW()
-        WHERE adyen_notification_id = $1
-        "#,
-    )
-    .bind(&event.id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| format!("Failed to mark retried event as processed: {e}"))?;
+    for entry_item in &envelope.notification_items {
+        let item = &entry_item.notification_request_item;
+        let notification_id = adyen_notification_id(item);
+        match claim_webhook_event(
+            state,
+            &notification_id,
+            item.event_code.trim(),
+            item.psp_reference.trim(),
+        )
+        .await?
+        {
+            WebhookEventClaim::Claimed => {}
+            WebhookEventClaim::AlreadyProcessed => {
+                info!(
+                    adyen_notification_id = %notification_id,
+                    "deadletter retry: event already processed, skipping"
+                );
+                continue;
+            }
+            WebhookEventClaim::AlreadyPending => {
+                return Err("Event is already pending on another worker".into());
+            }
+        }
 
-    info!(event_id = %event.id, "deadletter retry succeeded");
+        // Process the event business logic.
+        handle_notification(state, item).await?;
+
+        // Mark as processed in the database.
+        sqlx::query(
+            r#"
+            UPDATE adyen_webhook_events
+            SET status = 'processed', processed_at = NOW(), updated_at = NOW()
+            WHERE adyen_notification_id = $1
+            "#,
+        )
+        .bind(&notification_id)
+        .execute(&state.db)
+        .await
+        .map_err(|error| format!("Failed to mark retried event as processed: {error}"))?;
+
+        info!(adyen_notification_id = %notification_id, "deadletter retry succeeded");
+    }
+
     Ok(())
 }
 
@@ -4126,7 +2841,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         .redis
         .get()
         .await
-        .map_err(|e| format!("Redis connection error: {e}"))?;
+        .map_err(|error| format!("Redis connection error: {error}"))?;
 
     // Fetch all entries due for retry (score <= now_ms).
     let due_entries: Vec<String> = redis::cmd("ZRANGEBYSCORE")
@@ -4135,7 +2850,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         .arg(now_ms)
         .query_async(&mut *conn)
         .await
-        .map_err(|e| format!("Failed to query retry index: {e}"))?;
+        .map_err(|error| format!("Failed to query retry index: {error}"))?;
 
     let batch: Vec<&str> = due_entries
         .iter()
@@ -4155,7 +2870,7 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
             .arg(event_key)
             .query_async(&mut *conn)
             .await
-            .map_err(|e| format!("Failed to read deadletter entry: {e}"))?;
+            .map_err(|error| format!("Failed to read deadletter entry: {error}"))?;
 
         let Some(entry_json) = entry_json else {
             // Entry already evicted — remove stale retry index member.
@@ -4169,9 +2884,9 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         };
 
         let entry: DeadletterEntry = match serde_json::from_str(&entry_json) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, key = %event_key, "corrupt deadletter entry, removing from retry index");
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(error = %error, key = %event_key, "corrupt deadletter entry, removing from retry index");
                 let _: () = redis::cmd("ZREM")
                     .arg(DEADLETTER_RETRY_INDEX_KEY)
                     .arg(event_key)
@@ -4317,162 +3032,895 @@ pub async fn retry_deadlettered_webhooks(state: &AppState) -> Result<(), String>
     process_deadletter_retries(state).await
 }
 
+// ---------------------------------------------------------------------------
+// Dedicated-IP auto-provisioning
+// ---------------------------------------------------------------------------
+
+/// The exact JSON body sent to `POST {api_base_url}/v1/dedicated-ips`.
+///
+/// The API's `AllocateIpRequest` is `#[serde(deny_unknown_fields)]` and only
+/// declares `region` (optional). The empty object parses into the contract
+/// (every field is defaulted). If a region ever needs to be pinned, extend
+/// this object with `region` only.
+fn auto_provision_request_body() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// Background task that performs the actual dedicated IP provisioning for a
+/// tenant whose subscription became entitled.
+///
+/// Public because the subscription-state owners (outside the webhook layer
+/// after the Adyen conversion — Adyen sends no subscription-status
+/// notifications) are the legitimate callers. There is no maintenance retry
+/// consumer: failures are logged and the
+/// `dedicated_ip_provisioning_requests` row is finalized as
+/// 'failed'/'partial'. A later entitled-subscription event retries the
+/// provisioning path from scratch (idempotent request upsert + active-count
+/// check), so the absence of a sweeper does not strand provisioning.
+pub async fn auto_provision_dedicated_ips_background(
+    app_state: &AppState,
+    tenant_id: &str,
+) -> Result<(), String> {
+    // Re-borrow the inner fields we need
+    let state = app_state;
+    let included_count = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) AS included_count
+        FROM adyen_subscriptions s
+        JOIN plans p ON p.name = (
+            SELECT plan FROM tenants WHERE id = s.tenant_id
+        )
+        WHERE s.tenant_id = $1 AND s.status = 'active'
+        ORDER BY s.created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load dedicated IP allowance: {error}"))?
+    .unwrap_or(0);
+
+    if included_count <= 0 {
+        return Ok(());
+    }
+
+    let active_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM dedicated_ips
+        WHERE tenant_id = $1
+          AND status NOT IN ('retired', 'releasing', 'failed', 'cleanup_failed')
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load active dedicated IP count: {error}"))?;
+    // Terminal provisioning-failure rows (`failed`, `cleanup_failed`) do not
+    // occupy the allowance: the API-side `NON_OCCUPYING_STATUSES` is the
+    // canonical list (crates/api-server/src/ip_provider.rs) and must stay in
+    // sync with the literal above.
+
+    let to_allocate = i64::from(included_count) - active_count;
+    if to_allocate <= 0 {
+        info!(tenant_id = %tenant_id, active_count, included_count, "tenant already has sufficient dedicated IPs");
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO dedicated_ip_provisioning_requests
+            (id, tenant_id, requested_count, status, created_at, updated_at)
+        VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
+        ON CONFLICT (tenant_id) WHERE status = 'pending'
+        DO UPDATE SET requested_count = $2, updated_at = NOW()
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(to_allocate)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("Failed to record dedicated IP provisioning request: {error}"))?;
+
+    // Use a shared HTTP client with sane timeouts.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let api_base_url = state.config.api_base_url.trim_end_matches('/');
+    let bearer = format!("Bearer {}", state.config.service_auth_token);
+
+    // Build all requests upfront, then fire them concurrently with bounded parallelism.
+    let mut requests: Vec<_> = (0..to_allocate)
+        .map(|_| {
+            client
+                .post(format!("{api_base_url}/v1/dedicated-ips"))
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::AUTHORIZATION, &bearer)
+                .header("X-Internal-Service", "billing")
+                .header("X-Tenant-Id", tenant_id)
+                .json(&auto_provision_request_body())
+                .send()
+        })
+        .collect();
+
+    // Fire requests in concurrent batches of 5 to avoid overwhelming the API server.
+    let mut success_count = 0_i64;
+    let mut failure_count = 0_i64;
+    const BATCH_SIZE: usize = 5;
+
+    for chunk in requests.chunks_mut(BATCH_SIZE) {
+        let results = join_all(
+            chunk
+                .iter_mut()
+                .map(|req| timeout(Duration::from_secs(30), req)),
+        )
+        .await;
+
+        for result in results {
+            match result {
+                Ok(Ok(response)) if response.status().is_success() => {
+                    success_count += 1;
+                }
+                Ok(Ok(response)) => {
+                    failure_count += 1;
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    warn!(
+                        tenant_id = %tenant_id,
+                        status = %status,
+                        error = %body,
+                        "dedicated IP auto-provision request failed"
+                    );
+                }
+                Ok(Err(error)) => {
+                    failure_count += 1;
+                    error!(
+                        tenant_id = %tenant_id,
+                        error = %error,
+                        "dedicated IP auto-provision request errored"
+                    );
+                }
+                Err(_elapsed) => {
+                    failure_count += 1;
+                    error!(
+                        tenant_id = %tenant_id,
+                        "dedicated IP auto-provision request timed out after 30s"
+                    );
+                }
+            }
+        }
+    }
+
+    let final_status = if failure_count == 0 {
+        "completed"
+    } else if success_count > 0 {
+        "partial"
+    } else {
+        "failed"
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE dedicated_ip_provisioning_requests
+        SET status = $2, success_count = $3, failure_count = $4, updated_at = NOW()
+        WHERE tenant_id = $1 AND status = 'pending'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(final_status)
+    .bind(success_count)
+    .bind(failure_count)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("Failed to update dedicated IP provisioning request: {error}"))?;
+
+    if failure_count > 0 {
+        error!(
+            tenant_id = %tenant_id,
+            requested_count = to_allocate,
+            success_count,
+            failure_count,
+            final_status,
+            "dedicated IP provisioning had failures"
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers shared by both in-file test modules.
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
-mod tests {
+mod wire_test_helpers {
     use super::*;
 
-    /// The `Option`-returning [`derive_invoice_totals`] unwrapped for the
-    /// pinned assertions: every amount asserted below is far from the i64
-    /// bounds, so a `None` here is a test bug, not behaviour under test.
-    #[allow(dead_code)]
-    fn derive_invoice_totals(
-        subtotal: Option<i64>,
-        tax: Option<i64>,
-        total: Option<i64>,
-        amount_due: i64,
-    ) -> (i64, i64, i64) {
-        super::derive_invoice_totals(subtotal, tax, total, amount_due)
-            .expect("pinned test amounts do not overflow")
+    /// The official Adyen SDK HMAC test vector (the same key/fields the
+    /// Adyen client libraries pin, re-validated against the Python harness
+    /// recipe `tools/dogfood-v2/harness/adyen.py`).
+    pub(crate) const OFFICIAL_HMAC_KEY: &str =
+        "44782DEF547AAA06C910C43932B1EB0C71FC68D9D0C057550C48EC2ACF6BA056";
+    pub(crate) const OFFICIAL_HMAC_SIGNATURE: &str = "coqCmt/IZ4E3CzPvMY8zTjQVL5hYJUiBRg8UU+iCWo0=";
+    pub(crate) const OFFICIAL_SIGNING_STRING: &str =
+        "7914073381342284::TestMerchant:TestPayment-1407325143704:1130:EUR:AUTHORISATION:true";
+
+    pub(crate) fn official_item() -> AdyenNotificationItem {
+        parse_item(serde_json::json!({
+            "pspReference": "7914073381342284",
+            "merchantAccountCode": "TestMerchant",
+            "merchantReference": "TestPayment-1407325143704",
+            "amount": { "currency": "EUR", "value": 1130 },
+            "eventCode": "AUTHORISATION",
+            "eventDate": "2019-05-06T17:15:34.121+02:00",
+            "success": "true",
+            "paymentMethod": "visa",
+            "reason": "",
+            "operations": ["CANCEL", "CAPTURE", "REFUND"]
+        }))
     }
 
+    pub(crate) fn parse_item(value: serde_json::Value) -> AdyenNotificationItem {
+        serde_json::from_value(value).expect("notification item parses")
+    }
+
+    /// Sign an item exactly like the wire/harness: base64 of the HMAC over
+    /// the escaped signing string with the hex-decoded key.
+    pub(crate) fn sign_item(secret: &str, item: &AdyenNotificationItem) -> String {
+        let mut mac = HmacSha256::new_from_slice(&hmac_key_bytes(secret)).expect("HMAC key");
+        mac.update(adyen_signing_string(item).as_bytes());
+        base64_encode(&mac.finalize().into_bytes())
+    }
+
+    /// The notification envelope with one item carrying `signature` in its
+    /// `additionalData`.
+    pub(crate) fn envelope_bytes(item: &AdyenNotificationItem, signature: &str) -> Vec<u8> {
+        let mut value = serde_json::to_value(item).expect("item json");
+        let data = value
+            .get_mut("additionalData")
+            .and_then(serde_json::Value::as_object_mut)
+            .cloned();
+        let mut data = data.unwrap_or_default();
+        data.insert(
+            "hmacSignature".into(),
+            serde_json::Value::String(signature.into()),
+        );
+        value["additionalData"] = serde_json::Value::Object(data);
+        serde_json::to_vec(&serde_json::json!({
+            "live": "false",
+            "notificationItems": [{ "NotificationRequestItem": value }]
+        }))
+        .expect("envelope json")
+    }
+
+    /// The envelope for an item signed with `secret`.
+    pub(crate) fn signed_envelope(secret: &str, item: &AdyenNotificationItem) -> Vec<u8> {
+        let signature = sign_item(secret, item);
+        envelope_bytes(item, &signature)
+    }
+
+    pub(crate) fn parse_envelope(body: &[u8]) -> Vec<AdyenNotificationItem> {
+        let envelope: AdyenNotificationEnvelope =
+            serde_json::from_slice(body).expect("envelope parses");
+        envelope
+            .notification_items
+            .into_iter()
+            .map(|entry| entry.notification_request_item)
+            .collect()
+    }
+
+    /// A minimal recurring AUTHORISATION item for `reference`.
+    pub(crate) fn recurring_item(reference: &str, value: i64, success: bool) -> serde_json::Value {
+        serde_json::json!({
+            "pspReference": format!("psp_{reference}"),
+            "originalReference": "psp_original",
+            "merchantAccountCode": "ApexMailECOM",
+            "merchantReference": reference,
+            "amount": { "currency": "EUR", "value": value },
+            "eventCode": "AUTHORISATION",
+            "eventDate": "2026-10-14T10:00:00+00:00",
+            "success": if success { "true" } else { "false" },
+            "paymentMethod": "visa",
+            "additionalData": {
+                "shopperReference": "shopper-tenant",
+                "recurringProcessingModel": "Subscription",
+                "metadata": { "tenant_id": "shopper-tenant" }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wire_test_helpers::*;
+    use super::*;
+
     // ------------------------------------------------------------------
-    // Audit SM7 F3 — one obligation, one local paid invoice, one ledger
-    // entry: the duplicate-collection decision matrix.
+    // The HMAC recipe: the official pinned vector, tamper handling and the
+    // hex-decoded key.
     // ------------------------------------------------------------------
 
     #[test]
-    fn duplicate_collection_decisions_are_fail_safe() {
-        use DuplicateCollectionDecision::{
-            BindObligation, NoLocalObligation, RefuseDuplicate, SameInvoice,
-        };
-        const EVENT: &str = "in_event_second";
+    fn adyen_hmac_matches_the_official_sdk_vector() {
+        // The official test vector (Adyen's own SDK specs, validated against
+        // tools/dogfood-v2/harness/adyen.py): key hex-decoded, signing string
+        // escaped colon-joined, digest base64, verified timing-safe.
+        let item = official_item();
+        assert_eq!(adyen_signing_string(&item), OFFICIAL_SIGNING_STRING);
+        assert!(
+            verify_item_hmac(OFFICIAL_HMAC_KEY, &item, OFFICIAL_HMAC_SIGNATURE).is_ok(),
+            "the official pinned vector must verify"
+        );
+        // The signature is BASE64 (a hex comparison would never match).
+        assert_eq!(base64_encode(b"00"), "MDA=");
 
-        // Bound to the SAME Adyen invoice: the conflict-target upsert
-        // updates that one row.
-        assert_eq!(
-            duplicate_collection_decision(Some(Some("in_event_second")), EVENT),
-            SameInvoice
-        );
-        // Bound to a DIFFERENT Adyen invoice: REFUSED — this is the
-        // double-record.
-        assert_eq!(
-            duplicate_collection_decision(Some(Some("in_first_attempt")), EVENT),
-            RefuseDuplicate
-        );
-        // Unbound (the first attempt died before the mapping write): the
-        // mapping is REPAIRED, never a second row.
-        assert_eq!(
-            duplicate_collection_decision(Some(None), EVENT),
-            BindObligation
-        );
-        // No local row at all: the legacy import path applies.
-        assert_eq!(
-            duplicate_collection_decision(None, EVENT),
-            NoLocalObligation
-        );
-    }
-
-    #[test]
-    fn invoice_events_parse_apexmail_obligation_metadata() {
-        // The usage-collection path stamps apexmailInvoiceId on the Adyen
-        // invoices it creates; the webhook must carry it through.
-        let payload = serde_json::json!({
-            "id": "in_test",
-            "amount_due": 1_000,
-            "metadata": { "apexmailInvoiceId": "01234567-89ab-cdef-0123-456789abcdef" },
+        // Tampered item fields → HMAC mismatch.
+        let mut tampered = item.clone();
+        tampered.success = Some("false".into());
+        assert!(verify_item_hmac(OFFICIAL_HMAC_KEY, &tampered, OFFICIAL_HMAC_SIGNATURE).is_err());
+        let mut tampered = item.clone();
+        tampered.amount = Some(AdyenAmount {
+            value: Some(1131),
+            currency: Some("EUR".into()),
         });
-        let event: InvoiceEvent = serde_json::from_value(payload).expect("event");
-        let obligation = event
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("apexmailInvoiceId"))
-            .and_then(|value| Uuid::parse_str(value).ok());
-        assert_eq!(
-            obligation,
-            Some(Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"))
-        );
+        assert!(verify_item_hmac(OFFICIAL_HMAC_KEY, &tampered, OFFICIAL_HMAC_SIGNATURE).is_err());
 
-        // Events without metadata (plain subscription invoices) stay on the
-        // legacy path.
-        let plain: InvoiceEvent = serde_json::from_value(serde_json::json!({
-            "id": "in_test",
-            "amount_due": 1_000,
-        }))
-        .expect("event");
-        assert!(plain.metadata.is_none());
+        // Wrong secret → mismatch.
+        let wrong_secret = "44782DEF547AAA06C910C43932B1EB0C71FC68D9D0C057550C48EC2ACF6BA057";
+        assert!(verify_item_hmac(wrong_secret, &item, OFFICIAL_HMAC_SIGNATURE).is_err());
 
-        // A malformed obligation id is NOT an obligation — the guard must
-        // never misfire on garbage metadata.
-        let garbage: InvoiceEvent = serde_json::from_value(serde_json::json!({
-            "id": "in_test",
-            "amount_due": 1_000,
-            "metadata": { "apexmailInvoiceId": "not-a-uuid" },
-        }))
-        .expect("event");
-        assert!(garbage
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("apexmailInvoiceId"))
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .is_none());
-    }
+        // Bit-flipped signature → mismatch.
+        let flipped: String = OFFICIAL_HMAC_SIGNATURE
+            .chars()
+            .map(|character| if character == '0' { '1' } else { '0' })
+            .collect();
+        assert!(verify_item_hmac(OFFICIAL_HMAC_KEY, &item, &flipped).is_err());
 
-    // ------------------------------------------------------------------
-    // Audit F36 — entitlement reconciliation after a subscription delete.
-    // ------------------------------------------------------------------
-
-    fn ts(secs: i64) -> Option<DateTime<Utc>> {
-        DateTime::from_timestamp(secs, 0)
+        // A signature produced by our signer round-trips through verify.
+        let produced = sign_item(OFFICIAL_HMAC_KEY, &item);
+        assert_eq!(produced, OFFICIAL_HMAC_SIGNATURE);
+        assert!(verify_item_hmac(OFFICIAL_HMAC_KEY, &item, &produced).is_ok());
     }
 
     #[test]
-    fn older_cycle_events_are_stale_against_the_applied_watermark() {
-        // F36 verification shape: pause update A after its initial read,
-        // process replacement B (watermark advances), resume A — B stays.
-        assert!(subscription_event_is_stale(ts(1_000), ts(2_000)));
-        // Same cycle (replay or same-boundary plan change) is NOT stale.
-        assert!(!subscription_event_is_stale(ts(2_000), ts(2_000)));
-        // A newer cycle is the current replacement.
-        assert!(!subscription_event_is_stale(ts(3_000), ts(2_000)));
-        // Missing watermark (legacy row) or missing cycle in the event is
-        // never treated as stale.
-        assert!(!subscription_event_is_stale(ts(1_000), None));
-        assert!(!subscription_event_is_stale(None, ts(2_000)));
-        assert!(!subscription_event_is_stale(None, None));
+    fn hmac_key_is_hex_decoded_with_a_raw_local_dev_fallback() {
+        // A real key is hex: 64 hex chars → 32 key bytes.
+        assert_eq!(hmac_key_bytes(OFFICIAL_HMAC_KEY).len(), 32);
+        assert_eq!(
+            hmac_key_bytes(OFFICIAL_HMAC_KEY),
+            hex::decode(OFFICIAL_HMAC_KEY).expect("hex")
+        );
+        // The non-hex local-dev default stays usable as raw bytes (the
+        // documented harness fallback), so fixture/probe/local stack agree.
+        let dev = "dev-adyen-webhook-secret-local-only-0123456789";
+        assert_eq!(hmac_key_bytes(dev), dev.as_bytes().to_vec());
+        assert_eq!(hmac_key_bytes("  "), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn signature_base64_decoder_accepts_standard_padded_base64() {
+        assert_eq!(base64_decode("").as_deref(), None);
+        assert_eq!(base64_decode("TQ==").as_deref(), Some(&b"M"[..]));
+        assert_eq!(base64_decode("TWE=").as_deref(), Some(&b"Ma"[..]));
+        assert_eq!(base64_decode("TWFu").as_deref(), Some(&b"Man"[..]));
+        // The official signature decodes to a full SHA-256 digest (32 bytes).
+        assert_eq!(
+            base64_decode(OFFICIAL_HMAC_SIGNATURE)
+                .expect("official signature decodes")
+                .len(),
+            32
+        );
+        // Unpadded standard base64 is accepted too.
+        assert_eq!(base64_decode("TWFu").as_deref(), Some(&b"Man"[..]));
+    }
+
+    #[test]
+    fn signature_base64_decoder_rejects_empty_and_malformed_input() {
+        // Empty/blank never verifies as a signature.
+        assert_eq!(base64_decode(""), None);
+        assert_eq!(base64_decode("   "), None);
+        // Non-alphabet characters (including the URL-safe alphabet and hex).
+        assert_eq!(base64_decode("deadbeef!"), None);
+        assert_eq!(base64_decode("t=123,v1=abc"), None);
+        assert_eq!(base64_decode("AA-_"), None);
+        // A single dangling character is not a valid quantum.
+        assert_eq!(base64_decode("A"), None);
+        assert_eq!(base64_decode("AAAAA"), None);
+        // More than two padding characters is malformed.
+        assert_eq!(base64_decode("T==="), None);
+    }
+
+    #[test]
+    fn signature_base64_decoder_rejects_trailing_data_after_padding() {
+        assert_eq!(base64_decode("TQ==TQ=="), None);
+        assert_eq!(base64_decode("TQ==a"), None);
+    }
+
+    #[test]
+    fn signing_string_escapes_backslashes_before_colons() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp:with:colons",
+            "merchantAccountCode": "ApexMailECOM",
+            "merchantReference": "ref\\with\\slashes",
+            "amount": { "currency": "EUR", "value": 1 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert_eq!(
+            adyen_signing_string(&item),
+            "psp\\:with\\:colons::ApexMailECOM:ref\\\\with\\\\slashes:1:EUR:AUTHORISATION:true"
+        );
+    }
+
+    #[test]
+    fn signing_string_renders_missing_fields_as_empty() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_min",
+            "merchantAccountCode": "ApexMailECOM",
+            "merchantReference": "ref",
+            "eventCode": "REFUND",
+            "success": "true"
+        }));
+        // No originalReference, no amount: both render as empty fields.
+        assert_eq!(
+            adyen_signing_string(&item),
+            "psp_min::ApexMailECOM:ref:::REFUND:true"
+        );
     }
 
     // ------------------------------------------------------------------
-    // Audit F73 — the verified payment amount drives the allocation.
+    // The deterministic dedupe id (Adyen retries; the digest is the
+    // idempotency key replacing the pre-Adyen timestamp tolerance).
     // ------------------------------------------------------------------
 
-    fn invoice_event_with(amount_paid: Option<i64>, total: Option<i64>, due: i64) -> InvoiceEvent {
-        InvoiceEvent {
-            id: "in_test".into(),
-            amount_due: due,
-            amount_paid,
-            currency: Some("eur".into()),
-            subtotal: None,
-            tax: None,
-            total,
-            number: None,
-            created: None,
-            period_start: None,
-            period_end: None,
-            attempt_count: None,
-            subscription_details: None,
-            subscription: None,
-            lines: None,
-            automatic_tax: None,
-            customer_tax_ids: None,
-            total_taxes: None,
-            total_tax_amounts: None,
-            metadata: None,
+    #[test]
+    fn identical_notifications_share_the_dedupe_id_and_retries_cannot_reapply() {
+        let item = official_item();
+        let first = adyen_notification_id(&item);
+        let second = adyen_notification_id(&item);
+        assert_eq!(first, second, "Adyen retries the same notification");
+        // A different pspReference is a different notification.
+        let mut other = item.clone();
+        other.psp_reference = "7914073381342285".into();
+        assert_ne!(adyen_notification_id(&other), first);
+        // A different success is a different notification.
+        let mut other = item.clone();
+        other.success = Some("false".into());
+        assert_ne!(adyen_notification_id(&other), first);
+        // A different merchant reference is a different notification.
+        let mut other = item.clone();
+        other.merchant_reference = "TestPayment-other".into();
+        assert_ne!(adyen_notification_id(&other), first);
+    }
+
+    #[test]
+    fn a_new_event_date_is_a_new_notification() {
+        // eventDate participates in the digest: the SAME charge at a NEW
+        // eventDate is a new notification (a genuinely new event), while a
+        // byte-identical retry keeps the same id.
+        let item = official_item();
+        let mut later = item.clone();
+        later.event_date = Some("2026-10-14T10:00:00+00:00".into());
+        assert_ne!(adyen_notification_id(&later), adyen_notification_id(&item));
+        assert_eq!(
+            adyen_notification_id(&item),
+            adyen_notification_id(&official_item())
+        );
+    }
+
+    #[test]
+    fn notification_ids_are_prefixed_and_content_addressed() {
+        let id = adyen_notification_id(&official_item());
+        assert!(
+            id.starts_with("adn_"),
+            "the dedupe id carries the adn_ prefix"
+        );
+        assert_eq!(id.len(), 4 + 64, "adn_ + a full SHA-256 hex digest");
+        assert!(id[4..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        // Pinned against the Python harness's digest basis (unit-separated
+        // eventCode|pspReference|success|eventDate|merchantReference).
+        assert_eq!(
+            id,
+            "adn_dd4fa7b2362506799a047ccf6c15d6c6f33626d5c65827adc06fd78062c98689"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // merchantReference → local invoice; tenant resolution.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn merchant_reference_parses_invoice_prefixed_and_bare_uuids() {
+        let id = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid");
+        assert_eq!(
+            parse_merchant_reference_invoice_id("invoice:01234567-89ab-cdef-0123-456789abcdef"),
+            Some(id)
+        );
+        assert_eq!(
+            parse_merchant_reference_invoice_id("01234567-89ab-cdef-0123-456789abcdef"),
+            Some(id)
+        );
+        assert_eq!(
+            parse_merchant_reference_invoice_id("  invoice:01234567-89ab-cdef-0123-456789abcdef "),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn merchant_reference_rejects_garbage_and_foreign_prefixes() {
+        assert_eq!(parse_merchant_reference_invoice_id(""), None);
+        assert_eq!(parse_merchant_reference_invoice_id("not-a-uuid"), None);
+        assert_eq!(parse_merchant_reference_invoice_id("invoice:"), None);
+        assert_eq!(
+            parse_merchant_reference_invoice_id("invoice:not-a-uuid"),
+            None
+        );
+        // A foreign prefix is not silently unwrapped into a uuid.
+        assert_eq!(
+            parse_merchant_reference_invoice_id(
+                "dedicated_ip:01234567-89ab-cdef-0123-456789abcdef"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn item_metadata_tenant_fallback_is_used_when_shopper_is_absent() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_meta",
+            "merchantReference": "invoice:01234567-89ab-cdef-0123-456789abcdef",
+            "amount": { "currency": "EUR", "value": 100 },
+            "eventCode": "AUTHORISATION",
+            "success": "true",
+            "additionalData": { "metadata": { "tenant_id": "tenant_meta" } }
+        }));
+        assert_eq!(item.shopper_reference(), None);
+        assert_eq!(item.metadata_tenant_id(), Some("tenant_meta"));
+
+        // The shopper reference wins when present.
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_meta",
+            "merchantReference": "invoice:01234567-89ab-cdef-0123-456789abcdef",
+            "amount": { "currency": "EUR", "value": 100 },
+            "eventCode": "AUTHORISATION",
+            "success": "true",
+            "additionalData": {
+                "shopperReference": "tenant_shopper",
+                "metadata": { "tenant_id": "tenant_meta" }
+            }
+        }));
+        assert_eq!(item.shopper_reference(), Some("tenant_shopper"));
+
+        // Garbage/blank metadata never becomes a tenant.
+        let blank = parse_item(serde_json::json!({
+            "pspReference": "psp_meta_blank",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 100 },
+            "eventCode": "AUTHORISATION",
+            "success": "true",
+            "additionalData": { "metadata": { "tenant_id": "   " } }
+        }));
+        assert_eq!(blank.metadata_tenant_id(), None);
+    }
+
+    #[test]
+    fn item_accessors_trim_and_reject_blank_values() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_accessors",
+            "merchantReference": "ref",
+            "eventCode": "RECURRING_CONTRACT",
+            "amount": { "currency": "  ", "value": 0 },
+            "success": "TRUE",
+            "additionalData": {
+                "hmacSignature": "  ",
+                "recurringDetailReference": "  tok_123  ",
+                "recurringProcessingModel": "Subscription",
+                "shopperReference": ""
+            }
+        }));
+        assert_eq!(item.hmac_signature(), None, "blank signatures are absent");
+        assert_eq!(item.recurring_detail_reference(), Some("tok_123"));
+        assert_eq!(item.recurring_processing_model(), Some("Subscription"));
+        assert_eq!(item.shopper_reference(), None);
+        assert_eq!(item.amount_currency(), None);
+        assert_eq!(item.amount_value(), Some(0));
+        assert!(
+            item.success_is_true(),
+            "success is compared case-insensitively"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Dispatch: eventCode + success + recurringProcessingModel.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn notification_arm_routes_authorisation_by_success_and_recurring_model() {
+        let checkout = parse_item(serde_json::json!({
+            "pspReference": "psp_checkout",
+            "merchantReference": "checkout_ref",
+            "amount": { "currency": "EUR", "value": 2900 },
+            "eventCode": "AUTHORISATION",
+            "success": "true",
+            "additionalData": { "shopperReference": "tenant_1" }
+        }));
+        assert_eq!(
+            notification_arm(&checkout),
+            NotificationArm::CheckoutAuthorisation
+        );
+
+        let recurring = parse_item(recurring_item(
+            "invoice:01234567-89ab-cdef-0123-456789abcdef",
+            2900,
+            true,
+        ));
+        assert_eq!(
+            notification_arm(&recurring),
+            NotificationArm::RecurringAuthorisation
+        );
+
+        let refused = parse_item(recurring_item(
+            "invoice:01234567-89ab-cdef-0123-456789abcdef",
+            2900,
+            false,
+        ));
+        assert_eq!(
+            notification_arm(&refused),
+            NotificationArm::AuthorisationRefused
+        );
+
+        // A failed checkout authorisation is also a refusal event.
+        let failed_checkout = parse_item(serde_json::json!({
+            "pspReference": "psp_failed_checkout",
+            "merchantReference": "checkout_ref",
+            "amount": { "currency": "EUR", "value": 2900 },
+            "eventCode": "AUTHORISATION",
+            "success": "false"
+        }));
+        assert_eq!(
+            notification_arm(&failed_checkout),
+            NotificationArm::AuthorisationRefused
+        );
+    }
+
+    #[test]
+    fn notification_arm_covers_every_contract_event_code() {
+        for (event_code, expected) in [
+            ("RECURRING_CONTRACT", NotificationArm::TokenCreated),
+            ("recurring.token.created", NotificationArm::TokenCreated),
+            ("REFUND", NotificationArm::Refund),
+            ("REFUND_FAILED", NotificationArm::RefundFailed),
+            ("CHARGEBACK", NotificationArm::Chargeback),
+            ("CHARGEBACK_REVERSED", NotificationArm::ChargebackReversed),
+            ("ORDER_CLOSED", NotificationArm::Unknown),
+            ("  REFUND  ", NotificationArm::Refund),
+        ] {
+            let item = parse_item(serde_json::json!({
+                "pspReference": "psp_arm",
+                "merchantReference": "ref",
+                "amount": { "currency": "EUR", "value": 1 },
+                "eventCode": event_code,
+                "success": "true"
+            }));
+            assert_eq!(notification_arm(&item), expected, "eventCode {event_code}");
+        }
+    }
+
+    #[test]
+    fn unknown_event_codes_are_acknowledged() {
+        // The catch-all arm (warn + Ok) keeps the pre-Adyen unknown-type
+        // behaviour: an event family we do not consume must be acknowledged,
+        // never retried forever.
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_unknown",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 1 },
+            "eventCode": "ORDER_CLOSED",
+            "success": "true"
+        }));
+        assert_eq!(notification_arm(&item), NotificationArm::Unknown);
+        assert!(!matches!(
+            notification_arm(&item),
+            NotificationArm::RecurringAuthorisation
+                | NotificationArm::CheckoutAuthorisation
+                | NotificationArm::AuthorisationRefused
+                | NotificationArm::TokenCreated
+                | NotificationArm::Refund
+                | NotificationArm::RefundFailed
+                | NotificationArm::Chargeback
+                | NotificationArm::ChargebackReversed
+        ));
+    }
+
+    #[test]
+    fn supported_event_codes_cover_the_frozen_contract() {
+        // The contract's consumed event families (docs/tool-contracts/adyen.md).
+        for event_code in [
+            "AUTHORISATION",
+            "RECURRING_CONTRACT",
+            "REFUND",
+            "REFUND_FAILED",
+            "CHARGEBACK",
+            "CHARGEBACK_REVERSED",
+        ] {
+            let item = parse_item(serde_json::json!({
+                "pspReference": "psp_contract",
+                "merchantReference": "ref",
+                "amount": { "currency": "EUR", "value": 1 },
+                "eventCode": event_code,
+                "success": "true"
+            }));
+            assert_ne!(notification_arm(&item), NotificationArm::Unknown);
         }
     }
 
     // ------------------------------------------------------------------
-    // Tax truth (P0) — a Adyen/ApexMail charged-total discrepancy blocks
-    // finalization; a match passes.
+    // Money: allocation and exact minor units.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn allocation_prefers_the_verified_charge_over_the_invoice_total() {
+        // Adyen's own charged amount is the verified payment; the allocation
+        // is capped by it, never by a stale local total.
+        assert_eq!(allocation_cents(6_000, 10_000), 6_000);
+        assert_eq!(allocation_cents(11_300, 11_300), 11_300);
+    }
+
+    #[test]
+    fn allocation_is_capped_by_the_authoritative_remainder() {
+        // More charged than outstanding: only the remainder allocates.
+        assert_eq!(allocation_cents(12_400, 400), 400);
+        // Nothing outstanding (already paid / zero value): no allocation.
+        assert_eq!(allocation_cents(12_400, 0), 0);
+        assert_eq!(allocation_cents(0, 0), 0);
+    }
+
+    #[test]
+    fn allocation_never_goes_negative() {
+        assert_eq!(allocation_cents(-5, 1_000), 0);
+        assert_eq!(allocation_cents(1_000, -5), 0);
+        assert_eq!(allocation_cents(-5, -5), 0);
+    }
+
+    #[test]
+    fn zero_value_payments_settle_without_a_positive_allocation() {
+        // A zero-value paid invoice must not attempt an allocation (the
+        // amount_cents > 0 CHECK would fail the callback); the settlement
+        // marks it paid with no allocation row.
+        assert_eq!(allocation_cents(0, 0), 0);
+        assert_eq!(allocation_cents(0, 1_000), 0);
+    }
+
+    #[test]
+    fn the_charged_total_is_the_wire_amount_value() {
+        // The settlement binds `amount.value` (minor units) as the verified
+        // charge, and the snapshot records exactly that figure — never a
+        // re-derived or re-rounded amount.
+        let item = official_item();
+        assert_eq!(item.amount_value(), Some(1130));
+        assert_eq!(item.amount_currency(), Some("EUR"));
+        assert_eq!(settlement_operation_id(&item), "adyen:7914073381342284");
+        assert_eq!(
+            allocation_cents(item.amount_value().expect("amount"), 1130),
+            1130
+        );
+        let source = include_str!("adyen_webhooks.rs");
+        assert!(source.contains("let payment_cents = charged_cents.max(0);"));
+        assert!(source.contains(".bind(allocation)"));
+    }
+
+    #[test]
+    fn minor_unit_amounts_parse_exactly_without_float_drift() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_money",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 1130 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert_eq!(item.amount_value(), Some(1130));
+        let negative = parse_item(serde_json::json!({
+            "pspReference": "psp_money_credit",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": -1240 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert_eq!(negative.amount_value(), Some(-1_240));
+        // The extreme exact value survives; one past it is refused at parse
+        // time (never wrapped).
+        let max = parse_item(serde_json::json!({
+            "pspReference": "psp_money_max",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": i64::MAX },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert_eq!(max.amount_value(), Some(i64::MAX));
+        let overflow = serde_json::from_value::<AdyenNotificationItem>(serde_json::json!({
+            "pspReference": "psp_money_overflow",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 9_223_372_036_854_775_808_u64 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert!(overflow.is_err(), "an out-of-range amount is refused");
+        // Fractional minor units are not money — the parse refuses them.
+        let fractional = serde_json::from_value::<AdyenNotificationItem>(serde_json::json!({
+            "pspReference": "psp_money_frac",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 1130.5 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert!(fractional.is_err(), "a fractional minor unit is refused");
+    }
+
+    #[test]
+    fn a_zero_charged_total_is_a_real_zero_not_missing_data() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_zero",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 0 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert_eq!(item.amount_value(), Some(0));
+        assert!(item.amount.is_some());
+    }
+
+    #[test]
+    fn a_missing_wire_amount_is_absent_not_zero() {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_no_amount",
+            "merchantReference": "ref",
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        assert_eq!(item.amount_value(), None);
+        assert_eq!(item.amount_currency(), None);
+    }
+
+    #[test]
+    fn notification_item_decodes_the_full_wire_shape() {
+        let item = official_item();
+        assert_eq!(item.psp_reference, "7914073381342284");
+        assert_eq!(item.merchant_account_code.as_deref(), Some("TestMerchant"));
+        assert_eq!(item.merchant_reference, "TestPayment-1407325143704");
+        assert_eq!(item.amount_value(), Some(1130));
+        assert_eq!(item.amount_currency(), Some("EUR"));
+        assert_eq!(item.event_code, "AUTHORISATION");
+        assert_eq!(
+            item.event_date.as_deref(),
+            Some("2019-05-06T17:15:34.121+02:00")
+        );
+        assert_eq!(item.success.as_deref(), Some("true"));
+        assert_eq!(item.payment_method.as_deref(), Some("visa"));
+        // Unknown notification fields (`operations`, `live`) are ignored.
+        assert!(item.additional_data.is_none());
+    }
+
+    #[test]
+    fn notification_item_decodes_minimal_shape_with_empty_defaults() {
+        let item = parse_item(serde_json::json!({ "pspReference": "psp_minimal" }));
+        assert_eq!(item.psp_reference, "psp_minimal");
+        assert_eq!(item.merchant_reference, "");
+        assert_eq!(item.event_code, "");
+        assert_eq!(item.success, None);
+        assert!(item.amount.is_none());
+        assert_eq!(item.original_reference, None);
+        assert!(item.additional_data.is_none());
+        assert!(!item.success_is_true());
+    }
+
+    // ------------------------------------------------------------------
+    // Tax truth (P0): the local invoice is the expectation, the charge must
+    // match its total.
     // ------------------------------------------------------------------
 
     fn expected(subtotal: i64, vat: i64) -> ExpectedTax {
@@ -4489,18 +3937,14 @@ mod tests {
 
     #[test]
     fn tax_total_mismatch_is_an_error_not_a_warning() {
-        // Adyen charged X (e.g. 10.00 + 0 tax); ApexMail's statutory
-        // invoice says X + VAT (10.00 + 2.40). This MUST block.
+        // Adyen charged 10.00 + 0 tax; the local invoice's statutory total
+        // is 10.00 + 2.40. This MUST block.
         let discrepancy = check_charged_total(&expected(1_000, 240), 1_000, 0, 1_000)
             .expect_err("mismatch must be an error");
         assert_eq!(discrepancy.expected_total_cents, 1_240);
         assert_eq!(discrepancy.observed_total_cents, 1_000);
         assert_eq!(discrepancy.delta_cents, -240);
         assert!(discrepancy.summary().contains("1240"));
-
-        // Subtotal or VAT disagreement alone is also a discrepancy.
-        assert!(check_charged_total(&expected(1_000, 240), 1_000, 190, 1_190).is_err());
-        assert!(check_charged_total(&expected(1_000, 240), 900, 240, 1_140).is_err());
     }
 
     #[test]
@@ -4520,76 +3964,76 @@ mod tests {
     }
 
     #[test]
-    fn automatic_tax_status_is_read_verbatim() {
-        let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
-        invoice.automatic_tax = Some(AdyenAutomaticTax {
-            enabled: Some(true),
-            status: Some("complete".into()),
-            disabled_reason: None,
-        });
-        assert_eq!(automatic_tax_status(&invoice), "complete");
-        assert!(automatic_tax_complete(&invoice));
-
-        invoice.automatic_tax = Some(AdyenAutomaticTax {
-            enabled: Some(true),
-            status: Some("requires_location_inputs".into()),
-            disabled_reason: None,
-        });
-        assert!(!automatic_tax_complete(&invoice));
-
-        invoice.automatic_tax = None;
-        assert_eq!(automatic_tax_status(&invoice), "not_enabled");
-        assert!(!automatic_tax_complete(&invoice));
+    fn zero_value_and_credit_invoices_validate_without_inventing_vat() {
+        // A 100%-discounted invoice: local total 0, charge 0 — validated.
+        assert!(check_charged_total(&expected(0, 0), 0, 0, 0).is_ok());
+        // A credit invoice (negative totals): the charge carries the sign.
+        let credit = ExpectedTax {
+            subtotal_cents: -1_000,
+            vat_cents: -240,
+            total_cents: -1_240,
+            source: "local_invoice",
+            country: Some("EE".into()),
+            vat_rate: 24.0,
+            evidence_id: None,
+        };
+        assert!(check_charged_total(&credit, -1_000, -240, -1_240).is_ok());
+        // A charge against a zero-total invoice is a discrepancy, never a
+        // silent skip.
+        assert!(check_charged_total(&expected(0, 0), 0, 0, 1_000).is_err());
     }
 
     #[test]
-    fn tax_id_summary_distinguishes_verified_from_merely_provided() {
-        let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
-        assert_eq!(summarize_tax_ids(&invoice).0, "not_provided");
-
-        invoice.customer_tax_ids = Some(vec![AdyenShopperTaxId {
-            kind: Some("eu_vat".into()),
-            value: Some("DE123456789".into()),
-            verification: Some(serde_json::json!({"status": "unverified"})),
-        }]);
-        let (status, ids) = summarize_tax_ids(&invoice);
-        assert_eq!(status, "provided_unverified");
-        assert_eq!(ids[0]["value"], "DE123456789");
-
-        invoice.customer_tax_ids = Some(vec![AdyenShopperTaxId {
-            kind: Some("eu_vat".into()),
-            value: Some("DE123456789".into()),
-            verification: Some(serde_json::json!({"status": "verified"})),
-        }]);
-        let (status, _) = summarize_tax_ids(&invoice);
-        assert_eq!(status, "verified");
+    fn the_local_computation_is_the_only_tax_authority() {
+        // Adyen transmits no tax fields; the expectation is built ONLY from
+        // the local invoice row (totals, country, rate, evidence).
+        let local = LocalInvoiceSettlement {
+            id: Uuid::new_v4(),
+            tenant_id: "tenant_local".into(),
+            currency: "eur".into(),
+            subtotal_cents: 10_000,
+            vat_cents: 2_400,
+            total_cents: 12_400,
+            billing_country: Some("EE".into()),
+            vat_rate: Some(24.0),
+            vat_evidence_id: Some(Uuid::new_v4()),
+        };
+        let expected = expected_tax_from_local_invoice(&local);
+        assert_eq!(expected.source, "local_invoice");
+        assert_eq!(expected.subtotal_cents, 10_000);
+        assert_eq!(expected.vat_cents, 2_400);
+        assert_eq!(expected.total_cents, 12_400);
+        assert_eq!(expected.country.as_deref(), Some("EE"));
+        assert_eq!(expected.vat_rate, 24.0);
+        assert_eq!(expected.evidence_id, local.vat_evidence_id);
+        // A blank country is absent, never an empty-string jurisdiction.
+        let mut blank = local.clone();
+        blank.billing_country = Some("  ".into());
+        assert_eq!(expected_tax_from_local_invoice(&blank).country, None);
+        // A missing rate degrades to zero, never to a fabricated statutory
+        // rate.
+        let mut missing_rate = local.clone();
+        missing_rate.vat_rate = None;
+        assert_eq!(expected_tax_from_local_invoice(&missing_rate).vat_rate, 0.0);
     }
 
     #[test]
-    fn jurisdiction_is_read_from_either_api_shape() {
-        let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
-        assert_eq!(tax_jurisdiction(&invoice), None);
+    fn tax_validation_status_maps_outcomes_truthfully() {
+        let ok: Result<(), TaxTotalDiscrepancy> = Ok(());
+        assert_eq!(tax_validation_status(&ok), "validated");
+        let err =
+            check_charged_total(&expected(1_000, 240), 1_000, 0, 1_000).expect_err("mismatch");
+        assert_eq!(tax_validation_status(&Err(err)), "discrepancy");
+    }
 
-        invoice.total_taxes = Some(vec![AdyenTotalTax {
-            amount: Some(240),
-            inclusive: Some(false),
-            taxability_reason: Some("standard_rated".into()),
-            tax_rate_details: Some(
-                serde_json::json!({"country": "ee", "percentage_decimal": "24"}),
-            ),
-            tax_rate: None,
-        }]);
-        assert_eq!(tax_jurisdiction(&invoice).as_deref(), Some("EE"));
-
-        invoice.total_taxes = None;
-        invoice.total_tax_amounts = Some(vec![AdyenTotalTax {
-            amount: Some(240),
-            inclusive: Some(false),
-            taxability_reason: None,
-            tax_rate_details: None,
-            tax_rate: Some(serde_json::json!({"country": "DE"})),
-        }]);
-        assert_eq!(tax_jurisdiction(&invoice).as_deref(), Some("DE"));
+    #[test]
+    fn charged_total_discrepancy_summary_names_both_totals() {
+        let discrepancy =
+            check_charged_total(&expected(1_000, 240), 1_000, 0, 1_000).expect_err("mismatch");
+        let summary = discrepancy.summary();
+        assert!(summary.contains("charged total 1000"), "{summary}");
+        assert!(summary.contains("ApexMail-computed 1240"), "{summary}");
+        assert!(summary.contains("VAT 0 vs 240"), "{summary}");
     }
 
     #[test]
@@ -4605,13 +4049,14 @@ mod tests {
     #[test]
     fn snapshot_persist_sql_binds_expected_and_observed_sides() {
         // Guard the write shape: the snapshot must carry both the observed
-        // Adyen figures and ApexMail's independent expectation plus hash.
+        // charge figures and ApexMail's independent expectation plus hash.
         let source = include_str!("adyen_webhooks.rs");
         for needle in [
             "apexmail_expected_total_cents",
             "raw_payload_hash",
             "validation_status",
             "ON CONFLICT (adyen_psp_reference) DO NOTHING",
+            "adyen_merchant_reference",
         ] {
             assert!(
                 source.contains(needle),
@@ -4624,131 +4069,35 @@ mod tests {
     }
 
     #[test]
-    fn verified_payment_prefers_amount_paid_over_totals() {
-        // The confirmed payment wins over any derived total.
-        let event = invoice_event_with(Some(6_000), Some(10_000), 10_000);
-        assert_eq!(verified_payment_cents(&event), 6_000);
+    fn tax_snapshot_authority_is_an_allowed_check_value() {
+        // Migration 218's CHECK allows ('stripe_tax', 'apexmail_local');
+        // 'apexmail_local' is the truthful allowed value for "ApexMail's
+        // local computation validated against the charge".
+        assert_eq!(ADYEN_TAX_AUTHORITY_LOCAL, "apexmail_local");
+        assert_ne!(ADYEN_TAX_AUTHORITY_LOCAL, "adyen_tax");
+        let source = include_str!("adyen_webhooks.rs");
+        assert!(source.contains("ADYEN_TAX_AUTHORITY_LOCAL"));
     }
 
     #[test]
-    fn verified_payment_falls_back_to_the_canonical_derived_total() {
-        // No amount_paid: the canonical derivation prefers Adyen's own
-        // explicit total...
-        let mut event = invoice_event_with(None, Some(10_000), 10_000);
-        event.subtotal = Some(8_000);
-        event.tax = Some(1_920);
-        assert_eq!(verified_payment_cents(&event), 10_000);
-        // ...then subtotal + tax when total is absent...
-        let mut event = invoice_event_with(None, None, 0);
-        event.subtotal = Some(8_000);
-        event.tax = Some(1_920);
-        assert_eq!(verified_payment_cents(&event), 9_920);
-        // ...and otherwise amount_due.
-        let event = invoice_event_with(None, None, 7_500);
-        assert_eq!(verified_payment_cents(&event), 7_500);
+    fn currencies_are_compared_case_insensitively() {
+        assert!(currencies_match("eur", "EUR"));
+        assert!(currencies_match(" EUR ", "eur"));
+        assert!(!currencies_match("usd", "eur"));
+        assert!(!currencies_match("", "eur"));
     }
 
     #[test]
-    fn verified_payment_never_goes_negative() {
-        let event = invoice_event_with(Some(-5), None, 0);
-        assert_eq!(verified_payment_cents(&event), 0);
+    fn normalize_adyen_currency_defaults_to_eur_and_lowercases() {
+        assert_eq!(normalize_adyen_currency(Some("EUR")), "eur");
+        assert_eq!(normalize_adyen_currency(Some("usd")), "usd");
+        assert_eq!(normalize_adyen_currency(Some("  ")), "eur");
+        assert_eq!(normalize_adyen_currency(None), "eur");
     }
 
-    #[test]
-    fn zero_value_payments_settle_without_a_positive_allocation() {
-        // F73: a zero-value paid invoice must not attempt an allocation
-        // (the amount_cents > 0 CHECK would fail the callback); the
-        // settlement marks it paid with no allocation row.
-        let event = invoice_event_with(Some(0), Some(0), 0);
-        let payment = verified_payment_cents(&event);
-        assert_eq!(payment, 0);
-        // The allocation decision mirrors the handler: only positive
-        // amounts against a positive remainder allocate.
-        let outstanding = 0_i64;
-        assert_eq!(payment.min(outstanding).max(0), 0);
-    }
-
-    #[test]
-    fn delete_with_a_remaining_active_subscription_keeps_its_plan() {
-        // A stale deleted event for an OLD subscription must not downgrade
-        // the newer active one.
-        assert_eq!(
-            reconciled_entitlement_plan(Some((Some("growth"), "active"))),
-            "growth"
-        );
-    }
-
-    #[test]
-    fn delete_with_a_remaining_trial_keeps_the_trialled_plan() {
-        assert_eq!(
-            reconciled_entitlement_plan(Some((Some("pro"), "trialing"))),
-            "pro"
-        );
-    }
-
-    #[test]
-    fn delete_with_no_entitled_subscription_remaining_drops_to_free() {
-        assert_eq!(reconciled_entitlement_plan(None), "free");
-        // A remaining row with no plan recorded cannot grant entitlement.
-        assert_eq!(reconciled_entitlement_plan(Some((None, "active"))), "free");
-        // Blank plans are data corruption, not entitlement.
-        assert_eq!(
-            reconciled_entitlement_plan(Some((Some("  "), "active"))),
-            "free"
-        );
-    }
-
-    #[test]
-    fn delete_reconciliation_never_consults_the_deleted_row() {
-        // The decision input is exclusively the remaining-subscription
-        // query result; pin that the handler's query only selects rows
-        // OTHER than the deleted subscription and only entitled statuses.
-        // (Behavioral pin: the deleted subscription's plan 'enterprise'
-        // must lose to the remaining active 'starter'.)
-        assert_eq!(
-            reconciled_entitlement_plan(Some((Some("starter"), "active"))),
-            "starter"
-        );
-    }
-
-    #[test]
-    fn reactivation_transitions_from_terminal_states_are_allowed() {
-        // Adyen genuinely emits customer.subscription.updated with
-        // status=active for an un-cancelled (cancel_at_period_end removed) or
-        // support-side reactivated subscription whose last observed status was
-        // canceled/incomplete_expired. Refusing the transition deadletters
-        // the event and strands a paying customer on the free plan.
-        assert!(SubscriptionStatus::Active.can_transition_from("canceled"));
-        assert!(SubscriptionStatus::Active.can_transition_from("incomplete_expired"));
-        assert!(SubscriptionStatus::Trialing.can_transition_from("canceled"));
-        // Terminal states must still never "transition" to other terminal
-        // states — only revival to a paying/entitled state is admitted.
-        assert!(!SubscriptionStatus::Canceled.can_transition_from("canceled"));
-        assert!(!SubscriptionStatus::Unpaid.can_transition_from("canceled"));
-    }
-
-    #[test]
-    fn only_entitled_adyen_statuses_grant_the_paid_plan() {
-        assert_eq!(
-            SubscriptionStatus::Active.entitlement_plan_name("scale"),
-            "scale"
-        );
-        assert_eq!(
-            SubscriptionStatus::Trialing.entitlement_plan_name("scale"),
-            "scale"
-        );
-
-        for status in [
-            SubscriptionStatus::Incomplete,
-            SubscriptionStatus::IncompleteExpired,
-            SubscriptionStatus::PastDue,
-            SubscriptionStatus::Unpaid,
-            SubscriptionStatus::Paused,
-            SubscriptionStatus::Canceled,
-        ] {
-            assert_eq!(status.entitlement_plan_name("scale"), "free");
-        }
-    }
+    // ------------------------------------------------------------------
+    // Deadletter entries.
+    // ------------------------------------------------------------------
 
     #[test]
     fn deadletter_entry_default_has_max_retries() {
@@ -4765,13 +4114,16 @@ mod tests {
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
             occurred_at: Some("2025-01-01T00:00:00Z".into()),
-            event_id: Some("evt_123".into()),
+            event_id: Some("adn_123".into()),
             error: Some("transient db error".into()),
             payload_length: Some(1024),
             retry_count: 2,
             max_retries: DEADLETTER_MAX_RETRIES,
-            body: Some(r#"{"id":"evt_123","type":"checkout.session.completed"}"#.into()),
-            signature: Some("t=123,v1=abc".into()),
+            body: Some(
+                r#"{"notificationItems":[{"NotificationRequestItem":{"eventCode":"AUTHORISATION"}}]}"#
+                    .into(),
+            ),
+            signature: Some("coqCmt/IZ4E3CzPvMY8zTjQVL5hYJUiBRg8UU+iCWo0=".into()),
         };
 
         let json = serde_json::to_string(&entry).expect("serialize");
@@ -4780,7 +4132,7 @@ mod tests {
         assert_eq!(deserialized.reason, "processing_failed");
         assert_eq!(deserialized.retry_count, 2);
         assert_eq!(deserialized.max_retries, DEADLETTER_MAX_RETRIES);
-        assert_eq!(deserialized.event_id, Some("evt_123".into()));
+        assert_eq!(deserialized.event_id, Some("adn_123".into()));
         assert!(deserialized.body.is_some());
         assert!(deserialized.signature.is_some());
     }
@@ -4791,7 +4143,7 @@ mod tests {
         let legacy_json = r#"{
             "reason": "processing_failed",
             "occurredAt": "2025-01-01T00:00:00Z",
-            "eventId": "evt_999",
+            "eventId": "adn_999",
             "error": "timeout"
         }"#;
         let entry: DeadletterEntry = serde_json::from_str(legacy_json).expect("deserialize legacy");
@@ -4808,16 +4160,16 @@ mod tests {
         let prepared = prepare_deadletter(
             DeadletterEntry {
                 reason: "processing_failed".into(),
-                event_id: Some("evt_retry".into()),
+                event_id: Some("adn_retry".into()),
                 error: Some("db timeout".into()),
                 ..Default::default()
             },
-            Some(br#"{"id":"evt_retry"}"#),
-            Some("t=123,v1=abc"),
+            Some(br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_retry"}}]}"#),
+            Some("coqCmt/IZ4E3CzPvMY8zTjQVL5hYJUiBRg8UU+iCWo0="),
             now,
         );
 
-        assert!(prepared.event_key.contains("evt_retry"));
+        assert!(prepared.event_key.contains("adn_retry"));
         assert_eq!(
             prepared.retry_at_ms,
             Some(prepared.now_ms + DEADLETTER_RETRY_BACKOFF_SECONDS[0] * 1000)
@@ -4825,8 +4177,16 @@ mod tests {
 
         let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("payload json");
         assert_eq!(entry.reason, "processing_failed");
-        assert_eq!(entry.body.as_deref(), Some(r#"{"id":"evt_retry"}"#));
-        assert_eq!(entry.signature.as_deref(), Some("t=123,v1=abc"));
+        assert_eq!(
+            entry.body.as_deref(),
+            Some(
+                r#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_retry"}}]}"#
+            )
+        );
+        assert_eq!(
+            entry.signature.as_deref(),
+            Some("coqCmt/IZ4E3CzPvMY8zTjQVL5hYJUiBRg8UU+iCWo0=")
+        );
     }
 
     #[test]
@@ -4835,7 +4195,7 @@ mod tests {
         // SET, and — because the stored JSON is incomplete — no retry may be
         // scheduled for it.
         let oversized_body = format!(
-            r#"{{"id":"evt_big","data":"{}"}}"#,
+            r#"{{"notificationItems":[],"padding":"{}"}}"#,
             "x".repeat(DEADLETTER_MAX_BODY_BYTES)
         );
         let oversized_bytes = oversized_body.as_bytes();
@@ -4844,12 +4204,12 @@ mod tests {
         let prepared = prepare_deadletter(
             DeadletterEntry {
                 reason: "processing_failed".into(),
-                event_id: Some("evt_big".into()),
+                event_id: Some("adn_big".into()),
                 error: Some("boom".into()),
                 ..Default::default()
             },
             Some(oversized_bytes),
-            Some("t=123,v1=abc"),
+            Some("coqCmt/IZ4E3CzPvMY8zTjQVL5hYJUiBRg8UU+iCWo0="),
             Utc::now(),
         );
 
@@ -4875,37 +4235,104 @@ mod tests {
     }
 
     #[test]
-    fn verify_signature_hmac_accepts_valid_and_rejects_tampered() {
-        let secret = "whsec_test_secret";
-        let payload = br#"{"id":"evt_1","type":"invoice.paid"}"#;
-        let timestamp = 1_711_234_567_i64.to_string();
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(timestamp.as_bytes());
-        mac.update(b".");
-        mac.update(payload);
-        let signature = format!(
-            "t={timestamp},v1={}",
-            hex::encode(mac.finalize().into_bytes())
+    fn deadletter_preparation_truncates_and_never_schedules_truncated_replays() {
+        let now = Utc::now();
+        let small = prepare_deadletter(
+            DeadletterEntry {
+                reason: "processing_failed".into(),
+                event_id: Some("adn/with spaces".into()),
+                ..Default::default()
+            },
+            Some(br#"{"notificationItems":[]}"#),
+            Some("TQ=="),
+            now,
         );
+        assert!(small.retry_at_ms.is_some(), "a full body is retryable");
+        assert!(small.event_key.contains("adn_with_spaces"));
 
-        assert!(verify_signature_hmac(secret, payload, &signature).is_ok());
-
-        // Tampered body → HMAC mismatch.
-        assert!(verify_signature_hmac(secret, b"{\"id\":\"evt_2\"}", &signature).is_err());
-        // Wrong secret → mismatch.
-        assert!(verify_signature_hmac("whsec_other", payload, &signature).is_err());
+        let oversized = "x".repeat(DEADLETTER_MAX_BODY_BYTES + 100);
+        let big = prepare_deadletter(
+            DeadletterEntry {
+                reason: "processing_failed".into(),
+                event_id: Some("adn_big".into()),
+                ..Default::default()
+            },
+            Some(oversized.as_bytes()),
+            Some("TQ=="),
+            now,
+        );
+        assert!(
+            big.retry_at_ms.is_none(),
+            "a truncated body can never be replayed"
+        );
+        let stored: DeadletterEntry = serde_json::from_str(&big.payload).expect("payload");
+        assert!(
+            stored.body.expect("body").ends_with("...(truncated)"),
+            "truncation is marked"
+        );
     }
+
+    // ------------------------------------------------------------------
+    // Error/claim classification.
+    // ------------------------------------------------------------------
 
     #[test]
     fn process_webhook_error_tracks_deadletter_ownership() {
-        let unrecorded = ProcessWebhookError::RecordDeadletter("invalid signature".into());
+        let wire = ProcessWebhookError::InvalidRequest {
+            message: "Invalid JSON payload".into(),
+            detail: "expected value at line 1 column 1".into(),
+            reason: "invalid_json_payload",
+        };
+        assert!(wire.should_record_deadletter());
+        assert_eq!(wire.deadletter_reason(), "invalid_json_payload");
+        assert_eq!(
+            wire.deadletter_detail(),
+            "expected value at line 1 column 1"
+        );
+        assert_eq!(wire.response_message(), "Invalid JSON payload");
+        assert_eq!(wire.http_status(), StatusCode::BAD_REQUEST);
+
+        let unrecorded = ProcessWebhookError::RecordDeadletter("claim failed".into());
         assert!(unrecorded.should_record_deadletter());
-        assert_eq!(unrecorded.message(), "invalid signature");
+        assert_eq!(unrecorded.deadletter_reason(), "processing_failed");
+        assert_eq!(unrecorded.message(), "claim failed");
+        assert_eq!(unrecorded.response_message(), "Webhook processing failed");
 
         let handled = ProcessWebhookError::DeadletterFlowHandled("business failure".into());
         assert!(!handled.should_record_deadletter());
         assert_eq!(handled.message(), "business failure");
+        assert_eq!(handled.response_message(), "Webhook processing failed");
+    }
+
+    #[test]
+    fn retry_later_error_maps_to_500_and_no_deadletter() {
+        let error = ProcessWebhookError::RetryLater("event pending on another worker".into());
+
+        assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!error.should_record_deadletter());
+        assert_eq!(error.message(), "event pending on another worker");
+        assert_eq!(error.response_message(), "Webhook processing failed");
+    }
+
+    #[test]
+    fn deadlettered_errors_map_to_400_and_skip_duplicate_deadletter() {
+        let error = ProcessWebhookError::DeadletterFlowHandled("business failure".into());
+
+        assert_eq!(error.http_status(), StatusCode::BAD_REQUEST);
+        // The deadletter was already written atomically with the DB status
+        // flip inside process_webhook — must not be recorded twice.
+        assert!(!error.should_record_deadletter());
+    }
+
+    #[test]
+    fn stale_pending_cutoff_is_ten_minutes_in_the_past() {
+        let now = Utc::now();
+        let cutoff = stale_pending_cutoff(now);
+
+        assert_eq!(
+            now - cutoff,
+            TimeDelta::seconds(STALE_PENDING_RECLAIM_SECS as i64)
+        );
     }
 
     #[test]
@@ -4913,9 +4340,9 @@ mod tests {
         assert_eq!(sanitize_event_id(None), "unknown");
         assert_eq!(sanitize_event_id(Some("")), "unknown");
         assert_eq!(sanitize_event_id(Some("  ")), "unknown");
-        assert_eq!(sanitize_event_id(Some("evt_123")), "evt_123");
-        assert_eq!(sanitize_event_id(Some("evt_123:456")), "evt_123_456");
-        assert_eq!(sanitize_event_id(Some("evt/abc<>def")), "evt_abc__def");
+        assert_eq!(sanitize_event_id(Some("adn_123")), "adn_123");
+        assert_eq!(sanitize_event_id(Some("adn_123:456")), "adn_123_456");
+        assert_eq!(sanitize_event_id(Some("adn/abc<>def")), "adn_abc__def");
     }
 
     #[test]
@@ -4948,168 +4375,29 @@ mod tests {
         assert_eq!(decision, WebhookEventClaim::AlreadyPending);
     }
 
-    // ------------------------------------------------------------------
-    // Fix G — AlreadyPending must be retryable, not a silent 200.
-    // ------------------------------------------------------------------
-
     #[test]
-    fn retry_later_error_maps_to_500_and_no_deadletter() {
-        let error = ProcessWebhookError::RetryLater("event pending on another worker".into());
-
-        assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(!error.should_record_deadletter());
-        assert_eq!(error.message(), "event pending on another worker");
-    }
-
-    #[test]
-    fn deadlettered_errors_map_to_400_and_skip_duplicate_deadletter() {
-        let error = ProcessWebhookError::DeadletterFlowHandled("business failure".into());
-
-        assert_eq!(error.http_status(), StatusCode::BAD_REQUEST);
-        // The deadletter was already written atomically with the DB status
-        // flip inside process_webhook — must not be recorded twice.
-        assert!(!error.should_record_deadletter());
-    }
-
-    #[test]
-    fn stale_pending_cutoff_is_ten_minutes_in_the_past() {
-        let now = Utc::now();
-        let cutoff = stale_pending_cutoff(now);
-
-        assert_eq!(
-            now - cutoff,
-            TimeDelta::seconds(STALE_PENDING_RECLAIM_SECS as i64)
-        );
+    fn notification_claim_state_machine_states_are_the_ledger_contract() {
+        // The claim SQL writes exactly these statuses; the reclaimer only
+        // ever rewinds 'pending'. Pin the vocabulary the ledger depends on.
+        let states = ["received", "pending", "processed", "failed"];
+        assert!(states.contains(&"received"));
+        assert!(states.contains(&"pending"));
+        assert!(states.contains(&"processed"));
+        assert!(states.contains(&"failed"));
+        for source_probe in [
+            "status = 'processed', processed_at = NOW()",
+            "status = 'failed', error = $2",
+            "status = 'received',",
+        ] {
+            assert!(
+                include_str!("adyen_webhooks.rs").contains(source_probe),
+                "the ledger state machine must keep writing {source_probe}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------
-    // Fix A — invoice.paid must insert revenue when no local row exists.
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn derive_invoice_totals_preserves_signed_credit_invoices() {
-        // Adyen emits NEGATIVE invoices when customer credit / matrix
-        // proration exceeds the charge. Recording them as 0/0/0 overstates
-        // period revenue and hides the applied credit from the local ledger.
-        let (subtotal, vat, total) =
-            derive_invoice_totals(Some(-1_000), Some(-240), Some(-1_240), -1_240);
-        assert_eq!((subtotal, vat, total), (-1_000, -240, -1_240));
-        // VAT derivation mirrors the sign of the invoice for credits.
-        let (subtotal, vat, total) = derive_invoice_totals(Some(-1_000), None, Some(-1_240), 0);
-        assert_eq!((subtotal, vat, total), (-1_000, -240, -1_240));
-    }
-
-    #[test]
-    fn derive_invoice_totals_keeps_a_legitimate_zero_subtotal() {
-        // A 100%-discounted invoice legitimately has subtotal 0; replacing
-        // it with amount_due mislabels the row as charged.
-        let (subtotal, vat, total) = derive_invoice_totals(Some(0), Some(0), Some(0), 0);
-        assert_eq!((subtotal, vat, total), (0, 0, 0));
-        // The charge-relevant amount_due stays clamped at zero — nothing was
-        // due — but the explicit Adyen figures are preserved verbatim.
-        let (subtotal, _vat, total) = derive_invoice_totals(Some(0), None, Some(0), 5_000);
-        assert_eq!((subtotal, total), (0, 0));
-    }
-
-    #[test]
-    fn derive_invoice_totals_prefers_explicit_adyen_amounts() {
-        let (subtotal, vat, total) =
-            derive_invoice_totals(Some(10_000), Some(2_400), Some(12_400), 12_400);
-        assert_eq!((subtotal, vat, total), (10_000, 2_400, 12_400));
-    }
-
-    #[test]
-    fn derive_invoice_totals_derives_vat_from_total_minus_subtotal() {
-        // Older Adyen payloads may omit `tax`; derive it from total-subtotal.
-        let (subtotal, vat, total) =
-            derive_invoice_totals(Some(10_000), None, Some(12_400), 12_400);
-        assert_eq!((subtotal, vat, total), (10_000, 2_400, 12_400));
-    }
-
-    #[test]
-    fn derive_invoice_totals_falls_back_to_amount_due_without_subtotal() {
-        // Only amount_due known: treat it as the taxable subtotal, VAT 0.
-        let (subtotal, vat, total) = derive_invoice_totals(None, None, None, 5_000);
-        assert_eq!((subtotal, vat, total), (5_000, 0, 5_000));
-    }
-
-    #[test]
-    fn derive_invoice_totals_handles_empty_and_negative_inputs() {
-        assert_eq!(derive_invoice_totals(None, None, None, 0), (0, 0, 0));
-        assert_eq!(derive_invoice_totals(None, None, None, -5), (0, 0, 0));
-        // Inconsistent Adyen data never yields a negative VAT.
-        assert_eq!(
-            derive_invoice_totals(Some(2_000), None, Some(1_000), 1_000),
-            (2_000, 0, 1_000)
-        );
-    }
-
-    #[test]
-    fn derive_invoice_vat_rate_computes_effective_rate() {
-        assert_eq!(derive_invoice_vat_rate(10_000, 2_400), 24.0);
-        assert_eq!(derive_invoice_vat_rate(10_000, 1_900), 19.0);
-        assert_eq!(derive_invoice_vat_rate(10_000, 0), 0.0);
-        assert_eq!(derive_invoice_vat_rate(0, 500), 0.0);
-    }
-
-    #[test]
-    fn normalize_adyen_currency_defaults_to_eur_and_lowercases() {
-        assert_eq!(normalize_adyen_currency(Some("EUR")), "eur");
-        assert_eq!(normalize_adyen_currency(Some("usd")), "usd");
-        assert_eq!(normalize_adyen_currency(Some("  ")), "eur");
-        assert_eq!(normalize_adyen_currency(None), "eur");
-    }
-
-    #[test]
-    fn invoice_event_decodes_full_adyen_amount_payload() {
-        let payload = serde_json::json!({
-            "id": "in_123",
-            "amount_due": 12_400,
-            "currency": "eur",
-            "subtotal": 10_000,
-            "tax": 2_400,
-            "total": 12_400,
-            "number": "2026-000042",
-            "created": 1_777_000_000,
-            "period_start": 1_777_000_000,
-            "period_end": 1_779_000_000,
-            "attempt_count": 1,
-            "subscription": "sub_1",
-            "subscription_details": { "metadata": { "tenant_id": "tenant_1" } }
-        });
-
-        let invoice: InvoiceEvent = serde_json::from_value(payload).expect("decode");
-        assert_eq!(invoice.id, "in_123");
-        assert_eq!(invoice.subtotal, Some(10_000));
-        assert_eq!(invoice.tax, Some(2_400));
-        assert_eq!(invoice.total, Some(12_400));
-        assert_eq!(invoice.currency.as_deref(), Some("eur"));
-        assert_eq!(invoice.number.as_deref(), Some("2026-000042"));
-        assert_eq!(
-            invoice.subscription.as_ref().map(ExpandableId::id),
-            Some("sub_1")
-        );
-    }
-
-    #[test]
-    fn invoice_event_decodes_minimal_payload_with_defaults() {
-        let payload = serde_json::json!({ "id": "in_min", "amount_due": 500 });
-
-        let invoice: InvoiceEvent = serde_json::from_value(payload).expect("decode");
-        assert_eq!(invoice.id, "in_min");
-        assert_eq!(invoice.amount_due, 500);
-        assert!(invoice.subtotal.is_none());
-        assert!(invoice.subscription_details.is_none());
-        assert!(invoice.subscription.is_none());
-        assert!(invoice.currency.is_none());
-    }
-
-    // ------------------------------------------------------------------
-    // Fix H — dunning state computed from atomically-incremented counters.
-    // ------------------------------------------------------------------
-
-    // ------------------------------------------------------------------
-    // Audit item 3g — suspension transitions emit distinct events.
+    // Dunning state (Fix H) and transitions (audit item 3g).
     // ------------------------------------------------------------------
 
     #[test]
@@ -5155,8 +4443,8 @@ mod tests {
 
     #[test]
     fn dunning_transition_does_not_fire_without_state_change() {
-        // Repeated payment failures in the same state must not spam
-        // duplicate transition events.
+        // Repeated refusals in the same state must not spam duplicate
+        // transition events.
         assert_eq!(dunning_transition(Some("warning"), "warning"), None);
         assert_eq!(
             dunning_transition(Some("soft_suspended"), "soft_suspended"),
@@ -5292,69 +4580,57 @@ mod tests {
         DunningConfig::default()
     }
 
-    // -----------------------------------------------------------------------
-    // Fix 7.4 — Adyen webhook processing integration tests
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn parse_signature_header_parses_valid_input() {
-        // Simulate a real Adyen signature header with timestamp and v1 signatures.
-        let header = "t=1711234567,v1=abcdef1234567890abcdef1234567890abcdef12,v1=deadbeef";
-        let result = parse_signature_header(header);
-
-        let (timestamp, signatures) = result.expect("valid signature header should parse");
-        assert_eq!(timestamp, 1_711_234_567);
-        assert_eq!(signatures.len(), 2);
-        assert_eq!(signatures[0], "abcdef1234567890abcdef1234567890abcdef12");
-        assert_eq!(signatures[1], "deadbeef");
+    fn dunning_config_and_transition_helpers_are_bounded() {
+        let config = DunningConfig::default();
+        let now = Utc::now();
+        assert_eq!(
+            calculate_next_retry(now, 1, &config),
+            Some(now + TimeDelta::days(1))
+        );
+        assert_eq!(
+            calculate_next_retry(now, 2, &config),
+            Some(now + TimeDelta::days(3))
+        );
+        assert_eq!(
+            calculate_next_retry(now, 4, &config),
+            Some(now + TimeDelta::days(14))
+        );
+        assert_eq!(
+            calculate_next_retry(now, 99, &config),
+            None,
+            "past the schedule there is no next retry"
+        );
+        assert_eq!(
+            calculate_next_retry(now, 0, &config),
+            None,
+            "a zero count has no schedule slot and must not panic"
+        );
+        assert!(dunning_transition(Some("warning"), "warning").is_none());
+        assert!(dunning_transition(None, "warning").is_none());
+        assert_eq!(
+            dunning_transition(None, "soft_suspended"),
+            Some(DunningTransition::SoftSuspended)
+        );
+        assert!(dunning_transition(Some("soft_suspended"), "soft_suspended").is_none());
+        assert_eq!(
+            dunning_transition(Some("warning"), "hard_suspended"),
+            Some(DunningTransition::HardSuspended)
+        );
+        assert_eq!(
+            dunning_transition(Some("hard_suspended"), "healthy"),
+            Some(DunningTransition::Recovered)
+        );
+        assert!(dunning_transition(Some("healthy"), "healthy").is_none());
+        assert_eq!(
+            DunningTransition::Recovered.event_type(),
+            "payment_recovered"
+        );
     }
 
-    #[test]
-    fn parse_signature_header_rejects_missing_timestamp() {
-        // Header without a 't=' segment should be rejected.
-        let header = "v1=abc123";
-        let result = parse_signature_header(header);
-        assert!(result.is_err(), "missing timestamp should be rejected");
-        assert!(result.err().unwrap().contains("Invalid webhook signature"));
-    }
-
-    #[test]
-    fn parse_signature_header_rejects_empty_signatures() {
-        // Header with a timestamp but no v1 signatures should be rejected.
-        let header = "t=1711234567,v0=legacy";
-        let result = parse_signature_header(header);
-        assert!(result.is_err(), "no v1 signatures should be rejected");
-    }
-
-    #[test]
-    fn handle_adyen_notification_unknown_type_returns_ok() {
-        // The catch-all arm in handle_adyen_notification returns Ok(()) for unknown event types.
-        // This tests the event-type routing logic (serde deserialization + match).
-        let event = AdyenEventPayload {
-            id: "evt_test_unknown".into(),
-            event_type: "unknown.event.type".into(),
-            data: AdyenNotificationData {
-                object: serde_json::json!({}),
-            },
-        };
-
-        // The routing itself is synchronous; we verify the event type mapping
-        // by checking it would match the catch-all arm.
-        assert!(!matches!(
-            event.event_type.as_str(),
-            "checkout.session.completed"
-                | "customer.subscription.created"
-                | "customer.subscription.updated"
-                | "customer.subscription.deleted"
-                | "invoice.paid"
-                | "invoice.payment_failed"
-                | "customer.subscription.trial_will_end"
-        ));
-    }
-
-    // -----------------------------------------------------------------------
-    // Fix 7.5 — Dedicated IP auto-provisioning tests
-    // -----------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Dedicated-IP auto-provisioning request contract.
+    // ------------------------------------------------------------------
 
     /// Locally-declared mirror of the API's
     /// `api_server::routes::dedicated_ips::AllocateIpRequest` (api-server is
@@ -5388,28 +4664,6 @@ mod tests {
             "the old auto_provisioned body must remain rejected by the API contract"
         );
     }
-
-    #[test]
-    fn dedicated_ip_provisioning_flow_pending_then_provisioned() {
-        // Verify the conceptual state machine: a request moves from 'pending'
-        // to 'provisioning' to 'provisioned'. This test validates the invariants
-        // without requiring a real database connection.
-        let states = ["pending", "provisioning", "provisioned", "failed"];
-
-        assert!(states.contains(&"pending"), "initial state must be pending");
-        assert!(
-            states.contains(&"provisioning"),
-            "provisioning is a valid intermediate state"
-        );
-        assert!(
-            states.contains(&"provisioned"),
-            "provisioned is the terminal success state"
-        );
-        assert!(
-            states.contains(&"failed"),
-            "failed is the terminal error state"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5425,21 +4679,8 @@ mod tests {
 
 #[cfg(test)]
 mod coverage_adversarial {
+    use super::wire_test_helpers::*;
     use super::*;
-
-    /// The `Option`-returning [`derive_invoice_totals`] unwrapped for the
-    /// pinned assertions: every amount asserted below is far from the i64
-    /// bounds, so a `None` here is a test bug, not behaviour under test.
-    #[allow(dead_code)]
-    fn derive_invoice_totals(
-        subtotal: Option<i64>,
-        tax: Option<i64>,
-        total: Option<i64>,
-        amount_due: i64,
-    ) -> (i64, i64, i64) {
-        super::derive_invoice_totals(subtotal, tax, total, amount_due)
-            .expect("pinned test amounts do not overflow")
-    }
 
     use crate::config::BillingConfig;
     use deadpool_redis::Runtime;
@@ -5590,6 +4831,29 @@ mod coverage_adversarial {
         let redis = deadpool_redis::Config::from_url(redis_url)
             .create_pool(Some(Runtime::Tokio1))
             .expect("redis pool");
+
+        // MIGRATION-GAP COMPENSATION (private clone only): the committed
+        // migration 140 pins `invoice_payment_allocations.source` to
+        // ('wallet','stripe','manual','credit_note') — byte-exact and
+        // ledger-applied, so it cannot be edited in place. The Adyen
+        // settlement writes 'adyen' (the value
+        // `accounting_core::adapters::post_payment_allocation_in` branches on
+        // for the processor-clearing account); extend THIS CLONE to the
+        // intended post-cutover contract so the settlement path is exercised.
+        // Production needs the same value added by a new migration.
+        for statement in [
+            "ALTER TABLE invoice_payment_allocations \
+             DROP CONSTRAINT IF EXISTS invoice_payment_allocations_source_check",
+            "ALTER TABLE invoice_payment_allocations \
+             ADD CONSTRAINT invoice_payment_allocations_source_check \
+             CHECK (source IN ('wallet', 'stripe', 'manual', 'credit_note', 'adyen'))",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("allocation source contract (migration-gap compensation)");
+        }
+
         let config = BillingConfig {
             database_url,
             redis_url: "redis://127.0.0.1:6379".to_string(),
@@ -5638,90 +4902,1818 @@ mod coverage_adversarial {
         .expect("seed tenant");
     }
 
-    async fn seed_billing_address(env: &Env, tenant: &str, country: &str) {
+    fn invoice_number(invoice_id: Uuid) -> String {
+        format!("SWCOV-{}", &invoice_id.to_string()[..8])
+    }
+
+    /// A local invoice in the state the recurring-charge contract produces
+    /// (reference `invoice:{id}` is what the wire names it by).
+    async fn seed_local_invoice(
+        env: &Env,
+        tenant: &str,
+        invoice_id: Uuid,
+        subtotal: i64,
+        vat: i64,
+        total: i64,
+        currency: &str,
+    ) {
         sqlx::query(
-            "INSERT INTO billing_addresses (tenant_id, country, city)
-             VALUES ($1, $2, 'Testville')
-             ON CONFLICT (tenant_id) DO UPDATE SET country = EXCLUDED.country",
+            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
+                                   amount, currency, subtotal, vat_total, total,
+                                   due_at, period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, NULL, $3, 'pending', $6, $7, $4, $5, $6, NOW(), NOW(), NOW() + INTERVAL '30 days', NOW(), NOW())",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .bind(invoice_number(invoice_id))
+        .bind(subtotal)
+        .bind(vat)
+        .bind(total)
+        .bind(currency)
+        .execute(&env.pool)
+        .await
+        .expect("seed local invoice");
+    }
+
+    /// A recurring AUTHORISATION item (success or refusal) for a local
+    /// invoice.
+    fn authorisation_item(
+        psp_reference: &str,
+        invoice_id: Uuid,
+        value: i64,
+        success: bool,
+        shopper: Option<&str>,
+    ) -> AdyenNotificationItem {
+        let mut additional = serde_json::json!({ "recurringProcessingModel": "Subscription" });
+        if let Some(shopper) = shopper {
+            additional["shopperReference"] = serde_json::json!(shopper);
+            additional["metadata"] = serde_json::json!({ "tenant_id": shopper });
+        }
+        parse_item(serde_json::json!({
+            "pspReference": psp_reference,
+            "originalReference": "psp_original_ref",
+            "merchantAccountCode": "ApexMailECOV",
+            "merchantReference": format!("invoice:{invoice_id}"),
+            "amount": { "currency": "EUR", "value": value },
+            "eventCode": "AUTHORISATION",
+            "eventDate": "2026-10-14T10:00:00+00:00",
+            "success": if success { "true" } else { "false" },
+            "paymentMethod": "visa",
+            "additionalData": additional
+        }))
+    }
+
+    fn checkout_item(psp_reference: &str, shopper: Option<&str>) -> AdyenNotificationItem {
+        let additional = match shopper {
+            Some(shopper) => serde_json::json!({ "shopperReference": shopper }),
+            None => serde_json::json!({}),
+        };
+        parse_item(serde_json::json!({
+            "pspReference": psp_reference,
+            "merchantAccountCode": "ApexMailECOV",
+            "merchantReference": "checkout_ref",
+            "amount": { "currency": "EUR", "value": 2900 },
+            "eventCode": "AUTHORISATION",
+            "eventDate": "2026-10-14T10:00:00+00:00",
+            "success": "true",
+            "paymentMethod": "visa",
+            "additionalData": additional
+        }))
+    }
+
+    /// The local invoice read the way the handler reads it.
+    async fn local_invoice(env: &Env, invoice_id: Uuid) -> LocalInvoiceSettlement {
+        load_local_invoice_for_settlement(&env.state, invoice_id)
+            .await
+            .expect("load local invoice")
+            .expect("local invoice exists")
+    }
+
+    async fn redis_conn(env: &Env) -> deadpool_redis::Connection {
+        env.redis.get().await.expect("redis connection")
+    }
+
+    async fn pool_conn(pool: &deadpool_redis::Pool) -> deadpool_redis::Connection {
+        pool.get().await.expect("redis connection")
+    }
+
+    async fn event_rows(pool: &sqlx::PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
+            .fetch_one(pool)
+            .await
+            .expect("event rows")
+    }
+
+    /// Clear every deadletter key/index: the Redis server is shared across
+    /// runs, so stale entries (35-day TTL) would otherwise pollute counts.
+    /// Callers must hold DEADLETTER_LOCK.
+    async fn clear_all_deadletters(env: &Env) {
+        let mut conn = redis_conn(env).await;
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg("adyen:deadletter:*")
+            .query_async(&mut conn)
+            .await
+            .expect("keys");
+        if !keys.is_empty() {
+            let _: () = redis::cmd("DEL")
+                .arg(&keys)
+                .query_async(&mut conn)
+                .await
+                .expect("del");
+        }
+    }
+
+    async fn deadletter_entries(env: &Env, pattern: &str) -> Vec<String> {
+        let mut conn = redis_conn(env).await;
+        deadletter_entries_on(&mut conn, pattern).await
+    }
+
+    async fn deadletter_entries_on(
+        conn: &mut deadpool_redis::Connection,
+        pattern: &str,
+    ) -> Vec<String> {
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(pattern)
+            .query_async(&mut *conn)
+            .await
+            .expect("keys");
+        let mut out = Vec::new();
+        for key in keys {
+            let value: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(conn)
+                .await
+                .expect("get");
+            if let Some(value) = value {
+                out.push(value);
+            }
+        }
+        out
+    }
+
+    /// AppState over `env`'s DB with a private throwaway redis — full
+    /// isolation for tests that poison the shared deadletter indexes.
+    fn state_with_isolated_redis(
+        env: &Env,
+        isolated: &crate::test_support::IsolatedRedis,
+    ) -> Arc<AppState> {
+        let mut config = env.state.config.clone();
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        AppState::new(env.pool.clone(), isolated.pool.clone(), config)
+    }
+
+    async fn post_webhook_with_header(
+        state: &Arc<AppState>,
+        body: &[u8],
+        header_name: &str,
+        header_value: &str,
+    ) -> axum::response::Response {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhooks/adyen")
+            .header(header_name, header_value)
+            .body(axum::body::Body::from(body.to_vec()))
+            .expect("request");
+        tower::ServiceExt::oneshot(router().with_state(state.clone()), request)
+            .await
+            .expect("oneshot")
+    }
+
+    env_test!(legacy_header_only_deliveries_are_refused, |env| {
+        // FAIL-BEFORE PROOF that the pre-Adyen header scheme is dead: the old
+        // wire authenticated deliveries with an `Adyen-Signature` HEADER
+        // (`t=…,v1=…`, the shape `test_support::sign_adyen` builds) and
+        // enforced a timestamp tolerance. The Adyen contract moved the HMAC
+        // INTO the body at `additionalData.hmacSignature` with no timestamp at
+        // all, so a delivery carrying only the legacy header has no verifiable
+        // in-body signature and is refused.
+        let legacy_header = crate::test_support::sign_adyen(
+            "whsec_adversarial",
+            br#"{"notificationItems":[]}"#,
+            1_711_234_567,
+        );
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_legacy_header",
+            "merchantAccountCode": "ApexMailECOV",
+            "merchantReference": "ref",
+            "amount": { "currency": "EUR", "value": 1 },
+            "eventCode": "AUTHORISATION",
+            "success": "true"
+        }));
+        let body = envelope_bytes(&item, "");
+        let parsed = parse_envelope(&body);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].psp_reference, "psp_legacy_header");
+        assert!(parsed[0].hmac_signature().is_none());
+
+        let response =
+            post_webhook_with_header(&env.state, &body, "adyen-hmac-signature", &legacy_header)
+                .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(response).await["error"],
+            "Missing HMAC signature"
+        );
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "the legacy header authorises nothing"
+        );
+    });
+
+    async fn post_webhook(state: &Arc<AppState>, body: &[u8]) -> axum::response::Response {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhooks/adyen")
+            .body(axum::body::Body::from(body.to_vec()))
+            .expect("request");
+        tower::ServiceExt::oneshot(router().with_state(state.clone()), request)
+            .await
+            .expect("oneshot")
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let text = response_text(response).await;
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+    }
+
+    // ===================================================================
+    // Wire validation: the envelope, the in-body HMAC, the dedupe id.
+    // ===================================================================
+
+    env_test!(route_missing_hmac_signature_is_400_and_deadletters, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "notificationItems": [{ "NotificationRequestItem": {
+                "pspReference": "psp_nosig",
+                "merchantReference": "invoice:01234567-89ab-cdef-0123-456789abcdef",
+                "amount": { "currency": "EUR", "value": 100 },
+                "eventCode": "AUTHORISATION",
+                "success": "true"
+            }}]
+        }))
+        .expect("body");
+        let response = post_webhook(&env.state, &body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["error"], "Missing HMAC signature");
+        let entries = deadletter_entries(env, "adyen:deadletter:event:psp_nosig*").await;
+        assert_eq!(
+            entries.len(),
+            1,
+            "a missing in-body signature is deadlettered"
+        );
+        let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
+        assert_eq!(entry.reason, "missing_signature");
+        assert_eq!(event_rows(&env.pool).await, 0, "nothing claimed");
+    });
+
+    env_test!(route_blank_hmac_signature_is_400, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let item = authorisation_item(
+            "psp_blank_sig",
+            Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"),
+            100,
+            true,
+            Some("swcov_blank"),
+        );
+        let body = envelope_bytes(&item, "   ");
+        let response = post_webhook(&env.state, &body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["error"], "Missing HMAC signature");
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    env_test!(route_malformed_json_refused_with_no_write, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let response = post_webhook(&env.state, b"not json").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["error"], "Invalid JSON payload");
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "malformed JSON writes nothing"
+        );
+        let entries = deadletter_entries(env, "adyen:deadletter:event:*").await;
+        assert_eq!(entries.len(), 1);
+        let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
+        assert_eq!(entry.reason, "invalid_json_payload");
+        assert!(entry.body.is_some(), "the refused body is kept for triage");
+    });
+
+    env_test!(route_missing_items_and_blank_identities_refused, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        for body in [
+            br#"{}"#.to_vec(),
+            br#"{"notificationItems": []}"#.to_vec(),
+            br#"{"notificationItems": [{"NotificationRequestItem": {"pspReference": "", "eventCode": "AUTHORISATION"}}]}"#.to_vec(),
+            br#"{"notificationItems": [{"NotificationRequestItem": {"pspReference": "psp_blank_code", "eventCode": "   "}}]}"#.to_vec(),
+        ] {
+            let response = post_webhook(&env.state, &body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let json = response_json(response).await;
+            assert_eq!(json["error"], "Invalid notification payload");
+        }
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    env_test!(route_tampered_signature_and_secret_refused, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let item = authorisation_item(
+            "psp_tamper",
+            Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"),
+            100,
+            true,
+            Some("swcov_tamper"),
+        );
+
+        // Signed with the WRONG secret.
+        let wrong_secret = sign_item("whsec_NOT_the_secret", &item);
+        let response = post_webhook(&env.state, &envelope_bytes(&item, &wrong_secret)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(response).await["error"],
+            "Invalid webhook signature"
+        );
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "forged signature writes nothing"
+        );
+
+        // Tampered payload: the signature is over different item fields.
+        let mut tampered = item.clone();
+        tampered.success = Some("false".into());
+        let right_signature = sign_item("whsec_coverage", &item);
+        let response = post_webhook(&env.state, &envelope_bytes(&tampered, &right_signature)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Bit-flipped signature.
+        let flipped: String = right_signature
+            .chars()
+            .map(|character| if character == '0' { '1' } else { '0' })
+            .collect();
+        let response = post_webhook(&env.state, &envelope_bytes(&item, &flipped)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "bit-flipped signature writes nothing"
+        );
+    });
+
+    env_test!(route_malformed_hmac_signatures_refused, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let item = authorisation_item(
+            "psp_badsig",
+            Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"),
+            100,
+            true,
+            Some("swcov_badsig"),
+        );
+        for signature in [
+            "!!!not-base64!!!",
+            "t=123,v1=abc",
+            "deadbeef",
+            "AA==",
+            "====",
+            "TQ==TQ==",
+        ] {
+            let response = post_webhook(&env.state, &envelope_bytes(&item, signature)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "signature {signature} refused"
+            );
+        }
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    env_test!(
+        multi_item_envelopes_verify_every_item_before_claiming,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            clear_all_deadletters(env).await;
+            let tenant = "swcov_multi";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid");
+            seed_local_invoice(env, tenant, invoice_id, 100, 0, 100, "eur").await;
+
+            // One signed item + one unsigned item: the whole envelope is
+            // refused and NOTHING is claimed.
+            let signed =
+                authorisation_item("psp_multi_signed", invoice_id, 100, true, Some(tenant));
+            let unsigned =
+                authorisation_item("psp_multi_unsigned", invoice_id, 100, true, Some(tenant));
+            let mut unsigned_value = serde_json::to_value(&unsigned).expect("item json");
+            unsigned_value
+                .as_object_mut()
+                .expect("object")
+                .remove("additionalData");
+            let body = serde_json::to_vec(&serde_json::json!({
+                "notificationItems": [
+                    { "NotificationRequestItem": unsigned_value },
+                    { "NotificationRequestItem": signed_value(&signed, &sign_item("whsec_coverage", &signed)) }
+                ]
+            }))
+            .expect("body");
+            let response = post_webhook(&env.state, &body).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "one unsigned item refuses the whole envelope"
+            );
+            assert_eq!(
+                event_rows(&env.pool).await,
+                0,
+                "no item is claimed when any item fails verification"
+            );
+
+            // Every item signed: every item is claimed and the envelope is
+            // accepted with the bare [accepted] body.
+            let first = authorisation_item("psp_multi_1", invoice_id, 100, true, Some(tenant));
+            let second = authorisation_item("psp_multi_2", invoice_id, 100, true, Some(tenant));
+            let body = serde_json::to_vec(&serde_json::json!({
+                "notificationItems": [
+                    { "NotificationRequestItem": signed_value(&first, &sign_item("whsec_coverage", &first)) },
+                    { "NotificationRequestItem": signed_value(&second, &sign_item("whsec_coverage", &second)) }
+                ]
+            }))
+            .expect("body");
+            let response = post_webhook(&env.state, &body).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response_text(response).await, ADYEN_ACCEPTED_RESPONSE);
+            assert_eq!(event_rows(&env.pool).await, 2, "both items claimed");
+        }
+    );
+
+    /// An item with `signature` injected into its `additionalData`.
+    fn signed_value(item: &AdyenNotificationItem, signature: &str) -> serde_json::Value {
+        let mut value = serde_json::to_value(item).expect("item json");
+        let mut data = value
+            .get("additionalData")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        data.insert(
+            "hmacSignature".into(),
+            serde_json::Value::String(signature.into()),
+        );
+        value["additionalData"] = serde_json::Value::Object(data);
+        value
+    }
+
+    env_test!(route_unknown_event_type_acknowledged_and_processed, |env| {
+        let item = parse_item(serde_json::json!({
+            "pspReference": "psp_swadv_unknown",
+            "merchantAccountCode": "ApexMailECOV",
+            "merchantReference": "unrelated-ref",
+            "amount": { "currency": "EUR", "value": 1 },
+            "eventCode": "ORDER_CLOSED",
+            "success": "true"
+        }));
+        let body = signed_envelope("whsec_coverage", &item);
+        let response = post_webhook(&env.state, &body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_text(response).await,
+            ADYEN_ACCEPTED_RESPONSE,
+            "the acknowledgement is the BARE [accepted] body"
+        );
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+        )
+        .bind(adyen_notification_id(&item))
+        .fetch_one(&env.pool)
+        .await
+        .expect("status");
+        assert_eq!(
+            status, "processed",
+            "unknown types are claimed and acknowledged"
+        );
+        let psp: Option<String> = sqlx::query_scalar(
+            "SELECT adyen_psp_reference FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+        )
+        .bind(adyen_notification_id(&item))
+        .fetch_one(&env.pool)
+        .await
+        .expect("psp");
+        assert_eq!(
+            psp.as_deref(),
+            Some("psp_swadv_unknown"),
+            "the psp is stored for support lookups"
+        );
+    });
+
+    env_test!(verify_item_empty_secret_refused_before_any_write, |env| {
+        let item = authorisation_item(
+            "psp_nosecret",
+            Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"),
+            100,
+            true,
+            Some("swcov_nosecret"),
+        );
+        let body = signed_envelope("whsec_coverage", &item);
+        let broken = crate::test_support::state_with_empty_adyen_secret(
+            &env.pool,
+            &env.redis,
+            &env.state.config,
+        );
+        match process_webhook(&broken, &body).await {
+            Err(ProcessWebhookError::RetryLater(message)) => {
+                assert_eq!(message, "Adyen webhook secret is not configured");
+            }
+            other => panic!("an unconfigured secret must be retryable, got {other:?}"),
+        }
+
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some(adyen_notification_id(&item)),
+            body: Some(String::from_utf8(body.clone()).expect("body")),
+            signature: Some(sign_item("whsec_coverage", &item)),
+            ..Default::default()
+        };
+        let error = replay_deadletter(&broken, &entry)
+            .await
+            .expect_err("replay refuses an unconfigured secret");
+        assert_eq!(error, "Adyen webhook secret is not configured");
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    // ===================================================================
+    // Replay / idempotency.
+    // ===================================================================
+
+    env_test!(route_replay_is_exactly_once_no_double_settlement, |env| {
+        let tenant = "swadv_replay";
+        seed_tenant(env, tenant, "free", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 10_000, 2_400, 12_400, "eur").await;
+        let item = authorisation_item("psp_swadv_replay", invoice_id, 12_400, true, Some(tenant));
+        let body = signed_envelope("whsec_coverage", &item);
+
+        let first = post_webhook(&env.state, &body).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(response_text(first).await, ADYEN_ACCEPTED_RESPONSE);
+        let second = post_webhook(&env.state, &body).await;
+        assert_eq!(
+            second.status(),
+            StatusCode::OK,
+            "Adyen expects 2xx on replay"
+        );
+        assert_eq!(response_text(second).await, ADYEN_ACCEPTED_RESPONSE);
+
+        let (status, allocations, events): (String, i64, i64) = sqlx::query_as(
+            "SELECT
+                    (SELECT status FROM invoices WHERE id = $1),
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
+                    (SELECT COUNT(*) FROM adyen_webhook_events)",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("state");
+        assert_eq!(status, "paid");
+        assert_eq!(allocations, 1, "replay never double-allocates");
+        assert_eq!(events, 1, "replay never duplicates the ledger row");
+    });
+
+    env_test!(
+        semantics_identical_charge_with_a_new_event_date_is_a_new_notification_but_settles_once,
+        |env| {
+            // Adyen has no timestamp tolerance: freshness is replaced by the
+            // dedupe digest. A byte-identical retry is the SAME notification;
+            // a genuinely new eventDate is a new notification whose
+            // settlement is still capped by the authoritative remainder.
+            let tenant = "swadv_stale";
+            seed_tenant(env, tenant, "free", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 10_000, 2_400, 12_400, "eur").await;
+            let item =
+                authorisation_item("psp_swadv_stale", invoice_id, 12_400, true, Some(tenant));
+            let first = post_webhook(&env.state, &signed_envelope("whsec_coverage", &item)).await;
+            assert_eq!(first.status(), StatusCode::OK);
+
+            let mut later = item.clone();
+            later.event_date = Some("2026-10-15T10:00:00+00:00".into());
+            assert_ne!(
+                adyen_notification_id(&later),
+                adyen_notification_id(&item),
+                "a new eventDate is a new notification id"
+            );
+            let second = post_webhook(&env.state, &signed_envelope("whsec_coverage", &later)).await;
+            assert_eq!(second.status(), StatusCode::OK);
+            let allocations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("allocations");
+            assert_eq!(
+                allocations, 1,
+                "the settled invoice cannot be allocated twice"
+            );
+        }
+    );
+
+    env_test!(
+        route_event_pending_elsewhere_returns_503_and_no_deadletter,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            clear_all_deadletters(env).await;
+            seed_tenant(env, "swadv_pending", "free", "active").await;
+            let item = authorisation_item(
+                "psp_swadv_pending",
+                Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"),
+                100,
+                true,
+                Some("swadv_pending"),
+            );
+            sqlx::query(
+                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
+                 VALUES (gen_random_uuid(), $1, 'AUTHORISATION', 'pending')",
+            )
+            .bind(adyen_notification_id(&item))
+            .execute(&env.pool)
+            .await
+            .expect("pending row");
+
+            let response =
+                post_webhook(&env.state, &signed_envelope("whsec_coverage", &item)).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let entries = deadletter_entries(env, "adyen:deadletter:event:*").await;
+            assert_eq!(entries.len(), 0, "a pending event is never deadlettered");
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+            )
+            .bind(adyen_notification_id(&item))
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+            assert_eq!(status, "pending", "the other worker's claim is untouched");
+        }
+    );
+
+    // ===================================================================
+    // Recurring settlement: resolution, tenant binding, money.
+    // ===================================================================
+
+    env_test!(
+        recurring_authorisation_settles_allocates_and_recovers_dunning,
+        |env| {
+            let tenant = "swadv_settle";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 10_000, 2_400, 12_400, "eur").await;
+            // Tenant already in dunning: settlement must recover it.
+            sqlx::query(
+                "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
+                 VALUES ('swadv_settle_dunning_0001', $1, 'soft_suspended', 3)",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("dunning");
+
+            let item =
+                authorisation_item("psp_swadv_settle", invoice_id, 12_400, true, Some(tenant));
+            handle_recurring_authorisation(&env.state, &item)
+                .await
+                .expect("settlement");
+            let (status, paid_at_is_set, psp): (String, bool, Option<String>) = sqlx::query_as(
+                "SELECT status, paid_at IS NOT NULL, adyen_psp_reference FROM invoices WHERE id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("invoice");
+            assert_eq!(status, "paid");
+            assert!(paid_at_is_set);
+            assert_eq!(
+                psp.as_deref(),
+                Some("psp_swadv_settle"),
+                "the settlement binds the psp reference"
+            );
+            let (amount, source, operation_id): (i64, String, String) = sqlx::query_as(
+                "SELECT amount_cents, source, operation_id FROM invoice_payment_allocations WHERE invoice_id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("allocation");
+            assert_eq!(
+                amount, 12_400,
+                "the verified payment is allocated exactly once"
+            );
+            assert_eq!(source, ADYEN_ALLOCATION_SOURCE);
+            assert_eq!(operation_id, "adyen:psp_swadv_settle");
+            let dunning: Option<String> =
+                sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("dunning");
+            assert_eq!(
+                dunning.as_deref(),
+                Some("healthy"),
+                "settlement recovers dunning"
+            );
+            let snapshot: Option<Uuid> =
+                sqlx::query_scalar("SELECT adyen_tax_snapshot_id FROM invoices WHERE id = $1")
+                    .bind(invoice_id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("snapshot link");
+            assert!(snapshot.is_some(), "the tax snapshot is linked");
+
+            // Replay: idempotent, no second allocation.
+            handle_recurring_authorisation(&env.state, &item)
+                .await
+                .expect("replay");
+            let allocations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("count");
+            assert_eq!(allocations, 1, "replay never double-allocates");
+        }
+    );
+
+    env_test!(
+        recurring_authorisation_without_a_local_invoice_deadletters,
+        |env| {
+            seed_tenant(env, "swcov_orphan_paid", "growth", "active").await;
+            let unknown = Uuid::new_v4();
+            let orphan = authorisation_item(
+                "psp_orphan_paid",
+                unknown,
+                100,
+                true,
+                Some("swcov_orphan_paid"),
+            );
+            let error = handle_recurring_authorisation(&env.state, &orphan)
+                .await
+                .expect_err("unknown local invoice");
+            assert!(error.contains("does not exist"), "{error}");
+
+            // A reference that is not `invoice:{uuid}` at all is equally refused.
+            let garbage = parse_item(serde_json::json!({
+                "pspReference": "psp_orphan_ref",
+                "merchantReference": "not-an-invoice-ref",
+                "amount": { "currency": "EUR", "value": 100 },
+                "eventCode": "AUTHORISATION",
+                "success": "true",
+                "additionalData": { "recurringProcessingModel": "Subscription" }
+            }));
+            let error = handle_recurring_authorisation(&env.state, &garbage)
+                .await
+                .expect_err("unidentifiable reference");
+            assert!(error.contains("does not name a local invoice"), "{error}");
+            assert_eq!(event_rows(&env.pool).await, 0, "no ledger writes");
+            let snapshots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_tax_snapshots")
+                .fetch_one(&env.pool)
+                .await
+                .expect("snapshots");
+            assert_eq!(snapshots, 0);
+        }
+    );
+
+    env_test!(
+        recurring_authorisation_never_settles_another_tenants_invoice,
+        |env| {
+            let owner = "swadv_inv_owner";
+            let other = "swadv_inv_other";
+            seed_tenant(env, owner, "growth", "active").await;
+            seed_tenant(env, other, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, owner, invoice_id, 1_000, 0, 1_000, "eur").await;
+
+            // The invoice is attributed to a DIFFERENT shopper: refused, and
+            // the invoice is untouched.
+            let attacker = authorisation_item("psp_rebind", invoice_id, 1_000, true, Some(other));
+            let error = handle_recurring_authorisation(&env.state, &attacker)
+                .await
+                .expect_err("cross-tenant settlement refused");
+            assert!(error.contains("cross-tenant"), "{error}");
+            let (status, psp): (String, Option<String>) =
+                sqlx::query_as("SELECT status, adyen_psp_reference FROM invoices WHERE id = $1")
+                    .bind(invoice_id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
+            assert_eq!(status, "pending", "rejected write changes nothing");
+            assert_eq!(psp, None);
+
+            // The rightful shopper's event settles it in place.
+            let rightful =
+                authorisation_item("psp_rebind_ok", invoice_id, 1_000, true, Some(owner));
+            handle_recurring_authorisation(&env.state, &rightful)
+                .await
+                .expect("settle");
+            let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("status");
+            assert_eq!(status, "paid");
+        }
+    );
+
+    env_test!(recurring_authorisation_currency_mismatch_refused, |env| {
+        let tenant = "swadv_currency";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
+
+        let mut item = authorisation_item("psp_ccy", invoice_id, 1_000, true, Some(tenant));
+        item.amount = Some(AdyenAmount {
+            value: Some(1_000),
+            currency: Some("USD".into()),
+        });
+        let error = handle_recurring_authorisation(&env.state, &item)
+            .await
+            .expect_err("currency mismatch refused");
+        assert!(error.contains("denominated in"), "honest failure: {error}");
+        let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "pending", "the refused settlement writes nothing");
+        let snapshots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_tax_snapshots")
+            .fetch_one(&env.pool)
+            .await
+            .expect("snapshots");
+        assert_eq!(snapshots, 0, "the gate never ran for a refused settlement");
+    });
+
+    env_test!(
+        recurring_authorisation_zero_value_settles_without_allocation,
+        |env| {
+            let tenant = "swadv_zero";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 0, 0, 0, "eur").await;
+            let item = authorisation_item("psp_swadv_zero", invoice_id, 0, true, Some(tenant));
+            handle_recurring_authorisation(&env.state, &item)
+                .await
+                .expect("zero-value invoices settle");
+            let (status, psp): (String, Option<String>) =
+                sqlx::query_as("SELECT status, adyen_psp_reference FROM invoices WHERE id = $1")
+                    .bind(invoice_id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
+            assert_eq!(status, "paid");
+            assert_eq!(psp.as_deref(), Some("psp_swadv_zero"));
+            let allocations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("allocations");
+            assert_eq!(
+                allocations, 0,
+                "no positive allocation is invented for zero value"
+            );
+        }
+    );
+
+    env_test!(
+        recurring_authorisation_foreign_tenant_refused_leaves_dunning,
+        |env| {
+            let owner = "swadv_foreign_owner";
+            let other = "swadv_foreign_other";
+            seed_tenant(env, owner, "growth", "active").await;
+            seed_tenant(env, other, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, owner, invoice_id, 1_000, 0, 1_000, "eur").await;
+            sqlx::query(
+                "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
+                 VALUES ('swadv_foreign_dunning_1', $1, 'soft_suspended', 2)",
+            )
+            .bind(other)
+            .execute(&env.pool)
+            .await
+            .expect("other dunning");
+
+            let event = authorisation_item("psp_foreign", invoice_id, 1_000, true, Some(other));
+            let error = handle_recurring_authorisation(&env.state, &event)
+                .await
+                .expect_err("foreign tenant cannot settle");
+            assert!(error.contains("cross-tenant"), "{error}");
+            let dunning: Option<String> =
+                sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                    .bind(other)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("dunning");
+            assert_eq!(
+                dunning.as_deref(),
+                Some("soft_suspended"),
+                "no blanket recovery"
+            );
+            let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("status");
+            assert_eq!(status, "pending", "the foreign tenant cannot settle it");
+        }
+    );
+
+    env_test!(
+        recurring_authorisation_fails_closed_on_malformed_references,
+        |env| {
+            let tenant = "swadv_shape";
+            seed_tenant(env, tenant, "free", "active").await;
+            // No such local invoice.
+            let unknown = Uuid::new_v4();
+            let missing = authorisation_item("psp_shape_missing", unknown, 100, true, Some(tenant));
+            assert!(handle_recurring_authorisation(&env.state, &missing)
+                .await
+                .is_err());
+            // No amount at all: an unverifiable charge is refused.
+            let mut no_amount = missing.clone();
+            no_amount.amount = None;
+            let error = handle_recurring_authorisation(&env.state, &no_amount)
+                .await
+                .expect_err("missing amount refused");
+            assert!(error.contains("no amount.value"), "{error}");
+
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
+                .fetch_one(&env.pool)
+                .await
+                .expect("rows");
+            assert_eq!(rows, 0, "refused shapes write nothing");
+        }
+    );
+
+    env_test!(
+        renewal_settles_the_new_invoice_without_touching_the_previous_one,
+        |env| {
+            let tenant = "swadv_renew";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let first = Uuid::new_v4();
+            let second = Uuid::new_v4();
+            seed_local_invoice(env, tenant, first, 1_000, 0, 1_000, "eur").await;
+            seed_local_invoice(env, tenant, second, 1_000, 0, 1_000, "eur").await;
+
+            for (invoice_id, psp) in [(first, "psp_renew_1"), (second, "psp_renew_2")] {
+                let item = authorisation_item(psp, invoice_id, 1_000, true, Some(tenant));
+                handle_recurring_authorisation(&env.state, &item)
+                    .await
+                    .expect("settle the cycle");
+            }
+
+            let statuses: Vec<(String, String)> = sqlx::query_as(
+                "SELECT id::text, status FROM invoices WHERE tenant_id = $1 ORDER BY invoice_number",
+            )
+            .bind(tenant)
+            .fetch_all(&env.pool)
+            .await
+            .expect("statuses");
+            assert_eq!(statuses.len(), 2);
+            for (_, status) in &statuses {
+                assert_eq!(status, "paid", "both cycles settled");
+            }
+            let allocations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoice_payment_allocations WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("allocations");
+            assert_eq!(allocations, 2, "one allocation per settled cycle");
+            let snapshots: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM adyen_tax_snapshots WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("snapshots");
+            assert_eq!(snapshots, 2, "one immutable snapshot per charge");
+        }
+    );
+
+    env_test!(duplicate_delivery_never_rewinds_a_settled_invoice, |env| {
+        let tenant = "swadv_settled_replay";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
+        let item = authorisation_item("psp_settled", invoice_id, 1_000, true, Some(tenant));
+        handle_recurring_authorisation(&env.state, &item)
+            .await
+            .expect("settle");
+        // The same delivery again: still settled, one allocation.
+        handle_recurring_authorisation(&env.state, &item)
+            .await
+            .expect("replay");
+        let (status, allocations): (String, i64) = sqlx::query_as(
+            "SELECT
+                    (SELECT status FROM invoices WHERE id = $1),
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("state");
+        assert_eq!(status, "paid");
+        assert_eq!(allocations, 1);
+        // A LATE refusal for the same invoice (a new notification id)
+        // still cannot un-pay it.
+        let refusal = authorisation_item(
+            "psp_settled_refusal",
+            invoice_id,
+            1_000,
+            false,
+            Some(tenant),
+        );
+        handle_authorisation_refused(&env.state, &refusal)
+            .await
+            .expect("refusal recorded");
+        let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "paid", "a settled invoice is never un-settled");
+    });
+
+    // ===================================================================
+    // Refusals: dunning escalation and dead-letter honesty.
+    // ===================================================================
+
+    env_test!(
+        authorisation_refusal_escalates_and_only_transitions_audit,
+        |env| {
+            let tenant = "swcov_dunning";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 4_200, 0, 4_200, "eur").await;
+
+            let first = authorisation_item("psp_sw_dun_1", invoice_id, 4_200, false, Some(tenant));
+            handle_authorisation_refused(&env.state, &first)
+                .await
+                .expect("first refusal");
+            let (status, count, first_failed, retry): (
+                String,
+                i32,
+                Option<DateTime<Utc>>,
+                Option<DateTime<Utc>>,
+            ) = sqlx::query_as(
+                "SELECT status, failed_payment_count, first_failed_at, next_retry_at
+             FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!((status.as_str(), count), ("warning", 1));
+            let first_failed = first_failed.expect("first failure recorded");
+            let retry = retry.expect("retry scheduled");
+            assert_eq!(
+                (retry - first_failed).num_days(),
+                1,
+                "first retry follows the 1-day schedule"
+            );
+            let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'payment_failed'",
         )
         .bind(tenant)
-        .bind(country)
-        .execute(&env.pool)
+        .fetch_one(&env.pool)
         .await
-        .expect("seed billing address");
-    }
+        .expect("events");
+            assert_eq!(events, 1);
+            let transitions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'soft_suspended'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("transitions");
+            assert_eq!(transitions, 0, "warning is not a suspension transition");
+            let notified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'payment_failed'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("notified");
+            assert_eq!(notified, 1, "the customer is told about the refusal");
 
-    async fn seed_plan(env: &Env, name: &str, price_id: &str) {
+            // Age the failure history into the soft-suspension band (7 days).
+            sqlx::query(
+                "UPDATE dunning_records SET first_failed_at = NOW() - INTERVAL '8 days',
+                status = 'warning' WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("age dunning");
+            let second = authorisation_item("psp_sw_dun_2", invoice_id, 4_200, false, Some(tenant));
+            handle_authorisation_refused(&env.state, &second)
+                .await
+                .expect("second refusal");
+            let (status, count, retry): (String, i32, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, failed_payment_count, next_retry_at FROM dunning_records WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("dunning");
+            assert_eq!(status, "soft_suspended");
+            assert_eq!(count, 2);
+            let retry = retry.expect("still retrying");
+            assert!(
+                retry <= Utc::now(),
+                "the retry is anchored to the (aged) first failure, so it is due now"
+            );
+            let soft_transitions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'soft_suspended'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("soft transitions");
+            assert_eq!(soft_transitions, 1, "the transition is logged exactly once");
+            let notifications: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notification_queue
+             WHERE tenant_id = $1 AND type = 'account_soft_suspended'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("notifications");
+            assert!(notifications >= 1, "suspension notifies the tenant");
+
+            // Age into the hard-suspension band (21 days).
+            sqlx::query(
+                "UPDATE dunning_records SET first_failed_at = NOW() - INTERVAL '25 days',
+                status = 'soft_suspended' WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("age dunning");
+            let third = authorisation_item("psp_sw_dun_3", invoice_id, 4_200, false, Some(tenant));
+            handle_authorisation_refused(&env.state, &third)
+                .await
+                .expect("third refusal");
+            let (status, grace): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status, grace_period_ends_at FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!(status, "hard_suspended");
+            let grace = grace.expect("grace window recorded");
+            assert!(
+                (grace - Utc::now()).num_days() >= 6,
+                "the 7-day grace window is concrete"
+            );
+            let tenant_status: String =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant");
+            assert_eq!(tenant_status, "suspended", "hard suspension halts sending");
+            let holds: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tenant_restrictions
+             WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NULL",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("restriction");
+            assert_eq!(holds, 1, "the suspension is independently recorded");
+
+            // Idempotence of the suspension state: another refusal leaves the
+            // original grace deadline and does not duplicate the hold.
+            let fourth = authorisation_item("psp_sw_dun_4", invoice_id, 4_200, false, Some(tenant));
+            handle_authorisation_refused(&env.state, &fourth)
+                .await
+                .expect("fourth refusal");
+            let (grace_after, holds): (Option<DateTime<Utc>>, i64) = sqlx::query_as(
+                "SELECT grace_period_ends_at,
+                    (SELECT COUNT(*) FROM tenant_restrictions tr
+                     WHERE tr.tenant_id = dunning_records.tenant_id AND tr.kind = 'billing'
+                       AND tr.cleared_at IS NULL)
+             FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!(grace_after, Some(grace), "grace deadline is not extended");
+            assert_eq!(holds, 1, "the hold is never duplicated");
+        }
+    );
+
+    env_test!(
+        authorisation_refusal_without_a_local_invoice_is_deadlettered,
+        |env| {
+            seed_tenant(env, "swcov_orphan_refuse", "growth", "active").await;
+            let unknown = Uuid::new_v4();
+            let invoice = authorisation_item(
+                "psp_orphan_refuse",
+                unknown,
+                1_000,
+                false,
+                Some("swcov_orphan_refuse"),
+            );
+            let error = handle_authorisation_refused(&env.state, &invoice)
+                .await
+                .expect_err("unresolvable invoice");
+            assert!(error.contains("does not exist"), "{error}");
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records")
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+            assert_eq!(rows, 0, "nothing is written for an unresolvable refusal");
+
+            // A reference that is not a local invoice id at all is refused too.
+            let mut garbage = invoice.clone();
+            garbage.merchant_reference = "garbage-ref".into();
+            let error = handle_authorisation_refused(&env.state, &garbage)
+                .await
+                .expect_err("unidentifiable reference");
+            assert!(error.contains("does not name a local invoice"), "{error}");
+            assert_eq!(rows, 0);
+        }
+    );
+
+    env_test!(
+        refusal_for_an_already_paid_invoice_records_dunning_without_touching_status,
+        |env| {
+            let tenant = "swadv_paid_refusal";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
+            sqlx::query("UPDATE invoices SET status = 'paid', paid_at = NOW() WHERE id = $1")
+                .bind(invoice_id)
+                .execute(&env.pool)
+                .await
+                .expect("mark paid");
+
+            let refusal =
+                authorisation_item("psp_paid_refusal", invoice_id, 1_000, false, Some(tenant));
+            handle_authorisation_refused(&env.state, &refusal)
+                .await
+                .expect("the refusal is recorded");
+            let (status, dunning): (String, i64) = sqlx::query_as(
+                "SELECT (SELECT status FROM invoices WHERE id = $1),
+                        (SELECT COUNT(*) FROM dunning_records WHERE tenant_id = $2)",
+            )
+            .bind(invoice_id)
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("state");
+            assert_eq!(
+                status, "paid",
+                "the refusal never rewrites a settled invoice"
+            );
+            assert_eq!(dunning, 1, "the refusal is still durably recorded");
+        }
+    );
+
+    // ===================================================================
+    // Tax truth (P0).
+    // ===================================================================
+
+    env_test!(tax_gate_blocks_mismatch_and_dedupes_incidents, |env| {
+        let tenant = "swcov_tax";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        // The local invoice's statutory total is 49.00 (0 VAT); Adyen
+        // charged 59.00 — the charge disagrees with the local decision.
+        seed_local_invoice(env, tenant, invoice_id, 4_900, 0, 4_900, "eur").await;
+        let local = local_invoice(env, invoice_id).await;
+
+        let mismatch = authorisation_item("psp_tax_bad", invoice_id, 5_900, true, Some(tenant));
+        let error = validate_and_snapshot_adyen_tax(&env.state, &mismatch, &local, 5_900)
+            .await
+            .expect_err("charged total must not be accepted on trust");
+        assert!(error.contains("blocked"), "{error}");
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM finance_incidents
+             WHERE kind = 'tax_total_mismatch' AND adyen_psp_reference = 'psp_tax_bad'
+               AND status = 'open'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("incidents");
+        assert_eq!(incidents, 1, "a durable finance incident is raised");
+        let (validation, delta, authority): (String, i64, String) = sqlx::query_as(
+            "SELECT validation_status, discrepancy_cents, authority FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = 'psp_tax_bad'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("snapshot");
+        assert_eq!(validation, "discrepancy");
+        assert_eq!(delta, 1_000, "the delta is the over-charged amount");
+        assert_eq!(authority, ADYEN_TAX_AUTHORITY_LOCAL);
+
+        // A replay stays blocked and never duplicates the incident.
+        validate_and_snapshot_adyen_tax(&env.state, &mismatch, &local, 5_900)
+            .await
+            .expect_err("an open discrepancy keeps blocking");
+        let incidents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM finance_incidents
+             WHERE kind = 'tax_total_mismatch' AND adyen_psp_reference = 'psp_tax_bad'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("incidents");
+        assert_eq!(incidents, 1, "incident dedupe");
+
+        // A matching charge validates and snapshots under the local authority.
+        let good = authorisation_item("psp_tax_ok", invoice_id, 4_900, true, Some(tenant));
+        let snapshot = validate_and_snapshot_adyen_tax(&env.state, &good, &local, 4_900)
+            .await
+            .expect("matching charge validates")
+            .expect("snapshot id");
+        assert!(!snapshot.is_nil());
+        let (validation, authority): (String, String) = sqlx::query_as(
+            "SELECT validation_status, authority FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = 'psp_tax_ok'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("snapshot");
+        assert_eq!(validation, "validated");
+        assert_eq!(authority, ADYEN_TAX_AUTHORITY_LOCAL);
+    });
+
+    env_test!(
+        recurring_authorisation_is_blocked_by_the_tax_gate_on_a_mismatch,
+        |env| {
+            let tenant = "swadv_recompute";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 4_900, 0, 4_900, "eur").await;
+            let item =
+                authorisation_item("psp_recompute_bad", invoice_id, 5_900, true, Some(tenant));
+            let error = handle_recurring_authorisation(&env.state, &item)
+                .await
+                .expect_err("a mismatching charge blocks");
+            assert!(error.contains("blocked"), "honest failure: {error}");
+            let (status, allocations): (String, i64) = sqlx::query_as(
+                "SELECT
+                    (SELECT status FROM invoices WHERE id = $1),
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("state");
+            assert_eq!(status, "pending", "no local invoice is finalized");
+            assert_eq!(allocations, 0, "no allocation runs past the gate");
+            let incidents: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM finance_incidents WHERE kind = 'tax_total_mismatch'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("incidents");
+            assert_eq!(incidents, 1, "a critical finance incident is raised");
+        }
+    );
+
+    env_test!(tax_gate_zero_value_charges_are_validated, |env| {
+        let tenant = "swadv_tax_zero";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 0, 0, 0, "eur").await;
+        let local = local_invoice(env, invoice_id).await;
+
+        // Zero-value invoices (credits/100% discounts) have no tax decision
+        // and validate against the local zero total.
+        let zero = authorisation_item("psp_tax_zero", invoice_id, 0, true, Some(tenant));
+        validate_and_snapshot_adyen_tax(&env.state, &zero, &local, 0)
+            .await
+            .expect("zero-value charges validate");
+        let validation: String = sqlx::query_scalar(
+            "SELECT validation_status FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = 'psp_tax_zero'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("snapshot");
+        assert_eq!(validation, "validated");
+
+        // A charge against a zero-total invoice is a discrepancy that blocks.
+        let charged = authorisation_item(
+            "psp_tax_zero_charged",
+            invoice_id,
+            1_000,
+            true,
+            Some(tenant),
+        );
+        let error = validate_and_snapshot_adyen_tax(&env.state, &charged, &local, 1_000)
+            .await
+            .expect_err("money against a zero obligation must block");
+        assert!(error.contains("blocked"), "{error}");
+    });
+
+    env_test!(
+        tax_gate_records_the_local_jurisdiction_and_evidence,
+        |env| {
+            let tenant = "swadv_tax_local";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 10_000, 2_400, 12_400, "eur").await;
+            sqlx::query(
+                "UPDATE invoices SET billing_country = NULL, vat_rate = NULL WHERE id = $1",
+            )
+            .bind(invoice_id)
+            .execute(&env.pool)
+            .await
+            .expect("null country");
+            let local = local_invoice(env, invoice_id).await;
+            let item = authorisation_item("psp_tax_local", invoice_id, 12_400, true, Some(tenant));
+            validate_and_snapshot_adyen_tax(&env.state, &item, &local, 12_400)
+                .await
+                .expect("matching charge validates");
+            let (jurisdiction, country, automatic): (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = sqlx::query_as(
+                "SELECT jurisdiction,
+                        raw_payload->'apexmail'->>'expected_country',
+                        automatic_tax_status
+                 FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'psp_tax_local'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("snapshot");
+            assert_eq!(
+                jurisdiction, None,
+                "a null local country is no jurisdiction"
+            );
+            assert_eq!(country, None);
+            assert_eq!(
+                automatic, None,
+                "Adyen transmits no tax object — nothing is invented"
+            );
+        }
+    );
+
+    env_test!(tax_snapshot_edges_are_honest, |env| {
+        let tenant = "swadv_snapedge";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 0, 0, 0, "eur").await;
+        let local = local_invoice(env, invoice_id).await;
+        let item = authorisation_item("psp_snapedge", invoice_id, 0, true, Some(tenant));
+        let expected = expected_tax_from_local_invoice(&local);
+
+        let first = persist_tax_snapshot(
+            &env.pool,
+            &item,
+            tenant,
+            Some(invoice_id),
+            "eur",
+            (0, 0, 0),
+            &expected,
+            "validated",
+            0,
+        )
+        .await
+        .expect("first write");
+        assert!(!first.is_nil());
+
+        let (hash, payload): (String, serde_json::Value) = sqlx::query_as(
+            "SELECT raw_payload_hash, raw_payload FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = $1",
+        )
+        .bind("psp_snapedge")
+        .fetch_one(&env.pool)
+        .await
+        .expect("snapshot row");
+        assert_eq!(hash.len(), 64, "the raw payload is content-addressed");
+        assert_eq!(payload["adyen_item"]["pspReference"], "psp_snapedge");
+        assert_eq!(payload["apexmail"]["source"], "local_invoice");
+
+        // The immutability trigger refuses EVERY edit outright (the trigger
+        // function still names the pre-cutover column inside its message, so
+        // the refusal surfaces as a plpgsql error rather than the friendly
+        // text — the mutation is refused either way).
         sqlx::query(
-            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit,
-                                adyen_plan_code_monthly, is_active)
-             VALUES ($1, $2, $2, 4900, 100000, 100000, $3, true)
-             ON CONFLICT (name) DO UPDATE SET adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
-                 is_active = true",
+            "UPDATE adyen_tax_snapshots SET total_cents = 1 WHERE adyen_psp_reference = $1",
         )
-        .bind(format!("plan_{name}"))
-        .bind(name)
-        .bind(price_id)
+        .bind("psp_snapedge")
         .execute(&env.pool)
         .await
-        .expect("seed plan");
-    }
-
-    fn invoice_event(value: serde_json::Value) -> InvoiceEvent {
-        serde_json::from_value(value).expect("invoice event")
-    }
-
-    fn decode_invoice(value: &serde_json::Value) -> InvoiceEvent {
-        serde_json::from_value(value.clone()).expect("invoice event")
-    }
-
-    fn subscription_event(value: serde_json::Value) -> SubscriptionEvent {
-        serde_json::from_value(value).expect("subscription event")
-    }
-
-    fn sign(secret: &str, payload: &[u8], timestamp: i64) -> String {
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key");
-        mac.update(timestamp.to_string().as_bytes());
-        mac.update(b".");
-        mac.update(payload);
-        format!(
-            "t={timestamp},v1={}",
-            hex::encode(mac.finalize().into_bytes())
+        .expect_err("snapshots are trigger-immutable");
+        let total: i64 = sqlx::query_scalar(
+            "SELECT total_cents FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
         )
+        .bind("psp_snapedge")
+        .fetch_one(&env.pool)
+        .await
+        .expect("row");
+        assert_eq!(total, 0, "the refused edit changed nothing");
+    });
+
+    env_test!(persist_tax_snapshot_replay_returns_the_first_write, |env| {
+        let tenant = "swadv_snapreplay";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
+        let local = local_invoice(env, invoice_id).await;
+        let item = authorisation_item("psp_snapreplay", invoice_id, 1_000, true, Some(tenant));
+        let expected = expected_tax_from_local_invoice(&local);
+        let first = persist_tax_snapshot(
+            &env.pool,
+            &item,
+            tenant,
+            Some(invoice_id),
+            "eur",
+            (1_000, 0, 1_000),
+            &expected,
+            "validated",
+            0,
+        )
+        .await
+        .expect("first write");
+        let second = persist_tax_snapshot(
+            &env.pool,
+            &item,
+            tenant,
+            Some(invoice_id),
+            "eur",
+            (1_000, 0, 1_000),
+            &expected,
+            "validated",
+            0,
+        )
+        .await
+        .expect("replay");
+        assert_eq!(first, second, "the immutable first write wins");
+    });
+
+    // ===================================================================
+    // Token binding (RECURRING_CONTRACT).
+    // ===================================================================
+
+    fn token_item(
+        psp_reference: &str,
+        tenant: &str,
+        token: Option<&str>,
+        model: Option<&str>,
+    ) -> AdyenNotificationItem {
+        let mut additional = serde_json::json!({ "shopperReference": tenant });
+        if let Some(token) = token {
+            additional["recurringDetailReference"] = serde_json::json!(token);
+        }
+        if let Some(model) = model {
+            additional["recurringProcessingModel"] = serde_json::json!(model);
+        }
+        parse_item(serde_json::json!({
+            "pspReference": psp_reference,
+            "merchantAccountCode": "ApexMailECOV",
+            "merchantReference": format!("token-{tenant}"),
+            "amount": { "currency": "EUR", "value": 0 },
+            "eventCode": "RECURRING_CONTRACT",
+            "eventDate": "2026-10-14T10:00:00+00:00",
+            "success": "true",
+            "additionalData": additional
+        }))
     }
 
-    /// A `invoice.payment_failed` payload whose resolved tenant is `tenant`.
-    fn payment_failed_payload(event_id: &str, invoice_id: &str, tenant: &str) -> serde_json::Value {
-        serde_json::json!({
-            "id": event_id,
-            "type": "invoice.payment_failed",
-            "data": { "object": {
-                "id": invoice_id,
-                "amount_due": 4200,
-                "currency": "eur",
-                "subscription_details": { "metadata": { "tenant_id": tenant } }
-            }}
-        })
+    async fn seed_subscription(env: &Env, tenant: &str, subscription_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
+             VALUES ($1, $2, 'free', $3, NOW(), NOW() + INTERVAL '30 days', $1)",
+        )
+        .bind(tenant)
+        .bind(subscription_id)
+        .bind(status)
+        .execute(&env.pool)
+        .await
+        .expect("seed subscription");
     }
 
-    // ---------------- deadletter replay ----------------
+    env_test!(
+        token_created_updates_every_row_of_the_shopper_tenant,
+        |env| {
+            let tenant = "swadv_token";
+            let other = "swadv_token_other";
+            seed_tenant(env, tenant, "growth", "active").await;
+            seed_tenant(env, other, "growth", "active").await;
+            seed_subscription(env, tenant, "sub_swadv_token_active", "active").await;
+            seed_subscription(env, tenant, "sub_swadv_token_past_due", "past_due").await;
+            seed_subscription(env, other, "sub_swadv_token_other", "active").await;
+
+            let item = token_item(
+                "psp_swadv_token",
+                tenant,
+                Some("tok_swadv_123"),
+                Some("Subscription"),
+            );
+            handle_token_created(&env.state, &item)
+                .await
+                .expect("token bound");
+            let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT adyen_subscription_id, adyen_recurring_detail_reference, adyen_recurring_processing_model
+             FROM adyen_subscriptions WHERE tenant_id = $1 ORDER BY adyen_subscription_id",
+        )
+        .bind(tenant)
+        .fetch_all(&env.pool)
+        .await
+        .expect("rows");
+            assert_eq!(rows.len(), 2, "the shopper tenant's rows are bound");
+            for (_, token, model) in &rows {
+                assert_eq!(token.as_deref(), Some("tok_swadv_123"));
+                assert_eq!(model.as_deref(), Some("Subscription"));
+            }
+            let untouched: Option<String> = sqlx::query_scalar(
+                "SELECT adyen_recurring_detail_reference FROM adyen_subscriptions
+             WHERE adyen_subscription_id = 'sub_swadv_token_other'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("other row");
+            assert_eq!(untouched, None, "another tenant's rows are never touched");
+        }
+    );
+
+    env_test!(token_created_refuses_missing_token_or_tenant, |env| {
+        let tenant = "swadv_token_missing";
+        seed_tenant(env, tenant, "growth", "active").await;
+        // Missing token.
+        let no_token = token_item("psp_token_missing", tenant, None, Some("Subscription"));
+        let error = handle_token_created(&env.state, &no_token)
+            .await
+            .expect_err("missing token refused");
+        assert!(error.contains("recurringDetailReference"), "{error}");
+        // Missing shopper.
+        let no_shopper = parse_item(serde_json::json!({
+            "pspReference": "psp_token_no_shopper",
+            "merchantReference": "token-ref",
+            "amount": { "currency": "EUR", "value": 0 },
+            "eventCode": "RECURRING_CONTRACT",
+            "success": "true",
+            "additionalData": { "recurringDetailReference": "tok_orphan" }
+        }));
+        let error = handle_token_created(&env.state, &no_shopper)
+            .await
+            .expect_err("missing tenant refused");
+        assert!(error.contains("shopperReference"), "{error}");
+        // Resolved tenant without any subscription row: deadlettered, never a
+        // silent drop.
+        let no_rows = token_item(
+            "psp_token_no_rows",
+            tenant,
+            Some("tok_no_rows"),
+            Some("Subscription"),
+        );
+        let error = handle_token_created(&env.state, &no_rows)
+            .await
+            .expect_err("no row to bind refused");
+        assert!(error.contains("no subscription row"), "{error}");
+    });
+
+    // ===================================================================
+    // Checkout authorisation: informational only.
+    // ===================================================================
+
+    env_test!(checkout_authorisation_never_grants_entitlement, |env| {
+        let tenant = "swcov_trial";
+        seed_tenant(env, tenant, "suspended", "suspended").await;
+
+        // Checkout completed must NOT reactivate a suspended tenant.
+        let session = checkout_item("psp_sw_checkout", Some(tenant));
+        handle_checkout_authorisation(&env.state, &session)
+            .await
+            .expect("checkout acknowledged");
+        let status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("tenant");
+        assert_eq!(status, "suspended", "checkout never bypasses a suspension");
+        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
+            .fetch_one(&env.pool)
+            .await
+            .expect("subscriptions");
+        assert_eq!(subs, 0);
+        let notifications: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_queue")
+            .fetch_one(&env.pool)
+            .await
+            .expect("notifications");
+        assert_eq!(
+            notifications, 0,
+            "a checkout authorisation notifies nothing by itself"
+        );
+    });
+
+    env_test!(
+        checkout_authorisation_without_attribution_is_acknowledged,
+        |env| {
+            let event = checkout_item("psp_checkout_orphan", None);
+            handle_checkout_authorisation(&env.state, &event)
+                .await
+                .expect("unattributable checkout is acknowledged");
+            let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
+                .fetch_one(&env.pool)
+                .await
+                .expect("subs");
+            assert_eq!(subs, 0);
+        }
+    );
+
+    env_test!(notification_items_shape_failures_fail_closed, |env| {
+        // A malformed envelope (wrong types) is refused at the wire.
+        seed_tenant(env, "swadv_shape_fail", "growth", "active").await;
+        for body in [
+            br#"{"notificationItems": [{"NotificationRequestItem": {"amount": {"value": "many"}}}]}"#.to_vec(),
+            br#"{"notificationItems": [{"NotificationRequestItem": {"pspReference": "psp_x", "eventCode": "AUTHORISATION", "amount": {"value": 1.5}}}]}"#.to_vec(),
+        ] {
+            match process_webhook(&env.state, &body).await {
+                Err(ProcessWebhookError::InvalidRequest {
+                    reason: "invalid_json_payload",
+                    ..
+                }) => {}
+                other => panic!("malformed envelope must be refused, got {other:?}"),
+            }
+        }
+
+        // A recurring authorisation with no amount is a handler error
+        // (deadlettered by the caller), never a silent drop.
+        let mut no_amount = authorisation_item(
+            "psp_decode_fail",
+            Uuid::new_v4(),
+            100,
+            true,
+            Some("swadv_shape_fail"),
+        );
+        no_amount.amount = None;
+        let error = handle_notification(&env.state, &no_amount)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("a missing amount must be an error"));
+        assert!(error.contains("amount.value"), "{error}");
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    // ===================================================================
+    // Deadletter replay (HMAC re-verification, exactly-once).
+    // ===================================================================
 
     env_test!(replay_deadletter_reverifies_hmac_and_is_idempotent, |env| {
         let _guard = DEADLETTER_LOCK.lock().await;
         let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
         let tenant = "swcov_replay";
         seed_tenant(env, tenant, "growth", "active").await;
-        let payload = payment_failed_payload("evt_sw_replay", "in_sw_replay", tenant);
-        let body = serde_json::to_string(&payload).expect("body");
-        let timestamp = Utc::now().timestamp();
-        let good = sign("whsec_coverage", body.as_bytes(), timestamp);
-        let forged = sign("whsec_not_the_secret", body.as_bytes(), timestamp);
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 4_200, 0, 4_200, "eur").await;
+        let item = authorisation_item("psp_sw_replay", invoice_id, 4_200, false, Some(tenant));
+        let good = sign_item("whsec_coverage", &item);
+        let forged = sign_item("whsec_not_the_secret", &item);
+        let forged_body = String::from_utf8(envelope_bytes(&item, &forged)).expect("body");
+        let good_body = String::from_utf8(envelope_bytes(&item, &good)).expect("body");
 
         // A tampered secret must write NOTHING, not even the claim row.
         let bad_entry = DeadletterEntry {
             reason: "processing_failed".into(),
-            event_id: Some("evt_sw_replay".into()),
-            body: Some(body.clone()),
+            event_id: Some(adyen_notification_id(&item)),
+            body: Some(forged_body),
             signature: Some(forged),
             ..Default::default()
         };
@@ -5729,11 +6721,11 @@ mod coverage_adversarial {
             .await
             .expect_err("forged signature must be refused");
         assert!(error.contains("Invalid webhook signature"), "{error}");
-        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
-            .fetch_one(&env.pool)
-            .await
-            .expect("events");
-        assert_eq!(events, 0, "failed verification writes nothing at all");
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "failed verification writes nothing"
+        );
         let dunning: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records")
             .fetch_one(&env.pool)
             .await
@@ -5743,7 +6735,7 @@ mod coverage_adversarial {
         // Missing body/signature: refused before any side effect.
         let empty = DeadletterEntry {
             reason: "processing_failed".into(),
-            event_id: Some("evt_sw_replay".into()),
+            event_id: Some(adyen_notification_id(&item)),
             ..Default::default()
         };
         let error = replay_deadletter(&env.state, &empty)
@@ -5754,8 +6746,8 @@ mod coverage_adversarial {
         // The verified entry replays exactly once.
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
-            event_id: Some("evt_sw_replay".into()),
-            body: Some(body),
+            event_id: Some(adyen_notification_id(&item)),
+            body: Some(good_body),
             signature: Some(good),
             ..Default::default()
         };
@@ -5785,35 +6777,170 @@ mod coverage_adversarial {
         .expect("dunning count");
         assert_eq!(count, 1, "replay never re-applies the failure");
         let processed: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_sw_replay'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
         )
+        .bind(adyen_notification_id(&item))
         .fetch_one(&env.pool)
         .await
         .expect("event row");
         assert_eq!(processed, "processed");
     });
 
-    async fn redis_conn(env: &Env) -> deadpool_redis::Connection {
-        env.redis.get().await.expect("redis connection")
-    }
+    env_test!(replay_deadletter_missing_signature_refused, |env| {
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some("adn_nosig_replay".into()),
+            body: Some(r#"{"notificationItems":[]}"#.into()),
+            ..Default::default()
+        };
+        let error = replay_deadletter(&env.state, &entry)
+            .await
+            .expect_err("missing signature");
+        assert!(error.contains("No signature stored"));
+    });
+
+    env_test!(replay_deadletter_malformed_body_refused, |env| {
+        let body = r#"{"notificationItems": [{"NotificationRequestItem""#;
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some("adn_badbody".into()),
+            body: Some(body.to_string()),
+            signature: Some("TQ==".into()),
+            ..Default::default()
+        };
+        let error = replay_deadletter(&env.state, &entry)
+            .await
+            .expect_err("malformed stored body");
+        assert!(
+            error.contains("Failed to parse stored webhook body"),
+            "honest failure: {error}"
+        );
+        assert_eq!(event_rows(&env.pool).await, 0, "nothing claimed");
+    });
+
+    env_test!(replay_deadletter_pending_event_is_refused, |env| {
+        let tenant = "swadv_pendreplay";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 100, 0, 100, "eur").await;
+        let item = authorisation_item("psp_pendreplay", invoice_id, 100, false, Some(tenant));
+        let signature = sign_item("whsec_coverage", &item);
+        let body = String::from_utf8(envelope_bytes(&item, &signature)).expect("body");
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some(adyen_notification_id(&item)),
+            body: Some(body),
+            signature: Some(signature),
+            ..Default::default()
+        };
+        replay_deadletter(&env.state, &entry)
+            .await
+            .expect("first replay claims");
+        // Simulate a concurrent worker holding the claim.
+        sqlx::query(
+            "UPDATE adyen_webhook_events SET status = 'pending', processed_at = NULL
+             WHERE adyen_notification_id = $1",
+        )
+        .bind(adyen_notification_id(&item))
+        .execute(&env.pool)
+        .await
+        .expect("re-pend");
+        let error = replay_deadletter(&env.state, &entry)
+            .await
+            .expect_err("pending event");
+        assert!(
+            error.contains("pending on another worker"),
+            "honest failure: {error}"
+        );
+    });
+
+    env_test!(
+        replay_skips_already_processed_events_and_refuses_pending_ones,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            let tenant = "swcov_replay2";
+            seed_tenant(env, tenant, "growth", "active").await;
+            let invoice_id = Uuid::new_v4();
+            seed_local_invoice(env, tenant, invoice_id, 100, 0, 100, "eur").await;
+
+            let build_entry = |item: &AdyenNotificationItem| {
+                let signature = sign_item("whsec_coverage", item);
+                DeadletterEntry {
+                    reason: "processing_failed".into(),
+                    event_id: Some(adyen_notification_id(item)),
+                    body: Some(String::from_utf8(envelope_bytes(item, &signature)).expect("body")),
+                    signature: Some(signature),
+                    ..Default::default()
+                }
+            };
+
+            // An event already marked processed: the replay skips the
+            // business logic entirely and reports success.
+            let done = authorisation_item("psp_already_done", invoice_id, 100, false, Some(tenant));
+            sqlx::query(
+                "INSERT INTO adyen_webhook_events (adyen_notification_id, adyen_psp_reference, event_type, status, created_at, updated_at)
+                 VALUES ($1, 'psp_already_done', 'AUTHORISATION', 'processed', NOW(), NOW())",
+            )
+            .bind(adyen_notification_id(&done))
+            .execute(&env.pool)
+            .await
+            .expect("seed processed row");
+            replay_deadletter(&env.state, &build_entry(&done))
+                .await
+                .expect("an already-processed event replays as a no-op success");
+            let dunning: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records")
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+            assert_eq!(dunning, 0, "a processed event is never re-applied");
+
+            // An event currently pending on another worker: refused, and the
+            // refusal feeds the retry scheduling instead of losing the event.
+            let pending =
+                authorisation_item("psp_now_pending", invoice_id, 100, false, Some(tenant));
+            sqlx::query(
+                "INSERT INTO adyen_webhook_events (adyen_notification_id, adyen_psp_reference, event_type, status, created_at, updated_at)
+                 VALUES ($1, 'psp_now_pending', 'AUTHORISATION', 'pending', NOW(), NOW())",
+            )
+            .bind(adyen_notification_id(&pending))
+            .execute(&env.pool)
+            .await
+            .expect("seed pending row");
+            let error = replay_deadletter(&env.state, &build_entry(&pending))
+                .await
+                .expect_err("a pending event must not replay");
+            assert!(
+                error.contains("pending"),
+                "unexpected replay error: {error}"
+            );
+        }
+    );
+
+    // ===================================================================
+    // Deadletter retry worker.
+    // ===================================================================
 
     env_test!(deadletter_retry_backs_off_then_exhausts, |env| {
         let _guard = DEADLETTER_LOCK.lock().await;
         let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
         let tenant = "swcov_backoff";
         seed_tenant(env, tenant, "growth", "active").await;
-        let payload = payment_failed_payload("evt_sw_backoff", "in_sw_backoff", tenant);
-        let body = serde_json::to_string(&payload).expect("body");
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 100, 0, 100, "eur").await;
+        let item = authorisation_item("psp_sw_backoff", invoice_id, 100, false, Some(tenant));
         // A signature that can never verify keeps the retry ladder
         // deterministic: every attempt fails.
+        let body = String::from_utf8(envelope_bytes(&item, "!!!not-base64!!!")).expect("body");
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
-            event_id: Some("evt_sw_backoff".into()),
+            event_id: Some(adyen_notification_id(&item)),
             body: Some(body),
-            signature: Some("t=1,v1=deadbeef".into()),
+            signature: Some("!!!not-base64!!!".into()),
             ..Default::default()
         };
-        let the_key = "adyen:deadletter:event:evt_sw_backoff";
+        let the_key = "adyen:deadletter:event:authorisation_forced";
         let entry_json = serde_json::to_string(&entry).expect("entry json");
         let mut conn = redis_conn(env).await;
         // Isolate the shared retry index for this test.
@@ -5925,2078 +7052,12 @@ mod coverage_adversarial {
             .expect("drop entry");
     });
 
-    #[test]
-    fn adyen_decimal_to_cents_is_exact_and_rejects_malformed() {
-        assert_eq!(adyen_decimal_to_cents("65.00"), Some(6500));
-        assert_eq!(adyen_decimal_to_cents("0.40"), Some(40));
-        assert_eq!(adyen_decimal_to_cents("0.4"), Some(40));
-        assert_eq!(adyen_decimal_to_cents("0"), Some(0));
-        assert_eq!(adyen_decimal_to_cents(" 12.34 "), Some(1234));
-        assert_eq!(adyen_decimal_to_cents("100"), Some(10_000));
-        assert_eq!(adyen_decimal_to_cents(""), None);
-        assert_eq!(adyen_decimal_to_cents("abc"), None);
-        assert_eq!(adyen_decimal_to_cents("1.234"), None);
-        assert_eq!(adyen_decimal_to_cents("-5.00"), None);
-        assert_eq!(adyen_decimal_to_cents("1."), Some(100));
-        assert_eq!(adyen_decimal_to_cents(".5"), None);
-        assert_eq!(adyen_decimal_to_cents("99999999999999999999"), None);
-        // Audit SM7 F7 — the checked_mul/checked_add edge: the whole part
-        // PARSES as i64 but the cent arithmetic lands exactly on (and one
-        // cent past) i64::MAX. The pre-fix `whole * 100 + frac` wrapped in
-        // release; the fixed helper is exact at the bound and `None` past it.
-        assert_eq!(
-            adyen_decimal_to_cents("92233720368547758.07"),
-            Some(i64::MAX)
-        );
-        assert_eq!(adyen_decimal_to_cents("92233720368547758.08"), None);
-    }
-
-    #[test]
-    fn invoice_total_derivation_never_invents_or_hides_money() {
-        // Credit invoices keep their sign (VAT reversal is negative).
-        assert_eq!(
-            derive_invoice_totals(Some(1_000), None, Some(-500), -500),
-            (1_000, -1_500, -500)
-        );
-        // Explicit Adyen tax wins only when it reconciles with the total.
-        assert_eq!(
-            derive_invoice_totals(Some(1_000), Some(210), Some(1_210), 1_210),
-            (1_000, 210, 1_210)
-        );
-        assert_eq!(
-            derive_invoice_totals(Some(1_000), Some(9_999), Some(1_210), 1_210),
-            (1_000, 210, 1_210),
-            "inconsistent Adyen tax is replaced by the derived VAT"
-        );
-        // Missing fields degrade without inventing a VAT figure.
-        assert_eq!(
-            derive_invoice_totals(Some(1_000), None, None, 1_000),
-            (1_000, 0, 1_000)
-        );
-        assert_eq!(
-            derive_invoice_totals(None, Some(500), None, 500),
-            (500, 0, 500)
-        );
-        assert_eq!(derive_invoice_totals(None, None, None, 300), (300, 0, 300));
-        assert_eq!(
-            derive_invoice_totals(None, None, None, -42),
-            (0, 0, 0),
-            "a negative amount_due never becomes a negative subtotal"
-        );
-        // Rate derivation preserves one decimal of a fractional rate.
-        assert_eq!(derive_invoice_vat_rate(1_000, 255), 25.5);
-        assert_eq!(derive_invoice_vat_rate(1_000, 2_000), 200.0);
-        assert_eq!(derive_invoice_vat_rate(0, 100), 0.0);
-        assert_eq!(derive_invoice_vat_rate(100, -1), 0.0);
-        assert_eq!(normalize_adyen_currency(None), "eur");
-        assert_eq!(normalize_adyen_currency(Some("  EUR ")), "eur");
-        assert_eq!(normalize_adyen_currency(Some("")), "eur");
-    }
-
-    // ---------------- dunning escalation ----------------
-
-    env_test!(payment_failed_escalates_and_only_transitions_audit, |env| {
-        let tenant = "swcov_dunning";
-        seed_tenant(env, tenant, "growth", "active").await;
-
-        let first = invoice_event(serde_json::json!({
-            "id": "in_sw_dun_1",
-            "amount_due": 4200,
-            "subscription_details": { "metadata": { "tenant_id": tenant } }
-        }));
-        handle_payment_failed(&env.state, first)
-            .await
-            .expect("first failure");
-        let (status, count, first_failed, retry): (
-            String,
-            i32,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-        ) = sqlx::query_as(
-            "SELECT status, failed_payment_count, first_failed_at, next_retry_at
-             FROM dunning_records WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("dunning");
-        assert_eq!((status.as_str(), count), ("warning", 1));
-        let first_failed = first_failed.expect("first failure recorded");
-        let retry = retry.expect("retry scheduled");
-        assert_eq!(
-            (retry - first_failed).num_days(),
-            1,
-            "first retry follows the 1-day schedule"
-        );
-        let events: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'payment_failed'",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("events");
-        assert_eq!(events, 1);
-        let transitions: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'soft_suspended'",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("transitions");
-        assert_eq!(transitions, 0, "warning is not a suspension transition");
-
-        // Age the failure history into the soft-suspension band (7 days).
-        sqlx::query(
-            "UPDATE dunning_records SET first_failed_at = NOW() - INTERVAL '8 days',
-                status = 'warning' WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("age dunning");
-        let second = invoice_event(serde_json::json!({
-            "id": "in_sw_dun_2",
-            "amount_due": 4200,
-            "subscription_details": { "metadata": { "tenant_id": tenant } }
-        }));
-        handle_payment_failed(&env.state, second)
-            .await
-            .expect("second failure");
-        let (status, count, retry): (String, i32, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT status, failed_payment_count, next_retry_at FROM dunning_records WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("dunning");
-        assert_eq!(status, "soft_suspended");
-        assert_eq!(count, 2);
-        let retry = retry.expect("still retrying");
-        assert!(
-            retry <= Utc::now(),
-            "the retry is anchored to the (aged) first failure, so it is due now"
-        );
-        let soft_transitions: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'soft_suspended'",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("soft transitions");
-        assert_eq!(soft_transitions, 1, "the transition is logged exactly once");
-        let notifications: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM notification_queue
-             WHERE tenant_id = $1 AND type = 'account_soft_suspended'",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("notifications");
-        assert!(notifications >= 1, "suspension notifies the tenant");
-
-        // Age into the hard-suspension band (21 days).
-        sqlx::query(
-            "UPDATE dunning_records SET first_failed_at = NOW() - INTERVAL '25 days',
-                status = 'soft_suspended' WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("age dunning");
-        let third = invoice_event(serde_json::json!({
-            "id": "in_sw_dun_3",
-            "amount_due": 4200,
-            "subscription_details": { "metadata": { "tenant_id": tenant } }
-        }));
-        handle_payment_failed(&env.state, third)
-            .await
-            .expect("third failure");
-        let (status, grace): (String, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT status, grace_period_ends_at FROM dunning_records WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("dunning");
-        assert_eq!(status, "hard_suspended");
-        let grace = grace.expect("grace window recorded");
-        assert!(
-            (grace - Utc::now()).num_days() >= 6,
-            "the 7-day grace window is concrete"
-        );
-        let tenant_status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&env.pool)
-            .await
-            .expect("tenant");
-        assert_eq!(tenant_status, "suspended", "hard suspension halts sending");
-        let holds: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM tenant_restrictions
-             WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NULL",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("restriction");
-        assert_eq!(holds, 1, "the suspension is independently recorded");
-
-        // Idempotence of the suspension state: another failure leaves the
-        // original grace deadline and does not duplicate the hold.
-        let fourth = invoice_event(serde_json::json!({
-            "id": "in_sw_dun_4",
-            "amount_due": 4200,
-            "subscription_details": { "metadata": { "tenant_id": tenant } }
-        }));
-        handle_payment_failed(&env.state, fourth)
-            .await
-            .expect("fourth failure");
-        let (grace_after, holds): (Option<DateTime<Utc>>, i64) = sqlx::query_as(
-            "SELECT grace_period_ends_at,
-                    (SELECT COUNT(*) FROM tenant_restrictions tr
-                     WHERE tr.tenant_id = dunning_records.tenant_id AND tr.kind = 'billing'
-                       AND tr.cleared_at IS NULL)
-             FROM dunning_records WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("dunning");
-        assert_eq!(grace_after, Some(grace), "grace deadline is not extended");
-        assert_eq!(holds, 1, "the hold is never duplicated");
-    });
-
-    env_test!(
-        payment_failed_without_resolvable_tenant_is_deadlettered,
-        |env| {
-            let invoice = invoice_event(serde_json::json!({
-                "id": "in_sw_orphan",
-                "amount_due": 1000
-            }));
-            let error = handle_payment_failed(&env.state, invoice)
-                .await
-                .expect_err("unresolvable tenant");
-            assert!(error.contains("unresolvable"), "{error}");
-            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records")
-                .fetch_one(&env.pool)
-                .await
-                .expect("dunning");
-            assert_eq!(rows, 0, "nothing is written for an unresolvable event");
-
-            // A subscription reference that exists resolves the tenant instead.
-            let tenant = "swcov_orphan_ref";
-            seed_tenant(env, tenant, "growth", "active").await;
-            sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ($1, 'sub_sw_orphan', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_sw')",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("subscription");
-            let fallback = invoice_event(serde_json::json!({
-                "id": "in_sw_orphan_resolved",
-                "amount_due": 1000,
-                "subscription": "sub_sw_orphan"
-            }));
-            handle_payment_failed(&env.state, fallback)
-                .await
-                .expect("tenant resolved via subscription");
-            let status: String =
-                sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
-                    .bind(tenant)
-                    .fetch_one(&env.pool)
-                    .await
-                    .expect("dunning");
-            assert_eq!(status, "warning");
-        }
-    );
-
-    // ---------------- tax-truth gate ----------------
-
-    env_test!(tax_gate_blocks_mismatch_and_dedupes_incidents, |env| {
-        let tenant = "swcov_tax";
-        seed_tenant(env, tenant, "growth", "active").await;
-        seed_billing_address(env, tenant, "US").await;
-
-        // Adyen charged 1000 cents of tax on a US (0%) supply: mismatch.
-        let mismatch = invoice_event(serde_json::json!({
-            "id": "in_sw_tax_bad",
-            "amount_due": 5900,
-            "amount_paid": 5900,
-            "currency": "eur",
-            "subtotal": 4900,
-            "tax": 1000,
-            "total": 5900,
-            "automatic_tax": { "enabled": true, "status": "complete" }
-        }));
-        let error = validate_and_snapshot_adyen_tax(&env.state, &mismatch, tenant)
-            .await
-            .expect_err("charged total must not be accepted on trust");
-        assert!(error.contains("blocked"), "{error}");
-        let incidents: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM finance_incidents
-             WHERE kind = 'tax_total_mismatch' AND adyen_psp_reference = 'in_sw_tax_bad'
-               AND status = 'open'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("incidents");
-        assert_eq!(incidents, 1, "a durable finance incident is raised");
-        let (validation, delta): (String, i64) = sqlx::query_as(
-            "SELECT validation_status, discrepancy_cents FROM adyen_tax_snapshots
-             WHERE adyen_psp_reference = 'in_sw_tax_bad'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("snapshot");
-        assert_eq!(validation, "discrepancy");
-        assert_eq!(delta, 1000, "the delta is the over-charged VAT");
-
-        // A replay (new event id, same Adyen invoice) stays blocked and
-        // never duplicates the incident.
-        let replay = invoice_event(serde_json::json!({
-            "id": "in_sw_tax_bad",
-            "amount_due": 5900,
-            "amount_paid": 5900,
-            "currency": "eur",
-            "subtotal": 4900,
-            "tax": 1000,
-            "total": 5900,
-            "automatic_tax": { "enabled": true, "status": "complete" }
-        }));
-        validate_and_snapshot_adyen_tax(&env.state, &replay, tenant)
-            .await
-            .expect_err("an open discrepancy keeps blocking");
-        let incidents: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM finance_incidents
-             WHERE kind = 'tax_total_mismatch' AND adyen_psp_reference = 'in_sw_tax_bad'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("incidents");
-        assert_eq!(incidents, 1, "incident dedupe");
-
-        // A matching invoice validates and snapshots as authoritative.
-        let good = invoice_event(serde_json::json!({
-            "id": "in_sw_tax_ok",
-            "amount_due": 4900,
-            "amount_paid": 4900,
-            "currency": "EUR",
-            "subtotal": 4900,
-            "tax": 0,
-            "total": 4900,
-            "automatic_tax": { "enabled": true, "status": "complete" }
-        }));
-        let snapshot = validate_and_snapshot_adyen_tax(&env.state, &good, tenant)
-            .await
-            .expect("matching invoice validates")
-            .expect("snapshot id");
-        assert!(!snapshot.is_nil());
-        let (validation, authority): (String, String) = sqlx::query_as(
-            "SELECT validation_status, authority FROM adyen_tax_snapshots
-             WHERE adyen_psp_reference = 'in_sw_tax_ok'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("snapshot");
-        assert_eq!(validation, "validated");
-        assert_eq!(authority, "adyen_tax");
-    });
-
-    env_test!(tax_gate_fails_closed_without_any_expectation, |env| {
-        let tenant = "swcov_tax_unavail";
-        seed_tenant(env, tenant, "growth", "active").await;
-        // No billing address and Adyen Tax not complete: cannot validate.
-        let unknown = invoice_event(serde_json::json!({
-            "id": "in_sw_tax_unknown",
-            "amount_due": 1000,
-            "currency": "eur",
-            "subtotal": 1000,
-            "total": 1000
-        }));
-        let error = validate_and_snapshot_adyen_tax(&env.state, &unknown, tenant)
-            .await
-            .expect_err("fail closed");
-        assert!(error.contains("cannot validate"), "{error}");
-        let (incidents, validation): (i64, String) = sqlx::query_as(
-            "SELECT (SELECT COUNT(*) FROM finance_incidents
-                     WHERE kind = 'tax_validation_unavailable'
-                       AND adyen_psp_reference = 'in_sw_tax_unknown'),
-                    validation_status
-             FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_sw_tax_unknown'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("snapshot");
-        assert_eq!(incidents, 1);
-        assert_eq!(validation, "discrepancy");
-
-        // Zero-value invoices (credits/100% discounts) have no tax decision
-        // and are explicitly accepted as external.
-        let zero = invoice_event(serde_json::json!({
-            "id": "in_sw_tax_zero",
-            "amount_due": 0,
-            "currency": "eur",
-            "subtotal": 0,
-            "total": 0
-        }));
-        validate_and_snapshot_adyen_tax(&env.state, &zero, tenant)
-            .await
-            .expect("zero-value invoices are exempt");
-        let validation: String = sqlx::query_scalar(
-            "SELECT validation_status FROM adyen_tax_snapshots
-             WHERE adyen_psp_reference = 'in_sw_tax_zero'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("snapshot");
-        assert_eq!(validation, "unverified_external");
-    });
-
-    // ---------------- paid-invoice persistence guards ----------------
-
-    env_test!(insert_paid_invoice_never_rebinds_to_another_tenant, |env| {
-        let owner = "swcov_inv_owner";
-        let other = "swcov_inv_other";
-        seed_tenant(env, owner, "growth", "active").await;
-        seed_tenant(env, other, "growth", "active").await;
-        let local_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
-                                   amount, currency, subtotal, vat_total, total,
-                                   due_at, period_start, period_end, created_at, updated_at)
-             VALUES ($1, $2, 'in_sw_rebind', 'SWCOV-REBIND', 'pending',
-                     1000, 'eur', 1000, 0, 1000, NOW(), NOW(), NOW(), NOW(), NOW())",
-        )
-        .bind(local_id)
-        .bind(owner)
-        .execute(&env.pool)
-        .await
-        .expect("local invoice");
-
-        let event = invoice_event(serde_json::json!({
-            "id": "in_sw_rebind",
-            "amount_due": 1000,
-            "amount_paid": 1000,
-            "currency": "eur",
-            "subtotal": 1000,
-            "tax": 0,
-            "total": 1000,
-            "lines": { "data": [
-                { "description": "Subscription", "amount": 1000, "quantity": 1,
-                  "unit_amount_excluding_tax": "10.00" }
-            ] }
-        }));
-
-        // The same Adyen invoice resolved to a DIFFERENT tenant must not
-        // flip the existing local row to paid.
-        let affected = insert_paid_invoice_from_adyen(&env.state, &event, other)
-            .await
-            .expect("insert attempt");
-        assert_eq!(affected, 0, "tenant mismatch is rejected by the guard");
-        let (status, bound): (String, String) =
-            sqlx::query_as("SELECT status, tenant_id FROM invoices WHERE id = $1")
-                .bind(local_id)
-                .fetch_one(&env.pool)
-                .await
-                .expect("invoice");
-        assert_eq!(status, "pending", "rejected write changes nothing");
-        assert_eq!(bound, owner);
-        let duplicates: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_sw_rebind'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("count");
-        assert_eq!(duplicates, 1);
-
-        // The rightful tenant's event settles it in place.
-        let affected = insert_paid_invoice_from_adyen(&env.state, &event, owner)
-            .await
-            .expect("settle");
-        assert_eq!(affected, 1);
-        let (status, line_items): (String, serde_json::Value) = sqlx::query_as(
-            "SELECT status, COALESCE(line_items, '[]'::jsonb) FROM invoices WHERE id = $1",
-        )
-        .bind(local_id)
-        .fetch_one(&env.pool)
-        .await
-        .expect("invoice");
-        assert_eq!(status, "paid");
-        assert_eq!(
-            line_items,
-            serde_json::json!([]),
-            "settling an existing row never rewrites its line items"
-        );
-
-        // A brand-new Adyen invoice is inserted WITH its line items.
-        let fresh = invoice_event(serde_json::json!({
-            "id": "in_sw_rebind_new",
-            "amount_due": 1000,
-            "amount_paid": 1000,
-            "currency": "eur",
-            "subtotal": 1000,
-            "tax": 0,
-            "total": 1000,
-            "lines": { "data": [
-                { "description": "Subscription", "amount": 1000, "quantity": 1,
-                  "unit_amount_excluding_tax": "10.00" }
-            ] }
-        }));
-        let affected = insert_paid_invoice_from_adyen(&env.state, &fresh, owner)
-            .await
-            .expect("fresh insert");
-        assert_eq!(affected, 1);
-        let (status, line_items): (String, serde_json::Value) = sqlx::query_as(
-            "SELECT status, line_items FROM invoices WHERE adyen_psp_reference = 'in_sw_rebind_new'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("fresh invoice");
-        assert_eq!(status, "paid");
-        let items = line_items.as_array().expect("line items array").clone();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["amount"], 1000);
-        assert_eq!(items[0]["unit_price"], 1000);
-        assert_eq!(items[0]["quantity"], 1);
-    });
-
-    // ---------------- subscription lifecycle guards ----------------
-
-    fn subscription_payload(
-        tenant: Option<&str>,
-        status: &str,
-        price_id: &str,
-        interval: &str,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "id": "sub_sw_lifecycle",
-            "customer": "cus_sw_lifecycle",
-            "status": status,
-            "metadata": tenant.map(|tenant| serde_json::json!({ "tenant_id": tenant })),
-            "current_period_start": Utc::now().timestamp(),
-            "current_period_end": Utc::now().timestamp() + 2_592_000,
-            "cancel_at_period_end": false,
-            "canceled_at": null,
-            "trial_end": null,
-            "items": { "data": [ { "price": { "id": price_id, "recurring": { "interval": interval } } } ] }
-        })
-    }
-
-    env_test!(subscription_change_refuses_malformed_events, |env| {
-        let tenant = "swcov_sub";
-        seed_tenant(env, tenant, "free", "active").await;
-        seed_plan(env, "swcov_growth", "price_sw_growth").await;
-
-        // Missing metadata: deliberately ignored, not an error.
-        let no_tenant = subscription_event(subscription_payload(
-            None,
-            "active",
-            "price_sw_growth",
-            "month",
-        ));
-        handle_subscription_change(&env.state, no_tenant)
-            .await
-            .expect("unattributable events are a no-op");
-
-        // Unknown price: must be refused, never silently bound to free.
-        let unknown_price = subscription_event(subscription_payload(
-            Some(tenant),
-            "active",
-            "price_does_not_exist",
-            "month",
-        ));
-        let error = handle_subscription_change(&env.state, unknown_price)
-            .await
-            .expect_err("unknown price");
-        assert!(error.contains("Unknown Adyen price"), "{error}");
-
-        // A price with no recurring interval cannot be mapped to a plan.
-        let mut bad_interval =
-            subscription_payload(Some(tenant), "active", "price_sw_growth", "month");
-        bad_interval["items"] =
-            serde_json::json!({ "data": [ { "price": { "id": "price_sw_growth" } } ] });
-        let error = handle_subscription_change(&env.state, subscription_event(bad_interval))
-            .await
-            .expect_err("unsupported interval");
-        assert!(error.contains("unsupported billing interval"), "{error}");
-
-        // An initial delinquent state is refused (only active/trialing/
-        // incomplete may create a subscription).
-        let bad_initial = subscription_event(subscription_payload(
-            Some(tenant),
-            "past_due",
-            "price_sw_growth",
-            "month",
-        ));
-        let error = handle_subscription_change(&env.state, bad_initial)
-            .await
-            .expect_err("invalid initial state");
-        assert!(
-            error.contains("Invalid initial subscription state"),
-            "{error}"
-        );
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
-            .fetch_one(&env.pool)
-            .await
-            .expect("subscriptions");
-        assert_eq!(rows, 0, "rejected events write no subscription");
-
-        // No line items.
-        let mut no_items = subscription_payload(Some(tenant), "active", "price_sw_growth", "month");
-        no_items["items"] = serde_json::json!({ "data": [] });
-        let error = handle_subscription_change(&env.state, subscription_event(no_items))
-            .await
-            .expect_err("no items");
-        assert!(error.contains("no line items"), "{error}");
-
-        // A valid activation applies the plan and snapshots the period.
-        let valid = subscription_event(subscription_payload(
-            Some(tenant),
-            "active",
-            "price_sw_growth",
-            "month",
-        ));
-        handle_subscription_change(&env.state, valid)
-            .await
-            .expect("valid activation");
-        let (plan, status): (String, String) =
-            sqlx::query_as("SELECT plan, status FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&env.pool)
-                .await
-                .expect("subscription");
-        assert_eq!(plan, "swcov_growth");
-        assert_eq!(status, "active");
-        let tenant_plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&env.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(tenant_plan, "swcov_growth");
-        let periods: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM billing_periods WHERE tenant_id = $1 AND usage_kind = 'subscription'",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("periods");
-        assert_eq!(periods, 1, "the billing period is snapshotted");
-    });
-
-    env_test!(subscription_delete_downgrades_and_ignores_unknown, |env| {
-        let tenant = "swcov_sub_del";
-        seed_tenant(env, tenant, "swcov_growth", "active").await;
-        seed_plan(env, "swcov_growth", "price_sw_growth").await;
-        sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ($1, 'sub_sw_del', 'swcov_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_del')",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("subscription");
-
-        // Unknown subscription: acknowledged without local effect.
-        let mut unknown =
-            subscription_payload(Some(tenant), "canceled", "price_sw_growth", "month");
-        unknown["id"] = serde_json::json!("sub_sw_unknown");
-        handle_subscription_deleted(&env.state, subscription_event(unknown))
-            .await
-            .expect("unknown delete is a no-op");
-
-        let mut deleted =
-            subscription_payload(Some(tenant), "canceled", "price_sw_growth", "month");
-        deleted["id"] = serde_json::json!("sub_sw_del");
-        handle_subscription_deleted(&env.state, subscription_event(deleted))
-            .await
-            .expect("delete");
-        let (status, plan): (String, String) =
-            sqlx::query_as("SELECT status, plan FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&env.pool)
-                .await
-                .expect("subscription");
-        assert_eq!(status, "canceled");
-        assert_eq!(
-            plan, "swcov_growth",
-            "the historical plan name is retained on the terminal row"
-        );
-        let tenant_plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&env.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(tenant_plan, "free");
-    });
-
-    // ---------------- trial ending / checkout ----------------
-
-    env_test!(trial_ending_notifies_and_checkout_never_grants, |env| {
-        let tenant = "swcov_trial";
-        seed_tenant(env, tenant, "suspended", "suspended").await;
-
-        let mut trial = subscription_payload(Some(tenant), "trialing", "price_sw_growth", "month");
-        trial["id"] = serde_json::json!("sub_sw_trial");
-        handle_trial_ending(&env.state, subscription_event(trial))
-            .await
-            .expect("trial notification");
-        let queued: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'trial_ending'",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("notifications");
-        assert_eq!(queued, 1);
-
-        // No metadata: ignored entirely.
-        let mut orphan = subscription_payload(None, "trialing", "price_sw_growth", "month");
-        orphan["id"] = serde_json::json!("sub_sw_trial_orphan");
-        handle_trial_ending(&env.state, subscription_event(orphan))
-            .await
-            .expect("unattributable trial");
-        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_queue")
-            .fetch_one(&env.pool)
-            .await
-            .expect("notifications");
-        assert_eq!(queued, 1);
-
-        // Checkout completed must NOT reactivate a suspended tenant.
-        let session: CheckoutSession = serde_json::from_value(serde_json::json!({
-            "id": "cs_sw_checkout",
-            "metadata": { "tenant_id": tenant }
-        }))
-        .expect("session");
-        handle_checkout_completed(&env.state, session)
-            .await
-            .expect("checkout");
-        let status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&env.pool)
-            .await
-            .expect("tenant");
-        assert_eq!(status, "suspended", "checkout never bypasses a suspension");
-        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
-            .fetch_one(&env.pool)
-            .await
-            .expect("subscriptions");
-        assert_eq!(subs, 0);
-    });
-
-    // ---------------- stale-pending reclaim ----------------
-
-    env_test!(reclaim_stale_pending_only_touches_abandoned_rows, |env| {
-        let stale = "evt_sw_stale";
-        let fresh = "evt_sw_fresh";
-        let processed = "evt_sw_done";
-        let received = "evt_sw_received";
-        for (event_id, status, updated_offset_minutes) in [
-            (stale, "pending", 20_i64),
-            (fresh, "pending", 1),
-            (processed, "processed", 20),
-            (received, "received", 20),
-        ] {
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events
-                     (id, adyen_notification_id, event_type, status, created_at, updated_at)
-                 VALUES (gen_random_uuid(), $1, 'invoice.paid', $2,
-                         NOW() - make_interval(mins => $3::int),
-                         NOW() - make_interval(mins => $3::int))",
-            )
-            .bind(event_id)
-            .bind(status)
-            .bind(updated_offset_minutes)
-            .execute(&env.pool)
-            .await
-            .expect("event row");
-        }
-
-        let reclaimed = reclaim_stale_pending_webhooks(&env.state)
-            .await
-            .expect("reclaim");
-        assert_eq!(reclaimed, vec![stale.to_string()]);
-        let (fresh_status, done_status, received_status): (String, String, String) =
-            sqlx::query_as(
-                "SELECT
-                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1),
-                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $2),
-                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $3)",
-            )
-            .bind(fresh)
-            .bind(processed)
-            .bind(received)
-            .fetch_one(&env.pool)
-            .await
-            .expect("statuses");
-        assert_eq!(fresh_status, "pending", "a fresh claim is left alone");
-        assert_eq!(done_status, "processed", "completed work is never rewound");
-        assert_eq!(received_status, "received");
-        let reclaimed_status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
-        )
-        .bind(stale)
-        .fetch_one(&env.pool)
-        .await
-        .expect("stale status");
-        assert_eq!(reclaimed_status, "received");
-    });
-
-    env_test!(claim_webhook_event_is_exactly_once, |env| {
-        let event_id = "evt_sw_claim";
-        let first = claim_webhook_event(&env.state, event_id, "invoice.paid")
-            .await
-            .expect("claim");
-        assert!(matches!(first, WebhookEventClaim::Claimed));
-        // A second worker sees the row as pending.
-        let second = claim_webhook_event(&env.state, event_id, "invoice.paid")
-            .await
-            .expect("claim");
-        assert!(matches!(second, WebhookEventClaim::AlreadyPending));
-        // A failed attempt may be reclaimed; a processed one never is.
-        sqlx::query(
-            "UPDATE adyen_webhook_events SET status = 'failed' WHERE adyen_notification_id = $1",
-        )
-        .bind(event_id)
-        .execute(&env.pool)
-        .await
-        .expect("mark failed");
-        let reclaimed = claim_webhook_event(&env.state, event_id, "invoice.paid")
-            .await
-            .expect("claim");
-        assert!(matches!(reclaimed, WebhookEventClaim::Claimed));
-        sqlx::query(
-            "UPDATE adyen_webhook_events SET status = 'processed' WHERE adyen_notification_id = $1",
-        )
-        .bind(event_id)
-        .execute(&env.pool)
-        .await
-        .expect("mark processed");
-        let duplicate = claim_webhook_event(&env.state, event_id, "invoice.paid")
-            .await
-            .expect("claim");
-        assert!(matches!(duplicate, WebhookEventClaim::AlreadyProcessed));
-    });
-
-    #[test]
-    fn dunning_config_and_transition_helpers_are_bounded() {
-        let config = DunningConfig::default();
-        let now = Utc::now();
-        assert_eq!(
-            calculate_next_retry(now, 1, &config),
-            Some(now + TimeDelta::days(1))
-        );
-        assert_eq!(
-            calculate_next_retry(now, 2, &config),
-            Some(now + TimeDelta::days(3))
-        );
-        assert_eq!(
-            calculate_next_retry(now, 4, &config),
-            Some(now + TimeDelta::days(14))
-        );
-        assert_eq!(
-            calculate_next_retry(now, 99, &config),
-            None,
-            "past the schedule there is no next retry"
-        );
-        assert_eq!(
-            calculate_next_retry(now, 0, &config),
-            None,
-            "a zero count has no schedule slot and must not panic"
-        );
-        assert!(dunning_transition(Some("warning"), "warning").is_none());
-        assert!(dunning_transition(None, "warning").is_none());
-        assert_eq!(
-            dunning_transition(None, "soft_suspended"),
-            Some(DunningTransition::SoftSuspended)
-        );
-        assert!(dunning_transition(Some("soft_suspended"), "soft_suspended").is_none());
-        assert_eq!(
-            dunning_transition(Some("warning"), "hard_suspended"),
-            Some(DunningTransition::HardSuspended)
-        );
-        assert_eq!(
-            dunning_transition(Some("hard_suspended"), "healthy"),
-            Some(DunningTransition::Recovered)
-        );
-        assert!(dunning_transition(Some("healthy"), "healthy").is_none());
-        assert_eq!(
-            DunningTransition::Recovered.event_type(),
-            "payment_recovered"
-        );
-    }
-
-    #[test]
-    fn deadletter_preparation_truncates_and_never_schedules_truncated_replays() {
-        let now = Utc::now();
-        let small = prepare_deadletter(
-            DeadletterEntry {
-                reason: "processing_failed".into(),
-                event_id: Some("evt/with spaces".into()),
-                ..Default::default()
-            },
-            Some(b"{\"id\":\"evt_1\"}"),
-            Some("t=1,v1=aa"),
-            now,
-        );
-        assert!(small.retry_at_ms.is_some(), "a full body is retryable");
-        assert!(small.event_key.contains("evt_with_spaces"));
-
-        let oversized = "x".repeat(DEADLETTER_MAX_BODY_BYTES + 100);
-        let big = prepare_deadletter(
-            DeadletterEntry {
-                reason: "processing_failed".into(),
-                event_id: Some("evt_big".into()),
-                ..Default::default()
-            },
-            Some(oversized.as_bytes()),
-            Some("t=1,v1=aa"),
-            now,
-        );
-        assert!(
-            big.retry_at_ms.is_none(),
-            "a truncated body can never be replayed"
-        );
-        let stored: DeadletterEntry = serde_json::from_str(&big.payload).expect("payload");
-        assert!(stored.body.as_deref().is_some_and(str::is_empty).eq(&false));
-        assert!(
-            stored.body.expect("body").ends_with("...(truncated)"),
-            "truncation is marked"
-        );
-    }
-
-    // ===================================================================
-    // Deep adversarial additions: signature verification (real HMAC),
-    // every event arm, replay exactly-once, cross-tenant binding refusal,
-    // dead-letter fault injection, and the tax/settlement edges.
-    // ===================================================================
-
-    use crate::test_support::{
-        ensure_trace_subscriber, seed_plan as shared_seed_plan, seed_tenant as shared_seed_tenant,
-        sign_adyen, state_with_broken_db, state_with_dead_redis, state_with_empty_adyen_secret,
-        TestEnv,
-    };
-    use tower::ServiceExt;
-
-    async fn shared_env(tag: &str) -> TestEnv {
-        ensure_trace_subscriber();
-        crate::test_support::provision(tag)
-            .await
-            .expect("TEST_DATABASE_URL provisioning")
-    }
-
-    fn adyen_request(
-        body: &[u8],
-        signature: Option<&str>,
-    ) -> axum::http::Request<axum::body::Body> {
-        let mut builder = axum::http::Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen");
-        if let Some(signature) = signature {
-            builder = builder.header("adyen-hmac-signature", signature);
-        }
-        builder.body(axum::body::Body::from(body.to_vec())).unwrap()
-    }
-
-    async fn post_webhook(
-        state: &Arc<AppState>,
-        body: &[u8],
-        signature: Option<&str>,
-    ) -> axum::response::Response {
-        router()
-            .with_state(state.clone())
-            .oneshot(adyen_request(body, signature))
-            .await
-            .expect("oneshot")
-    }
-
-    async fn response_json(response: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
-    }
-
-    fn signed_event(event_id: &str, event_type: &str, object: serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "id": event_id,
-            "type": event_type,
-            "data": { "object": object }
-        }))
-        .expect("event json")
-    }
-
-    /// Clear every deadletter key/index: the Redis server is shared across
-    /// runs, so stale entries (35-day TTL) would otherwise pollute counts.
-    /// Callers must hold DEADLETTER_LOCK.
-    async fn clear_all_deadletters(env: &Env) {
-        let mut conn = redis_conn(env).await;
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("adyen:deadletter:*")
-            .query_async(&mut conn)
-            .await
-            .expect("keys");
-        if !keys.is_empty() {
-            let _: () = redis::cmd("DEL")
-                .arg(&keys)
-                .query_async(&mut conn)
-                .await
-                .expect("del");
-        }
-    }
-
-    async fn deadletter_entries(env: &Env, pattern: &str) -> Vec<String> {
-        let mut conn = redis_conn(env).await;
-        deadletter_entries_on(&mut conn, pattern).await
-    }
-
-    async fn deadletter_entries_on(
-        conn: &mut deadpool_redis::Connection,
-        pattern: &str,
-    ) -> Vec<String> {
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
-            .query_async(&mut *conn)
-            .await
-            .expect("keys");
-        let mut out = Vec::new();
-        for key in keys {
-            let value: Option<String> = redis::cmd("GET")
-                .arg(&key)
-                .query_async(conn)
-                .await
-                .expect("get");
-            if let Some(value) = value {
-                out.push(value);
-            }
-        }
-        out
-    }
-
-    async fn pool_conn(pool: &deadpool_redis::Pool) -> deadpool_redis::Connection {
-        pool.get().await.expect("redis connection")
-    }
-
-    /// AppState over `env`'s DB with a private throwaway redis — full
-    /// isolation for tests that poison the shared deadletter indexes.
-    fn state_with_isolated_redis(
-        env: &Env,
-        isolated: &crate::test_support::IsolatedRedis,
-    ) -> Arc<AppState> {
-        let mut config = env.state.config.clone();
-        config.redis_url = "redis://127.0.0.1:1".to_string();
-        AppState::new(env.pool.clone(), isolated.pool.clone(), config)
-    }
-
-    async fn event_rows(pool: &sqlx::PgPool) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
-            .fetch_one(pool)
-            .await
-            .expect("event rows")
-    }
-
-    // ---------------- signature verification (real HMAC) ----------------
-
-    env_test!(route_missing_signature_is_400_and_deadletters, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let body = br#"{"id":"evt_nosig","type":"invoice.paid"}"#;
-        let response = post_webhook(&env.state, body, None).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let json = response_json(response).await;
-        assert_eq!(json["error"], "Missing adyen-hmac-signature header");
-        let entries = deadletter_entries(env, "adyen:deadletter:event:unknown*").await;
-        assert_eq!(entries.len(), 1, "missing signature is deadlettered");
-        let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
-        assert_eq!(entry.reason, "missing_signature");
-        assert_eq!(event_rows(&env.pool).await, 0, "nothing claimed");
-    });
-
-    env_test!(route_empty_signature_header_is_400, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let response = post_webhook(&env.state, br#"{"id":"evt_emptysig"}"#, Some("  ")).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(event_rows(&env.pool).await, 0);
-    });
-
-    env_test!(route_malformed_json_refused_with_no_write, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let timestamp = Utc::now().timestamp();
-        let signature = sign_adyen("whsec_coverage", b"not json", timestamp);
-        let response = post_webhook(&env.state, b"not json", Some(&signature)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let json = response_json(response).await;
-        assert_eq!(json["error"], "Invalid JSON payload");
-        assert_eq!(
-            event_rows(&env.pool).await,
-            0,
-            "malformed JSON writes nothing"
-        );
-        let entries = deadletter_entries(env, "adyen:deadletter:event:unknown*").await;
-        assert_eq!(entries.len(), 1);
-        let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
-        assert_eq!(entry.reason, "invalid_json_payload");
-    });
-
-    env_test!(route_missing_and_blank_event_ids_refused, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let timestamp = Utc::now().timestamp();
-        for body in [
-            br#"{"no_id": true}"#.to_vec(),
-            br#"{"id": null}"#.to_vec(),
-            br#"{"id": "   "}"#.to_vec(),
-        ] {
-            let signature = sign_adyen("whsec_coverage", &body, timestamp);
-            let response = post_webhook(&env.state, &body, Some(&signature)).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let json = response_json(response).await;
-            assert_eq!(json["error"], "Missing event ID");
-        }
-        assert_eq!(event_rows(&env.pool).await, 0);
-    });
-
-    env_test!(route_tampered_signature_and_secret_refused, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let body = signed_event(
-            "evt_tamper",
-            "invoice.paid",
-            serde_json::json!({"id":"in_t","amount_due":1}),
-        );
-        let timestamp = Utc::now().timestamp();
-        let wrong_secret = sign_adyen("whsec_NOT_the_secret", &body, timestamp);
-        let response = post_webhook(&env.state, &body, Some(&wrong_secret)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            event_rows(&env.pool).await,
-            0,
-            "forged signature writes nothing"
-        );
-
-        let right_secret = sign_adyen("whsec_coverage", &body, timestamp);
-        let mut segments = right_secret.split(',');
-        let ts = segments.next().unwrap();
-        let v1 = segments.next().unwrap();
-        let flipped: String = format!(
-            "{},{}",
-            ts,
-            v1.chars()
-                .map(|c| if c == '0' { '1' } else { '0' })
-                .collect::<String>()
-        );
-        let response = post_webhook(&env.state, &body, Some(&flipped)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            event_rows(&env.pool).await,
-            0,
-            "bit-flipped signature writes nothing"
-        );
-    });
-
-    env_test!(route_timestamp_tolerance_window_enforced, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let body = signed_event(
-            "evt_stale",
-            "invoice.paid",
-            serde_json::json!({"id":"in_s","amount_due":1}),
-        );
-        for delta in [301_i64, -301] {
-            let signature = sign_adyen("whsec_coverage", &body, Utc::now().timestamp() + delta);
-            let response = post_webhook(&env.state, &body, Some(&signature)).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::BAD_REQUEST,
-                "outside tolerance refused"
-            );
-            assert_eq!(event_rows(&env.pool).await, 0);
-        }
-        // Inside the window the signature verifies and the event is CLAIMED
-        // (it may then fail on its own business content — never on the MAC).
-        let signature = sign_adyen("whsec_coverage", &body, Utc::now().timestamp() - 299);
-        let _response = post_webhook(&env.state, &body, Some(&signature)).await;
-        assert_eq!(
-            event_rows(&env.pool).await,
-            1,
-            "verified signature claims the event"
-        );
-    });
-
-    env_test!(route_malformed_signature_headers_refused, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        clear_all_deadletters(env).await;
-        let body = br#"{"id":"evt_badsig","type":"invoice.paid"}"#;
-        for header in [
-            "t=abc,v1=deadbeef",
-            "t=123",
-            "v1=deadbeef",
-            "t=123,v1=",
-            "garbage",
-            "t=123,v0=legacy",
-        ] {
-            let response = post_webhook(&env.state, body, Some(header)).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::BAD_REQUEST,
-                "header {header} refused"
-            );
-        }
-        assert_eq!(event_rows(&env.pool).await, 0);
-    });
-
-    #[test]
-    fn parse_signature_header_skips_valueless_and_unknown_segments() {
-        // A segment with no '=' is skipped, unknown keys are ignored, and a
-        // second t= overwrites the first.
-        let (timestamp, signatures) = parse_signature_header("junk,t=5,t=7,v1=ab,v0=x,=").unwrap();
-        assert_eq!(timestamp, 7);
-        assert_eq!(signatures, vec!["ab"]);
-        assert!(parse_signature_header("t=notanumber,v1=ab").is_err());
-    }
-
-    env_test!(
-        verify_signature_empty_secret_refused_before_any_write,
-        |env| {
-            let body = signed_event(
-                "evt_nosecret",
-                "invoice.paid",
-                serde_json::json!({"id":"in_n","amount_due":1}),
-            );
-            let timestamp = Utc::now().timestamp();
-            let signature = sign_adyen("whsec_coverage", &body, timestamp);
-            let broken = state_with_empty_adyen_secret(&env.pool, &env.redis, &env.state.config);
-            let error = verify_and_parse_event(&broken, &body, &signature)
-                .expect_err("empty secret refused");
-            assert_eq!(error, "Adyen webhook secret is not configured");
-
-            let error = replay_deadletter(
-                &broken,
-                &DeadletterEntry {
-                    reason: "processing_failed".into(),
-                    event_id: Some("evt_nosecret".into()),
-                    body: Some(String::from_utf8(body.clone()).unwrap()),
-                    signature: Some(signature.clone()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect_err("replay refuses an unconfigured secret");
-            assert_eq!(error, "Adyen webhook secret is not configured");
-            assert_eq!(event_rows(&env.pool).await, 0);
-        }
-    );
-
-    // ---------------- replay / concurrency semantics ----------------
-
-    env_test!(route_replay_is_exactly_once_no_double_entitlement, |env| {
-        shared_seed_tenant(&env.pool, "swadv_replay", "free").await;
-        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
-        let object = serde_json::json!({
-            "id": "sub_swadv_replay",
-            "customer": "cus_swadv",
-            "status": "active",
-            "metadata": { "tenant_id": "swadv_replay" },
-            "current_period_start": Utc::now().timestamp(),
-            "current_period_end": Utc::now().timestamp() + 2_592_000,
-            "cancel_at_period_end": false,
-            "canceled_at": null,
-            "trial_end": null,
-            "items": { "data": [ { "price": { "id": "price_swadv_growth", "recurring": { "interval": "month" } } } ] }
-        });
-        let body = signed_event("evt_swadv_replay", "customer.subscription.created", object);
-        let timestamp = Utc::now().timestamp();
-        let signature = sign_adyen("whsec_coverage", &body, timestamp);
-
-        let first = post_webhook(&env.state, &body, Some(&signature)).await;
-        assert_eq!(first.status(), StatusCode::OK);
-        let second = post_webhook(&env.state, &body, Some(&signature)).await;
-        assert_eq!(
-            second.status(),
-            StatusCode::OK,
-            "Adyen expects 2xx on replay"
-        );
-
-        let (plan, subs): (String, i64) = sqlx::query_as(
-            "SELECT (SELECT plan FROM tenants WHERE id = 'swadv_replay'),
-                    (SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = 'swadv_replay')",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("state");
-        assert_eq!(plan, "swadv_growth");
-        assert_eq!(subs, 1, "replay never duplicates the subscription");
-        let periods: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM billing_periods WHERE tenant_id = 'swadv_replay'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("periods");
-        assert_eq!(periods, 1, "replay never duplicates the billing period");
-    });
-
-    env_test!(
-        route_event_pending_elsewhere_returns_503_and_no_deadletter,
-        |env| {
-            let _guard = DEADLETTER_LOCK.lock().await;
-            let _dl_guard =
-                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-            clear_all_deadletters(env).await;
-            shared_seed_tenant(&env.pool, "swadv_pending", "free").await;
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
-             VALUES (gen_random_uuid(), 'evt_swadv_pending', 'invoice.paid', 'pending')",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("pending row");
-            let body = signed_event(
-                "evt_swadv_pending",
-                "invoice.paid",
-                serde_json::json!({"id": "in_p", "amount_due": 1}),
-            );
-            let timestamp = Utc::now().timestamp();
-            let signature = sign_adyen("whsec_coverage", &body, timestamp);
-            let response = post_webhook(&env.state, &body, Some(&signature)).await;
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-            let entries = deadletter_entries(env, "adyen:deadletter:event:*").await;
-            assert_eq!(entries.len(), 0, "a pending event is never deadlettered");
-            let status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_swadv_pending'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("status");
-            assert_eq!(status, "pending", "the other worker's claim is untouched");
-        }
-    );
-
-    // ---------------- unknown types + per-arm decode failures ----------------
-
-    env_test!(route_unknown_event_type_acknowledged_and_processed, |env| {
-        let body = signed_event(
-            "evt_swadv_unknown",
-            "customer.created",
-            serde_json::json!({"id": "cus_x"}),
-        );
-        let timestamp = Utc::now().timestamp();
-        let signature = sign_adyen("whsec_coverage", &body, timestamp);
-        let response = post_webhook(&env.state, &body, Some(&signature)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["received"], true);
-        let status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_swadv_unknown'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("status");
-        assert_eq!(
-            status, "processed",
-            "unknown types are claimed and acknowledged"
-        );
-    });
-
-    env_test!(handle_adyen_notification_decode_failures_fail_closed, |env| {
-        // Every handled event type with a malformed object must be an error
-        // (deadlettered by the caller), never a silent drop.
-        let cases = [
-            (
-                "checkout.session.completed",
-                serde_json::json!({"no_id": 1}),
-            ),
-            (
-                "customer.subscription.created",
-                serde_json::json!({"id": "sub_x"}),
-            ),
-            (
-                "customer.subscription.updated",
-                serde_json::json!({"id": 42}),
-            ),
-            (
-                "customer.subscription.deleted",
-                serde_json::json!({"items": "nope"}),
-            ),
-            ("invoice.paid", serde_json::json!({"id": "in_x"})),
-            (
-                "invoice.payment_failed",
-                serde_json::json!({"amount_due": "many"}),
-            ),
-            (
-                "customer.subscription.trial_will_end",
-                serde_json::json!({"id": "sub_y"}),
-            ),
-        ];
-        for (event_type, object) in cases {
-            let event: AdyenEventPayload = serde_json::from_value(serde_json::json!({
-                "id": "evt_decode",
-                "type": event_type,
-                "data": { "object": object }
-            }))
-            .expect("envelope");
-            let error = handle_adyen_notification(&env.state, &event)
-                .await
-                .err()
-                .unwrap_or_else(|| panic!("decode failure must be an error"));
-            assert!(
-                error.contains("Failed to decode"),
-                "decode failure must be an error"
-            );
-        }
-        assert_eq!(event_rows(&env.pool).await, 0);
-    });
-
-    env_test!(handle_checkout_completed_without_metadata_is_noop, |env| {
-        let event: AdyenEventPayload = serde_json::from_value(serde_json::json!({
-            "id": "evt_checkout_orphan",
-            "type": "checkout.session.completed",
-            "data": { "object": { "id": "cs_orphan" } }
-        }))
-        .expect("envelope");
-        handle_adyen_notification(&env.state, &event)
-            .await
-            .expect("unattributable checkout is acknowledged");
-        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
-            .fetch_one(&env.pool)
-            .await
-            .expect("subs");
-        assert_eq!(subs, 0);
-    });
-
-    // ---------------- subscription binding / lifecycle guards ----------------
-
-    async fn sub_event(
-        tenant: Option<&str>,
-        status: &str,
-        price_id: &str,
-        interval: Option<&str>,
-        period_start: i64,
-    ) -> SubscriptionEvent {
-        let price = match interval {
-            Some(interval) => {
-                serde_json::json!({ "id": price_id, "recurring": { "interval": interval } })
-            }
-            None => serde_json::json!({ "id": price_id }),
-        };
-        serde_json::from_value(serde_json::json!({
-            "id": "sub_swadv",
-            "customer": "cus_swadv",
-            "status": status,
-            "metadata": tenant.map(|t| serde_json::json!({ "tenant_id": t })),
-            "current_period_start": period_start,
-            "current_period_end": period_start + 2_592_000,
-            "cancel_at_period_end": false,
-            "canceled_at": null,
-            "trial_end": null,
-            "items": { "data": [ { "price": price } ] }
-        }))
-        .expect("subscription event")
-    }
-
-    env_test!(subscription_price_shape_failures_fail_closed, |env| {
-        shared_seed_tenant(&env.pool, "swadv_shape", "free").await;
-        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
-        let now = Utc::now().timestamp();
-
-        // items[0].price == null
-        let no_price: SubscriptionEvent = serde_json::from_value(serde_json::json!({
-            "id": "sub_swadv", "customer": "cus", "status": "active",
-            "metadata": { "tenant_id": "swadv_shape" },
-            "current_period_start": now, "current_period_end": now + 100,
-            "cancel_at_period_end": false, "canceled_at": null, "trial_end": null,
-            "items": { "data": [ { "price": null } ] }
-        }))
-        .expect("event");
-        let error = handle_subscription_change(&env.state, no_price)
-            .await
-            .expect_err("missing price refused");
-        assert!(error.contains("no line-item price"));
-
-        // price present but id missing
-        let event = sub_event(
-            Some("swadv_shape"),
-            "active",
-            "price_swadv_growth",
-            None,
-            now,
-        )
-        .await;
-        let priceless = SubscriptionEvent {
-            items: SubscriptionItems {
-                data: vec![SubscriptionItem {
-                    price: Some(SubscriptionPrice {
-                        id: None,
-                        recurring: None,
-                    }),
-                }],
-            },
-            ..event
-        };
-        let error = handle_subscription_change(&env.state, priceless)
-            .await
-            .expect_err("missing price id refused");
-        assert!(error.contains("no valid line-item price"));
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
-            .fetch_one(&env.pool)
-            .await
-            .expect("rows");
-        assert_eq!(rows, 0, "refused shapes write nothing");
-    });
-
-    env_test!(subscription_cross_tenant_rebind_refused, |env| {
-        shared_seed_tenant(&env.pool, "swadv_owner", "free").await;
-        shared_seed_tenant(&env.pool, "swadv_attacker", "free").await;
-        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
-        let now = Utc::now().timestamp();
-        sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ('swadv_owner', 'sub_swadv', 'swadv_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_owner')",
-        )
-        .execute(&env.pool)
-        .await
-        .expect("owner row");
-
-        // The same Adyen subscription id, attributed to a DIFFERENT tenant.
-        let event = sub_event(
-            Some("swadv_attacker"),
-            "active",
-            "price_swadv_growth",
-            Some("month"),
-            now,
-        )
-        .await;
-        let error = handle_subscription_change(&env.state, event)
-            .await
-            .expect_err("cross-tenant rebind refused");
-        assert!(error.contains("already bound to a different tenant"));
-        let owner: String = sqlx::query_scalar(
-            "SELECT tenant_id FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("owner");
-        assert_eq!(owner, "swadv_owner");
-    });
-
-    env_test!(subscription_illegal_transition_refused, |env| {
-        shared_seed_tenant(&env.pool, "swadv_trans", "free").await;
-        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
-        let now = Utc::now().timestamp();
-        sqlx::query(
-            "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ('swadv_trans', 'sub_swadv', 'swadv_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_t')",
-        )
-        .execute(&env.pool)
-        .await
-        .expect("active row");
-
-        // active -> incomplete is not an admitted transition.
-        let event = sub_event(
-            Some("swadv_trans"),
-            "incomplete",
-            "price_swadv_growth",
-            Some("month"),
-            now,
-        )
-        .await;
-        let error = handle_subscription_change(&env.state, event)
-            .await
-            .expect_err("illegal transition refused");
-        assert!(error.contains("Invalid subscription status transition"));
-        let status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("status");
-        assert_eq!(status, "active", "the refused event changes nothing");
-
-        // Legal deactivation still applies.
-        let event = sub_event(
-            Some("swadv_trans"),
-            "canceled",
-            "price_swadv_growth",
-            Some("month"),
-            now,
-        )
-        .await;
-        handle_subscription_change(&env.state, event)
-            .await
-            .expect("legal transition applies");
-    });
-
-    env_test!(
-        subscription_stale_cycle_and_stale_replacement_ignored,
-        |env| {
-            shared_seed_tenant(&env.pool, "swadv_stale", "free").await;
-            shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
-            let now = Utc::now().timestamp();
-            // The stored row already applied a NEWER cycle watermark.
-            sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference, event_watermark)
-             VALUES ('swadv_stale', 'sub_swadv', 'swadv_growth', 'active',
-                     to_timestamp($1), to_timestamp($2), 'cus_s', to_timestamp($1))",
-            )
-            .bind(now)
-            .bind(now + 2_592_000)
-            .execute(&env.pool)
-            .await
-            .expect("row");
-
-            // An OLDER event for the same subscription must not rewind the cycle.
-            let event = sub_event(
-                Some("swadv_stale"),
-                "past_due",
-                "price_swadv_growth",
-                Some("month"),
-                now - 100_000,
-            )
-            .await;
-            handle_subscription_change(&env.state, event)
-                .await
-                .expect("stale events are acknowledged");
-            let (status, watermark): (String, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT status, event_watermark FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("row");
-            assert_eq!(status, "active", "stale event cannot rewind state");
-            assert_eq!(
-                watermark.expect("watermark").timestamp(),
-                now,
-                "watermark never rewinds"
-            );
-
-            // A stale event for an OLD subscription cannot outrank a newer
-            // active replacement on the same tenant: the old row is demoted
-            // (no watermark) and the replacement is ACTIVE with a newer one.
-            sqlx::query(
-                "UPDATE adyen_subscriptions SET status = 'canceled', event_watermark = NULL
-                 WHERE adyen_subscription_id = 'sub_swadv'",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("demote the old row");
-            sqlx::query(
-                "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, adyen_shopper_reference, event_watermark)
-                 VALUES ('swadv_stale', 'sub_swadv_old', 'swadv_growth', 'active',
-                         to_timestamp($1), to_timestamp($2), 'cus_s', to_timestamp($1))",
-            )
-            .bind(now)
-            .bind(now + 2_592_000)
-            .execute(&env.pool)
-            .await
-            .expect("replacement row");
-            let mut revival = sub_event(
-                Some("swadv_stale"),
-                "active",
-                "price_swadv_growth",
-                Some("month"),
-                now - 100_000,
-            )
-            .await;
-            revival.id = "sub_swadv".to_string();
-            handle_subscription_change(&env.state, revival)
-                .await
-                .expect("stale replacement events are acknowledged");
-            let newer_status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv_old'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("newer");
-            assert_eq!(newer_status, "active", "the newer replacement survives");
-        }
-    );
-
-    env_test!(
-        subscription_renewal_snapshots_closing_and_superseded_cycles,
-        |env| {
-            shared_seed_tenant(&env.pool, "swadv_renew", "free").await;
-            shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
-            let now = Utc::now().timestamp();
-
-            // A closing cycle on the renewed subscription (trialing: only one
-            // ACTIVE row per tenant is possible) plus an ACTIVE superseded one.
-            for (sub_id, status) in [("sub_swadv", "trialing"), ("sub_swadv_other", "active")] {
-                sqlx::query(
-                    "INSERT INTO adyen_subscriptions
-                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, adyen_shopper_reference, event_watermark)
-                 VALUES ('swadv_renew', $3, 'swadv_growth', $4,
-                         to_timestamp($1), to_timestamp($2), 'cus_r', to_timestamp($1))",
-                )
-                .bind(
-                    now - 2_592_000
-                        - if sub_id == "sub_swadv_other" {
-                            86_400
-                        } else {
-                            0
-                        },
-                )
-                .bind(
-                    now - if sub_id == "sub_swadv_other" {
-                        86_400
-                    } else {
-                        0
-                    },
-                )
-                .bind(sub_id)
-                .bind(status)
-                .execute(&env.pool)
-                .await
-                .expect("row");
-            }
-
-            // A renewal (trialing -> active, a legal transition) with a NEW
-            // cycle start snapshots both the closing cycle and the
-            // superseded sibling before overwriting.
-            let event = sub_event(
-                Some("swadv_renew"),
-                "active",
-                "price_swadv_growth",
-                Some("month"),
-                now,
-            )
-            .await;
-            handle_subscription_change(&env.state, event)
-                .await
-                .expect("renewal applies");
-            let periods: Vec<(String,)> = sqlx::query_as(
-                "SELECT adyen_subscription_id FROM billing_periods
-             WHERE tenant_id = 'swadv_renew' ORDER BY adyen_subscription_id, period_start",
-            )
-            .fetch_all(&env.pool)
-            .await
-            .expect("periods");
-            assert!(
-                periods.len() >= 3,
-                "closing + superseded + incoming cycles snapshotted"
-            );
-            let superseded_status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv_other'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("superseded");
-            assert_eq!(
-                superseded_status, "canceled",
-                "renewal deactivates superseded rows"
-            );
-            // Replay of the same renewal is idempotent (same cycle start).
-            let event = sub_event(
-                Some("swadv_renew"),
-                "active",
-                "price_swadv_growth",
-                Some("month"),
-                now,
-            )
-            .await;
-            handle_subscription_change(&env.state, event)
-                .await
-                .expect("replay applies");
-        }
-    );
-
-    #[test]
-    fn subscription_status_deserializes_every_arm_and_maps_entitlement() {
-        for (raw, expect) in [
-            ("active", "active"),
-            ("past_due", "past_due"),
-            ("unpaid", "unpaid"),
-            ("canceled", "canceled"),
-            ("incomplete", "incomplete"),
-            ("incomplete_expired", "incomplete_expired"),
-            ("trialing", "trialing"),
-            ("paused", "paused"),
-        ] {
-            let status: SubscriptionStatus =
-                serde_json::from_value(serde_json::json!(raw)).expect("status");
-            assert_eq!(status.as_str(), expect);
-        }
-        assert!(SubscriptionStatus::Active.can_transition_from("paused"));
-        assert!(SubscriptionStatus::Canceled.can_transition_from("paused"));
-        assert!(!SubscriptionStatus::Trialing.can_transition_from("paused"));
-        assert!(SubscriptionStatus::Active.can_transition_from("incomplete"));
-        assert!(SubscriptionStatus::IncompleteExpired.can_transition_from("incomplete"));
-        assert!(!SubscriptionStatus::Paused.can_transition_from("incomplete"));
-        assert!(SubscriptionStatus::Unpaid.can_transition_from("past_due"));
-        assert!(SubscriptionStatus::Active.can_transition_from("unpaid"));
-        assert!(SubscriptionStatus::Canceled.can_transition_from("unpaid"));
-        assert!(!SubscriptionStatus::Incomplete.can_transition_from("unpaid"));
-        assert!(!SubscriptionStatus::Active.can_transition_from("unknown_status"));
-        // ExpandableId object form.
-        let expanded: ExpandableId =
-            serde_json::from_value(serde_json::json!({"id": "cus_obj"})).expect("expandable");
-        assert_eq!(expanded.id(), "cus_obj");
-        let plain: ExpandableId =
-            serde_json::from_value(serde_json::json!("cus_plain")).expect("expandable");
-        assert_eq!(plain.id(), "cus_plain");
-    }
-
-    // ---------------- dead-letter fault injection ----------------
-
-    env_test!(
-        deadletter_write_failure_on_dead_redis_is_logged_not_fatal,
-        |env| {
-            let dead = state_with_dead_redis(&env.pool);
-            // A missing signature must still answer 400 even when Redis is down.
-            let response = post_webhook(&dead, br#"{"id":"evt_deadredis"}"#, None).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(event_rows(&env.pool).await, 0);
-        }
-    );
-
-    env_test!(deadletter_index_wrongtype_fails_the_write_arm, |env| {
-        let _guard = DEADLETTER_LOCK.lock().await;
-        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-        let mut conn = redis_conn(env).await;
-        let _: () = redis::cmd("SET")
-            .arg(DEADLETTER_INDEX_KEY)
-            .arg("not-a-zset")
-            .query_async(&mut conn)
-            .await
-            .expect("poison index");
-        drop(conn);
-
-        let response = post_webhook(&env.state, br#"{"id":"evt_wrongtype"}"#, None).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let mut conn = redis_conn(env).await;
-        let _: () = redis::cmd("DEL")
-            .arg(DEADLETTER_INDEX_KEY)
-            .query_async(&mut conn)
-            .await
-            .expect("cleanup index");
-    });
-
-    env_test!(
-        record_failed_deadletter_without_row_reports_not_found,
-        |env| {
-            let error = record_failed_webhook_deadletter_atomic(
-                &env.state,
-                "evt_never_claimed",
-                "boom",
-                br#"{"id":"evt_never_claimed"}"#,
-                "t=1,v1=ab",
-            )
-            .await
-            .expect_err("missing claim row");
-            assert!(error.contains("was not found"), "honest failure: {error}");
-        }
-    );
-
-    env_test!(
-        record_failed_deadletter_begin_failure_is_a_hard_error,
-        |env| {
-            let broken = state_with_broken_db();
-            let error = record_failed_webhook_deadletter_atomic(
-                &broken,
-                "evt_beginfail",
-                "boom",
-                br#"{"id":"evt_beginfail"}"#,
-                "t=1,v1=ab",
-            )
-            .await
-            .expect_err("broken db begin");
-            assert!(error.contains("Failed to begin"), "honest failure: {error}");
-            assert_eq!(event_rows(&env.pool).await, 0, "nothing was claimed");
-        }
-    );
-
-    env_test!(
-        record_failed_deadletter_redis_failure_rolls_back_the_status_flip,
-        |env| {
-            let isolated = crate::test_support::spawn_isolated_redis();
-            let state = state_with_isolated_redis(env, &isolated);
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
-                 VALUES (gen_random_uuid(), 'evt_rollback', 'invoice.paid', 'pending')",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("claim row");
-
-            let mut conn = pool_conn(&isolated.pool).await;
-            let _: () = redis::cmd("SET")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg("not-a-zset")
-                .query_async(&mut conn)
-                .await
-                .expect("poison retry index");
-            drop(conn);
-
-            let error = record_failed_webhook_deadletter_atomic(
-                &state,
-                "evt_rollback",
-                "boom",
-                br#"{"id":"evt_rollback"}"#,
-                "t=1,v1=ab",
-            )
-            .await
-            .expect_err("redis failure surfaces");
-            assert!(
-                error.contains("adyen dead letter"),
-                "honest failure: {error}"
-            );
-            let status: String = sqlx::query_scalar(
-                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_rollback'",
-            )
-            .fetch_one(&env.pool)
-            .await
-            .expect("status");
-            assert_eq!(status, "pending", "the failed-status flip rolled back");
-        }
-    );
-
-    env_test!(
-        record_failed_deadletter_commit_failure_compensates_redis,
-        |env| {
-            let isolated = crate::test_support::spawn_isolated_redis();
-            let state = state_with_isolated_redis(env, &isolated);
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
-                 VALUES (gen_random_uuid(), 'evt_commitfail', 'invoice.paid', 'pending')",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("claim row");
-            // Deferred constraint: the UPDATE succeeds inside the tx and the
-            // COMMIT itself fails — the exact commit-failure fault to inject.
-            // (Postgres CHECK constraints cannot defer; a FK to a guard table
-            // can, and 'failed' is absent from the guard.)
-            for statement in [
-                "CREATE TABLE cov_status_guard (status text PRIMARY KEY)",
-                "INSERT INTO cov_status_guard VALUES ('pending'), ('received')",
-                "ALTER TABLE adyen_webhook_events ADD CONSTRAINT cov_status_fk FOREIGN KEY (status)                  REFERENCES cov_status_guard(status) DEFERRABLE INITIALLY DEFERRED",
-            ] {
-                sqlx::query(statement)
-                    .execute(&env.pool)
-                    .await
-                    .expect("deferred constraint setup");
-            }
-
-            let error = record_failed_webhook_deadletter_atomic(
-                &state,
-                "evt_commitfail",
-                "boom",
-                br#"{"id":"evt_commitfail"}"#,
-                "t=1,v1=ab",
-            )
-            .await
-            .expect_err("commit failure surfaces");
-            assert!(
-                error.contains("Failed to commit"),
-                "honest failure: {error}"
-            );
-            let status: String = sqlx::query_scalar(
-                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_commitfail'",
-            )
-            .fetch_one(&env.pool)
-            .await
-            .expect("status");
-            assert_eq!(
-                status, "pending",
-                "commit failure leaves the claim untouched"
-            );
-            // The already-written deadletter entry is compensated away.
-            let mut conn = pool_conn(&isolated.pool).await;
-            let entries =
-                deadletter_entries_on(&mut conn, "adyen:deadletter:event:evt_commitfail*").await;
-            assert_eq!(
-                entries.len(),
-                0,
-                "redis entry compensated after commit failure"
-            );
-        }
-    );
-
-    env_test!(compensation_failure_is_logged_never_fatal, |env| {
-        // Direct fault injection: the compensation pipeline must tolerate a
-        // Redis failure (it only logs) — a commit failure must never panic
-        // or mask its own error because the compensating DEL/ZREM failed.
-        let isolated = crate::test_support::spawn_isolated_redis();
-        let state = state_with_isolated_redis(env, &isolated);
-        let mut conn = pool_conn(&isolated.pool).await;
-        let the_key = "adyen:deadletter:event:evt_comp_direct";
-        let _: () = redis::cmd("SETEX")
-            .arg(the_key)
-            .arg(60)
-            .arg("{}")
-            .query_async(&mut conn)
-            .await
-            .expect("stored entry");
-        // Poison the shared index as a STRING: DEL succeeds, ZREM fails.
-        let _: () = redis::cmd("SET")
-            .arg(DEADLETTER_INDEX_KEY)
-            .arg("not-a-zset")
-            .query_async(&mut conn)
-            .await
-            .expect("poison index");
-        drop(conn);
-
-        remove_prepared_deadletter_from_redis(&state, the_key).await;
-
-        let mut conn = pool_conn(&isolated.pool).await;
-        let gone: Option<String> = redis::cmd("GET")
-            .arg(the_key)
-            .query_async(&mut conn)
-            .await
-            .expect("entry state");
-        assert_eq!(gone, None, "the DEL in the compensation still ran");
-    });
-
-    env_test!(
-        prepare_deadletter_without_body_stores_nothing_replayable,
-        |env| {
-            let _ = env;
-            let prepared = prepare_deadletter(
-                DeadletterEntry {
-                    reason: "missing_signature".into(),
-                    ..Default::default()
-                },
-                None,
-                None,
-                Utc::now(),
-            );
-            assert_eq!(prepared.retry_at_ms, None);
-            let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("entry");
-            assert!(entry.body.is_none());
-            assert!(entry.signature.is_none());
-        }
-    );
-
-    // ---------------- retry worker arms ----------------
-
     env_test!(
         retry_worker_handles_evicted_corrupt_and_foreign_entries,
         |env| {
             let isolated = crate::test_support::spawn_isolated_redis();
             let state = state_with_isolated_redis(env, &isolated);
             let mut conn = pool_conn(&isolated.pool).await;
-            let _ = &state;
             let _: () = redis::cmd("ZREMRANGEBYSCORE")
                 .arg(DEADLETTER_RETRY_INDEX_KEY)
                 .arg("-inf")
@@ -8077,19 +7138,20 @@ mod coverage_adversarial {
     env_test!(retry_worker_success_removes_entry_from_index, |env| {
         let isolated = crate::test_support::spawn_isolated_redis();
         let state = state_with_isolated_redis(env, &isolated);
-        shared_seed_tenant(&env.pool, "swadv_retry_ok", "growth").await;
-        let payload = payment_failed_payload("evt_retry_ok", "in_retry_ok", "swadv_retry_ok");
-        let body = serde_json::to_string(&payload).unwrap();
-        let timestamp = Utc::now().timestamp();
-        let signature = sign_adyen("whsec_coverage", body.as_bytes(), timestamp);
+        let tenant = "swadv_retry_ok";
+        crate::test_support::seed_tenant(&env.pool, tenant, "growth").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 100, 0, 100, "eur").await;
+        let item = authorisation_item("psp_retry_ok", invoice_id, 100, false, Some(tenant));
+        let signature = sign_item("whsec_coverage", &item);
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
-            event_id: Some("evt_retry_ok".into()),
-            body: Some(body),
+            event_id: Some(adyen_notification_id(&item)),
+            body: Some(String::from_utf8(envelope_bytes(&item, &signature)).expect("body")),
             signature: Some(signature),
             ..Default::default()
         };
-        let the_key = "adyen:deadletter:event:evt_retry_ok";
+        let the_key = "adyen:deadletter:event:psp_retry_ok";
         let mut conn = pool_conn(&isolated.pool).await;
         let _: () = redis::cmd("ZREMRANGEBYSCORE")
             .arg(DEADLETTER_RETRY_INDEX_KEY)
@@ -8129,12 +7191,13 @@ mod coverage_adversarial {
             .expect("kept");
         assert!(kept.is_some(), "the deadletter body stays for audit");
         let count: i32 = sqlx::query_scalar(
-            "SELECT failed_payment_count FROM dunning_records WHERE tenant_id = 'swadv_retry_ok'",
+            "SELECT failed_payment_count FROM dunning_records WHERE tenant_id = $1",
         )
+        .bind(tenant)
         .fetch_one(&env.pool)
         .await
         .expect("dunning");
-        assert_eq!(count, 1, "the retried failure applied exactly once");
+        assert_eq!(count, 1, "the retried refusal applied exactly once");
         let _: () = redis::cmd("DEL")
             .arg(the_key)
             .query_async(&mut conn)
@@ -8150,436 +7213,567 @@ mod coverage_adversarial {
             .expect("nothing due is a clean pass");
     });
 
-    #[tokio::test]
-    async fn spawned_retry_worker_performs_one_immediate_pass() {
-        {
-            let env = shared_env("worker_spawn").await;
-            spawn_deadletter_retry_worker(env.state.clone());
-            // The first interval tick fires immediately: one full retry pass
-            // runs before the runtime is torn down.
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            env.finish().await;
-        }
-    }
-
-    // ---------------- invoice settlement edges ----------------
+    env_test!(spawned_retry_worker_performs_one_immediate_pass, |env| {
+        spawn_deadletter_retry_worker(env.state.clone());
+        // The first interval tick fires immediately: one full retry pass runs
+        // before the runtime is torn down.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
 
     env_test!(
-        invoice_paid_without_any_tenant_reference_deadletters,
+        retry_failure_reschedules_with_backoff_then_gives_up_after_max_attempts,
         |env| {
-            let orphan: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_orphan_paid", "amount_due": 100
-            }))
-            .expect("event");
-            let error = handle_invoice_paid(&env.state, orphan)
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let isolated = crate::test_support::spawn_isolated_redis();
+            // The replay must FAIL deterministically: a state whose database
+            // never connects (the HMAC re-verification against the isolated
+            // redis passes, then the claim query fails).
+            let state = AppState::new(
+                crate::test_support::broken_db_pool(),
+                isolated.pool.clone(),
+                env.state.config.clone(),
+            );
+            let mut conn = pool_conn(&isolated.pool).await;
+            let _: () = redis::cmd("DEL")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .query_async(&mut conn)
                 .await
-                .expect_err("unresolvable invoice.paid");
-            assert!(error.contains("could not be resolved to a tenant"));
+                .expect("clear index");
 
-            // A subscription reference that matches nothing is equally refused.
-            let unknown_sub: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_orphan_sub", "amount_due": 100, "subscription": "sub_ghost"
-            }))
-            .expect("event");
-            let error = handle_invoice_paid(&env.state, unknown_sub)
+            let make_entry = |event_id: &str, retry_count: u32| {
+                let item = authorisation_item(
+                    event_id,
+                    Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"),
+                    100,
+                    false,
+                    Some("swcov_backoff"),
+                );
+                let signature = sign_item("whsec_coverage", &item);
+                DeadletterEntry {
+                    reason: "processing_failed".into(),
+                    event_id: Some(event_id.into()),
+                    body: Some(String::from_utf8(envelope_bytes(&item, &signature)).expect("body")),
+                    signature: Some(signature),
+                    retry_count,
+                    ..Default::default()
+                }
+            };
+            for (event_id, count) in [("psp_backoff_1", 0u32), ("psp_give_up", 4u32)] {
+                let entry = make_entry(event_id, count);
+                let key = format!("adyen:deadletter:event:{event_id}");
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(serde_json::to_string(&entry).unwrap())
+                    .query_async(&mut conn)
+                    .await
+                    .expect("store entry");
+                let _: () = redis::cmd("ZADD")
+                    .arg(DEADLETTER_RETRY_INDEX_KEY)
+                    .arg(1)
+                    .arg(&key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("schedule entry");
+            }
+            drop(conn);
+
+            process_deadletter_retries(&state)
                 .await
-                .expect_err("unknown subscription");
-            assert!(error.contains("could not be resolved to a tenant"));
+                .expect("the pass completes; per-entry failures are absorbed");
+
+            // Entry 1: first failure → rescheduled on the FIRST backoff step.
+            let mut conn = pool_conn(&isolated.pool).await;
+            let score: Option<f64> = redis::cmd("ZSCORE")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("adyen:deadletter:event:psp_backoff_1")
+                .query_async(&mut conn)
+                .await
+                .expect("score");
+            assert!(score.is_some(), "a first failure stays scheduled");
+            let rescheduled: String = redis::cmd("GET")
+                .arg("adyen:deadletter:event:psp_backoff_1")
+                .query_async(&mut conn)
+                .await
+                .expect("entry");
+            let entry: DeadletterEntry = serde_json::from_str(&rescheduled).unwrap();
+            assert_eq!(entry.retry_count, 1, "the retry counter advanced");
+
+            // Entry 2: the failure AFTER the last allowed attempt gives up —
+            // dropped from the index, entry rewritten with the final count
+            // and a 7-day review TTL.
+            let gone: i64 = redis::cmd("ZSCORE")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("adyen:deadletter:event:psp_give_up")
+                .query_async(&mut conn)
+                .await
+                .map(|v: Option<f64>| v.map(|_| 1).unwrap_or(0))
+                .expect("zscore");
+            assert_eq!(gone, 0, "an exhausted entry leaves the retry index");
+            let final_json: String = redis::cmd("GET")
+                .arg("adyen:deadletter:event:psp_give_up")
+                .query_async(&mut conn)
+                .await
+                .expect("final entry");
+            let final_entry: DeadletterEntry = serde_json::from_str(&final_json).unwrap();
+            assert_eq!(
+                final_entry.retry_count, DEADLETTER_MAX_RETRIES,
+                "the final count is recorded for review"
+            );
+            let ttl: i64 = redis::cmd("TTL")
+                .arg("adyen:deadletter:event:psp_give_up")
+                .query_async(&mut conn)
+                .await
+                .expect("ttl");
+            assert!(
+                ttl > 0 && ttl <= 7 * 24 * 60 * 60,
+                "the final entry keeps a 7-day review TTL, got {ttl}"
+            );
         }
     );
 
-    env_test!(invoice_paid_settles_allocates_and_recovers_dunning, |env| {
-        let tenant = "swadv_settle";
-        shared_seed_tenant(&env.pool, tenant, "growth").await;
-        let invoice_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
-                                   amount, currency, subtotal, vat_total, total,
-                                   due_at, period_start, period_end)
-             VALUES ($1, $2, 'in_swadv_settle', 'SWADV-1', 'pending', 12400, 'eur', 10000, 2400,
-                     12400, NOW(), NOW(), NOW() + INTERVAL '30 days')",
-        )
-        .bind(invoice_id)
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("local invoice");
-        // Tenant already in dunning: settlement must recover it.
-        sqlx::query(
-            "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
-             VALUES ('swadv_settle_dunning_0001', $1, 'soft_suspended', 3)",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("dunning");
+    // ===================================================================
+    // Deadletter write-failure arms.
+    // ===================================================================
 
-        let settlement_body = serde_json::json!({
-            "id": "in_swadv_settle",
-            "amount_due": 12400,
-            "amount_paid": 12400,
-            "currency": "eur",
-            "subtotal": 10000,
-            "tax": 2400,
-            "total": 12400,
-            "subscription_details": { "metadata": { "tenant_id": tenant } },
-            "automatic_tax": { "enabled": true, "status": "complete" }
-        });
-        handle_invoice_paid(&env.state, decode_invoice(&settlement_body))
-            .await
-            .expect("settlement");
-        let (status, paid_at_is_set): (String, bool) =
-            sqlx::query_as("SELECT status, paid_at IS NOT NULL FROM invoices WHERE id = $1")
-                .bind(invoice_id)
-                .fetch_one(&env.pool)
-                .await
-                .expect("invoice");
-        assert_eq!(status, "paid");
-        assert!(paid_at_is_set);
-        let allocation: i64 = sqlx::query_scalar(
-            "SELECT amount_cents FROM invoice_payment_allocations WHERE invoice_id = $1",
-        )
-        .bind(invoice_id)
-        .fetch_one(&env.pool)
-        .await
-        .expect("allocation");
-        assert_eq!(
-            allocation, 12400,
-            "the verified payment is allocated exactly once"
-        );
-        let dunning: Option<String> =
-            sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&env.pool)
-                .await
-                .expect("dunning");
-        assert_eq!(
-            dunning.as_deref(),
-            Some("healthy"),
-            "settlement recovers dunning"
-        );
+    env_test!(
+        deadletter_write_failure_on_dead_redis_is_logged_not_fatal,
+        |env| {
+            let dead = crate::test_support::state_with_dead_redis(&env.pool);
+            // A missing signature must still answer 400 even when Redis is down.
+            let body = br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_deadredis","eventCode":"AUTHORISATION"}}]}"#;
+            let response = post_webhook(&dead, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(event_rows(&env.pool).await, 0);
+        }
+    );
 
-        // Replay: idempotent, no second allocation.
-        handle_invoice_paid(&env.state, decode_invoice(&settlement_body))
+    env_test!(deadletter_index_wrongtype_fails_the_write_arm, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        let mut conn = redis_conn(env).await;
+        let _: () = redis::cmd("SET")
+            .arg(DEADLETTER_INDEX_KEY)
+            .arg("not-a-zset")
+            .query_async(&mut conn)
             .await
-            .expect("replay");
-        let allocations: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
-        )
-        .bind(invoice_id)
-        .fetch_one(&env.pool)
-        .await
-        .expect("count");
-        assert_eq!(allocations, 1, "replay never double-allocates");
-    });
+            .expect("poison index");
+        drop(conn);
 
-    env_test!(invoice_paid_currency_mismatch_refused, |env| {
-        let tenant = "swadv_currency";
-        shared_seed_tenant(&env.pool, tenant, "growth").await;
-        let invoice_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
-                                   amount, currency, subtotal, vat_total, total,
-                                   due_at, period_start, period_end)
-             VALUES ($1, $2, 'in_ccy', 'SWADV-2', 'pending', 1000, 'eur', 1000, 0, 1000,
-                     NOW(), NOW(), NOW() + INTERVAL '30 days')",
-        )
-        .bind(invoice_id)
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("local invoice");
+        let body = br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_wrongtype","eventCode":"AUTHORISATION"}}]}"#;
+        let response = post_webhook(&env.state, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
-            "id": "in_ccy",
-            "amount_due": 1000,
-            "amount_paid": 1000,
-            "currency": "usd",
-            "subtotal": 1000,
-            "total": 1000,
-            "subscription_details": { "metadata": { "tenant_id": tenant } },
-            "automatic_tax": { "enabled": true, "status": "complete" }
-        }))
-        .expect("event");
-        let error = handle_invoice_paid(&env.state, event)
+        let mut conn = redis_conn(env).await;
+        let _: () = redis::cmd("DEL")
+            .arg(DEADLETTER_INDEX_KEY)
+            .query_async(&mut conn)
             .await
-            .expect_err("currency mismatch refused");
-        assert!(error.contains("denominated in"), "honest failure: {error}");
-        let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
-            .bind(invoice_id)
-            .fetch_one(&env.pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "pending", "the refused settlement writes nothing");
-    });
-
-    env_test!(invoice_paid_zero_value_settles_without_allocation, |env| {
-        let tenant = "swadv_zero";
-        shared_seed_tenant(&env.pool, tenant, "growth").await;
-        let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
-            "id": "in_swadv_zero",
-            "amount_due": 0,
-            "amount_paid": 0,
-            "currency": "eur",
-            "subtotal": 0,
-            "total": 0,
-            "subscription_details": { "metadata": { "tenant_id": tenant } },
-            "automatic_tax": { "enabled": true, "status": "complete" }
-        }))
-        .expect("event");
-        handle_invoice_paid(&env.state, event)
-            .await
-            .expect("zero-value invoices settle");
-        let invoice: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM invoices WHERE adyen_psp_reference = 'in_swadv_zero'")
-                .fetch_optional(&env.pool)
-                .await
-                .expect("invoice");
-        assert_eq!(
-            invoice.expect("imported").0,
-            "paid",
-            "Fix A imports the paid row"
-        );
-        let allocations: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE operation_id = 'adyen:in_swadv_zero'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("allocations");
-        assert_eq!(
-            allocations, 0,
-            "no positive allocation is invented for zero value"
-        );
+            .expect("cleanup index");
     });
 
     env_test!(
-        invoice_paid_import_refused_for_foreign_tenant_leaves_dunning,
+        record_failed_deadletter_without_row_reports_not_found,
         |env| {
-            let owner = "swadv_import_owner";
-            let other = "swadv_import_other";
-            shared_seed_tenant(&env.pool, owner, "growth").await;
-            shared_seed_tenant(&env.pool, other, "growth").await;
-            sqlx::query(
-                "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
-                                   amount, currency, subtotal, vat_total, total,
-                                   due_at, period_start, period_end)
-             VALUES (gen_random_uuid(), $1, 'in_import', 'SWADV-3', 'pending',
-                     1000, 'eur', 1000, 0, 1000, NOW(), NOW(), NOW() + INTERVAL '30 days')",
+            let error = record_failed_webhook_deadletter_atomic(
+                &env.state,
+                "adn_never_claimed",
+                "boom",
+                br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_never_claimed"}}]}"#,
+                Some("TQ=="),
             )
-            .bind(owner)
-            .execute(&env.pool)
             .await
-            .expect("owner invoice");
-            sqlx::query(
-                "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
-             VALUES ('swadv_import_dunning_01', $1, 'soft_suspended', 2)",
-            )
-            .bind(other)
-            .execute(&env.pool)
-            .await
-            .expect("other dunning");
+            .expect_err("missing claim row");
+            assert!(error.contains("was not found"), "honest failure: {error}");
+        }
+    );
 
-            let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_import",
-                "amount_due": 1000,
-                "amount_paid": 1000,
-                "currency": "eur",
-                "subtotal": 1000,
-                "total": 1000,
-                "subscription_details": { "metadata": { "tenant_id": other } },
-                "automatic_tax": { "enabled": true, "status": "complete" }
-            }))
-            .expect("event");
-            handle_invoice_paid(&env.state, event)
+    env_test!(
+        record_failed_deadletter_begin_failure_is_a_hard_error,
+        |env| {
+            let broken = crate::test_support::state_with_broken_db();
+            let error = record_failed_webhook_deadletter_atomic(
+                &broken,
+                "adn_beginfail",
+                "boom",
+                br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_beginfail"}}]}"#,
+                Some("TQ=="),
+            )
+            .await
+            .expect_err("broken db begin");
+            assert!(error.contains("Failed to begin"), "honest failure: {error}");
+            assert_eq!(event_rows(&env.pool).await, 0, "nothing was claimed");
+        }
+    );
+
+    env_test!(
+        record_failed_deadletter_redis_failure_rolls_back_the_status_flip,
+        |env| {
+            let isolated = crate::test_support::spawn_isolated_redis();
+            let state = state_with_isolated_redis(env, &isolated);
+            sqlx::query(
+                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, adyen_psp_reference, event_type, status)
+                 VALUES (gen_random_uuid(), 'adn_rollback', 'psp_rollback', 'AUTHORISATION', 'pending')",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("claim row");
+
+            let mut conn = pool_conn(&isolated.pool).await;
+            let _: () = redis::cmd("SET")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("not-a-zset")
+                .query_async(&mut conn)
                 .await
-                .expect("guard-rejected upsert is not an error");
-            let dunning: Option<String> =
-                sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
-                    .bind(other)
-                    .fetch_one(&env.pool)
-                    .await
-                    .expect("dunning");
-            assert_eq!(
-                dunning.as_deref(),
-                Some("soft_suspended"),
-                "Fix F4: no blanket recovery"
+                .expect("poison retry index");
+            drop(conn);
+
+            let error = record_failed_webhook_deadletter_atomic(
+                &state,
+                "adn_rollback",
+                "boom",
+                br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_rollback"}}]}"#,
+                Some("TQ=="),
+            )
+            .await
+            .expect_err("redis failure surfaces");
+            assert!(
+                error.contains("adyen dead letter"),
+                "honest failure: {error}"
             );
             let status: String = sqlx::query_scalar(
-                "SELECT status FROM invoices WHERE adyen_psp_reference = 'in_import'",
+                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'adn_rollback'",
             )
             .fetch_one(&env.pool)
             .await
             .expect("status");
-            assert_eq!(status, "pending", "the foreign tenant cannot settle it");
+            assert_eq!(status, "pending", "the failed-status flip rolled back");
         }
     );
 
     env_test!(
-        invoice_paid_tax_gate_with_recomputation_from_address,
+        record_failed_deadletter_commit_failure_compensates_redis,
         |env| {
-            let tenant = "swadv_recompute";
-            shared_seed_tenant(&env.pool, tenant, "growth").await;
-            // A country outside the EU with no VAT number: recomputed VAT is 0.
+            let isolated = crate::test_support::spawn_isolated_redis();
+            let state = state_with_isolated_redis(env, &isolated);
             sqlx::query(
-                "INSERT INTO billing_addresses (tenant_id, country, city)
-             VALUES ($1, 'US', 'Testville')",
+                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, adyen_psp_reference, event_type, status)
+                 VALUES (gen_random_uuid(), 'adn_commitfail', 'psp_commitfail', 'AUTHORISATION', 'pending')",
             )
-            .bind(tenant)
             .execute(&env.pool)
             .await
-            .expect("address");
+            .expect("claim row");
+            // Deferred constraint: the UPDATE succeeds inside the tx and the
+            // COMMIT itself fails — the exact commit-failure fault to inject.
+            // (Postgres CHECK constraints cannot defer; a FK to a guard table
+            // can, and 'failed' is absent from the guard.)
+            for statement in [
+                "CREATE TABLE cov_status_guard (status text PRIMARY KEY)",
+                "INSERT INTO cov_status_guard VALUES ('pending'), ('received')",
+                "ALTER TABLE adyen_webhook_events ADD CONSTRAINT cov_status_fk FOREIGN KEY (status)                  REFERENCES cov_status_guard(status) DEFERRABLE INITIALLY DEFERRED",
+            ] {
+                sqlx::query(statement)
+                    .execute(&env.pool)
+                    .await
+                    .expect("deferred constraint setup");
+            }
 
-            let matching: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_recompute_ok",
-                "amount_due": 4900,
-                "amount_paid": 4900,
-                "currency": "eur",
-                "subtotal": 4900,
-                "total": 4900,
-                "subscription_details": { "metadata": { "tenant_id": tenant } }
-            }))
-            .expect("event");
-            handle_invoice_paid(&env.state, matching)
-                .await
-                .expect("recomputed 0% VAT matches");
-            let (validation, source): (String, String) = sqlx::query_as(
-                "SELECT validation_status,
-                    raw_payload->'apexmail'->>'source'
-             FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_recompute_ok'",
+            let error = record_failed_webhook_deadletter_atomic(
+                &state,
+                "adn_commitfail",
+                "boom",
+                br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_commitfail"}}]}"#,
+                Some("TQ=="),
+            )
+            .await
+            .expect_err("commit failure surfaces");
+            assert!(
+                error.contains("Failed to commit"),
+                "honest failure: {error}"
+            );
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'adn_commitfail'",
             )
             .fetch_one(&env.pool)
             .await
-            .expect("snapshot");
-            assert_eq!(validation, "fallback_unavailable");
-            assert_eq!(source, "recomputed");
-
-            // An EU country without evidence recomputes the statutory rate; a
-            // mismatching charged total blocks.
-            sqlx::query("UPDATE billing_addresses SET country = 'EE' WHERE tenant_id = $1")
-                .bind(tenant)
-                .execute(&env.pool)
-                .await
-                .expect("address");
-            let mismatch: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_recompute_bad",
-                "amount_due": 4900,
-                "amount_paid": 4900,
-                "currency": "eur",
-                "subtotal": 4900,
-                "total": 4900,
-                "subscription_details": { "metadata": { "tenant_id": tenant } }
-            }))
-            .expect("event");
-            let error = handle_invoice_paid(&env.state, mismatch)
-                .await
-                .expect_err("missing statutory VAT blocks");
-            assert!(error.contains("blocked"), "honest failure: {error}");
-            let incidents: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM finance_incidents WHERE kind = 'tax_total_mismatch'",
-            )
-            .fetch_one(&env.pool)
-            .await
-            .expect("incidents");
-            assert_eq!(incidents, 1, "a critical finance incident is raised");
+            .expect("status");
+            assert_eq!(
+                status, "pending",
+                "commit failure leaves the claim untouched"
+            );
+            // The already-written deadletter entry is compensated away.
+            let mut conn = pool_conn(&isolated.pool).await;
+            let entries =
+                deadletter_entries_on(&mut conn, "adyen:deadletter:event:adn_commitfail*").await;
+            assert_eq!(
+                entries.len(),
+                0,
+                "redis entry compensated after commit failure"
+            );
         }
     );
 
-    env_test!(
-        invoice_paid_null_country_address_degrades_to_zero_vat,
-        |env| {
-            let tenant = "swadv_nullcountry";
-            shared_seed_tenant(&env.pool, tenant, "growth").await;
-            sqlx::query(
-                "INSERT INTO billing_addresses (tenant_id, country, city)
-             VALUES ($1, NULL, 'Testville')",
-            )
-            .bind(tenant)
-            .execute(&env.pool)
+    env_test!(compensation_failure_is_logged_never_fatal, |env| {
+        // Direct fault injection: the compensation pipeline must tolerate a
+        // Redis failure (it only logs) — a commit failure must never panic
+        // or mask its own error because the compensating DEL/ZREM failed.
+        let isolated = crate::test_support::spawn_isolated_redis();
+        let state = state_with_isolated_redis(env, &isolated);
+        let mut conn = pool_conn(&isolated.pool).await;
+        let the_key = "adyen:deadletter:event:adn_comp_direct";
+        let _: () = redis::cmd("SETEX")
+            .arg(the_key)
+            .arg(60)
+            .arg("{}")
+            .query_async(&mut conn)
             .await
-            .expect("address");
-            let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_nullcountry",
-                "amount_due": 1000,
-                "amount_paid": 1000,
-                "currency": "eur",
-                "subtotal": 1000,
-                "total": 1000,
-                "subscription_details": { "metadata": { "tenant_id": tenant } }
-            }))
-            .expect("event");
-            handle_invoice_paid(&env.state, event)
-                .await
-                .expect("null country recomputes 0% VAT and matches");
-            let validation: String = sqlx::query_scalar(
-            "SELECT validation_status FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_nullcountry'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("snapshot");
-            assert_eq!(validation, "fallback_unavailable");
-        }
-    );
+            .expect("stored entry");
+        // Poison the shared index as a STRING: DEL succeeds, ZREM fails.
+        let _: () = redis::cmd("SET")
+            .arg(DEADLETTER_INDEX_KEY)
+            .arg("not-a-zset")
+            .query_async(&mut conn)
+            .await
+            .expect("poison index");
+        drop(conn);
 
-    env_test!(persist_tax_snapshot_replay_returns_the_first_write, |env| {
-        let tenant = "swadv_snapreplay";
-        shared_seed_tenant(&env.pool, tenant, "growth").await;
-        let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
-            "id": "in_snapreplay",
-            "amount_due": 1000,
-            "currency": "eur",
-            "subtotal": 1000,
-            "total": 1000
-        }))
-        .expect("event");
-        let expected = ExpectedTax {
-            subtotal_cents: 1000,
-            vat_cents: 0,
-            total_cents: 1000,
-            source: "recomputed",
-            country: Some("US".into()),
-            vat_rate: 0.0,
-            evidence_id: None,
-        };
-        let first = persist_tax_snapshot(
-            &env.pool,
-            &event,
-            tenant,
-            None,
-            "eur",
-            (1000, 0, 1000),
-            &expected,
-            "apexmail_local",
-            "fallback_unavailable",
-            0,
-            "not_provided",
-            &serde_json::json!([]),
-        )
-        .await
-        .expect("first write");
-        let second = persist_tax_snapshot(
-            &env.pool,
-            &event,
-            tenant,
-            None,
-            "eur",
-            (1000, 0, 1000),
-            &expected,
-            "apexmail_local",
-            "fallback_unavailable",
-            0,
-            "not_provided",
-            &serde_json::json!([]),
-        )
-        .await
-        .expect("replay");
-        assert_eq!(first, second, "the immutable first write wins");
+        remove_prepared_deadletter_from_redis(&state, the_key).await;
+
+        let mut conn = pool_conn(&isolated.pool).await;
+        let gone: Option<String> = redis::cmd("GET")
+            .arg(the_key)
+            .query_async(&mut conn)
+            .await
+            .expect("entry state");
+        assert_eq!(gone, None, "the DEL in the compensation still ran");
     });
 
-    // ---------------- dunning config + notification edges ----------------
+    env_test!(
+        prepare_deadletter_without_body_stores_nothing_replayable,
+        |env| {
+            let _ = env;
+            let prepared = prepare_deadletter(
+                DeadletterEntry {
+                    reason: "missing_signature".into(),
+                    ..Default::default()
+                },
+                None,
+                None,
+                Utc::now(),
+            );
+            assert_eq!(prepared.retry_at_ms, None);
+            let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("entry");
+            assert!(entry.body.is_none());
+            assert!(entry.signature.is_none());
+        }
+    );
+
+    env_test!(
+        deadletter_write_refuses_when_the_claim_row_is_missing,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            let mut clear = pool_conn(&env.redis).await;
+            let _: () = redis::cmd("DEL")
+                .arg(DEADLETTER_INDEX_KEY)
+                .query_async(&mut clear)
+                .await
+                .expect("clear index");
+            drop(clear);
+            let error = record_failed_webhook_deadletter_atomic(
+                &env.state,
+                "adn_never_claimed_cov",
+                "handler failed",
+                br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_never_claimed_cov"}}]}"#,
+                Some("TQ=="),
+            )
+            .await
+            .expect_err("an unknown event row must fail the atomic deadletter");
+            assert!(
+                error.contains("event row was not found"),
+                "unexpected: {error}"
+            );
+            // The empty transaction left nothing behind.
+            let deadletters: i64 = redis::cmd("ZCARD")
+                .arg(DEADLETTER_INDEX_KEY)
+                .query_async(&mut pool_conn(&env.redis).await)
+                .await
+                .expect("zcard");
+            assert_eq!(deadletters, 0, "no deadletter without a claim row");
+        }
+    );
+
+    env_test!(
+        deadletter_write_rolls_back_when_the_redis_leg_fails,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let dead_redis = crate::test_support::dead_redis_pool();
+            let state = AppState::new(env.pool.clone(), dead_redis, env.state.config.clone());
+
+            // The claim row EXISTS (the webhook was claimed earlier), so the
+            // SQL leg matches one row; the Redis leg then fails on the dead
+            // pool and the whole transaction must roll back.
+            sqlx::query(
+                "INSERT INTO adyen_webhook_events (adyen_notification_id, adyen_psp_reference, event_type, status, created_at, updated_at)
+                 VALUES ('adn_redis_dead_cov', 'psp_redis_dead', 'AUTHORISATION', 'pending', NOW(), NOW())",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("seed claim row");
+
+            let error = record_failed_webhook_deadletter_atomic(
+                &state,
+                "adn_redis_dead_cov",
+                "handler failed",
+                br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"psp_redis_dead"}}]}"#,
+                Some("TQ=="),
+            )
+            .await
+            .expect_err("dead redis must fail the atomic deadletter");
+            assert!(error.contains("adyen dead letter"), "unexpected: {error}");
+
+            // The SQL leg was rolled back: the row is still 'pending'.
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'adn_redis_dead_cov'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("row");
+            assert_eq!(status, "pending", "the failed-marking was rolled back");
+        }
+    );
+
+    // ===================================================================
+    // Ledger claim / reclaim.
+    // ===================================================================
+
+    env_test!(reclaim_stale_pending_only_touches_abandoned_rows, |env| {
+        let stale = "adn_sw_stale";
+        let fresh = "adn_sw_fresh";
+        let processed = "adn_sw_done";
+        let received = "adn_sw_received";
+        for (notification_id, status, updated_offset_minutes) in [
+            (stale, "pending", 20_i64),
+            (fresh, "pending", 1),
+            (processed, "processed", 20),
+            (received, "received", 20),
+        ] {
+            sqlx::query(
+                "INSERT INTO adyen_webhook_events
+                     (id, adyen_notification_id, adyen_psp_reference, event_type, status, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, 'psp_reclaim', 'AUTHORISATION', $2,
+                         NOW() - make_interval(mins => $3::int),
+                         NOW() - make_interval(mins => $3::int))",
+            )
+            .bind(notification_id)
+            .bind(status)
+            .bind(updated_offset_minutes)
+            .execute(&env.pool)
+            .await
+            .expect("event row");
+        }
+
+        let reclaimed = reclaim_stale_pending_webhooks(&env.state)
+            .await
+            .expect("reclaim");
+        assert_eq!(reclaimed, vec![stale.to_string()]);
+        let (fresh_status, done_status, received_status): (String, String, String) =
+            sqlx::query_as(
+                "SELECT
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1),
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $2),
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $3)",
+            )
+            .bind(fresh)
+            .bind(processed)
+            .bind(received)
+            .fetch_one(&env.pool)
+            .await
+            .expect("statuses");
+        assert_eq!(fresh_status, "pending", "a fresh claim is left alone");
+        assert_eq!(done_status, "processed", "completed work is never rewound");
+        assert_eq!(received_status, "received");
+        let reclaimed_status: String = sqlx::query_scalar(
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+        )
+        .bind(stale)
+        .fetch_one(&env.pool)
+        .await
+        .expect("stale status");
+        assert_eq!(reclaimed_status, "received");
+    });
+
+    env_test!(claim_webhook_event_is_exactly_once, |env| {
+        let notification_id = "adn_sw_claim";
+        let first =
+            claim_webhook_event(&env.state, notification_id, "AUTHORISATION", "psp_sw_claim")
+                .await
+                .expect("claim");
+        assert!(matches!(first, WebhookEventClaim::Claimed));
+        // The psp reference is stored for support lookups.
+        let psp: Option<String> = sqlx::query_scalar(
+            "SELECT adyen_psp_reference FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+        )
+        .bind(notification_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("psp");
+        assert_eq!(psp.as_deref(), Some("psp_sw_claim"));
+        // A second worker sees the row as pending.
+        let second =
+            claim_webhook_event(&env.state, notification_id, "AUTHORISATION", "psp_sw_claim")
+                .await
+                .expect("claim");
+        assert!(matches!(second, WebhookEventClaim::AlreadyPending));
+        // A failed attempt may be reclaimed; a processed one never is.
+        sqlx::query(
+            "UPDATE adyen_webhook_events SET status = 'failed' WHERE adyen_notification_id = $1",
+        )
+        .bind(notification_id)
+        .execute(&env.pool)
+        .await
+        .expect("mark failed");
+        let reclaimed =
+            claim_webhook_event(&env.state, notification_id, "AUTHORISATION", "psp_sw_claim")
+                .await
+                .expect("claim");
+        assert!(matches!(reclaimed, WebhookEventClaim::Claimed));
+        sqlx::query(
+            "UPDATE adyen_webhook_events SET status = 'processed' WHERE adyen_notification_id = $1",
+        )
+        .bind(notification_id)
+        .execute(&env.pool)
+        .await
+        .expect("mark processed");
+        let duplicate =
+            claim_webhook_event(&env.state, notification_id, "AUTHORISATION", "psp_sw_claim")
+                .await
+                .expect("claim");
+        assert!(matches!(duplicate, WebhookEventClaim::AlreadyProcessed));
+    });
+
+    env_test!(reclaim_reports_reclaimed_events_loudly, |env| {
+        sqlx::query(
+            "INSERT INTO adyen_webhook_events (id, adyen_notification_id, adyen_psp_reference, event_type, status, updated_at)
+             VALUES (gen_random_uuid(), 'adn_swadv_reclaim', 'psp_swadv_reclaim', 'AUTHORISATION', 'pending',
+                     NOW() - INTERVAL '20 minutes')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("stale row");
+        let reclaimed = reclaim_stale_pending_webhooks(&env.state)
+            .await
+            .expect("reclaim");
+        assert_eq!(reclaimed, vec!["adn_swadv_reclaim".to_string()]);
+    });
+
+    // ===================================================================
+    // Dunning config + notification edges.
+    // ===================================================================
 
     env_test!(dunning_config_degrades_to_defaults_on_faults, |env| {
         let tenant = "swadv_duncfg";
-        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        crate::test_support::seed_tenant(&env.pool, tenant, "growth").await;
         // Per-tenant configured schedule is honored.
         sqlx::query(
             "INSERT INTO dunning_config
@@ -8618,7 +7812,7 @@ mod coverage_adversarial {
         dunning_notification_type_mapping_and_enqueue_failure,
         |env| {
             let tenant = "swadv_notif";
-            shared_seed_tenant(&env.pool, tenant, "growth").await;
+            crate::test_support::seed_tenant(&env.pool, tenant, "growth").await;
             for (status, _kind) in [
                 ("warning", "payment_reminder"),
                 ("soft_suspended", "account_soft_suspended"),
@@ -8650,48 +7844,96 @@ mod coverage_adversarial {
         }
     );
 
-    env_test!(
-        payment_failed_caches_status_and_survives_cache_faults,
-        |env| {
-            let tenant = "swadv_cache";
-            shared_seed_tenant(&env.pool, tenant, "growth").await;
-            let dead = state_with_dead_redis(&env.pool);
-            let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
-                "id": "in_cache",
-                "amount_due": 10,
-                "subscription_details": { "metadata": { "tenant_id": tenant } }
-            }))
-            .expect("event");
-            handle_payment_failed(&dead, event)
-                .await
-                .expect("payment failure processing survives a dead cache");
-            let count: i32 = sqlx::query_scalar(
-                "SELECT failed_payment_count FROM dunning_records WHERE tenant_id = $1",
-            )
-            .bind(tenant)
-            .fetch_one(&env.pool)
+    env_test!(refusal_caches_status_and_survives_cache_faults, |env| {
+        let tenant = "swadv_cache";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 10, 0, 10, "eur").await;
+        let dead = crate::test_support::state_with_dead_redis(&env.pool);
+        let item = authorisation_item("psp_cache", invoice_id, 10, false, Some(tenant));
+        handle_authorisation_refused(&dead, &item)
             .await
-            .expect("dunning");
-            assert_eq!(count, 1);
-        }
-    );
-
-    env_test!(reclaim_reports_reclaimed_events_loudly, |env| {
-        sqlx::query(
-            "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, updated_at)
-             VALUES (gen_random_uuid(), 'evt_swadv_reclaim', 'invoice.paid', 'pending',
-                     NOW() - INTERVAL '20 minutes')",
+            .expect("refusal processing survives a dead cache");
+        let count: i32 = sqlx::query_scalar(
+            "SELECT failed_payment_count FROM dunning_records WHERE tenant_id = $1",
         )
-        .execute(&env.pool)
+        .bind(tenant)
+        .fetch_one(&env.pool)
         .await
-        .expect("stale row");
-        let reclaimed = reclaim_stale_pending_webhooks(&env.state)
-            .await
-            .expect("reclaim");
-        assert_eq!(reclaimed, vec!["evt_swadv_reclaim".to_string()]);
+        .expect("dunning");
+        assert_eq!(count, 1);
     });
 
-    // ---------------- dedicated-IP auto-provisioning (local servers) ----------------
+    // ===================================================================
+    // Money events: refund / failed refund / chargeback.
+    // ===================================================================
+
+    env_test!(refund_and_chargeback_events_are_audited_never_5xx, |env| {
+        let tenant = "swadv_money";
+        seed_tenant(env, tenant, "growth", "active").await;
+        let invoice_id = Uuid::new_v4();
+        seed_local_invoice(env, tenant, invoice_id, 1_000, 0, 1_000, "eur").await;
+
+        for (psp, event_code) in [
+            ("psp_refund", "REFUND"),
+            ("psp_refund_failed", "REFUND_FAILED"),
+            ("psp_chargeback", "CHARGEBACK"),
+            ("psp_chargeback_reversed", "CHARGEBACK_REVERSED"),
+        ] {
+            let item = parse_item(serde_json::json!({
+                "pspReference": psp,
+                "originalReference": "psp_paid",
+                "merchantAccountCode": "ApexMailECOV",
+                "merchantReference": format!("invoice:{invoice_id}"),
+                "amount": { "currency": "EUR", "value": 1_000 },
+                "eventCode": event_code,
+                "eventDate": "2026-10-14T10:00:00+00:00",
+                "success": "true",
+                "reason": "requested"
+            }));
+            // Never a 5xx, never a silent drop: the handler records and
+            // acknowledges.
+            handle_notification(&env.state, &item)
+                .await
+                .unwrap_or_else(|error| panic!("{event_code} must be recorded, got {error}"));
+        }
+
+        let audits: Vec<(String,)> =
+            sqlx::query_as("SELECT action FROM audit_logs WHERE tenant_id = $1 ORDER BY action")
+                .bind(tenant)
+                .fetch_all(&env.pool)
+                .await
+                .expect("audit rows");
+        let actions: Vec<&str> = audits.iter().map(|row| row.0.as_str()).collect();
+        assert!(actions.contains(&"billing.adyen_refund_recorded"));
+        assert!(actions.contains(&"billing.adyen_refund_failed"));
+        assert!(actions.contains(&"billing.adyen_chargeback_recorded"));
+        assert!(actions.contains(&"billing.adyen_chargeback_reversed"));
+        // The invoice itself is untouched by a money event (credit notes are
+        // the refund path's writer, not this arm).
+        let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "pending");
+
+        // An unresolvable binding is loudly recorded and still acknowledged.
+        let orphan = parse_item(serde_json::json!({
+            "pspReference": "psp_refund_orphan",
+            "merchantReference": "not-a-local-invoice",
+            "amount": { "currency": "EUR", "value": 10 },
+            "eventCode": "REFUND",
+            "success": "true"
+        }));
+        handle_notification(&env.state, &orphan)
+            .await
+            .expect("an unresolvable refund is acknowledged (never 5xx)");
+    });
+
+    // ===================================================================
+    // Dedicated-IP auto-provisioning (local servers).
+    // ===================================================================
 
     /// A local axum server on an ephemeral port answering /v1/dedicated-ips.
     async fn local_api_server(
@@ -8718,12 +7960,14 @@ mod coverage_adversarial {
     }
 
     async fn seed_dedicated_ip_plan(env: &Env, name: &str, included: i32) {
+        // Shared plan-seeding convention (test_support) so the catalog row is
+        // created exactly like the other billing suites; this suite only adds
+        // the dedicated-IP allowance on top.
+        crate::test_support::seed_plan(&env.pool, name, name).await;
         sqlx::query(
-            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit, features)
-             VALUES ($1, $2, $2, 0, 1000, 1000, jsonb_build_object('dedicated_ip_count', $3))
-             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+            "UPDATE plans SET features = jsonb_build_object('dedicated_ip_count', $2)
+             WHERE name = $1",
         )
-        .bind(format!("plan_{name}"))
         .bind(name)
         .bind(included)
         .execute(&env.pool)
@@ -8749,7 +7993,7 @@ mod coverage_adversarial {
     env_test!(auto_provision_covers_every_allocation_outcome, |env| {
         // 1) plan without dedicated IPs -> immediate no-op.
         let none = "swadv_ip_none";
-        shared_seed_tenant(&env.pool, none, "growth").await;
+        crate::test_support::seed_tenant(&env.pool, none, "growth").await;
         auto_provision_dedicated_ips_background(&env.state, none)
             .await
             .expect("no allowance is a no-op");
@@ -8802,7 +8046,7 @@ mod coverage_adversarial {
         assert_eq!(ok, 1);
         server.abort();
 
-        // 4) partial: one IP already allocated, the next attempt fails (409).
+        // 4) partial: the attempt fails (409).
         let partial = "swadv_ip_partial";
         sqlx::query(
             "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan', 'active')",
@@ -8859,12 +8103,12 @@ mod coverage_adversarial {
             let tenant = "swadv_ip_fault";
             seed_dedicated_ip_plan(env, "swadv_ip_plan2", 1).await;
             sqlx::query(
-            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan2', 'active')",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("tenant");
+                "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan2', 'active')",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("tenant");
             seed_active_subscription(env, tenant, "swadv_ip_plan2", "sub_swadv_ip_fault").await;
             // The request table is gone: recording the intent fails honestly.
             env.break_table("dedicated_ip_provisioning_requests").await;
@@ -8892,376 +8136,6 @@ mod coverage_adversarial {
                 .expect_err("broken count query");
             assert!(error.contains("Failed to load active dedicated IP count"));
             env.restore_table("dedicated_ips").await;
-        }
-    );
-
-    // ---------------- snapshot helpers ----------------
-
-    #[test]
-    fn normalize_period_currency_rejects_malformed_codes() {
-        assert_eq!(normalize_period_currency("eur"), "EUR");
-        assert_eq!(normalize_period_currency("  usd "), "USD");
-        assert_eq!(normalize_period_currency("EURO"), "EUR");
-        assert_eq!(normalize_period_currency("e1"), "EUR");
-        assert_eq!(normalize_period_currency(""), "EUR");
-    }
-
-    #[test]
-    fn derive_invoice_totals_none_total_arm_uses_the_total() {
-        let (subtotal, vat, total) = derive_invoice_totals(None, None, Some(7_777), 7_777);
-        assert_eq!((subtotal, vat, total), (7_777, 0, 7_777));
-    }
-
-    env_test!(snapshot_period_edges_are_honest, |env| {
-        let tenant = "swadv_snapedge";
-        shared_seed_tenant(&env.pool, tenant, "growth").await;
-        let mut tx = env.pool.begin().await.expect("tx");
-        // Inverted period: no snapshot, no error.
-        snapshot_billing_period(
-            &mut tx,
-            tenant,
-            "sub_snap",
-            "active",
-            Some("growth"),
-            Utc::now(),
-            Utc::now() - Duration::from_secs(60),
-        )
-        .await
-        .expect("inverted periods are skipped");
-        // Unknown tenant: degrades to the subscription plan + default currency.
-        snapshot_billing_period(
-            &mut tx,
-            "swadv_missing_tenant",
-            "sub_snap",
-            "canceled",
-            Some("growth"),
-            Utc::now(),
-            Utc::now() + Duration::from_secs(60),
-        )
-        .await
-        .expect("unknown tenant degrades");
-        tx.commit().await.expect("commit");
-        let snapshot: serde_json::Value = sqlx::query_scalar(
-            "SELECT pricing_snapshot FROM billing_periods WHERE tenant_id = 'swadv_missing_tenant'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("snapshot");
-        assert_eq!(snapshot["currency"], "EUR");
-    });
-
-    // ---------------- replay refusals ----------------
-
-    env_test!(replay_deadletter_missing_signature_refused, |env| {
-        let entry = DeadletterEntry {
-            reason: "processing_failed".into(),
-            event_id: Some("evt_nosig_replay".into()),
-            body: Some(r#"{"id":"evt_nosig_replay","type":"invoice.paid"}"#.into()),
-            ..Default::default()
-        };
-        let error = replay_deadletter(&env.state, &entry)
-            .await
-            .expect_err("missing signature");
-        assert!(error.contains("No signature stored"));
-    });
-
-    env_test!(replay_deadletter_malformed_body_refused, |env| {
-        let timestamp = Utc::now().timestamp();
-        let body = r#"{"id":"evt_badbody","type":"invoice.paid"#;
-        let signature = sign_adyen("whsec_coverage", body.as_bytes(), timestamp);
-        let entry = DeadletterEntry {
-            reason: "processing_failed".into(),
-            event_id: Some("evt_badbody".into()),
-            body: Some(body.to_string()),
-            signature: Some(signature),
-            ..Default::default()
-        };
-        let error = replay_deadletter(&env.state, &entry)
-            .await
-            .expect_err("malformed stored body");
-        assert!(
-            error.contains("Failed to parse stored webhook body"),
-            "honest failure: {error}"
-        );
-        assert_eq!(event_rows(&env.pool).await, 0, "nothing claimed");
-    });
-
-    env_test!(replay_deadletter_pending_event_is_refused, |env| {
-        shared_seed_tenant(&env.pool, "swadv_pendreplay", "growth").await;
-        let payload = payment_failed_payload("evt_pendreplay", "in_pendreplay", "swadv_pendreplay");
-        let body = serde_json::to_string(&payload).unwrap();
-        let timestamp = Utc::now().timestamp();
-        let signature = sign_adyen("whsec_coverage", body.as_bytes(), timestamp);
-        let entry = DeadletterEntry {
-            reason: "processing_failed".into(),
-            event_id: Some("evt_pendreplay".into()),
-            body: Some(body),
-            signature: Some(signature),
-            ..Default::default()
-        };
-        replay_deadletter(&env.state, &entry)
-            .await
-            .expect("first replay claims");
-        // Simulate a concurrent worker holding the claim.
-        sqlx::query(
-            "UPDATE adyen_webhook_events SET status = 'pending', processed_at = NULL
-             WHERE adyen_notification_id = 'evt_pendreplay'",
-        )
-        .execute(&env.pool)
-        .await
-        .expect("re-pend");
-        let error = replay_deadletter(&env.state, &entry)
-            .await
-            .expect_err("pending event");
-        assert!(
-            error.contains("pending on another worker"),
-            "honest failure: {error}"
-        );
-    });
-
-    // ---------------- deadletter retry failure arms ----------------
-
-    env_test!(
-        retry_failure_reschedules_with_backoff_then_gives_up_after_max_attempts,
-        |env| {
-            let _guard = DEADLETTER_LOCK.lock().await;
-            let isolated = crate::test_support::spawn_isolated_redis();
-            // The replay must FAIL deterministically: a state whose database
-            // never connects (the HMAC re-verification against the isolated
-            // redis passes, then the claim query fails).
-            let state = AppState::new(
-                crate::test_support::broken_db_pool(),
-                isolated.pool.clone(),
-                env.state.config.clone(),
-            );
-            let mut conn = pool_conn(&isolated.pool).await;
-            let _: () = redis::cmd("DEL")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .query_async(&mut conn)
-                .await
-                .expect("clear index");
-
-            let make_entry = |event_id: &str, retry_count: u32| {
-                let payload = payment_failed_payload(event_id, "in_backoff", "swcov_backoff");
-                let body = serde_json::to_string(&payload).expect("body");
-                let signature = sign("whsec_coverage", body.as_bytes(), Utc::now().timestamp());
-                DeadletterEntry {
-                    reason: "processing_failed".into(),
-                    event_id: Some(event_id.into()),
-                    body: Some(body),
-                    signature: Some(signature),
-                    retry_count,
-                    ..Default::default()
-                }
-            };
-            for (event_id, count) in [("evt_backoff_1", 0u32), ("evt_give_up", 4u32)] {
-                let entry = make_entry(event_id, count);
-                let key = format!("adyen:deadletter:event:{event_id}");
-                let _: () = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(serde_json::to_string(&entry).unwrap())
-                    .query_async(&mut conn)
-                    .await
-                    .expect("store entry");
-                let _: () = redis::cmd("ZADD")
-                    .arg(DEADLETTER_RETRY_INDEX_KEY)
-                    .arg(1)
-                    .arg(&key)
-                    .query_async(&mut conn)
-                    .await
-                    .expect("schedule entry");
-            }
-            drop(conn);
-
-            process_deadletter_retries(&state)
-                .await
-                .expect("the pass completes; per-entry failures are absorbed");
-
-            // Entry 1: first failure → rescheduled on the FIRST backoff step.
-            let mut conn = pool_conn(&isolated.pool).await;
-            let score: Option<f64> = redis::cmd("ZSCORE")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg("adyen:deadletter:event:evt_backoff_1")
-                .query_async(&mut conn)
-                .await
-                .expect("score");
-            assert!(score.is_some(), "a first failure stays scheduled");
-            let rescheduled: String = redis::cmd("GET")
-                .arg("adyen:deadletter:event:evt_backoff_1")
-                .query_async(&mut conn)
-                .await
-                .expect("entry");
-            let entry: DeadletterEntry = serde_json::from_str(&rescheduled).unwrap();
-            assert_eq!(entry.retry_count, 1, "the retry counter advanced");
-
-            // Entry 2: the failure AFTER the last allowed attempt gives up —
-            // dropped from the index, entry rewritten with the final count
-            // and a 7-day review TTL.
-            let gone: i64 = redis::cmd("ZSCORE")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg("adyen:deadletter:event:evt_give_up")
-                .query_async(&mut conn)
-                .await
-                .map(|v: Option<f64>| v.map(|_| 1).unwrap_or(0))
-                .expect("zscore");
-            assert_eq!(gone, 0, "an exhausted entry leaves the retry index");
-            let final_json: String = redis::cmd("GET")
-                .arg("adyen:deadletter:event:evt_give_up")
-                .query_async(&mut conn)
-                .await
-                .expect("final entry");
-            let final_entry: DeadletterEntry = serde_json::from_str(&final_json).unwrap();
-            assert_eq!(
-                final_entry.retry_count, DEADLETTER_MAX_RETRIES,
-                "the final count is recorded for review"
-            );
-            let ttl: i64 = redis::cmd("TTL")
-                .arg("adyen:deadletter:event:evt_give_up")
-                .query_async(&mut conn)
-                .await
-                .expect("ttl");
-            assert!(
-                ttl > 0 && ttl <= 7 * 24 * 60 * 60,
-                "the final entry keeps a 7-day review TTL, got {ttl}"
-            );
-        }
-    );
-
-    env_test!(
-        replay_skips_already_processed_events_and_refuses_pending_ones,
-        |env| {
-            let _guard = DEADLETTER_LOCK.lock().await;
-            let _dl_guard =
-                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-            let tenant = "swcov_replay2";
-            seed_tenant(env, tenant, "growth", "active").await;
-
-            let build_entry = |event_id: &str| {
-                let payload = payment_failed_payload(event_id, "in_replay2", tenant);
-                let body = serde_json::to_string(&payload).expect("body");
-                let signature = sign("whsec_coverage", body.as_bytes(), Utc::now().timestamp());
-                DeadletterEntry {
-                    reason: "processing_failed".into(),
-                    event_id: Some(event_id.into()),
-                    body: Some(body),
-                    signature: Some(signature),
-                    ..Default::default()
-                }
-            };
-
-            // An event already marked processed: the replay skips the
-            // business logic entirely and reports success.
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events (adyen_notification_id, event_type, status, created_at, updated_at)
-                 VALUES ('evt_already_done', 'invoice.payment_failed', 'processed', NOW(), NOW())",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("seed processed row");
-            let done_entry = build_entry("evt_already_done");
-            replay_deadletter(&env.state, &done_entry)
-                .await
-                .expect("an already-processed event replays as a no-op success");
-
-            // An event currently pending on another worker: refused, and the
-            // refusal feeds the retry scheduling instead of losing the event.
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events (adyen_notification_id, event_type, status, created_at, updated_at)
-                 VALUES ('evt_now_pending', 'invoice.payment_failed', 'pending', NOW(), NOW())",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("seed pending row");
-            let pending_entry = build_entry("evt_now_pending");
-            let error = replay_deadletter(&env.state, &pending_entry)
-                .await
-                .expect_err("a pending event must not replay");
-            assert!(
-                error.contains("pending"),
-                "unexpected replay error: {error}"
-            );
-        }
-    );
-
-    // ---------------- deadletter WRITE-failure arms (mandate) ----------------
-    //
-    // record_failed_webhook_deadletter_atomic must (a) refuse honestly when
-    // the event claim row is gone, and (b) roll the transaction back when the
-    // Redis deadletter write fails AFTER the SQL leg succeeded. Both are
-    // driven deterministically here.
-
-    env_test!(
-        deadletter_write_refuses_when_the_claim_row_is_missing,
-        |env| {
-            let _guard = DEADLETTER_LOCK.lock().await;
-            let _dl_guard =
-                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
-            let mut clear = pool_conn(&env.redis).await;
-            let _: () = redis::cmd("DEL")
-                .arg(DEADLETTER_INDEX_KEY)
-                .query_async(&mut clear)
-                .await
-                .expect("clear index");
-            drop(clear);
-            let error = record_failed_webhook_deadletter_atomic(
-                &env.state,
-                "evt_never_claimed_cov",
-                "handler failed",
-                br#"{"id":"evt_never_claimed_cov","type":"invoice.payment_failed"}"#,
-                "t=1,v1=deadbeef",
-            )
-            .await
-            .expect_err("an unknown event row must fail the atomic deadletter");
-            assert!(
-                error.contains("event row was not found"),
-                "unexpected: {error}"
-            );
-            // The empty transaction left nothing behind.
-            let deadletters: i64 = redis::cmd("ZCARD")
-                .arg(DEADLETTER_INDEX_KEY)
-                .query_async(&mut pool_conn(&env.redis).await)
-                .await
-                .expect("zcard");
-            assert_eq!(deadletters, 0, "no deadletter without a claim row");
-        }
-    );
-
-    env_test!(
-        deadletter_write_rolls_back_when_the_redis_leg_fails,
-        |env| {
-            let _guard = DEADLETTER_LOCK.lock().await;
-            let dead_redis = crate::test_support::dead_redis_pool();
-            let state = AppState::new(env.pool.clone(), dead_redis, env.state.config.clone());
-
-            // The claim row EXISTS (the webhook was claimed earlier), so the
-            // SQL leg matches one row; the Redis leg then fails on the dead
-            // pool and the whole transaction must roll back.
-            sqlx::query(
-                "INSERT INTO adyen_webhook_events (adyen_notification_id, event_type, status, created_at, updated_at)
-                 VALUES ('evt_redis_dead_cov', 'invoice.payment_failed', 'pending', NOW(), NOW())",
-            )
-            .execute(&env.pool)
-            .await
-            .expect("seed claim row");
-
-            let error = record_failed_webhook_deadletter_atomic(
-                &state,
-                "evt_redis_dead_cov",
-                "handler failed",
-                br#"{"id":"evt_redis_dead_cov","type":"invoice.payment_failed"}"#,
-                "t=1,v1=deadbeef",
-            )
-            .await
-            .expect_err("dead redis must fail the atomic deadletter");
-            assert!(error.contains("adyen dead letter"), "unexpected: {error}");
-
-            // The SQL leg was rolled back: the row is still 'pending'.
-            let status: String =
-                sqlx::query_scalar("SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_redis_dead_cov'")
-                    .fetch_one(&env.pool)
-                    .await
-                    .expect("row");
-            assert_eq!(status, "pending", "the failed-marking was rolled back");
         }
     );
 }

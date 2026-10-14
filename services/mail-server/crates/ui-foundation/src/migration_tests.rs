@@ -244,13 +244,17 @@ fn migration_docs_define_rust_ui_and_current_adyen_boundary() {
         "Adyen tool contract no longer documents the current server-side Adyen integration boundary"
     );
     assert!(
-        ADYEN_TOOL_CONTRACT_MD
-            .contains("**Verification:** Adyen signature HMAC plus timestamp tolerance"),
-        "Adyen tool contract no longer documents manual webhook verification ownership"
+        ADYEN_TOOL_CONTRACT_MD.contains("the in-body `additionalData.hmacSignature`")
+            && ADYEN_TOOL_CONTRACT_MD
+                .contains("HMAC SHA256 signature over the escaped colon-joined"),
+        "Adyen tool contract no longer documents the in-body HMAC webhook verification ownership"
     );
     assert!(
-        ADYEN_TOOL_CONTRACT_MD
-            .contains("Adyen redirects the customer to the approved return URL"),
+        ADYEN_TOOL_CONTRACT_MD.contains("`[accepted]`"),
+        "Adyen tool contract no longer documents the [accepted] acknowledgement"
+    );
+    assert!(
+        ADYEN_TOOL_CONTRACT_MD.contains("Adyen redirects the customer to the approved return URL"),
         "Adyen tool contract no longer documents hosted Adyen checkout"
     );
 }

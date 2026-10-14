@@ -7,12 +7,11 @@ transitions with the DB invariant asserted after each.
 from __future__ import annotations
 
 import concurrent.futures
-import hmac
-import hashlib
 import json
 import time
 import uuid
 
+from ..adyen import sign_notification
 from ..assertions import Checks, refusal_ok
 from ..fixtures import ensure_verified_domain
 from ..identity import Session
@@ -197,54 +196,82 @@ def out_of_order(ctx):
 
 
 @probe("p.state.adyen_notification_replay", "state", severity="P1",
-       description="A replayed Adyen webhook event (valid HMAC) is idempotent and never 5xx")
+       description="A replayed Adyen notification (valid in-body HMAC) is idempotent and never 5xx")
 def adyen_notification_replay(ctx):
     checks = Checks("p.state.adyen_notification_replay", "api:POST /webhooks/adyen")
     secret = _env_value("ADYEN_HMAC_KEY", "dev-adyen-webhook-secret-local-only-0123456789")
-    event_id = f"evt_dgv2_{uuid.uuid4().hex[:16]}"
+    psp_reference = f"psp_dgv2_{uuid.uuid4().hex[:16]}"
+    item = {
+        "pspReference": psp_reference,
+        "originalReference": "",
+        "merchantAccountCode": "ApexMailDogfoodECOM",
+        "merchantReference": f"dgv2-refund-{uuid.uuid4().hex[:10]}",
+        # amounts are minor units (cents), EUR
+        "amount": {"value": 2900, "currency": "EUR"},
+        "eventCode": "REFUND",
+        "success": "true",
+        "eventDate": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+        "paymentMethod": "visa",
+    }
+    item["additionalData"] = {"hmacSignature": sign_notification(item, secret)}
     payload = json.dumps({
-        "id": event_id,
-        "type": "invoice.paid",
-        "created": int(time.time()),
-        "data": {"object": {"id": f"in_dgv2_{uuid.uuid4().hex[:10]}", "object": "invoice",
-                            "amount_paid": 1000, "currency": "eur"}},
+        "live": "false",
+        "notificationItems": [{"NotificationRequestItem": item}],
     }).encode()
-    timestamp = int(time.time())
-    signature = hmac.new(secret.encode(), f"{timestamp}.".encode() + payload, hashlib.sha256).hexdigest()
-    headers = {"Adyen-Signature": f"t={timestamp},v1={signature}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
     first = ctx.http.call("POST", "/webhooks/adyen", raw=payload, headers=headers)
     second = ctx.http.call("POST", "/webhooks/adyen", raw=payload, headers=headers)
     checks.add(
-        "a signed Adyen event is accepted without a 5xx",
+        "a correctly signed notification is accepted and answered `[accepted]`",
+        first.status == 200 and "[accepted]" in first.text,
+        observed=f"first={first.status} body={first.text[:80]!r}",
+        expected="200 with the bare `[accepted]` body", severity="P1",
+        surface="api:POST /webhooks/adyen",
+    )
+    checks.add(
+        "the signed notification is never answered with a 5xx",
         first.status < 500 and second.status < 500,
         observed=f"first={first.status} second={second.status} bodies={first.text[:80]!r}/{second.text[:80]!r}",
         expected="2xx/4xx, never a crash", severity="P1", surface="api:POST /webhooks/adyen",
     )
     if ctx.db is not None:
-        rows = ctx.db.count("adyen_webhook_events", adyen_notification_id=event_id)
+        rows = ctx.db.count("adyen_webhook_events", adyen_psp_reference=psp_reference)
         checks.add(
-            "the replayed event id does not create duplicate processing rows",
-            rows <= 1, observed=f"adyen_webhook_events rows for the event={rows}",
-            expected="<=1 (idempotent by event id)", severity="P1",
+            "the replayed notification does not create duplicate processing rows",
+            rows <= 1, observed=f"adyen_webhook_events rows for the pspReference={rows}",
+            expected="<=1 (idempotent by notification id)", severity="P1",
             surface="table:adyen_webhook_events",
         )
-    tampered = payload.replace(b"invoice.paid", b"invoice.payment_failed")
-    bad = ctx.http.call(
-        "POST", "/webhooks/adyen", raw=tampered,
-        headers={"Adyen-Signature": f"t={timestamp},v1={signature}", "Content-Type": "application/json"},
-    )
+    tampered_item = dict(item)
+    tampered_item["additionalData"] = dict(item["additionalData"])
+    tampered_item["success"] = "false"
+    tampered = json.dumps({
+        "live": "false",
+        "notificationItems": [{"NotificationRequestItem": tampered_item}],
+    }).encode()
+    bad = ctx.http.call("POST", "/webhooks/adyen", raw=tampered, headers=headers)
     checks.add(
-        "a tampered Adyen payload is refused (signature binds the bytes)",
+        "a tampered Adyen notification is refused (the HMAC binds the item fields)",
         bad.status in (400, 401, 403), observed=f"status={bad.status} body={bad.text[:120]!r}",
         expected="4xx signature refusal", severity="P1", surface="api:POST /webhooks/adyen",
     )
-    unsigned = ctx.http.call("POST", "/webhooks/adyen", raw=payload, headers={"Content-Type": "application/json"})
+    unsigned = ctx.http.call("POST", "/webhooks/adyen", raw=_unsigned_envelope(item), headers=headers)
     checks.add(
-        "an unsigned Adyen payload is refused",
+        "a notification without additionalData.hmacSignature is refused",
         unsigned.status in (400, 401, 403, 503), observed=f"status={unsigned.status} body={unsigned.text[:120]!r}",
         expected="4xx/503 named refusal", severity="P1", surface="api:POST /webhooks/adyen",
     )
     return checks.obs
+
+
+def _unsigned_envelope(item: dict) -> bytes:
+    """The same notification with additionalData stripped (the unsigned arm)."""
+    stripped = dict(item)
+    stripped.pop("additionalData", None)
+    return json.dumps({
+        "live": "false",
+        "notificationItems": [{"NotificationRequestItem": stripped}],
+    }).encode()
 
 
 def _env_value(key: str, fallback: str) -> str:

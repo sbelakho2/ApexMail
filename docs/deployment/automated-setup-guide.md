@@ -338,8 +338,8 @@ HETZNER_POOL_MIN_FREE=5
 # =============================================================================
 # Adyen
 # =============================================================================
-ADYEN_API_KEY=sk_live_****
-ADYEN_HMAC_KEY=whsec_****
+ADYEN_API_KEY=<adyen-api-key>
+ADYEN_HMAC_KEY=<64-hex-characters>
 
 # =============================================================================
 # DKIM
@@ -440,7 +440,7 @@ Once Phase 1 is complete, customer provisioning is fully automated. Here is exac
 
 #### Step 1: Adyen Webhook Fires
 
-When the customer upgrades (e.g., from Free to Growth), Adyen sends a `checkout.session.completed` or `invoice.paid` event to the ApexMail webhook endpoint.
+When the customer upgrades (e.g., from Free to Growth), Adyen sends a verified subscription notification (`AUTHORISATION` / `RECURRING_CONTRACT`) to the ApexMail webhook endpoint.
 
 #### Step 2: Auto-Provision Background Job
 
@@ -708,7 +708,7 @@ IP and limit) rather than fixed message strings; inspect the worker logs for
 
 ### Auto-provisioning failed on upgrade
 
-1. **Check Adyen webhook logs**: Look for `checkout.session.completed` or `invoice.paid` events.
+1. **Check Adyen webhook logs**: Look for `AUTHORISATION` (success `true`) and `RECURRING_CONTRACT` notifications.
 2. **Check API server logs**: Look for `auto_provision_dedicated_ips_background` errors.
 3. **Check Hetzner API token validity**: Ensure the token has `read/write` for `floating_ip` and `server`.
 4. **Check Floating IP quota**: Verify the project has available quota.

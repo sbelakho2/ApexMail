@@ -854,13 +854,18 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         errors,
     )
     for needle in (
-        "active_plan_name_for_adyen_plan_code",
+        # The Adyen-era checkout keeps every safety boundary the pre-cutover
+        # checkout carried: the client-supplied priceId resolves server-side to
+        # an active self-serve plan, and the session carries server-set tenant
+        # and plan bindings (tenant metadata + shopper reference + immutable
+        # merchant reference) that the verified webhook reconciles back.
+        "active_plan_checkout_target",
         "is_active = true",
         "SELF_SERVE_CHECKOUT_PLAN_IDS.contains",
-        '"metadata[tenant_id]"',
-        '"metadata[plan_name]"',
-        '"subscription_data[metadata][tenant_id]"',
-        '"subscription_data[metadata][plan_name]"',
+        '"tenant_id": auth.tenant_id.clone(),',
+        '"plan_name": plan_name.clone(),',
+        '"shopperReference": customer_id,',
+        '"reference": format!("checkout:{plan_name}:{interval_label}")',
         '"code": "CHECKOUT_REQUIRED"',
         '"code": "BILLING_PORTAL_REQUIRED"',
     ):
@@ -868,15 +873,19 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
     for unsafe in ("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3", "Subscription cancelled immediately"):
         check(unsafe not in billing, f"billing route contains direct local mutation {unsafe!r}", errors)
 
+    # The safety boundary the old Stripe-era reconciliation encoded (entitlement
+    # only from verified provider state, cross-tenant events refused, amounts
+    # never invented) is carried by DIFFERENT constructs under the Adyen wire
+    # (2026-10-14): HMAC verification per notification item, settlement keyed
+    # on OUR merchant reference, and an explicit no-entitlement checkout arm.
     for needle in (
-        "fn entitlement_plan_name",
-        "Self::Active | Self::Trialing => paid_plan_name",
-        "Self::PastDue",
-        "WHERE is_active = true",
-        "$2 = 'monthly'",
-        "$2 = 'yearly'",
-        "Adyen subscription {} is already bound to a different tenant",
-        "checkout completed; awaiting subscription state webhook",
+        "fn verify_item_hmac",
+        "fn handle_recurring_authorisation",
+        "fn parse_merchant_reference_invoice_id",
+        "refusing to settle an unidentifiable obligation",
+        "cross-tenant event refused",
+        "entitlement follows the recurring/our-side subscription state",
+        "adyen_notification_id",
     ):
         check(needle in webhooks, f"Adyen webhook reconciliation is missing {needle!r}", errors)
 
@@ -949,13 +958,13 @@ def validate_lifecycle_docs(errors: list[str]) -> None:
         "does not change tenant status or grant an entitlement",
         "Only verified `active` and `trialing` Adyen subscriptions grant",
         "`409 BILLING_PORTAL_REQUIRED`",
-        "persists monthly and yearly Adyen price IDs",
+        "persists the monthly and yearly Adyen plan codes",
     ):
         check(needle in lifecycle, f"billing lifecycle doc is missing {needle!r}", errors)
     check("does not persist Adyen price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
     for needle in (
         "The public Checkout endpoint accepts",
-        "A `checkout.session.completed` event is informational only",
+        "An `AUTHORISATION` notification is informational only",
         "Only `active` and `trialing` statuses grant",
     ):
         check(needle in adyen, f"Adyen contract is missing {needle!r}", errors)

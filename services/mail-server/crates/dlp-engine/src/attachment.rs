@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn test_env_file_detection() {
         let engine = DlpEngine::new();
-        let env_content = b"DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-adyen-api-key.detected-adyen-api-key — Adyen's public documentation example key (sk_live_4eC39HqLyjWDarjtT1zdp7dc) used as DLP detection-test corpus — the code that FINDS such keys
+        let env_content = b"DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key — the payment provider's public documentation example key (Stripe-shaped corpus, kept for multi-vendor DLP coverage) used as DLP detection-test corpus — the code that FINDS such keys
         let result = engine.scan_attachment(env_content, Some(".env"), None);
 
         assert_eq!(result.kind, AttachmentKind::PlainText);

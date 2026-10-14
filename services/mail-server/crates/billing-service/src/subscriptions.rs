@@ -284,8 +284,10 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            adyen_subscription_id: Some("sub_123".into()),
-            adyen_shopper_reference: Some("cus_456".into()),
+            // A subscription id is a Adyen pspReference; the shopper
+            // reference IS the tenant id (Adyen has no customer object).
+            adyen_subscription_id: Some("8815393378561587".into()),
+            adyen_shopper_reference: Some("tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into()),
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -362,8 +364,8 @@ mod tests {
                     billing_interval: BillingInterval::Monthly,
                     period_start: now,
                     period_end: now,
-                    adyen_subscription_id: Some("sub_123".into()),
-                    adyen_shopper_reference: Some("cus_123".into()),
+                    adyen_subscription_id: Some("8815393378561587".into()),
+                    adyen_shopper_reference: Some("tenant_123".into()),
                 },
             )
             .await,

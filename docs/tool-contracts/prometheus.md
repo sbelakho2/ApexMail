@@ -35,7 +35,7 @@ apexmail_api_requests_total{method="POST", route="/v1/messages", status="200"}
 apexmail_api_request_duration_seconds{method="GET", route="/v1/campaigns"}
 apexmail_worker_emails_sent_total{tenant_id="t_abc", status="delivered"}
 apexmail_mta_queue_depth{priority="high"}
-apexmail_billing_adyen_webhook_duration_seconds{event="invoice.paid"}
+apexmail_billing_adyen_webhook_duration_seconds{event="AUTHORISATION"}
 ```
 
 ---

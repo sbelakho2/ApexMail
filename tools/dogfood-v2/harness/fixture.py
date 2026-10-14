@@ -21,6 +21,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, quote as urllib_quote, urlparse
 
+from .adyen import notification_id, notification_items, verify_notification
 from .config import REPO_ROOT, PASSWORD as LIVE_PASSWORD
 from .identity import totp
 
@@ -1474,36 +1475,48 @@ class FixtureHandler(BaseHTTPRequestHandler):
         return True
 
     def _adyen(self, method, path) -> bool:
-        signature = self.headers.get("adyen-hmac-signature", "")
+        """The Adyen notification endpoint, per the frozen contract: body
+        `{"notificationItems": [{"NotificationRequestItem": {...}}]}`, the HMAC
+        inside the body at `additionalData.hmacSignature` (base64 over the
+        escaped colon-joined fields, key = hex-decoded ADYEN_HMAC_KEY), the
+        success answer the bare body `[accepted]`.
+
+        The fixture VERIFIES the HMAC (same recipe as the live endpoint): the
+        battery's tampered/unsigned refusals are covered contract checks, so an
+        accept-everything double would silently delete real assertions. The
+        probe signs with the same shared helpers, so mock and probe cannot
+        drift.
+        """
         raw = self._read()
-        secret = _env_value("ADYEN_HMAC_KEY", "dev-adyen-webhook-secret-local-only-0123456789")
-        if not signature:
-            self._err(400, "VALIDATION_ERROR", "Missing adyen-hmac-signature header")
-            return True
         try:
-            timestamp, candidate = signature.split(",", 1)
-            timestamp = timestamp.split("=", 1)[1]
-            candidate = candidate.split("=", 1)[1]
-        except Exception:  # noqa: BLE001
-            self._err(400, "VALIDATION_ERROR", "malformed adyen-hmac-signature header")
-            return True
-        expected = hmac.new(secret.encode(), f"{timestamp}.".encode() + raw, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, candidate):
-            self._err(400, "VALIDATION_ERROR", "Invalid webhook signature")
-            return True
-        try:
-            event = json.loads(raw)
+            envelope = json.loads(raw)
         except Exception:  # noqa: BLE001
             self._err(400, "VALIDATION_ERROR", "Invalid JSON payload")
             return True
-        event_id = str(event.get("id", ""))
-        if not event_id:
-            self._err(400, "VALIDATION_ERROR", "Missing event ID")
+        items = notification_items(envelope)
+        if not items:
+            self._err(400, "VALIDATION_ERROR",
+                      "invalid notification: notificationItems is required")
             return True
-        if not self.state.find_one("adyen_webhook_events", adyen_notification_id=event_id):
-            self.state.insert("adyen_webhook_events", adyen_notification_id=event_id,
-                              event_type=event.get("type", ""), status="processed")
-        self._ok({"received": True})
+        secret = _env_value("ADYEN_HMAC_KEY", "dev-adyen-webhook-secret-local-only-0123456789")
+        for item in items:
+            signature = (item.get("additionalData") or {}).get("hmacSignature") or ""
+            if not signature:
+                self._err(400, "VALIDATION_ERROR", "Missing additionalData.hmacSignature")
+                return True
+            if not verify_notification(item, signature, secret):
+                self._err(400, "VALIDATION_ERROR", "Invalid webhook signature")
+                return True
+        for item in items:
+            # Adyen retries the same notification; the ledger dedupes on the
+            # digest over (eventCode, pspReference, success, eventDate,
+            # merchantReference). pspReference is stored for support lookups.
+            entry_id = notification_id(item)
+            if not self.state.find_one("adyen_webhook_events", adyen_notification_id=entry_id):
+                self.state.insert("adyen_webhook_events", adyen_notification_id=entry_id,
+                                  adyen_psp_reference=str(item.get("pspReference", "")),
+                                  event_type=str(item.get("eventCode", "")), status="processed")
+        self._html(200, "[accepted]", ctype="text/plain")
         return True
 
     def _webhook_fire(self, tenant_id: str, event: str, payload: dict) -> None:

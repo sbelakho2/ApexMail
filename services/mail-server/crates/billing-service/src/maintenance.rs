@@ -1319,12 +1319,9 @@ struct DedicatedIpPendingRow {
 
 #[derive(Debug, FromRow)]
 struct TenantAdyenSubscriptionRow {
-    adyen_subscription_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenSubscriptionItemResponse {
-    id: String,
+    /// The stored-payment token recurring charges replay; `None` until the
+    /// customer re-tokenizes at cutover (migration 252).
+    adyen_recurring_detail_reference: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -1727,8 +1724,10 @@ fn normalize_metering_event_id(raw_id: &str) -> Uuid {
 #[derive(Debug, FromRow)]
 struct RetryCandidateRow {
     tenant_id: String,
-    adyen_subscription_id: String,
-    adyen_shopper_reference: String,
+    /// The stored-payment token the recurring charge replays
+    /// (`adyen_subscriptions.adyen_recurring_detail_reference`); `None`
+    /// until the customer re-tokenizes at cutover.
+    adyen_recurring_detail_reference: Option<String>,
 }
 
 /// Whether the scheduled auto-pay job may charge tenants' saved Adyen
@@ -1739,6 +1738,24 @@ fn auto_pay_open_invoices_enabled() -> bool {
     std::env::var("AUTO_PAY_OPEN_INVOICES")
         .map(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
         .unwrap_or(false)
+}
+
+/// Nothing is left to retry for this tenant (no open local invoice, or one
+/// already covered): clear the scheduled retry so the dunning sweep stops
+/// claiming it.
+async fn clear_dunning_retry(state: &AppState, tenant_id: &str) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE dunning_records
+        SET next_retry_at = NULL, updated_at = NOW()
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .execute(&state.db)
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("Failed to clear next_retry_at for {tenant_id}: {error}"))
 }
 
 async fn process_scheduled_retries(
@@ -1761,7 +1778,7 @@ async fn process_scheduled_retries(
 
     let rows = sqlx::query_as::<_, RetryCandidateRow>(
         r#"
-        SELECT d.tenant_id, s.adyen_subscription_id, s.adyen_shopper_reference
+        SELECT d.tenant_id, s.adyen_recurring_detail_reference
         FROM dunning_records d
         JOIN adyen_subscriptions s ON s.tenant_id = d.tenant_id
         WHERE d.next_retry_at IS NOT NULL
@@ -1783,48 +1800,95 @@ async fn process_scheduled_retries(
         attempted += 1;
 
         let retry_result: Result<(), String> = async {
-            let invoices = adyen_get_json::<AdyenPaymentListResponse>(
-                client,
-                "/v1/invoices",
-                &[
-                    ("customer", row.adyen_shopper_reference.clone()),
-                    ("subscription", row.adyen_subscription_id.clone()),
-                    ("status", "open".to_string()),
-                    ("limit", "1".to_string()),
-                ],
+            // Adyen has no provider-side invoice objects: the retry charges
+            // the tenant's OWN open (pending) local invoice against the
+            // stored recurring token. No open invoice → nothing to retry.
+            let invoice: Option<(Uuid, String)> = sqlx::query_as(
+                r#"
+                SELECT id, currency
+                FROM invoices
+                WHERE tenant_id = $1 AND status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                "#,
             )
-            .await?;
+            .bind(&row.tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|error| format!("Failed to load the tenant's open invoice: {error}"))?;
 
-            let Some(invoice) = invoices.data.first() else {
-                sqlx::query(
-                    r#"
-                    UPDATE dunning_records
-                    SET next_retry_at = NULL, updated_at = NOW()
-                    WHERE tenant_id = $1
-                    "#,
-                )
-                .bind(&row.tenant_id)
-                .execute(&state.db)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Failed to clear next_retry_at for {}: {error}",
-                        row.tenant_id
-                    )
-                })?;
+            let Some((invoice_id, currency)) = invoice else {
+                clear_dunning_retry(state, &row.tenant_id).await?;
                 return Ok(());
             };
 
-            adyen_post_json_idempotent::<serde_json::Value>(
+            // The amount is DERIVED from the local invoice (total minus
+            // confirmed payments minus debt-reduction credits) — never a
+            // provider object, never a client input.
+            let outstanding_cents =
+                crate::invoices::invoice_outstanding_cents(&state.db, invoice_id)
+                    .await
+                    .map_err(|error| format!("Failed to derive the invoice outstanding: {error}"))?;
+            if outstanding_cents <= 0 {
+                // Fully covered since the retry was scheduled (e.g. wallet):
+                // the collection ladder settles it, not this sweep.
+                clear_dunning_retry(state, &row.tenant_id).await?;
+                return Ok(());
+            }
+
+            let Some(stored_payment_method_id) = row
+                .adyen_recurring_detail_reference
+                .as_deref()
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+            else {
+                return Err(
+                    "the tenant has no stored Adyen recurring token to charge".to_string()
+                );
+            };
+
+            let response = adyen_charge_stored_payment_method(
                 client,
-                &format!("/v1/invoices/{}/pay", invoice.id),
+                &format!("invoice:{invoice_id}"),
+                &row.tenant_id,
+                stored_payment_method_id,
+                outstanding_cents,
+                &currency,
                 // One key per invoice: a retry after a lost response must
-                // replay the SAME Adyen pay call, not charge twice.
-                &format!("autopay_{}", invoice.id),
+                // replay the SAME Adyen charge call, not charge twice.
+                &format!("autopay_{}", invoice_id.simple()),
+                serde_json::json!({
+                    "apexmailInvoiceId": invoice_id.to_string(),
+                    "source": "dunning_retry",
+                }),
             )
             .await?;
 
-            mark_payment_recovered(state, &row.tenant_id, Some(invoice.id.as_str())).await?;
+            // Bind the charge's pspReference to the local invoice (the
+            // webhook settles on `reference = invoice:{id}`); an existing
+            // different binding is never overwritten.
+            let bound = sqlx::query(
+                r#"
+                UPDATE invoices
+                SET adyen_psp_reference = $2, updated_at = NOW()
+                WHERE id = $1
+                  AND status = 'pending'
+                  AND adyen_psp_reference IS NULL
+                "#,
+            )
+            .bind(invoice_id)
+            .bind(&response.psp_reference)
+            .execute(&state.db)
+            .await
+            .map_err(|error| format!("Failed to bind the Adyen payment to the invoice: {error}"))?;
+            if bound.rows_affected() == 0 {
+                warn!(
+                    invoice_id = %invoice_id,
+                    "dunning retry charge accepted but the invoice already carries a Adyen binding — left untouched"
+                );
+            }
+
+            mark_payment_recovered(state, &row.tenant_id, Some(&invoice_id.to_string())).await?;
             Ok(())
         }
         .await;
@@ -2512,7 +2576,7 @@ async fn process_pending_dedicated_ip_charges(
     state: &AppState,
     client: &Client,
 ) -> Result<i64, String> {
-    let Some(price_id) = dedicated_ip_price_id() else {
+    let Some(price_cents) = dedicated_ip_price_cents() else {
         return Ok(0);
     };
 
@@ -2565,7 +2629,7 @@ async fn process_pending_dedicated_ip_charges(
             }
         };
 
-        match charge_dedicated_ip(&mut savepoint, client, &row, &price_id).await {
+        match charge_dedicated_ip(&mut savepoint, client, &row, price_cents).await {
             Ok(()) => {
                 if let Err(error) = savepoint.commit().await {
                     warn!(ip_id = %row.id, error = %error, "failed to commit dedicated IP savepoint");
@@ -2580,7 +2644,7 @@ async fn process_pending_dedicated_ip_charges(
                 // Record the backoff on the outer transaction (outside the
                 // rolled-back savepoint) so failed rows are retried later.
                 update_dedicated_ip_retry_metadata(&mut tx, &row.id).await;
-                warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to create dedicated IP Adyen subscription item");
+                warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to charge the dedicated IP add-on via Adyen");
             }
         }
     }
@@ -2650,7 +2714,7 @@ async fn process_pending_dedicated_ip_cancels(
                 if let Err(rollback_error) = savepoint.rollback().await {
                     warn!(ip_id = %row.id, error = %rollback_error, "failed to roll back dedicated IP cancel savepoint");
                 }
-                warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to cancel dedicated IP Adyen subscription item");
+                warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to finalize the dedicated IP add-on cancel");
             }
         }
     }
@@ -2662,15 +2726,23 @@ async fn process_pending_dedicated_ip_cancels(
     Ok(processed)
 }
 
+/// Charge one dedicated-IP add-on activation via Adyen.
+///
+/// Adyen has no subscription-item object: the add-on is OUR row and the
+/// charge is a recurring `POST /payments` against the tenant subscription's
+/// stored token, priced ONLY from `ADYEN_DEDICATED_IP_PRICE` (cents), with
+/// `reference = dedicated_ip:{dedicated_ips.id}` (the add-on's own identity —
+/// there is no local invoice for an add-on activation, and the base
+/// subscription id is shared by every add-on of the tenant).
 async fn charge_dedicated_ip(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client: &Client,
     row: &DedicatedIpPendingRow,
-    price_id: &str,
+    price_cents: i64,
 ) -> Result<(), String> {
     let subscription = sqlx::query_as::<_, TenantAdyenSubscriptionRow>(
         r#"
-        SELECT adyen_subscription_id
+        SELECT adyen_recurring_detail_reference
         FROM adyen_subscriptions
         WHERE tenant_id = $1
           AND status = 'active'
@@ -2686,13 +2758,33 @@ async fn charge_dedicated_ip(
     let Some(subscription) = subscription else {
         return Err("No active Adyen subscription for tenant".to_string());
     };
+    let Some(stored_payment_method_id) = subscription
+        .adyen_recurring_detail_reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return Err(
+            "the tenant's active Adyen subscription carries no stored recurring token".to_string(),
+        );
+    };
 
-    let response = dedicated_ip_subscription_item_create(
+    let response = adyen_charge_stored_payment_method(
         client,
-        &subscription.adyen_subscription_id,
-        price_id,
-        &row.id,
+        &format!("dedicated_ip:{}", row.id),
         &row.tenant_id,
+        stored_payment_method_id,
+        price_cents,
+        "EUR",
+        // Deterministic per add-on activation, time-independent: a crashed
+        // sweep whose transaction is lost REPLAYS this key instead of
+        // charging the add-on twice on the retry.
+        &dedicated_ip_idempotency_key(&row.id),
+        serde_json::json!({
+            "apexmailIpId": row.id,
+            "apexmailTenantId": row.tenant_id,
+            "type": "dedicated_ip_addon",
+        }),
     )
     .await?;
 
@@ -2709,7 +2801,9 @@ async fn charge_dedicated_ip(
         "#,
     )
     .bind(&row.id)
-    .bind(response.id)
+    // The activation charge's pspReference is the add-on's provider-side
+    // reference (there is no subscription item to store).
+    .bind(response.psp_reference)
     .execute(&mut **tx)
     .await
     .map_err(|error| format!("Failed to mark dedicated IP billing active: {error}"))?;
@@ -2717,13 +2811,22 @@ async fn charge_dedicated_ip(
     Ok(())
 }
 
+/// Stop billing a dedicated-IP add-on. Adyen has no provider-side
+/// subscription-item object to delete and NO automatic future charges for
+/// the add-on (each activation is charged by our own sweep), so ending the
+/// add-on is a LOCAL transition: the row flips to `canceled` and no further
+/// sweep claims it. The recorded activation charge stays untouched.
 async fn cancel_dedicated_ip_billing(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client: &Client,
+    _client: &Client,
     row: &DedicatedIpPendingRow,
 ) -> Result<(), String> {
-    if let Some(subscription_item_id) = &row.adyen_recurring_detail_reference {
-        dedicated_ip_subscription_item_delete(client, subscription_item_id).await?;
+    if let Some(provider_reference) = &row.adyen_recurring_detail_reference {
+        info!(
+            ip_id = %row.id,
+            provider_reference = %provider_reference,
+            "cancel: no provider-side dedicated IP object exists under Adyen — the add-on stops with its local row"
+        );
     }
 
     sqlx::query(
@@ -2744,75 +2847,27 @@ async fn cancel_dedicated_ip_billing(
     Ok(())
 }
 
-fn dedicated_ip_price_id() -> Option<String> {
+/// The dedicated-IP activation charge's Idempotency-Key: deterministic per
+/// add-on and bounded to Adyen's 64-char limit (production ids are 36-char
+/// UUIDs, `dedicated_ip_` + 36 = 49; anything longer is folded into a
+/// fixed-width digest).
+fn dedicated_ip_idempotency_key(ip_id: &str) -> String {
+    let key = format!("dedicated_ip_{ip_id}");
+    if key.len() <= 64 {
+        return key;
+    }
+    let digest = Sha256::digest(ip_id.as_bytes());
+    format!("dedicated_ip_{}", hex::encode(&digest[..24]))
+}
+
+/// The dedicated-IP add-on price in CENTS (minor units),
+/// `ADYEN_DEDICATED_IP_PRICE`. Unset, blank or non-positive → the sweep is
+/// disabled (`None`): never invent a price.
+fn dedicated_ip_price_cents() -> Option<i64> {
     std::env::var("ADYEN_DEDICATED_IP_PRICE")
         .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-async fn dedicated_ip_subscription_item_create(
-    client: &Client,
-    subscription_id: &str,
-    price_id: &str,
-    ip_id: &str,
-    tenant_id: &str,
-) -> Result<AdyenSubscriptionItemResponse, String> {
-    let secret_key = std::env::var("ADYEN_API_KEY")
-        .map_err(|_| "Adyen secret key is not configured".to_string())?;
-
-    let form = vec![
-        ("subscription", subscription_id.to_string()),
-        ("price", price_id.to_string()),
-        ("quantity", "1".to_string()),
-        ("proration_behavior", "create_prorations".to_string()),
-        ("metadata[apexmail_ip_id]", ip_id.to_string()),
-        ("metadata[apexmail_tenant_id]", tenant_id.to_string()),
-        ("metadata[type]", "dedicated_ip_addon".to_string()),
-    ];
-
-    let response = client
-        .post(format!("{}/v1/subscription_items", adyen_api_base_url()))
-        .bearer_auth(secret_key)
-        .header("Idempotency-Key", format!("apexmail_ip_charge_{ip_id}"))
-        .form(&form)
-        .send()
-        .await
-        .map_err(|error| format!("Adyen request failed: {error}"))?;
-
-    decode_adyen_response(response).await
-}
-
-async fn dedicated_ip_subscription_item_delete(
-    client: &Client,
-    subscription_item_id: &str,
-) -> Result<(), String> {
-    let secret_key = std::env::var("ADYEN_API_KEY")
-        .map_err(|_| "Adyen secret key is not configured".to_string())?;
-
-    let form = [("proration_behavior", "create_prorations")];
-    let response = client
-        .delete(format!(
-            "{}/v1/subscription_items/{subscription_item_id}",
-            adyen_api_base_url()
-        ))
-        .bearer_auth(secret_key)
-        .form(&form)
-        .send()
-        .await
-        .map_err(|error| format!("Adyen request failed: {error}"))?;
-
-    if response.status().is_success() {
-        return Ok(());
-    }
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if status.as_u16() == 404 || body.contains("resource_missing") {
-        return Ok(());
-    }
-
-    Err(format!("Adyen returned {status}: {body}"))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|cents| *cents > 0)
 }
 
 fn is_missing_table_error(error: &sqlx::Error) -> bool {
@@ -3863,49 +3918,90 @@ pub async fn resolve_abuse_report(
 }
 
 fn adyen_api_base_url() -> String {
-    std::env::var("ADYEN_API_BASE_URL").unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
+    std::env::var("ADYEN_API_BASE_URL")
+        .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
 }
 
-async fn adyen_get_json<T: DeserializeOwned>(
-    client: &Client,
-    path: &str,
-    query: &[(&str, String)],
-) -> Result<T, String> {
-    let secret_key = std::env::var("ADYEN_API_KEY")
-        .map_err(|_| "Adyen secret key is not configured".to_string())?;
-
-    let response = client
-        .get(format!("{}{}", adyen_api_base_url(), path))
-        .bearer_auth(secret_key)
-        .query(query)
-        .send()
-        .await
-        .map_err(|error| format!("Adyen request failed: {error}"))?;
-
-    decode_adyen_response(response).await
+fn adyen_api_key() -> Result<String, String> {
+    std::env::var("ADYEN_API_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| "ADYEN_API_KEY is not configured".to_string())
 }
 
-/// `adyen_post_json` with an `Idempotency-Key` header (mirrors the
-/// dedicated-IP charge call below): money-moving POSTs must be safe to
-/// retry — a timeout between Adyen executing the pay call and the
-/// response reaching us used to cause a SECOND charge on the retry sweep.
-async fn adyen_post_json_idempotent<T: DeserializeOwned>(
+fn adyen_merchant_account() -> Result<String, String> {
+    std::env::var("ADYEN_MERCHANT_ACCOUNT")
+        .ok()
+        .map(|account| account.trim().to_string())
+        .filter(|account| !account.is_empty())
+        .ok_or_else(|| "ADYEN_MERCHANT_ACCOUNT is not configured".to_string())
+}
+
+/// A Adyen Checkout `POST /payments` response (the fields this sweep reads).
+#[derive(Debug, Deserialize)]
+struct AdyenPaymentResponse {
+    #[serde(rename = "pspReference")]
+    psp_reference: String,
+    #[serde(rename = "resultCode")]
+    result_code: String,
+}
+
+/// One Adyen recurring charge against a STORED payment method
+/// (`POST /payments`): JSON body with the amount in MINOR UNITS, the API key
+/// in `X-API-Key` (the version lives in the base URL path, there is no
+/// version header), the merchant account required in every body, and a
+/// deterministic `Idempotency-Key` so a timeout between Adyen executing the
+/// charge and the response reaching us cannot double-charge on a retry.
+///
+/// `reference` is the frozen logical-operation identity the webhook settles
+/// on (`invoice:{local_invoice_id}` for invoice charges); the caller keeps it
+/// deterministic. A non-success `resultCode` (Refused, Error, ...) is an
+/// `Err` — HTTP 200 does not mean the money moved.
+#[allow(clippy::too_many_arguments)]
+async fn adyen_charge_stored_payment_method(
     client: &Client,
-    path: &str,
+    reference: &str,
+    tenant_id: &str,
+    stored_payment_method_id: &str,
+    amount_cents: i64,
+    currency: &str,
     idempotency_key: &str,
-) -> Result<T, String> {
-    let secret_key = std::env::var("ADYEN_API_KEY")
-        .map_err(|_| "Adyen secret key is not configured".to_string())?;
+    metadata: serde_json::Value,
+) -> Result<AdyenPaymentResponse, String> {
+    let api_key = adyen_api_key()?;
+    let merchant_account = adyen_merchant_account()?;
+
+    let body = serde_json::json!({
+        "amount": { "currency": currency.trim().to_uppercase(), "value": amount_cents },
+        "merchantAccount": merchant_account,
+        "reference": reference,
+        "paymentMethod": {
+            "type": "scheme",
+            "storedPaymentMethodId": stored_payment_method_id,
+        },
+        "shopperReference": tenant_id,
+        "recurringProcessingModel": "Subscription",
+        "metadata": metadata,
+    });
 
     let response = client
-        .post(format!("{}{}", adyen_api_base_url(), path))
-        .bearer_auth(secret_key)
+        .post(format!("{}/payments", adyen_api_base_url()))
+        .header("X-API-Key", api_key)
         .header("Idempotency-Key", idempotency_key)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|error| format!("Adyen request failed: {error}"))?;
+        .map_err(|error| format!("Adyen charge request failed: {error}"))?;
 
-    decode_adyen_response(response).await
+    let charge = decode_adyen_response::<AdyenPaymentResponse>(response).await?;
+    match charge.result_code.as_str() {
+        "Authorised" | "Pending" | "Received" => Ok(charge),
+        other => Err(format!(
+            "Adyen declined the charge ({reference}): resultCode {other}"
+        )),
+    }
 }
 
 async fn decode_adyen_response<T: DeserializeOwned>(
@@ -3921,16 +4017,6 @@ async fn decode_adyen_response<T: DeserializeOwned>(
         .json::<T>()
         .await
         .map_err(|error| format!("Adyen response decode failed: {error}"))
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenPaymentListResponse {
-    data: Vec<AdyenPaymentSummary>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdyenPaymentSummary {
-    id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -4354,10 +4440,18 @@ mod coverage_adversarial {
 
     // ---------------- scripted local HTTP mock ----------------
 
+    #[derive(Clone, Debug)]
+    struct RecordedCall {
+        method: String,
+        path: String,
+        headers: std::collections::HashMap<String, String>,
+        body: String,
+    }
+
     #[derive(Clone, Default)]
     struct Mock {
         responses: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
-        calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        calls: Arc<std::sync::Mutex<Vec<RecordedCall>>>,
     }
 
     impl Mock {
@@ -4373,8 +4467,18 @@ mod coverage_adversarial {
                 .lock()
                 .expect("lock")
                 .iter()
-                .filter(|(recorded, _)| recorded == path)
+                .filter(|recorded| recorded.path == path)
                 .count()
+        }
+
+        fn last_call(&self, path: &str) -> Option<RecordedCall> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .rev()
+                .find(|recorded| recorded.path == path)
+                .cloned()
         }
     }
 
@@ -4383,20 +4487,38 @@ mod coverage_adversarial {
         request: axum::http::Request<axum::body::Body>,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
+        let method = request.method().to_string();
         let path = request.uri().path().to_string();
-        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
-        let (status, body) = mock
+        let headers = request
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let (status, response_body) = mock
             .responses
             .lock()
             .expect("lock")
             .get(&path)
             .cloned()
             .unwrap_or_else(|| (404, "{}".to_string()));
-        mock.calls.lock().expect("lock").push((path, "hit".into()));
+        mock.calls.lock().expect("lock").push(RecordedCall {
+            method,
+            path,
+            headers,
+            body: String::from_utf8_lossy(&body).to_string(),
+        });
         (
             axum::http::StatusCode::from_u16(status).expect("status"),
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            body,
+            response_body,
         )
             .into_response()
     }
@@ -5399,27 +5521,38 @@ mod coverage_adversarial {
             return;
         };
         let mock = Mock::default();
-        mock.route("/v1/subscription_items", 200, r#"{"id":"si_cov_1"}"#);
-        mock.route("/v1/subscription_items/si_cov_1", 200, "{}");
+        // Adyen has no subscription-item object: an add-on activation is ONE
+        // recurring `POST /payments` against the tenant's stored token, and
+        // the 404 fallback carried the old two-step item protocol.
+        mock.route(
+            "/payments",
+            200,
+            r#"{"pspReference":"psp_dip_cov","resultCode":"Authorised"}"#,
+        );
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
             std::env::var("ADYEN_API_KEY").ok(),
             std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "sk_test_coverage");
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "price_cov_dip");
+        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
+        // The add-on price is CENTS (minor units) — never a provider price id.
+        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
 
         let tenant = "mtcov_dip";
         seed_tenant(&env, tenant, "growth", "active").await;
         sqlx::query(
             "INSERT INTO adyen_subscriptions
                  (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ($1, 'sub_dip', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_dip')",
+                  billing_cycle_end, adyen_shopper_reference,
+                  adyen_recurring_detail_reference)
+             VALUES ($1, 'psp_dip_sub', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days',
+                     $1, 'tok_dip_cov')",
         )
         .bind(tenant)
         .execute(&env.pool)
@@ -5434,12 +5567,6 @@ mod coverage_adversarial {
         .execute(&env.pool)
         .await
         .expect("dedicated ips");
-        sqlx::query(
-            "UPDATE dedicated_ips SET adyen_recurring_detail_reference = 'si_cov_1' WHERE id = 'cov_dip_cancel'",
-        )
-        .execute(&env.pool)
-        .await
-        .expect("cancel item");
 
         let client = Client::new();
         let result = process_dedicated_ip_billing(&env.state, &client)
@@ -5447,21 +5574,67 @@ mod coverage_adversarial {
             .expect("dip billing");
         assert_eq!(result.charged, 1, "one charge processed");
         assert_eq!(result.canceled, 1, "one cancel processed");
-        let (charge_status, item): (String, Option<String>) = sqlx::query_as(
+        // The activation charge's pspReference becomes the add-on's
+        // provider-side reference (there is no subscription item to store).
+        let (charge_status, provider_ref): (String, Option<String>) = sqlx::query_as(
             "SELECT billing_status, adyen_recurring_detail_reference FROM dedicated_ips WHERE id = 'cov_dip_charge'",
         )
         .fetch_one(&env.pool)
         .await
         .expect("charged ip");
         assert_eq!(charge_status, "active");
-        assert_eq!(item.as_deref(), Some("si_cov_1"));
+        assert_eq!(provider_ref.as_deref(), Some("psp_dip_cov"));
         let cancel_status: String = sqlx::query_scalar(
             "SELECT billing_status FROM dedicated_ips WHERE id = 'cov_dip_cancel'",
         )
         .fetch_one(&env.pool)
         .await
         .expect("canceled ip");
-        assert_eq!(cancel_status, "canceled");
+        assert_eq!(cancel_status, "canceled", "cancel is a local transition");
+
+        // The single payment call carries the frozen contract: API key
+        // header, deterministic idempotency key, stored-token payment method
+        // and the minor-unit add-on price with its own reference identity.
+        assert_eq!(mock.call_count("/payments"), 1, "cancels make no HTTP call");
+        let call = mock.last_call("/payments").expect("charge call");
+        assert_eq!(call.method, "POST");
+        assert_eq!(
+            call.headers.get("x-api-key").map(String::as_str),
+            Some("AQEohONJaaPk33yRwggDP5DPc2s")
+        );
+        assert_eq!(
+            call.headers.get("idempotency-key").map(String::as_str),
+            Some("dedicated_ip_cov_dip_charge"),
+            "the add-on's own identity is the deterministic key"
+        );
+        let body: serde_json::Value = serde_json::from_str(&call.body).expect("payment body JSON");
+        assert_eq!(
+            body["amount"],
+            serde_json::json!({"currency": "EUR", "value": 500}),
+            "the dedicated-IP price travels as cents"
+        );
+        assert_eq!(
+            body["merchantAccount"],
+            serde_json::json!("ApexMailTestECOM")
+        );
+        assert_eq!(
+            body["reference"],
+            serde_json::json!("dedicated_ip:cov_dip_charge")
+        );
+        assert_eq!(body["paymentMethod"]["type"], serde_json::json!("scheme"));
+        assert_eq!(
+            body["paymentMethod"]["storedPaymentMethodId"],
+            serde_json::json!("tok_dip_cov")
+        );
+        assert_eq!(body["shopperReference"], serde_json::json!(tenant));
+        assert_eq!(
+            body["recurringProcessingModel"],
+            serde_json::json!("Subscription")
+        );
+        assert_eq!(
+            body["metadata"]["type"],
+            serde_json::json!("dedicated_ip_addon")
+        );
 
         // Failure isolation: a pending charge with NO active subscription
         // records retry metadata instead of aborting the sweep.
@@ -5496,16 +5669,23 @@ mod coverage_adversarial {
             billing, "pending_charge",
             "still pending, never silently dropped"
         );
+        assert_eq!(
+            mock.call_count("/payments"),
+            1,
+            "a tokenless/subscriptionless charge never reaches the provider"
+        );
 
         match previous {
-            (Some(key), Some(url), Some(price)) => {
+            (Some(key), Some(url), Some(merchant), Some(price)) => {
                 std::env::set_var("ADYEN_API_KEY", key);
                 std::env::set_var("ADYEN_API_BASE_URL", url);
+                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
                 std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price);
             }
             _ => {
                 std::env::remove_var("ADYEN_API_KEY");
                 std::env::remove_var("ADYEN_API_BASE_URL");
+                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
                 std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
             }
         }
@@ -5521,11 +5701,13 @@ mod coverage_adversarial {
             return;
         };
         let mock = Mock::default();
-        mock.route("/v1/invoices", 200, r#"{"data":[{"id":"in_open_cov"}]}"#);
+        // Adyen has no provider-side invoice objects: the retry charges the
+        // tenant's OWN open (pending) LOCAL invoice with ONE recurring
+        // `POST /payments` against the stored token.
         mock.route(
-            "/v1/invoices/in_open_cov/pay",
+            "/payments",
             200,
-            r#"{"id":"in_open_cov"}"#,
+            r#"{"pspReference":"psp_retry_pay","resultCode":"Authorised"}"#,
         );
         let base = spawn_mock(mock.clone()).await;
 
@@ -5534,10 +5716,12 @@ mod coverage_adversarial {
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
             std::env::var("ADYEN_API_KEY").ok(),
             std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "sk_test_coverage");
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
         let tenant = "mtcov_retry";
         seed_tenant(&env, tenant, "growth", "active").await;
@@ -5552,13 +5736,31 @@ mod coverage_adversarial {
         sqlx::query(
             "INSERT INTO adyen_subscriptions
                  (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ($1, 'sub_retry', 'growth', 'past_due', NOW(), NOW() + INTERVAL '30 days', 'cus_retry')",
+                  billing_cycle_end, adyen_shopper_reference,
+                  adyen_recurring_detail_reference)
+             VALUES ($1, 'psp_retry_sub', 'growth', 'past_due', NOW(),
+                     NOW() + INTERVAL '30 days', $1, 'tok_retry')",
         )
         .bind(tenant)
         .execute(&env.pool)
         .await
         .expect("subscription");
+        // The open LOCAL invoice the retry must collect (amount derived from
+        // its own outstanding remainder, never a provider object).
+        let invoice_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, 4900, 'EUR', 'pending', $3, 4900, 0, 4900,
+                     NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .bind(format!("MTCOV-{}", invoice_id.simple()))
+        .execute(&env.pool)
+        .await
+        .expect("open invoice");
 
         let client = Client::new();
         let result = process_scheduled_retries(&env.state, &client)
@@ -5566,12 +5768,51 @@ mod coverage_adversarial {
             .expect("retries");
         assert_eq!(result.attempted, 1);
         assert_eq!(result.succeeded, 1);
-        assert_eq!(mock.call_count("/v1/invoices"), 1);
         assert_eq!(
-            mock.call_count("/v1/invoices/in_open_cov/pay"),
+            mock.call_count("/payments"),
             1,
-            "paid exactly once"
+            "the open invoice is paid exactly once"
         );
+        let call = mock.last_call("/payments").expect("retry payment call");
+        assert_eq!(call.method, "POST");
+        assert_eq!(
+            call.headers.get("x-api-key").map(String::as_str),
+            Some("AQEohONJaaPk33yRwggDP5DPc2s")
+        );
+        assert_eq!(
+            call.headers.get("idempotency-key").map(String::as_str),
+            Some(format!("autopay_{}", invoice_id.simple()).as_str()),
+            "one key per invoice: a lost response replays the same charge"
+        );
+        let body: serde_json::Value = serde_json::from_str(&call.body).expect("payment body JSON");
+        assert_eq!(
+            body["amount"],
+            serde_json::json!({"currency": "EUR", "value": 4900}),
+            "the amount is the local invoice's minor-unit total"
+        );
+        assert_eq!(
+            body["merchantAccount"],
+            serde_json::json!("ApexMailTestECOM")
+        );
+        assert_eq!(
+            body["reference"],
+            serde_json::json!(format!("invoice:{invoice_id}"))
+        );
+        assert_eq!(
+            body["paymentMethod"]["storedPaymentMethodId"],
+            serde_json::json!("tok_retry")
+        );
+        assert_eq!(body["shopperReference"], serde_json::json!(tenant));
+        // The charge's pspReference is bound to the local invoice for the
+        // webhook to settle on `reference = invoice:{id}`.
+        let (status, bound): (String, Option<String>) =
+            sqlx::query_as("SELECT status, adyen_psp_reference FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(status, "pending");
+        assert_eq!(bound.as_deref(), Some("psp_retry_pay"));
         let status: String =
             sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
                 .bind(tenant)
@@ -5581,15 +5822,17 @@ mod coverage_adversarial {
         assert_eq!(status, "healthy", "recovery reset the dunning record");
 
         match previous {
-            (Some(auto), Some(key), Some(url)) => {
+            (Some(auto), Some(key), Some(url), Some(merchant)) => {
                 std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
                 std::env::set_var("ADYEN_API_KEY", key);
                 std::env::set_var("ADYEN_API_BASE_URL", url);
+                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
             }
             _ => {
                 std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
                 std::env::remove_var("ADYEN_API_KEY");
                 std::env::remove_var("ADYEN_API_BASE_URL");
+                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
             }
         }
         drop(guard);
@@ -6144,7 +6387,7 @@ mod coverage_adversarial {
             "INSERT INTO adyen_subscriptions
                  (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end, adyen_shopper_reference)
-             VALUES ($1, $2, 'growth', $3, NOW(), NOW() + INTERVAL '30 days', 'cus_retry_cov')",
+             VALUES ($1, $2, 'growth', $3, NOW(), NOW() + INTERVAL '30 days', $1)",
         )
         .bind(tenant)
         .bind(format!("sub_{}", &tenant[..tenant.len().min(20)]))
@@ -6156,20 +6399,47 @@ mod coverage_adversarial {
 
     env_test!(scheduled_retries_reschedule_after_adyen_failure, |env| {
         let mock = Mock::default();
-        mock.route("/v1/invoices", 500, "adyen down");
+        mock.route("/payments", 500, "adyen down");
         let base = spawn_mock(mock.clone()).await;
         let guard = ENV_LOCK.lock().await;
         let previous = (
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
             std::env::var("ADYEN_API_KEY").ok(),
             std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "sk_test_coverage");
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
         let tenant = "mtcov_retry_fail";
         seed_retry_candidate(env, tenant, "warning", "past_due").await;
+        // The retry only reaches Adyen when the tenant HAS an open local
+        // invoice to collect; seed one so the provider failure is the thing
+        // under test (not the nothing-to-collect early exit).
+        sqlx::query(
+            "UPDATE adyen_subscriptions SET adyen_recurring_detail_reference = 'tok_retry_fail'
+             WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("stored token");
+        let invoice_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, 2500, 'EUR', 'pending', $3, 2500, 0, 2500,
+                     NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .bind(format!("MTCOV-{}", invoice_id.simple()))
+        .execute(&env.pool)
+        .await
+        .expect("open invoice");
         let client = Client::new();
         let result = process_scheduled_retries(&env.state, &client)
             .await
@@ -6190,21 +6460,34 @@ mod coverage_adversarial {
             "failure backs off a full day"
         );
         assert_eq!(
-            mock.call_count("/v1/invoices"),
+            mock.call_count("/payments"),
             1,
-            "the pay endpoint is never reached on a failed list call"
+            "the failed charge is attempted exactly once and never replayed blindly"
+        );
+        let (invoice_status, bound): (String, Option<String>) =
+            sqlx::query_as("SELECT status, adyen_psp_reference FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(invoice_status, "pending");
+        assert!(
+            bound.is_none(),
+            "a failed charge binds no pspReference to the invoice"
         );
 
         match previous {
-            (Some(auto), Some(key), Some(url)) => {
+            (Some(auto), Some(key), Some(url), Some(merchant)) => {
                 std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
                 std::env::set_var("ADYEN_API_KEY", key);
                 std::env::set_var("ADYEN_API_BASE_URL", url);
+                std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
             }
             _ => {
                 std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
                 std::env::remove_var("ADYEN_API_KEY");
                 std::env::remove_var("ADYEN_API_BASE_URL");
+                std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
             }
         }
         drop(guard);
@@ -6214,17 +6497,18 @@ mod coverage_adversarial {
         scheduled_retries_clear_retry_when_no_open_invoice_exists,
         |env| {
             let mock = Mock::default();
-            mock.route("/v1/invoices", 200, r#"{"data":[]}"#);
             let base = spawn_mock(mock.clone()).await;
             let guard = ENV_LOCK.lock().await;
             let previous = (
                 std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
                 std::env::var("ADYEN_API_KEY").ok(),
                 std::env::var("ADYEN_API_BASE_URL").ok(),
+                std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             );
             std::env::set_var("AUTO_PAY_OPEN_INVOICES", "1");
-            std::env::set_var("ADYEN_API_KEY", "sk_test_coverage");
+            std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
             std::env::set_var("ADYEN_API_BASE_URL", &base);
+            std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
             let tenant = "mtcov_retry_empty";
             seed_retry_candidate(env, tenant, "soft_suspended", "unpaid").await;
@@ -6252,21 +6536,23 @@ mod coverage_adversarial {
             .expect("dunning");
             assert!(retry.is_none(), "nothing to collect: retry cleared");
             assert_eq!(
-                mock.call_count("/v1/invoices"),
-                1,
-                "no invoice exists, so no pay call is made"
+                mock.call_count("/payments"),
+                0,
+                "no open LOCAL invoice exists, so the provider is never called"
             );
 
             match previous {
-                (Some(auto), Some(key), Some(url)) => {
+                (Some(auto), Some(key), Some(url), Some(merchant)) => {
                     std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
                     std::env::set_var("ADYEN_API_KEY", key);
                     std::env::set_var("ADYEN_API_BASE_URL", url);
+                    std::env::set_var("ADYEN_MERCHANT_ACCOUNT", merchant);
                 }
                 _ => {
                     std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
                     std::env::remove_var("ADYEN_API_KEY");
                     std::env::remove_var("ADYEN_API_BASE_URL");
+                    std::env::remove_var("ADYEN_MERCHANT_ACCOUNT");
                 }
             }
             drop(guard);
@@ -6298,139 +6584,146 @@ mod coverage_adversarial {
         .expect("dedicated ip");
     }
 
-    env_test!(dedicated_ip_charge_without_price_id_moves_nothing, |env| {
-        let guard = ENV_LOCK.lock().await;
-        let previous = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
-        std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
-
-        let tenant = "mtcov_dip_noprice";
-        seed_tenant(env, tenant, "growth", "active").await;
-        seed_dedicated_ip(
-            env,
-            "cov_dip_noprice",
-            tenant,
-            "203.0.113.251",
-            "pending_charge",
-            None,
-        )
-        .await;
-        let client = Client::new();
-        let result = process_dedicated_ip_billing(&env.state, &client)
-            .await
-            .expect("dip billing");
-        assert_eq!((result.charged, result.canceled), (0, 0));
-        let (billing, failures): (String, i32) = sqlx::query_as(
-            "SELECT billing_status, COALESCE(billing_failure_count, 0)
-             FROM dedicated_ips WHERE id = 'cov_dip_noprice'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("ip state");
-        assert_eq!((billing.as_str(), failures), ("pending_charge", 0));
-
-        match previous {
-            Some(price) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price),
-            None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
-        }
-        drop(guard);
-    });
-
     env_test!(
-        dedicated_ip_cancel_without_item_finalizes_without_http,
+        dedicated_ip_charge_without_price_cents_moves_nothing,
         |env| {
-            let mock = Mock::default();
-            let base = spawn_mock(mock.clone()).await;
             let guard = ENV_LOCK.lock().await;
-            let previous = (
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_API_BASE_URL").ok(),
-                std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
-            );
-            std::env::set_var("ADYEN_API_KEY", "sk_test_coverage");
-            std::env::set_var("ADYEN_API_BASE_URL", &base);
-            std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "price_cov_dip");
+            let previous = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
 
-            let tenant = "mtcov_dip_cancel";
+            let tenant = "mtcov_dip_noprice";
             seed_tenant(env, tenant, "growth", "active").await;
-            // No subscription item was ever created, so the delete call is
-            // unnecessary — the row still finalizes.
             seed_dedicated_ip(
                 env,
-                "cov_dip_cancel_none",
+                "cov_dip_noprice",
                 tenant,
-                "203.0.113.252",
-                "pending_cancel",
+                "203.0.113.251",
+                "pending_charge",
                 None,
             )
             .await;
             let client = Client::new();
-            let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
-                .await
-                .expect("cancels");
-            assert_eq!(canceled, 1);
-            let (billing, ended): (String, Option<DateTime<Utc>>) = sqlx::query_as(
-                "SELECT billing_status, billing_ended_at FROM dedicated_ips
-                 WHERE id = 'cov_dip_cancel_none'",
+            // Unset, blank, non-numeric and non-positive prices all disable
+            // the sweep: the variable is a CENTS amount, never a provider
+            // price id.
+            for price in [
+                None,
+                Some(""),
+                Some("   "),
+                Some("0"),
+                Some("-5"),
+                Some("abc"),
+            ] {
+                match price {
+                    Some(value) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value),
+                    None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+                }
+                let result = process_dedicated_ip_billing(&env.state, &client)
+                    .await
+                    .expect("dip billing");
+                assert_eq!((result.charged, result.canceled), (0, 0), "price {price:?}");
+            }
+            let (billing, failures): (String, i32) = sqlx::query_as(
+                "SELECT billing_status, COALESCE(billing_failure_count, 0)
+             FROM dedicated_ips WHERE id = 'cov_dip_noprice'",
             )
             .fetch_one(&env.pool)
             .await
             .expect("ip state");
-            assert_eq!(billing, "canceled");
-            assert!(ended.is_some(), "cancel is timestamped");
-            assert_eq!(
-                mock.call_count("/v1/subscription_items/cov_missing"),
-                0,
-                "no HTTP for a row without an item"
-            );
-
-            // A 404 on the item delete means the item is already gone: the
-            // local cancel must still finalize (never wedge).
-            mock.route(
-                "/v1/subscription_items/si_gone",
-                404,
-                r#"{"error":{"code":"resource_missing"}}"#,
-            );
-            seed_dedicated_ip(
-                env,
-                "cov_dip_cancel_gone",
-                tenant,
-                "203.0.113.253",
-                "pending_cancel",
-                Some("si_gone"),
-            )
-            .await;
-            let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
-                .await
-                .expect("cancels");
-            assert_eq!(canceled, 1, "a missing Adyen item is a successful cancel");
-            let billing: String = sqlx::query_scalar(
-                "SELECT billing_status FROM dedicated_ips WHERE id = 'cov_dip_cancel_gone'",
-            )
-            .fetch_one(&env.pool)
-            .await
-            .expect("ip state");
-            assert_eq!(billing, "canceled");
+            assert_eq!((billing.as_str(), failures), ("pending_charge", 0));
 
             match previous {
-                (Some(key), Some(url), Some(price)) => {
-                    std::env::set_var("ADYEN_API_KEY", key);
-                    std::env::set_var("ADYEN_API_BASE_URL", url);
-                    std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price);
-                }
-                _ => {
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_API_BASE_URL");
-                    std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
-                }
+                Some(price) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price),
+                None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
             }
             drop(guard);
         }
     );
 
+    env_test!(dedicated_ip_cancel_finalizes_locally_without_http, |env| {
+        let mock = Mock::default();
+        let base = spawn_mock(mock.clone()).await;
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
+        );
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+
+        let tenant = "mtcov_dip_cancel";
+        seed_tenant(env, tenant, "growth", "active").await;
+        // Adyen has no provider-side subscription-item object AND no
+        // automatic future charges for the add-on (each activation is
+        // charged by our own sweep), so a cancel is a LOCAL transition:
+        // with or without a stale stored reference, no HTTP is ever made.
+        seed_dedicated_ip(
+            env,
+            "cov_dip_cancel_none",
+            tenant,
+            "203.0.113.252",
+            "pending_cancel",
+            None,
+        )
+        .await;
+        seed_dedicated_ip(
+            env,
+            "cov_dip_cancel_gone",
+            tenant,
+            "203.0.113.253",
+            "pending_cancel",
+            Some("si_gone"),
+        )
+        .await;
+        let client = Client::new();
+        let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
+            .await
+            .expect("cancels");
+        assert_eq!(canceled, 2, "both rows finalize locally");
+        let rows: Vec<(String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT id, billing_status, billing_ended_at FROM dedicated_ips
+             WHERE id LIKE 'cov_dip_cancel_%' ORDER BY id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .expect("ip states");
+        assert_eq!(
+            rows.iter()
+                .map(|(id, status, ended)| (id.as_str(), status.as_str(), ended.is_some()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("cov_dip_cancel_gone", "canceled", true),
+                ("cov_dip_cancel_none", "canceled", true),
+            ],
+            "cancel is timestamped and never wedges on a stale provider reference"
+        );
+        for path in ["/payments", "/v1/subscription_items/si_gone"] {
+            assert_eq!(mock.call_count(path), 0, "no HTTP for {path}");
+        }
+
+        match previous {
+            (Some(key), Some(url), Some(price)) => {
+                std::env::set_var("ADYEN_API_KEY", key);
+                std::env::set_var("ADYEN_API_BASE_URL", url);
+                std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price);
+            }
+            _ => {
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::remove_var("ADYEN_API_BASE_URL");
+                std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
+            }
+        }
+        drop(guard);
+    });
+
     env_test!(dedicated_ip_missing_table_is_a_clean_noop, |env| {
         let guard = ENV_LOCK.lock().await;
         let previous = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "price_cov_dip");
+        // A VALID cents price: with the sweep disabled the missing table
+        // would never be queried and the test would pass for the wrong
+        // reason.
+        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
         sqlx::query("DROP TABLE IF EXISTS dedicated_ips CASCADE")
             .execute(&env.pool)
             .await
@@ -6827,6 +7120,10 @@ mod coverage_adversarial {
             return;
         };
         crate::test_support::ensure_trace_subscriber();
+        // A VALID cents price: without it the dedicated-IP sweep returns
+        // before touching the table and its error arm would stay cold.
+        let previous_price = std::env::var("ADYEN_DEDICATED_IP_PRICE").ok();
+        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
         // Break the tables the startup sweeps read: every Err arm must be an
         // error! log, never a panic or an aborted task.
         env.break_table("invoices").await;
@@ -6837,6 +7134,10 @@ mod coverage_adversarial {
         env.restore_table("invoices").await;
         env.restore_table("adyen_webhook_events").await;
         env.restore_table("dedicated_ips").await;
+        match previous_price {
+            Some(value) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value),
+            None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
+        }
         env.finish().await;
     }
 
@@ -6981,7 +7282,7 @@ mod coverage_adversarial {
                      (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
                       billing_cycle_end, trial_end, adyen_shopper_reference)
                  VALUES ($1, $2, 'growth', 'trialing', NOW() - INTERVAL '20 days',
-                         NOW() - INTERVAL '2 days', $3::timestamptz, 'cus_mtcov')",
+                         NOW() - INTERVAL '2 days', $3::timestamptz, $1)",
             )
             .bind(tenant)
             .bind(sub)
@@ -7763,10 +8064,13 @@ mod coverage_adversarial {
         crate::test_support::ensure_trace_subscriber();
 
         let mock = Mock::default();
-        // Dedicated-IP subscription item creation (charge path).
-        mock.route("/v1/subscription_items", 200, r#"{"id":"si_w6c_drv"}"#);
-        // Auto-pay: no open Adyen invoices → the dunning retry clears.
-        mock.route("/v1/invoices", 200, r#"{"data":[]}"#);
+        // Dedicated-IP activation: ONE recurring `POST /payments` per add-on
+        // against the tenant's stored token.
+        mock.route(
+            "/payments",
+            200,
+            r#"{"pspReference":"psp_w6c_drv","resultCode":"Authorised"}"#,
+        );
         let base = spawn_mock(mock.clone()).await;
 
         let _env_guard = ENV_LOCK.lock().await;
@@ -7775,25 +8079,30 @@ mod coverage_adversarial {
             std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
             std::env::var("ADYEN_API_KEY").ok(),
             std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
         );
         std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "10");
-        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "price_w6c_drv");
-        std::env::set_var("ADYEN_API_KEY", "sk_test_w6c_drv");
+        // Cents, not a provider price id.
+        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
 
         let env = &owned;
 
         // ── dedicated IP: two pending charges (one for the startup sweep,
-        // one for a tick) on a tenant with an ACTIVE subscription.
+        // one for a tick) on a tenant with an ACTIVE subscription carrying
+        // the stored recurring token the charge replays.
         seed_tenant_plan(env, "w6cdrv_ip", "growth", "active").await;
         sqlx::query(
             "INSERT INTO adyen_subscriptions
                  (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, adyen_shopper_reference)
-             VALUES ('w6cdrv_ip', 'sub_w6cdrv_ip', 'growth', 'active', NOW(),
-                     NOW() + INTERVAL '30 days', 'cus_w6cdrv_ip')",
+                  billing_cycle_end, adyen_shopper_reference,
+                  adyen_recurring_detail_reference)
+             VALUES ('w6cdrv_ip', 'psp_w6cdrv_ip', 'growth', 'active', NOW(),
+                     NOW() + INTERVAL '30 days', 'w6cdrv_ip', 'tok_w6cdrv')",
         )
         .execute(&env.pool)
         .await
@@ -7844,14 +8153,15 @@ mod coverage_adversarial {
         .expect("queued message");
 
         // ── scheduled auto-pay: warning dunning due NOW on a past_due
-        // subscription; the empty Adyen list clears the retry.
+        // subscription; NO open local invoice exists, so the sweep clears
+        // the retry without ever calling the provider.
         seed_tenant_plan(env, "w6cdrv_pay", "growth", "active").await;
         sqlx::query(
             "INSERT INTO adyen_subscriptions
                  (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end, adyen_shopper_reference)
-             VALUES ('w6cdrv_pay', 'sub_w6cdrv_pay', 'growth', 'past_due', NOW(),
-                     NOW() + INTERVAL '30 days', 'cus_w6cdrv_pay')",
+             VALUES ('w6cdrv_pay', 'psp_w6cdrv_pay', 'growth', 'past_due', NOW(),
+                     NOW() + INTERVAL '30 days', 'w6cdrv_pay')",
         )
         .execute(&env.pool)
         .await
@@ -7989,8 +8299,8 @@ mod coverage_adversarial {
             }};
         }
 
-        // Dedicated IPs: BOTH pending charges became active Adyen items —
-        // one charged by the startup sweep, one by a tick.
+        // Dedicated IPs: ALL pending charges were charged to active —
+        // one charged by the startup sweep, the rest by ticks.
         poll_until!(
             deadline,
             "SELECT COUNT(*) FROM dedicated_ips
@@ -8019,8 +8329,8 @@ mod coverage_adversarial {
         .expect("notification");
         assert_eq!(notified, 1, "exactly one purge notification was queued");
 
-        // Scheduled auto-pay: the due retry ran against the (empty) Adyen
-        // list and cleared the next retry — never rescheduled blindly.
+        // Scheduled auto-pay: the due retry found no open LOCAL invoice and
+        // cleared the next retry — never rescheduled blindly.
         poll_until!(
             deadline,
             "SELECT COUNT(*) FROM dunning_records
@@ -8091,7 +8401,7 @@ mod coverage_adversarial {
 
         // The loops keep running on the runtime until it drops; restore the
         // process-global environment before other work observes it.
-        let (interval, price, secret, api_base, auto_pay) = previous_env;
+        let (interval, price, secret, api_base, merchant, auto_pay) = previous_env;
         match interval {
             Some(value) => std::env::set_var("PERIODIC_TASK_INTERVAL_MS", value),
             None => std::env::remove_var("PERIODIC_TASK_INTERVAL_MS"),
@@ -8107,6 +8417,10 @@ mod coverage_adversarial {
         match api_base {
             Some(value) => std::env::set_var("ADYEN_API_BASE_URL", value),
             None => std::env::remove_var("ADYEN_API_BASE_URL"),
+        }
+        match merchant {
+            Some(value) => std::env::set_var("ADYEN_MERCHANT_ACCOUNT", value),
+            None => std::env::remove_var("ADYEN_MERCHANT_ACCOUNT"),
         }
         match auto_pay {
             Some(value) => std::env::set_var("AUTO_PAY_OPEN_INVOICES", value),
@@ -8399,77 +8713,76 @@ mod coverage_adversarial {
 
     // ── dedicated-IP cancel fault arms ──────────────────────────────────
 
-    env_test!(
-        dedicated_ip_cancel_failure_rolls_back_and_404_succeeds,
-        |env| {
-            let mock = Mock::default();
-            mock.route("/v1/subscription_items/si_dead", 500, "adyen exploded");
-            mock.route(
-                "/v1/subscription_items/si_gone",
-                404,
-                r#"{"error":{"code":"resource_missing"}}"#,
-            );
-            let base = spawn_mock(mock.clone()).await;
+    env_test!(dedicated_ip_cancel_is_local_and_never_calls_adyen, |env| {
+        let mock = Mock::default();
+        let base = spawn_mock(mock.clone()).await;
 
-            let guard = ENV_LOCK.lock().await;
-            let previous = (
-                std::env::var("ADYEN_API_KEY").ok(),
-                std::env::var("ADYEN_API_BASE_URL").ok(),
-                std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
-            );
-            std::env::set_var("ADYEN_API_KEY", "sk_test_w6c_dip");
-            std::env::set_var("ADYEN_API_BASE_URL", &base);
-            std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "price_w6c_dip");
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
+            std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
+        );
+        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
 
-            seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
-            sqlx::query(
+        // Under Adyen there is no provider-side subscription-item object to
+        // delete and no automatic future add-on charges: ending the add-on
+        // is a LOCAL transition for every row — stale stored references
+        // included (they are activation pspReferences now, not deletable
+        // items). The old two-step failure matrix (500 rolls back, 404
+        // succeeds) pinned a Stripe mechanic with no Adyen analog.
+        seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
+        sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
                                         adyen_recurring_detail_reference)
-             VALUES ('w6cdip-dead', 'w6cdip_cancel', '192.0.2.51', 'active', 'pending_cancel', 'si_dead'),
-                    ('w6cdip-gone', 'w6cdip_cancel', '192.0.2.52', 'active', 'pending_cancel', 'si_gone')",
+             VALUES ('w6cdip-dead', 'w6cdip_cancel', '192.0.2.51', 'active', 'pending_cancel', 'psp_dead'),
+                    ('w6cdip-gone', 'w6cdip_cancel', '192.0.2.52', 'active', 'pending_cancel', 'psp_gone')",
         )
         .execute(&env.pool)
         .await
         .expect("pending cancels");
 
-            let client = Client::new();
-            let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
-                .await
-                .expect("cancel sweep");
-            assert_eq!(
-                canceled, 1,
-                "the 404/resource_missing cancel succeeds, the 500 one does not"
-            );
-            let statuses: Vec<(String, String)> = sqlx::query_as(
-                "SELECT id, billing_status FROM dedicated_ips WHERE id LIKE 'w6cdip-%' ORDER BY id",
-            )
-            .fetch_all(&env.pool)
+        let client = Client::new();
+        let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
             .await
-            .expect("statuses");
-            assert_eq!(
-                statuses,
-                vec![
-                    ("w6cdip-dead".to_string(), "pending_cancel".to_string()),
-                    ("w6cdip-gone".to_string(), "canceled".to_string()),
-                ],
-                "the Adyen failure rolled back whole, the missing resource was finalized"
-            );
+            .expect("cancel sweep");
+        assert_eq!(canceled, 2, "every pending cancel finalizes locally");
+        let statuses: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, billing_status FROM dedicated_ips WHERE id LIKE 'w6cdip-%' ORDER BY id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .expect("statuses");
+        assert_eq!(
+            statuses,
+            vec![
+                ("w6cdip-dead".to_string(), "canceled".to_string()),
+                ("w6cdip-gone".to_string(), "canceled".to_string()),
+            ],
+            "no provider call exists to succeed or fail: both rows finalize"
+        );
+        assert_eq!(
+            mock.call_count("/payments"),
+            0,
+            "cancelling an add-on never moves money"
+        );
 
-            match previous {
-                (Some(a), Some(b), Some(c)) => {
-                    std::env::set_var("ADYEN_API_KEY", a);
-                    std::env::set_var("ADYEN_API_BASE_URL", b);
-                    std::env::set_var("ADYEN_DEDICATED_IP_PRICE", c);
-                }
-                _ => {
-                    std::env::remove_var("ADYEN_API_KEY");
-                    std::env::remove_var("ADYEN_API_BASE_URL");
-                    std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
-                }
+        match previous {
+            (Some(a), Some(b), Some(c)) => {
+                std::env::set_var("ADYEN_API_KEY", a);
+                std::env::set_var("ADYEN_API_BASE_URL", b);
+                std::env::set_var("ADYEN_DEDICATED_IP_PRICE", c);
             }
-            drop(guard);
+            _ => {
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::remove_var("ADYEN_API_BASE_URL");
+                std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
+            }
         }
-    );
+        drop(guard);
+    });
 
     // ── cost margin status arms ─────────────────────────────────────────
 

@@ -96,9 +96,9 @@ to operational and abuse controls.
 
 1. A customer creates or signs in to a workspace.
 2. The authenticated billing surface creates a Adyen Checkout or billing
-   portal session for an allowed catalog price.
-3. ApexMail verifies Adyen's signed webhook and maps the Adyen price back to
-   an active catalog plan.
+   portal session for an allowed catalog plan.
+3. ApexMail verifies Adyen's signed webhook and maps the notified charge back
+   to an active catalog plan.
 4. Only `active` or `trialing` verified subscriptions grant the paid plan;
    incomplete, delinquent, paused, unpaid, and canceled subscriptions resolve
    to Free access.

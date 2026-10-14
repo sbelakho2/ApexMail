@@ -990,9 +990,9 @@ fn validate_usage_alert_channel(channel: &str) -> bool {
     matches!(channel, "email" | "webhook" | "both")
 }
 
-
 fn adyen_api_base_url() -> String {
-    std::env::var("ADYEN_API_BASE_URL").unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
+    std::env::var("ADYEN_API_BASE_URL")
+        .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
 }
 
 #[derive(Clone)]
@@ -5893,9 +5893,12 @@ mod tests {
                 .expect("idempotency key")
                 .to_str()
                 .expect("idempotency key string"),
-            "customer_create_tenant_123",
+            "checkout_tenant_123",
         );
-        assert!(request.headers().get("authorization").is_some());
+        assert!(
+            request.headers().get("authorization").is_none(),
+            "Adyen authenticates with X-API-Key — there is no bearer authorization header"
+        );
     }
 
     #[tokio::test]
@@ -6583,7 +6586,7 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/plans/advpro").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["name"], "advpro");
-        assert_eq!(body["data"]["adyenPriceIdMonthly"], "price_pro_m");
+        assert_eq!(body["data"]["adyenPlanCodeMonthly"], "price_pro_m");
         // An inactive plan is still readable by name (legacy clients need
         // it for renewal copy) but is never in the catalog — asserted above.
         let (status, body) = get(&env, "/v1/billing/plans/advlegacy").await;

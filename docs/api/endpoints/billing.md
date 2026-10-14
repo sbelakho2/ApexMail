@@ -41,21 +41,22 @@ Content-Type: application/json
 
 ```json
 {
-  "priceId": "price_123",
+  "priceId": "<adyen-plan-code>",
   "successUrl": "https://app.apexmail.ee/settings/billing?checkout=success",
   "cancelUrl": "https://app.apexmail.ee/settings/billing?checkout=cancelled"
 }
 ```
 
-`priceId` must be a monthly or yearly Adyen price ID bound to an **active**
+`priceId` must be the monthly or yearly Adyen plan code bound to an **active**
 Starter, Pro, Growth, or Scale catalog row. The API rejects blank, unknown,
-inactive, Enterprise, PAYG, and cross-product price IDs. Both redirect URLs
-must be approved ApexMail URLs.
+inactive, Enterprise, PAYG, and cross-product values. Both redirect URLs must
+be approved ApexMail URLs.
 
 A successful response contains the hosted Adyen Checkout URL and session ID.
 It does **not** grant paid access. The API records the resolved `tenant_id` and
-`plan_name` in Adyen metadata; a verified Adyen subscription webhook is the
-only normal self-service path that activates the paid entitlement.
+`plan_name` in the Adyen Checkout session metadata; a verified Adyen webhook
+notification is the only normal self-service path that activates the paid
+entitlement.
 
 ### Create billing portal session
 

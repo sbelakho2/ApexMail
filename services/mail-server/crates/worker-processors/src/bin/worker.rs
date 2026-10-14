@@ -811,8 +811,7 @@ async fn run_worker(
                     info!("billing maintenance: lease acquired; starting periodic jobs");
                     let billing_config = billing_service::config::BillingConfig {
                         database_url,
-                        adyen_hmac_key: std::env::var("ADYEN_HMAC_KEY")
-                            .unwrap_or_default(),
+                        adyen_hmac_key: std::env::var("ADYEN_HMAC_KEY").unwrap_or_default(),
                         ..Default::default()
                     };
                     let state =

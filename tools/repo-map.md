@@ -98,7 +98,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **223 `*.sql` files**, latest `251_gates_review_data_fixups.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **224 `*.sql` files**, latest `252_adyen_billing_renames.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

@@ -743,6 +743,15 @@ DROP_TABLE_RE = re.compile(
     r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:public\.)?\"?([a-z0-9_]+)\"?",
     re.IGNORECASE,
 )
+# RENAMEs matter to the net-schema computation: migration 252 renames the
+# provider tables (`stripe_webhook_events` → `adyen_webhook_events`, …) inside
+# DO $$ blocks, so without this the ledger planned tables the live DB no
+# longer has (every renamed table looked missing, every current name orphaned).
+RENAME_TABLE_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:public\.)?\"?([a-z0-9_]+)\"?\s+"
+    r"RENAME\s+TO\s+(?:public\.)?\"?([a-z0-9_]+)\"?",
+    re.IGNORECASE,
+)
 PARTITION_OF_RE = re.compile(r"PARTITION\s+OF\s+(?:public\.)?\"?([a-z0-9_]+)\"?", re.IGNORECASE)
 
 
@@ -805,9 +814,10 @@ def mask_sql_literals(text: str) -> str:
 
 
 def migration_tables() -> dict[str, list[str]]:
-    """Net CREATE/DROP table names across the migration chain, applied in
-    migration order (066 drops and recreates `metering_events` as partitioned;
-    a global set-difference wrongly reported it missing).
+    """Net CREATE/DROP/RENAME table names across the migration chain, applied
+    in migration order (066 drops and recreates `metering_events` as
+    partitioned; a global set-difference wrongly reported it missing; 252
+    renames the four provider tables inside DO $$ blocks).
 
     String literals are blanked first (dynamic `format('CREATE TABLE x_%s')`
     partition builders and NOTICE strings are not static declarations), and a
@@ -816,23 +826,48 @@ def migration_tables() -> dict[str, list[str]]:
     created: dict[str, list[str]] = {}
     present: dict[str, list[str]] = {}
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        text = mask_sql_literals(path.read_text(errors="replace"))
-        events: list[tuple[int, str, str]] = []
+        raw = path.read_text(errors="replace")
+        text = mask_sql_literals(raw)
+        events: list[tuple[int, str, str, str]] = []
         for pattern in (CREATE_TABLE_RE, PARTITION_OF_RE):
             for match in pattern.finditer(text):
                 name = match.group(1)
                 if text[match.end():match.end() + 1] == "%":
                     continue                     # dynamic format placeholder
-                events.append((match.start(), "create", name))
+                events.append((match.start(), "create", name, ""))
         for match in DROP_TABLE_RE.finditer(text):
-            events.append((match.start(), "drop", match.group(1)))
+            events.append((match.start(), "drop", match.group(1), ""))
+        renames: list[tuple[str, str]] = []
+        for match in RENAME_TABLE_RE.finditer(text):
+            renames.append((match.group(1), match.group(2)))
+            events.append((match.start(), "rename", match.group(1), match.group(2)))
+        # The 050 idiom moves the live table aside as a `<name>_old` backup and
+        # drops the backup inside the same DO block with a dynamic
+        # `EXECUTE 'DROP TABLE IF EXISTS <name>'` — string-masked, so the scan
+        # cannot see the drop. Gate on a same-file rename so NOTICE/WARNING
+        # text mentioning an `_old` name elsewhere never removes a live table.
+        transient = {
+            new for _old, new in renames
+            if new.endswith("_old") and re.search(
+                r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[\"']?" + re.escape(new) + r"\b",
+                raw, re.IGNORECASE,
+            )
+        }
         # statements execute top-to-bottom: a DROP followed by a CREATE in the
         # same migration (066 recreates metering_events as partitioned) nets a
-        # live table, never a phantom removal.
-        for _position, kind, name in sorted(events):
+        # live table, never a phantom removal; a RENAME moves the live name
+        # (and its source attribution) forward, while a transient backup rename
+        # nets the old name away.
+        for _position, kind, name, new_name in sorted(events):
             if kind == "create":
                 created.setdefault(name, []).append(path.name)
                 present[name] = sorted(set(created[name]))
+            elif kind == "rename":
+                if name in present:
+                    if new_name in transient:
+                        present.pop(name)
+                    else:
+                        present[new_name] = present.pop(name)
             else:
                 present.pop(name, None)
     net = {name: files for name, files in present.items() if name != "_sqlx_migrations"}

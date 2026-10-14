@@ -365,10 +365,12 @@ async fn seed_adyen_subscription(
     cycle_end: DateTime<Utc>,
 ) {
     sqlx::query(
+        // Adyen has no customer object: the shopper reference IS the tenant
+        // id, and the plan code is OUR merchant-defined catalog code.
         "INSERT INTO adyen_subscriptions
              (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
               billing_cycle_end, adyen_shopper_reference, adyen_plan_code)
-         VALUES ($1, $2, 'growth', $3, $4, $5, 'cus_cov', 'price_cov')",
+         VALUES ($1, $2, 'growth', $3, $4, $5, $1, 'apexmail_growth_monthly')",
     )
     .bind(tenant_id)
     .bind(subscription_id)
@@ -3820,68 +3822,65 @@ db_test!(
     }
 );
 
-db_test!(
-    adyen_webhook_replay_is_idempotent_and_reclaims_stale,
-    |h| {
-        let app = billing_service::routes::router(h.state.clone());
-        let tenant = "cov_wh_replay";
-        seed_tenant(&h, tenant, "free").await;
-        seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
+db_test!(adyen_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
+    let app = billing_service::routes::router(h.state.clone());
+    let tenant = "cov_wh_replay";
+    seed_tenant(&h, tenant, "free").await;
+    seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
 
-        let now = Utc::now().timestamp();
-        let payload = adyen_notification(
-            "evt_cov_replay",
-            "customer.subscription.created",
-            subscription_object(
-                tenant,
-                "sub_cov_replay",
-                "active",
-                "price_cov_monthly",
-                now,
-                now + 2_592_000,
-            ),
-        );
+    let now = Utc::now().timestamp();
+    let payload = adyen_notification(
+        "evt_cov_replay",
+        "customer.subscription.created",
+        subscription_object(
+            tenant,
+            "sub_cov_replay",
+            "active",
+            "price_cov_monthly",
+            now,
+            now + 2_592_000,
+        ),
+    );
 
-        expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
+    expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
 
-        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_one(&h.pool)
-            .await
-            .expect("tenant plan");
-        assert_eq!(
-            plan, "growth",
-            "verified subscription webhook grants the plan"
-        );
-        let watermark_after_first: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT event_watermark FROM adyen_subscriptions WHERE tenant_id = $1",
-        )
+    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
         .bind(tenant)
         .fetch_one(&h.pool)
         .await
-        .expect("watermark");
-        assert!(watermark_after_first.is_some(), "watermark recorded");
+        .expect("tenant plan");
+    assert_eq!(
+        plan, "growth",
+        "verified subscription webhook grants the plan"
+    );
+    let watermark_after_first: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT event_watermark FROM adyen_subscriptions WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("watermark");
+    assert!(watermark_after_first.is_some(), "watermark recorded");
 
-        // Replay: 200, no re-application, no duplicate rows.
-        expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
-        let events: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_replay'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("count replay rows");
-        assert_eq!(events, 1, "one claim row per event id");
-        let subs: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&h.pool)
-                .await
-                .expect("count subscriptions");
-        assert_eq!(subs, 1);
+    // Replay: 200, no re-application, no duplicate rows.
+    expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_replay'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("count replay rows");
+    assert_eq!(events, 1, "one claim row per event id");
+    let subs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("count subscriptions");
+    assert_eq!(subs, 1);
 
-        // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
-        // fresh one is left alone.
-        sqlx::query(
+    // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
+    // fresh one is left alone.
+    sqlx::query(
         "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, created_at, updated_at)
          VALUES (gen_random_uuid(), 'evt_cov_stale', 'customer.subscription.updated', 'pending',
                  NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '11 minutes'),
@@ -3892,26 +3891,25 @@ db_test!(
     .await
     .expect("seed pending rows");
 
-        let reclaimed = billing_service::adyen_webhooks::reclaim_stale_pending_webhooks(&h.state)
-            .await
-            .expect("reclaim");
-        assert_eq!(reclaimed, vec!["evt_cov_stale".to_string()]);
-        let stale_status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_stale'",
-        )
-        .fetch_one(&h.pool)
+    let reclaimed = billing_service::adyen_webhooks::reclaim_stale_pending_webhooks(&h.state)
         .await
-        .expect("stale row");
-        assert_eq!(stale_status, "received");
-        let fresh_status: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_fresh'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("fresh row");
-        assert_eq!(fresh_status, "pending", "fresh pending work is not stolen");
-    }
-);
+        .expect("reclaim");
+    assert_eq!(reclaimed, vec!["evt_cov_stale".to_string()]);
+    let stale_status: String = sqlx::query_scalar(
+        "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_stale'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("stale row");
+    assert_eq!(stale_status, "received");
+    let fresh_status: String = sqlx::query_scalar(
+        "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_fresh'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("fresh row");
+    assert_eq!(fresh_status, "pending", "fresh pending work is not stolen");
+});
 
 db_test!(adyen_webhook_out_of_order_events_never_rewind_state, |h| {
     let app = billing_service::routes::router(h.state.clone());
@@ -4118,11 +4116,12 @@ db_test!(adyen_webhook_invoice_paid_persists_verified_payment, |h| {
     replay["id"] = serde_json::json!("evt_cov_paid_replay");
     let (status, _) = post_signed_webhook(&app, &replay, now).await;
     assert_eq!(status, StatusCode::OK);
-    let invoices: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_cov_paid'")
-            .fetch_one(&h.pool)
-            .await
-            .expect("count invoices");
+    let invoices: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_cov_paid'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("count invoices");
     assert_eq!(invoices, 1, "replay is idempotent on the Adyen invoice id");
 
     // The tax snapshot is immutable and reconciled.
@@ -4587,7 +4586,7 @@ db_test!(
         sqlx::query(
             "INSERT INTO adyen_subscriptions
              (tenant_id, adyen_subscription_id, plan, status, adyen_shopper_reference)
-         VALUES ($1, 'sub_cov_proration', 'growth', 'active', 'cus_cov_proration')",
+         VALUES ($1, 'sub_cov_proration', 'growth', 'active', $1)",
         )
         .bind(tenant)
         .execute(&h.pool)
@@ -5850,11 +5849,11 @@ db_test!(
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let status_text: String = sqlx::query_scalar(
-        "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_cov_bound'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .unwrap();
+            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_cov_bound'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
         assert_eq!(status_text, "active", "refused event never rewinds state");
 
         // A subscription with no line-item price cannot grant anything.

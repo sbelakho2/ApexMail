@@ -1927,7 +1927,9 @@ mod coverage_adversarial {
             api_call_limit: api_limit,
             sort_order: 7,
             features: PlanFeatures::default(),
-            adyen_plan_code_monthly: Some("price_cov_monthly".to_string()),
+            // A merchant-defined plan code (Adyen has no provider price
+            // objects; the code is OUR catalog key).
+            adyen_plan_code_monthly: Some("apexmail_plcov_monthly".to_string()),
             adyen_plan_code_yearly: None,
         }
     }
@@ -1946,18 +1948,18 @@ mod coverage_adversarial {
             // and a NULL adyen id preserves the stored one.
             let mut update = upsert("plcov_plan", 300, 400);
             update.adyen_plan_code_monthly = None;
-            update.adyen_plan_code_yearly = Some("price_cov_yearly".to_string());
+            update.adyen_plan_code_yearly = Some("apexmail_plcov_yearly".to_string());
             let updated = upsert_plan_input(&env.pool, &update).await.expect("update");
             assert_eq!(updated.id, created.id, "same row, updated in place");
             assert_eq!(updated.email_limit, 300);
             assert_eq!(
                 updated.adyen_plan_code_monthly.as_deref(),
-                Some("price_cov_monthly"),
-                "an omitted Adyen price never erases the stored id"
+                Some("apexmail_plcov_monthly"),
+                "an omitted Adyen plan code never erases the stored id"
             );
             assert_eq!(
                 updated.adyen_plan_code_yearly.as_deref(),
-                Some("price_cov_yearly")
+                Some("apexmail_plcov_yearly")
             );
             let rows: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM plans WHERE name = 'plcov_plan'")

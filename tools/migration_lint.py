@@ -142,7 +142,10 @@ LEGACY_HEADER = {
     "065_webhook_dual_secret_rotation.sql",
     "066_fix_remaining_db_faults_v2.sql",
     "067_fix_remaining_db_faults_v3.sql",
-    "074_adyen_billing_schema_fixes.sql",
+    # The applied migration FILES keep their historical names (ledger-frozen);
+    # the exemption list must match the filenames on disk, not the provider
+    # wording a sweep would prefer.
+    "074_stripe_billing_schema_fixes.sql",
     "077_add_hipaa_event_signature.sql",
     "078_race_condition_fixes.sql",
     "079_estonia_ou_compliance.sql",
@@ -197,11 +200,11 @@ LEGACY_HEADER = {
     "132_billing_addresses_state_email.sql",
     "133_abuse_reports_status.sql",
     "134_credit_notes.sql",
-    "135_adyen_subscriptions_plan_backfill.sql",
+    "135_stripe_subscriptions_plan_backfill.sql",
     "136_invoices_unique_overage_period.sql",
     "137_billing_periods.sql",
     "138_invoice_collection_outbox.sql",
-    "139_invoices_adyen_item_id.sql",
+    "139_invoices_stripe_item_id.sql",
     "140_invoice_payment_allocations.sql",
     "150_contacts_tags_canonical.sql",
     "159_reply_events_canonical.sql",

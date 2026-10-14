@@ -45,14 +45,14 @@ BEGIN
     END IF;
 END $$;
 
-ALTER TABLE adyen_shoppers ADD COLUMN IF NOT EXISTS shopper_reference VARCHAR(128);
-UPDATE adyen_shoppers SET shopper_reference = tenant_id WHERE shopper_reference IS NULL;
+ALTER TABLE adyen_shoppers ADD COLUMN IF NOT EXISTS adyen_shopper_reference VARCHAR(128);
+UPDATE adyen_shoppers SET adyen_shopper_reference = tenant_id WHERE adyen_shopper_reference IS NULL;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema = 'public' AND table_name = 'adyen_shoppers'
-                 AND column_name = 'shopper_reference' AND is_nullable = 'YES') THEN
-        ALTER TABLE adyen_shoppers ALTER COLUMN shopper_reference SET NOT NULL;
+                 AND column_name = 'adyen_shopper_reference' AND is_nullable = 'YES') THEN
+        ALTER TABLE adyen_shoppers ALTER COLUMN adyen_shopper_reference SET NOT NULL;
     END IF;
 END $$;
 
@@ -379,7 +379,7 @@ END $$;
 -- 7. Table comments follow the rename (operator-facing truth)
 -- ---------------------------------------------------------------------------
 COMMENT ON TABLE adyen_shoppers IS
-    'Billing shopper identity: shopper_reference = tenant id (the Adyen shopperReference); legacy_stripe_customer_id preserves the pre-cutover provider id.';
+    'Billing shopper identity: adyen_shopper_reference = tenant id (the Adyen shopperReference); legacy_stripe_customer_id preserves the pre-cutover provider id.';
 COMMENT ON TABLE adyen_subscriptions IS
     'Our subscription state machine (billing cycles, dunning watermark, admin overrides). adyen_recurring_detail_reference carries the Adyen stored-payment token once the customer re-tokenizes at cutover.';
 COMMENT ON TABLE adyen_webhook_events IS
@@ -397,3 +397,91 @@ COMMENT ON COLUMN plans.adyen_plan_code_monthly IS
     'Provider-facing plan reference for monthly charges (sent as the Adyen charge reference). Amounts come inline from platform-catalog.';
 COMMENT ON COLUMN plans.adyen_plan_code_yearly IS
     'Provider-facing plan reference for yearly charges (sent as the Adyen charge reference). Amounts come inline from platform-catalog.';
+
+-- ---------------------------------------------------------------------------
+-- 8. Follow-ups the renames require
+-- ---------------------------------------------------------------------------
+
+-- 8a. The immutability function's BODY still printed the old column name and
+-- referenced OLD.stripe_invoice_id, which the rename above removed — snapshot
+-- edits would fail with a raw plpgsql "no field" error instead of the
+-- intended, self-describing refusal. Recreate it against the renamed column.
+CREATE OR REPLACE FUNCTION prevent_adyen_tax_snapshot_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'adyen_tax_snapshots is immutable (attempted % on %)',
+        TG_OP, COALESCE(OLD.adyen_psp_reference, '(unknown)');
+END;
+$$ LANGUAGE plpgsql;
+
+-- 8b. Payment allocations record the settlement processor. The post-cutover
+-- value is 'adyen'; 'stripe' stays in the allowed set ONLY so rows settled
+-- before the cutover remain valid — the same provenance rule the
+-- legacy_stripe_* columns follow.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'invoice_payment_allocations_source_check') THEN
+        ALTER TABLE invoice_payment_allocations
+            DROP CONSTRAINT invoice_payment_allocations_source_check;
+    END IF;
+END $$;
+ALTER TABLE invoice_payment_allocations
+    ADD CONSTRAINT invoice_payment_allocations_source_check
+    CHECK (source IN ('wallet', 'stripe', 'adyen', 'manual', 'credit_note'));
+
+-- 8c. Accounting chart roles and processor/clearing enumerations follow the
+-- processor switch. Migration 220 enumerated provider-named values; extend
+-- every CHECK for the Adyen-era values and rename already-seeded rows so a
+-- previously charted deployment keeps resolving by role. The stripe_* values
+-- stay allowed ONLY for historical rows (same provenance rule as the
+-- legacy_stripe_* columns).
+DO $$
+BEGIN
+    UPDATE chart_of_accounts SET account_role = 'adyen_clearing'
+        WHERE account_role = 'stripe_clearing';
+    UPDATE chart_of_accounts SET account_role = 'adyen_fees'
+        WHERE account_role = 'stripe_fees';
+    UPDATE processor_clearing_accounts SET processor = 'adyen'
+        WHERE processor = 'stripe';
+    UPDATE accounting_source_documents SET source_type = 'adyen_settlement'
+        WHERE source_type = 'stripe_settlement';
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chart_of_accounts_account_role_check') THEN
+        ALTER TABLE chart_of_accounts DROP CONSTRAINT chart_of_accounts_account_role_check;
+    END IF;
+    ALTER TABLE chart_of_accounts ADD CONSTRAINT chart_of_accounts_account_role_check
+        CHECK (account_role IS NULL OR account_role IN (
+            'ar', 'ap', 'revenue', 'refunds', 'vat_output', 'vat_input',
+            'bank', 'bank_clearing', 'stripe_clearing', 'stripe_fees',
+            'adyen_clearing', 'adyen_fees',
+            'wallet_liability', 'expense_default', 'payroll_expense',
+            'net_wages_payable', 'income_tax_payable', 'social_tax_payable',
+            'unemployment_payable', 'pension_payable', 'fx_gain', 'fx_loss',
+            'depreciation_expense', 'accumulated_depreciation',
+            'retained_earnings', 'suspense', 'other_income'
+        ));
+
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'accounting_source_documents_source_type_check') THEN
+        ALTER TABLE accounting_source_documents DROP CONSTRAINT accounting_source_documents_source_type_check;
+    END IF;
+    ALTER TABLE accounting_source_documents ADD CONSTRAINT accounting_source_documents_source_type_check
+        CHECK (source_type IN (
+            'invoice', 'credit_note', 'credit_note_refund', 'stripe_settlement',
+            'adyen_settlement',
+            'wallet_settlement', 'manual_settlement', 'expense',
+            'bank_statement_line', 'payroll', 'tax', 'manual',
+            'opening_balance', 'depreciation', 'fx_revaluation', 'reversal',
+            'closing'
+        ));
+
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'processor_clearing_accounts_processor_check') THEN
+        ALTER TABLE processor_clearing_accounts DROP CONSTRAINT processor_clearing_accounts_processor_check;
+    END IF;
+    ALTER TABLE processor_clearing_accounts ADD CONSTRAINT processor_clearing_accounts_processor_check
+        CHECK (processor IN ('stripe', 'adyen', 'paypal', 'bank'));
+END $$;
