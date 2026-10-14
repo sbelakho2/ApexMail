@@ -50,7 +50,7 @@ La liste actuelle des sous-traitants autorisés est tenue dans le [Registre des 
 | Amazon Web Services, Inc. | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Clauses contractuelles types de l'UE (DPA AWS) |
 | Google LLC | Authentification OAuth optionnelle | Mondial (entité américaine, données traitées selon la configuration OAuth) | Clauses contractuelles types |
 | GitHub, Inc. | Authentification OAuth optionnelle | Mondial (entité américaine) | Clauses contractuelles types |
-| Stripe, Inc. | Traitement des paiements | États-Unis (principal), Inde (support) | Clauses contractuelles types |
+| Adyen N.V. | Traitement des paiements | États-Unis (principal), Inde (support) | Clauses contractuelles types |
 
 L'infrastructure auto-hébergée (ClickHouse, Redis) s'exécute sur des serveurs Hetzner sous le contrôle opérationnel d'ApexMail. Les éditeurs open source en amont ne traitent pas les données des clients.
 

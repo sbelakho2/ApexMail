@@ -49,7 +49,7 @@ Les frais sont facturés mensuellement ou annuellement selon votre choix. Les pr
 
 ### 7.1 Renouvellement automatique
 
-Les abonnements sont renouvelés automatiquement à la fin de chaque période de facturation, sauf résiliation avant la date de renouvellement. Les modifications et résiliations en libre-service s'effectuent via le portail de facturation Stripe. La résiliation prend effet conformément à l'événement de facturation Stripe confirmé ; aucun remboursement n'est accordé pour les périodes partielles.
+Les abonnements sont renouvelés automatiquement à la fin de chaque période de facturation, sauf résiliation avant la date de renouvellement. Les modifications et résiliations en libre-service s'effectuent via le portail de facturation Adyen. La résiliation prend effet conformément à l'événement de facturation Adyen confirmé ; aucun remboursement n'est accordé pour les périodes partielles.
 
 ### 7.2 Changements de prix
 

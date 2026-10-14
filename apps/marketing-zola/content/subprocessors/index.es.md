@@ -21,7 +21,7 @@ Las siguientes entidades externas tratan datos personales de clientes por cuenta
 | Amazon Web Services, Inc. | AWS SES | Transporte de entrega de email | Entrega de email cuando está activada | Contenido de los emails y direcciones de los destinatarios | Región de SES configurada | Región de SES configurada | EE. UU. | Cláusulas Contractuales Tipo de la UE (DPA de AWS) | No — solo cuando la implementación activa usa SES |
 | Google LLC | Google | Autenticación OAuth | Inicio de sesión mediante Google OAuth | Tokens OAuth, dirección de email, nombre | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No — solo si el cliente activa Google OAuth |
 | GitHub, Inc. | GitHub | Autenticación OAuth | Inicio de sesión mediante GitHub OAuth | Tokens OAuth, nombre de usuario, dirección de email | Global (datos de la UE) | Usuarios con sede en el EEE: EEE | EE. UU. | Cláusulas Contractuales Tipo (SCC) | No — solo si el cliente activa GitHub OAuth |
-| Stripe, Inc. | Stripe | Procesamiento de pagos | Facturación por suscripción, facturación, almacenamiento de métodos de pago | Tokens de métodos de pago, metadatos de transacciones, datos de facturas | EE. UU. (principal); India (soporte) | EE. UU. | EE. UU. | Cláusulas Contractuales Tipo (SCC) según el DPA de Stripe | Sí — necesario para los planes de pago |
+| Adyen N.V. | Adyen | Procesamiento de pagos | Facturación por suscripción, facturación, almacenamiento de métodos de pago | Tokens de métodos de pago, metadatos de transacciones, datos de facturas | EE. UU. (principal); India (soporte) | EE. UU. | EE. UU. | Cláusulas Contractuales Tipo (SCC) según el DPA de Adyen | Sí — necesario para los planes de pago |
 
 ### Infraestructura autoalojada (no son subprocesadores externos)
 
@@ -44,4 +44,4 @@ Si se opone a un nuevo subprocesador por motivos razonables de protección de da
 
 | Fecha | Cambio | Descripción |
 |---|---|---|
-| 2026-07-29 | Publicación inicial | Registro de subprocesadores publicado con Hetzner (infraestructura), AWS (S3/SES, cuando están activados), Google (OAuth), GitHub (OAuth) y Stripe (pagos). ClickHouse y Redis son software autoalojado, no subprocesadores (véase arriba). |
+| 2026-07-29 | Publicación inicial | Registro de subprocesadores publicado con Hetzner (infraestructura), AWS (S3/SES, cuando están activados), Google (OAuth), GitHub (OAuth) y Adyen (pagos). ClickHouse y Redis son software autoalojado, no subprocesadores (véase arriba). |

@@ -178,7 +178,7 @@ ApexMail uses **Hetzner Cloud floating IPs** for all dedicated sending IPs. Thes
 When a tenant upgrades to a plan with dedicated IPs:
 
 ```
-Stripe webhook (plan change)
+Adyen webhook (plan change)
   → billing-service: auto_provision_dedicated_ips_background()
   → POST /v1/dedicated-ips
   → DedicatedIpProvider::allocate_ip()

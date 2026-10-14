@@ -172,7 +172,7 @@ See [operations/runbooks/README.md](./runbooks/README.md) for the complete list 
 | Engineering lead | PagerDuty + Slack DM |
 | Hetzner support | Cloud console ticket |
 | Zone.ee support | Dashboard ticket |
-| Stripe support | Dashboard ticket |
+| Adyen support | Dashboard ticket |
 | Domain registrar | Provider dashboard |
 
 ---

@@ -36,7 +36,7 @@ Whether AWS SES is enabled, and the delivery provider and region used, are contr
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Stripe, Inc.** | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | USA (primary); India (support) | Standard Contractual Clauses (SCCs) per the Stripe Data Processing Agreement; Stripe is PCI DSS Level 1 certified |
+| **Adyen N.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | USA (primary); India (support) | Standard Contractual Clauses (SCCs) per the Adyen Data Processing Agreement; Adyen is PCI DSS Level 1 certified |
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 

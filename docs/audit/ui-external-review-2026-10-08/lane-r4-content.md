@@ -216,7 +216,7 @@ Legend: **F-ALREADY** = current tree already satisfied the recommendation (evide
 | 38 | Transactional email | F-NOW | First-send path + diagnostics link added before the narrative in all 4; plan names corrected |
 | 39 | Status | F-ALREADY (substance) + R3 | EN template already distinguishes manual viewing/JSON from subscription and avoids health claims; localization blocked by `status.html` (no i18n refs; content not rendered) → reported |
 | 40 | Subprocessors | F-NOW | Full registers restored in de/es/fr; EN table cell counts corrected (10/6/3 columns) |
-| 41 | Terms | F-NOW (name) | Renewal/cancellation navigation (7.1 auto-renewal + Stripe portal) in all 4; de "Scale"→"Business" |
+| 41 | Terms | F-NOW (name) | Renewal/cancellation navigation (7.1 auto-renewal + Adyen portal) in all 4; de "Scale"→"Business" |
 
 ### 8.2 English-only families (13)
 
@@ -245,7 +245,7 @@ Legend: **F-ALREADY** = current tree already satisfied the recommendation (evide
    Values are real translations (no English prose: the gate's untranslated check and my
    own paragraph scan both clean). The de `compliance.cta_subtitle` empty string was
    filled. Answers use only catalog numbers (3,000/month + 30,000 one-time; per-plan
-   overage ladder; ten monthly payments ≈ 16.7%; "not offered" HIPAA; Stripe entitlement
+   overage ladder; ten monthly payments ≈ 16.7%; "not offered" HIPAA; Adyen entitlement
    wording).
 2. **Privacy retention anchors** — `<span id="data-retention"></span>` in all four
    privacy pages; every cross-page retention link now resolves (fragment proof below).

@@ -6119,7 +6119,7 @@ paths:
   /billing/checkout:
     post:
       operationId: createBillingCheckoutSession
-      summary: Create a Stripe checkout session
+      summary: Create a Adyen checkout session
       tags:
         - Billing
       parameters:
@@ -6168,7 +6168,7 @@ paths:
   /billing/portal:
     post:
       operationId: createBillingPortalSession
-      summary: Create a Stripe billing portal session
+      summary: Create a Adyen billing portal session
       tags:
         - Billing
       parameters:
@@ -6547,7 +6547,7 @@ paths:
     get:
       operationId: getBillingSubscription
       summary: Get subscription details
-      description: Return the current Stripe-backed subscription details for the authenticated tenant.
+      description: Return the current Adyen-backed subscription details for the authenticated tenant.
       tags:
         - Billing
       responses:
@@ -6867,19 +6867,19 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /webhooks/stripe:
+  /webhooks/adyen:
     post:
-      operationId: receiveStripeWebhook
-      summary: Receive Stripe webhook
-      description: Stripe webhook endpoint with signature verification, event deduplication, and dead-letter handling for malformed or failed events.
+      operationId: receiveAdyenWebhook
+      summary: Receive Adyen webhook
+      description: Adyen webhook endpoint with signature verification, event deduplication, and dead-letter handling for malformed or failed events.
       tags:
         - Webhooks
         - Billing
       parameters:
-        - name: stripe-signature
+        - name: adyen-hmac-signature
           in: header
           required: true
-          description: Stripe webhook signature header
+          description: Adyen webhook signature header
           schema:
             type: string
         - name: Idempotency-Key
@@ -6907,7 +6907,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StripeWebhookAck'
+                $ref: '#/components/schemas/AdyenWebhookAck'
         '400':
           description: Missing signature, invalid payload, or processing failure
           content:
@@ -11271,11 +11271,11 @@ components:
           description: Monthly API call quota (not per-minute)
         features:
           $ref: '#/components/schemas/BillingPlanFeatures'
-        stripePriceIdMonthly:
+        adyenPriceIdMonthly:
           oneOf:
             - type: string
             - type: 'null'
-        stripePriceIdYearly:
+        adyenPriceIdYearly:
           oneOf:
             - type: string
             - type: 'null'
@@ -11421,9 +11421,9 @@ components:
       required:
         - id
         - tenantId
-        - stripeSubscriptionId
-        - stripeCustomerId
-        - stripePriceId
+        - adyenSubscriptionId
+        - adyenCustomerId
+        - adyenPriceId
         - status
         - billingInterval
         - billingCycleStart
@@ -11436,11 +11436,11 @@ components:
           type: string
         tenantId:
           type: string
-        stripeSubscriptionId:
+        adyenSubscriptionId:
           type: string
-        stripeCustomerId:
+        adyenCustomerId:
           type: string
-        stripePriceId:
+        adyenPriceId:
           type: string
         status:
           type: string
@@ -11567,7 +11567,7 @@ components:
           type: string
         tenantId:
           type: string
-        stripeInvoiceId:
+        adyenInvoiceId:
           oneOf:
             - type: string
             - type: 'null'
@@ -11903,7 +11903,7 @@ components:
         offset:
           type: integer
 
-    StripeWebhookAck:
+    AdyenWebhookAck:
       type: object
       properties:
         received:

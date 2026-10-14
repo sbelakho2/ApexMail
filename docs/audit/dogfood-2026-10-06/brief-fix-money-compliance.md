@@ -38,7 +38,7 @@ properly and add a regression test that fails without the fix. Work in
    emits the `admin` claim it checks, and the container lacks `JWT_PRIVATE_KEY_PEM` so SSO cannot
    mint a console cookie. Fix the claim check to the real operator claim/role and wire the key in
    the dev compose so an operator can configure SSO; test the configurator accepts an owner session.
-7. **P2 VAT third-month fallback sweep is never scheduled** while `stripe_webhooks.rs:2532` claims
+7. **P2 VAT third-month fallback sweep is never scheduled** while `adyen_webhooks.rs:2532` claims
    "the sweep" handles it — schedule it (or make the claim true) and test it runs.
 8. **P2 wallet-reservation sweep is dead** (nothing writes `wallet_reservations`) — either wire the
    reservation writer (if the feature is real) or, if the flow was replaced, remove the dead sweep

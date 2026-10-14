@@ -30,7 +30,7 @@ Working tree: main, dirty (expected). Reviewer: subagent, read-only.
 - [x] services/mail-server/crates/billing-service/src/metering_monitor.rs
 - [x] services/mail-server/crates/billing-service/src/invoices.rs (part 1/2)
 - [x] services/mail-server/crates/billing-service/src/credit_notes.rs
-- [x] services/mail-server/crates/billing-service/src/stripe_webhooks.rs (targeted: settlement/tax/import/period snapshot; 2 findings reviewed)
+- [x] services/mail-server/crates/billing-service/src/adyen_webhooks.rs (targeted: settlement/tax/import/period snapshot; 2 findings reviewed)
 - [x] services/mail-server/crates/billing-service/src/maintenance.rs (targeted: SLA credits, auto-pay, wallet sweeps, payment recovery; finding P2 dead reservation machinery)
 - [x] services/mail-server/crates/accounting-core/src/posting.rs (clean)
 - [x] services/mail-server/crates/accounting-core/src/adapters.rs (clean)
@@ -48,7 +48,7 @@ bank_ingest, sweeps, periods}; compliance {consent_enforcement, suppressions (pu
 processing/erasure core)}; ai-service {knowledge, verifier (core), pipeline (run/fallback)}; sales-autopilot
 {autonomy, sequence_worker execution gate, personalization claim gate, dispatcher admission greps}; SDK endpoint
 surfaces (php/python/java/ruby greps + PHP/Python email resources).
-Targeted/hit-scan only (high-signal greps, not full reads): billing-service {stripe_webhooks, maintenance, routes,
+Targeted/hit-scan only (high-signal greps, not full reads): billing-service {adyen_webhooks, maintenance, routes,
 vat_kmd, vat_emta, simulation, bin/server, coverage_adversarial}; compliance {audit_logger, dsr_outbox_flush,
 dsr_rate_limit, retention_sweep, routes, governance, entitlements, claims_registry, feature_registry, trust_portal,
 spending_controls, abuse_gating, signing}; ai-service {chat, email_agent, routes, tools, defense, inference,

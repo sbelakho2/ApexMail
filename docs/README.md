@@ -44,7 +44,7 @@ docs/
 ├── sending/                # Sending guides (rest-api, smtp, batch, scheduling, cancellation,
 │                           #   idempotency, attachments, tags, test-mode, …)
 ├── tool-contracts/         # Internal per-tool engineering contracts (postgres, redis, clickhouse,
-│                           #   hetzner, ses, stripe, prometheus, zone-ee)
+│                           #   hetzner, ses, adyen, prometheus, zone-ee)
 ├── user-guide/             # End-user docs (getting-started, contacts, delivery-options, glossary,
 │                           #   assistant, inbox-placement-testing, troubleshooting)
 ├── pricing.md, pricing-authority.md, sla.md, quickstart.md

@@ -209,7 +209,7 @@
 8 docs/tool-contracts/prometheus.md
 15 docs/tool-contracts/redis.md
 10 docs/tool-contracts/ses.md
-4 docs/tool-contracts/stripe.md
+4 docs/tool-contracts/adyen.md
 9 docs/tool-contracts/zone-ee.md
 23 docs/user-guide/contacts.md
 4 docs/user-guide/delivery-options.md

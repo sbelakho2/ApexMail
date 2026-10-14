@@ -132,7 +132,7 @@ A single authoritative data-location matrix has been created at `/data-locations
 
 Account data, API keys, sender and recipient addresses, message content, attachments, events and logs, authentication, billing, support, analytics, security logs, and backups.
 
-All categories confirm primary storage and processing in Hetzner data centers in Germany and Finland. Transfers outside the EEA (Stripe US/India, Google OAuth US, GitHub OAuth US) are documented with SCC safeguards.
+All categories confirm primary storage and processing in Hetzner data centers in Germany and Finland. Transfers outside the EEA (Adyen US/India, Google OAuth US, GitHub OAuth US) are documented with SCC safeguards.
 
 The Privacy Policy (all locales) now references the matrix in section 4 with a summary location table. The DPA (all locales) references the Data Locations page in section 6. The data-locations.md page is the single authoritative source for all location disclosures referenced by Privacy, DPA, Security, Compliance, Enterprise, Private Cloud, and the Subprocessor Register.
 
@@ -141,7 +141,7 @@ The Privacy Policy (all locales) now references the matrix in section 4 with a s
 The DPA across all locales and formats has been corrected:
 
 Registry code: 16588745 (correct).
-Subprocessors: all four authorised subprocessors listed (Hetzner, Google, GitHub, Stripe), not only Hetzner.
+Subprocessors: all four authorised subprocessors listed (Hetzner, Google, GitHub, Adyen), not only Hetzner.
 Location disclosure: core infrastructure processing in Germany and Finland (Hetzner), not claimed as Estonia-only.
 Subprocessor Register: incorporated by reference and forms part of the DPA.
 Breach clause: "without undue delay" language per GDPR Article 33, distinguishing processor notification from the controller's 72-hour supervisory-authority deadline.

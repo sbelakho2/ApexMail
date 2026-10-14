@@ -22,7 +22,7 @@ The following third-party entities process customer personal data on behalf of A
 | Amazon Web Services, Inc. | AWS SES | Email-delivery transport | Email delivery when enabled | Email content and recipient addresses | Configured SES region | Configured SES region | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses SES |
 | Google LLC | Google | OAuth authentication | User sign-in via Google OAuth | OAuth tokens, email address, name | Global (EU data) | EU/EEA-based users: EEA | USA | Standard Contractual Clauses (SCCs) | No — only if customer enables Google OAuth |
 | GitHub, Inc. | GitHub | OAuth authentication | User sign-in via GitHub OAuth | OAuth tokens, username, email address | Global (EU data) | EU/EEA-based users: EEA | USA | Standard Contractual Clauses (SCCs) | No — only if customer enables GitHub OAuth |
-| Stripe, Inc. | Stripe | Payment processing | Subscription billing, invoicing, payment method storage | Payment method tokens, transaction metadata, invoice data | USA (primary); India (support) | USA | USA | Standard Contractual Clauses (SCCs) per Stripe Data Processing Agreement | Yes — required for paid plans |
+| Adyen N.V. | Adyen | Payment processing | Subscription billing, invoicing, payment method storage | Payment method tokens, transaction metadata, invoice data | USA (primary); India (support) | USA | USA | Standard Contractual Clauses (SCCs) per Adyen Data Processing Agreement | Yes — required for paid plans |
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
@@ -45,4 +45,4 @@ If you object to a new subprocessor on reasonable data protection grounds, conta
 
 | Date | Change | Description |
 |---|---|---|
-| 2026-07-29 | Initial publication | Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Stripe (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |
+| 2026-07-29 | Initial publication | Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Adyen (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |

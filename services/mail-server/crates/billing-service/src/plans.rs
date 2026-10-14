@@ -79,8 +79,8 @@ pub struct PlanUpsertInput {
     pub api_call_limit: i64,
     pub sort_order: i32,
     pub features: PlanFeatures,
-    pub stripe_price_id_monthly: Option<String>,
-    pub stripe_price_id_yearly: Option<String>,
+    pub adyen_plan_code_monthly: Option<String>,
+    pub adyen_plan_code_yearly: Option<String>,
 }
 
 /// All default plans shipped with ApexMail.
@@ -446,7 +446,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
         INSERT INTO plans (
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
@@ -476,7 +476,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
         RETURNING
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         "#;
 
@@ -547,7 +547,7 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
 /// value, because the live drift it repairs (Free 30k instead of 3k, Pro
 /// €10 instead of €89, Business €50 instead of €699) IS the seed history.
 ///
-/// Stripe price ids are deliberately NOT in the SET list: they are
+/// Adyen price ids are deliberately NOT in the SET list: they are
 /// integration identifiers, not catalog facts, and must survive a
 /// reconcile. `price_cents` (the legacy CP listing column) is kept equal to
 /// `price_monthly`.
@@ -555,7 +555,7 @@ const RECONCILE_PLAN_UPSERT_SQL: &str = r#"
         INSERT INTO plans (
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at, price_cents
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
@@ -609,7 +609,7 @@ pub struct PlanReconcileReport {
 ///    `reconcile_repairs_drifted_capability_flags`);
 /// 2. deactivates every active row whose name is not a catalog plan.
 ///
-/// Stripe price-id columns are preserved. All SQL runs in ONE transaction,
+/// Adyen price-id columns are preserved. All SQL runs in ONE transaction,
 /// and the pass is idempotent: a second run reports zero changes.
 pub async fn reconcile_plans_with_catalog(
     pool: &PgPool,
@@ -709,7 +709,7 @@ pub async fn upsert_plan_input(
         INSERT INTO plans (
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
@@ -724,14 +724,14 @@ pub async fn upsert_plan_input(
             email_limit   = EXCLUDED.email_limit,
             api_call_limit= EXCLUDED.api_call_limit,
             features      = EXCLUDED.features,
-            stripe_price_id_monthly = COALESCE(EXCLUDED.stripe_price_id_monthly, plans.stripe_price_id_monthly),
-            stripe_price_id_yearly  = COALESCE(EXCLUDED.stripe_price_id_yearly, plans.stripe_price_id_yearly),
+            adyen_plan_code_monthly = COALESCE(EXCLUDED.adyen_plan_code_monthly, plans.adyen_plan_code_monthly),
+            adyen_plan_code_yearly  = COALESCE(EXCLUDED.adyen_plan_code_yearly, plans.adyen_plan_code_yearly),
             sort_order    = EXCLUDED.sort_order,
             updated_at    = $10
         RETURNING
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         "#,
     )
@@ -745,8 +745,8 @@ pub async fn upsert_plan_input(
     .bind(&features_json)
     .bind(input.sort_order)
     .bind(now)
-    .bind(&input.stripe_price_id_monthly)
-    .bind(&input.stripe_price_id_yearly)
+    .bind(&input.adyen_plan_code_monthly)
+    .bind(&input.adyen_plan_code_yearly)
     .fetch_one(pool)
     .await?;
 
@@ -760,7 +760,7 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
         SELECT
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE is_active = true
@@ -789,7 +789,7 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
         SELECT
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE name = $1
@@ -1090,8 +1090,8 @@ struct PlanRow {
     email_limit: i64,
     api_call_limit: i64,
     features: Option<serde_json::Value>,
-    stripe_price_id_monthly: Option<String>,
-    stripe_price_id_yearly: Option<String>,
+    adyen_plan_code_monthly: Option<String>,
+    adyen_plan_code_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: DateTime<Utc>,
@@ -1145,8 +1145,8 @@ impl PlanRow {
             email_limit: self.email_limit,
             api_call_limit: self.api_call_limit,
             features,
-            stripe_price_id_monthly: self.stripe_price_id_monthly,
-            stripe_price_id_yearly: self.stripe_price_id_yearly,
+            adyen_plan_code_monthly: self.adyen_plan_code_monthly,
+            adyen_plan_code_yearly: self.adyen_plan_code_yearly,
             is_active: self.is_active,
             sort_order: self.sort_order,
             created_at: self.created_at,
@@ -1688,8 +1688,8 @@ mod tests {
             email_limit: 1_000,
             api_call_limit: 1_000,
             features,
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,
@@ -1927,13 +1927,13 @@ mod coverage_adversarial {
             api_call_limit: api_limit,
             sort_order: 7,
             features: PlanFeatures::default(),
-            stripe_price_id_monthly: Some("price_cov_monthly".to_string()),
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: Some("price_cov_monthly".to_string()),
+            adyen_plan_code_yearly: None,
         }
     }
 
     env_test!(
-        upsert_plan_input_updates_in_place_and_keeps_stripe_ids,
+        upsert_plan_input_updates_in_place_and_keeps_adyen_ids,
         |env| {
             let created = upsert_plan_input(&env.pool, &upsert("plcov_plan", 100, 200))
                 .await
@@ -1943,20 +1943,20 @@ mod coverage_adversarial {
             assert!(created.is_active);
 
             // A second upsert with the same name updates rather than duplicates,
-            // and a NULL stripe id preserves the stored one.
+            // and a NULL adyen id preserves the stored one.
             let mut update = upsert("plcov_plan", 300, 400);
-            update.stripe_price_id_monthly = None;
-            update.stripe_price_id_yearly = Some("price_cov_yearly".to_string());
+            update.adyen_plan_code_monthly = None;
+            update.adyen_plan_code_yearly = Some("price_cov_yearly".to_string());
             let updated = upsert_plan_input(&env.pool, &update).await.expect("update");
             assert_eq!(updated.id, created.id, "same row, updated in place");
             assert_eq!(updated.email_limit, 300);
             assert_eq!(
-                updated.stripe_price_id_monthly.as_deref(),
+                updated.adyen_plan_code_monthly.as_deref(),
                 Some("price_cov_monthly"),
-                "an omitted Stripe price never erases the stored id"
+                "an omitted Adyen price never erases the stored id"
             );
             assert_eq!(
-                updated.stripe_price_id_yearly.as_deref(),
+                updated.adyen_plan_code_yearly.as_deref(),
                 Some("price_cov_yearly")
             );
             let rows: i64 =

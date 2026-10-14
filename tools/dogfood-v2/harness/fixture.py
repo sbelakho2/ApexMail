@@ -1403,8 +1403,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return True
             self._ok({"data": []})
             return True
-        if path == "/webhooks/stripe" and method == "POST":
-            return self._stripe(method, path)
+        if path == "/webhooks/adyen" and method == "POST":
+            return self._adyen(method, path)
         if path.startswith("/v1/admin/") and method == "GET":
             if self._admin(method, path):
                 return True
@@ -1473,19 +1473,19 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._ok({"ok": True})
         return True
 
-    def _stripe(self, method, path) -> bool:
-        signature = self.headers.get("stripe-signature", "")
+    def _adyen(self, method, path) -> bool:
+        signature = self.headers.get("adyen-hmac-signature", "")
         raw = self._read()
-        secret = _env_value("STRIPE_WEBHOOK_SECRET", "dev-stripe-webhook-secret-local-only-0123456789")
+        secret = _env_value("ADYEN_HMAC_KEY", "dev-adyen-webhook-secret-local-only-0123456789")
         if not signature:
-            self._err(400, "VALIDATION_ERROR", "Missing stripe-signature header")
+            self._err(400, "VALIDATION_ERROR", "Missing adyen-hmac-signature header")
             return True
         try:
             timestamp, candidate = signature.split(",", 1)
             timestamp = timestamp.split("=", 1)[1]
             candidate = candidate.split("=", 1)[1]
         except Exception:  # noqa: BLE001
-            self._err(400, "VALIDATION_ERROR", "malformed stripe-signature header")
+            self._err(400, "VALIDATION_ERROR", "malformed adyen-hmac-signature header")
             return True
         expected = hmac.new(secret.encode(), f"{timestamp}.".encode() + raw, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, candidate):
@@ -1500,8 +1500,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if not event_id:
             self._err(400, "VALIDATION_ERROR", "Missing event ID")
             return True
-        if not self.state.find_one("stripe_webhook_events", stripe_event_id=event_id):
-            self.state.insert("stripe_webhook_events", stripe_event_id=event_id,
+        if not self.state.find_one("adyen_webhook_events", adyen_notification_id=event_id):
+            self.state.insert("adyen_webhook_events", adyen_notification_id=event_id,
                               event_type=event.get("type", ""), status="processed")
         self._ok({"received": True})
         return True

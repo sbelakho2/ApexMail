@@ -188,6 +188,6 @@ packages/
 
 ## References
 
-- [Stripe SDK Design](https://stripe.com/docs/libraries)
+- [Adyen SDK Design](https://adyen.com/docs/libraries)
 - [AWS SDK Patterns](https://aws.amazon.com/sdk-for-python/)
-- [Designing APIs for Humans](https://stripe.com/blog/api-design)
+- [Designing APIs for Humans](https://adyen.com/blog/api-design)

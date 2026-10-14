@@ -144,7 +144,7 @@ Uptime is measured per component, not as a single global number. Each component 
 | Partial outage handling | If some probe locations succeed and some fail, component is marked degraded. If all locations fail, component is marked down |
 | Degraded performance handling | If response time exceeds 5 seconds for HTTP probes (3 consecutive probes), component is marked degraded even if returning 2xx |
 | Scheduled maintenance | Published at least 48 hours in advance on the status page. Does not count against uptime SLA if declared as maintenance. Displayed as "Under Maintenance" on status page |
-| Third-party dependency handling | If a component depends on a third-party service (e.g., Stripe for billing) and that service is unavailable, the dependent component is marked degraded with a note identifying the third-party dependency |
+| Third-party dependency handling | If a component depends on a third-party service (e.g., Adyen for billing) and that service is unavailable, the dependent component is marked degraded with a note identifying the third-party dependency |
 | Measurement period | Rolling 90 days for public display; rolling 365 days for SLA calculations |
 | Rounding rules | Uptime is calculated to 4 decimal places, displayed to 2 decimal places (e.g., 99.97%). Round half-up |
 

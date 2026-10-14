@@ -1,9 +1,9 @@
 //! Subscription management – create, get, update plan, cancel.
 //!
-//! The actual Stripe subscription lifecycle (checkout, portal, and verified
+//! The actual Adyen subscription lifecycle (checkout, portal, and verified
 //! webhooks) stays in the billing integration boundary. Public helpers in
 //! this module deliberately cannot create, change, or cancel local records
-//! because doing so would bypass Stripe as the payment authority.
+//! because doing so would bypass Adyen as the payment authority.
 
 #[cfg(test)]
 use crate::types::UsageSummary;
@@ -20,9 +20,9 @@ use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
 
 /// Direct local subscription creation is disabled.
 ///
-/// Verified Stripe webhook handling owns subscription persistence. Retaining
+/// Verified Adyen webhook handling owns subscription persistence. Retaining
 /// this public helper as a safe failure prevents future callers from creating
-/// an `active` local record without a matching Stripe event.
+/// an `active` local record without a matching Adyen event.
 pub async fn create_subscription(
     _pool: &PgPool,
     _input: CreateSubscriptionInput,
@@ -32,9 +32,9 @@ pub async fn create_subscription(
 
 /// SQL used by [`get_subscription`] to read the live subscription.
 ///
-/// Fix C — entitlement writers only ever touch `stripe_subscriptions` +
+/// Fix C — entitlement writers only ever touch `adyen_subscriptions` +
 /// `tenants.plan`; the legacy `subscriptions` table stays empty, so reads
-/// must resolve against stripe_subscriptions (period bounds live in
+/// must resolve against adyen_subscriptions (period bounds live in
 /// billing_cycle_start/end) and join tenants for the effective plan name.
 const GET_SUBSCRIPTION_SQL: &str = r#"
         SELECT
@@ -43,9 +43,9 @@ const GET_SUBSCRIPTION_SQL: &str = r#"
             s.status, s.billing_interval,
             s.billing_cycle_start AS current_period_start,
             s.billing_cycle_end AS current_period_end,
-            s.stripe_subscription_id, s.stripe_customer_id,
+            s.adyen_subscription_id, s.adyen_shopper_reference,
             s.cancel_at_period_end, s.created_at, s.updated_at
-        FROM stripe_subscriptions s
+        FROM adyen_subscriptions s
         JOIN tenants t ON t.id = s.tenant_id
         WHERE s.tenant_id = $1
           AND s.status IN ('active', 'trialing', 'past_due')
@@ -67,8 +67,8 @@ pub async fn get_subscription(
     row.map(|r| r.into_subscription()).transpose()
 }
 
-/// Direct subscription changes are deliberately blocked. Stripe is the source
-/// of payment confirmation, and only verified Stripe webhook processing may
+/// Direct subscription changes are deliberately blocked. Adyen is the source
+/// of payment confirmation, and only verified Adyen webhook processing may
 /// update an entitlement-bearing tenant plan.
 pub async fn update_plan(
     _pool: &PgPool,
@@ -78,7 +78,7 @@ pub async fn update_plan(
     Err(SubscriptionError::PaymentConfirmationRequired)
 }
 
-/// Direct local cancellation is disabled; use Stripe’s billing portal and
+/// Direct local cancellation is disabled; use Adyen’s billing portal and
 /// reconcile the verified webhook event instead.
 pub async fn cancel_subscription(
     _pool: &PgPool,
@@ -97,8 +97,8 @@ pub struct CreateSubscriptionInput {
     pub billing_interval: BillingInterval,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
-    pub stripe_subscription_id: Option<String>,
-    pub stripe_customer_id: Option<String>,
+    pub adyen_subscription_id: Option<String>,
+    pub adyen_shopper_reference: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,8 +162,8 @@ struct SubRow {
     billing_interval: String,
     current_period_start: DateTime<Utc>,
     current_period_end: DateTime<Utc>,
-    stripe_subscription_id: Option<String>,
-    stripe_customer_id: Option<String>,
+    adyen_subscription_id: Option<String>,
+    adyen_shopper_reference: Option<String>,
     cancel_at_period_end: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -187,8 +187,8 @@ impl SubRow {
             billing_interval: parse_interval(&self.billing_interval),
             current_period_start: self.current_period_start,
             current_period_end: self.current_period_end,
-            stripe_subscription_id: self.stripe_subscription_id,
-            stripe_customer_id: self.stripe_customer_id,
+            adyen_subscription_id: self.adyen_subscription_id,
+            adyen_shopper_reference: self.adyen_shopper_reference,
             cancel_at_period_end: self.cancel_at_period_end,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -284,8 +284,8 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            stripe_subscription_id: Some("sub_123".into()),
-            stripe_customer_id: Some("cus_456".into()),
+            adyen_subscription_id: Some("sub_123".into()),
+            adyen_shopper_reference: Some("cus_456".into()),
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -307,8 +307,8 @@ mod tests {
             billing_interval: "monthly".into(),
             current_period_start: now,
             current_period_end: now,
-            stripe_subscription_id: None,
-            stripe_customer_id: None,
+            adyen_subscription_id: None,
+            adyen_shopper_reference: None,
             cancel_at_period_end: false,
             created_at: now,
             updated_at: now,
@@ -333,13 +333,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix C — the subscription reader must target the table the Stripe
+    // Fix C — the subscription reader must target the table the Adyen
     // webhook writers actually populate.
     // ------------------------------------------------------------------
 
     #[test]
-    fn get_subscription_reads_stripe_subscriptions_not_legacy_table() {
-        assert!(GET_SUBSCRIPTION_SQL.contains("FROM stripe_subscriptions s"));
+    fn get_subscription_reads_adyen_subscriptions_not_legacy_table() {
+        assert!(GET_SUBSCRIPTION_SQL.contains("FROM adyen_subscriptions s"));
         assert!(!GET_SUBSCRIPTION_SQL.contains("FROM subscriptions\n"));
         assert!(GET_SUBSCRIPTION_SQL.contains("JOIN tenants t"));
         assert!(GET_SUBSCRIPTION_SQL.contains("s.billing_cycle_start"));
@@ -362,8 +362,8 @@ mod tests {
                     billing_interval: BillingInterval::Monthly,
                     period_start: now,
                     period_end: now,
-                    stripe_subscription_id: Some("sub_123".into()),
-                    stripe_customer_id: Some("cus_123".into()),
+                    adyen_subscription_id: Some("sub_123".into()),
+                    adyen_shopper_reference: Some("cus_123".into()),
                 },
             )
             .await,

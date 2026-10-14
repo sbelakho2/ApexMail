@@ -49,7 +49,7 @@ All systems operated by Bel Consulting OÜ for ApexMail:
 | **Admin** | Full platform access including infrastructure, database, and user management. Reserved for founders/CTO. | All systems |
 | **Developer** | Code repository access (read/write), CI/CD, staging environment, application logs. Production access limited to read-only monitoring. | Repos, CI/CD, staging, monitoring |
 | **Support** | Customer-facing admin panel (read-only customer data, limited actions: password reset, account unlock). No infrastructure access. | Admin panel (scoped) |
-| **Billing** | Access to billing dashboard, invoice management, Stripe dashboard. No access to customer email content or recipient data. | Billing systems |
+| **Billing** | Access to billing dashboard, invoice management, Adyen dashboard. No access to customer email content or recipient data. | Billing systems |
 
 ### 4.2 Access Matrix
 

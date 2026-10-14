@@ -44,8 +44,8 @@ pub(crate) fn ensure_trace_subscriber() {
     }
 }
 
-/// The Stripe signing secret baked into every provisioned [`AppState`].
-pub(crate) const TEST_STRIPE_SECRET: &str = "whsec_adversarial";
+/// The Adyen signing secret baked into every provisioned [`AppState`].
+pub(crate) const TEST_ADYEN_SECRET: &str = "whsec_adversarial";
 
 /// Serializes canonical-template clones process-wide: PostgreSQL rejects a
 /// `CREATE DATABASE ... TEMPLATE x` while any other session (including a
@@ -234,7 +234,7 @@ pub(crate) async fn provision(tag: &str) -> Option<TestEnv> {
         database_url: format!("{server_part}/{db_name}"),
         redis_url: "redis://127.0.0.1:6379".to_string(),
         service_auth_token: "adversarial-service-token".to_string(),
-        stripe_webhook_secret: TEST_STRIPE_SECRET.to_string(),
+        adyen_hmac_key: TEST_ADYEN_SECRET.to_string(),
         api_base_url: "http://127.0.0.1:9".to_string(),
         ..BillingConfig::default()
     };
@@ -288,8 +288,8 @@ pub(crate) fn spawn_isolated_redis() -> IsolatedRedis {
     IsolatedRedis { pool, server }
 }
 
-/// Build a real Stripe-style `Stripe-Signature` header over `payload`.
-pub(crate) fn sign_stripe(secret: &str, payload: &[u8], timestamp: i64) -> String {
+/// Build a real Adyen-style `Adyen-Signature` header over `payload`.
+pub(crate) fn sign_adyen(secret: &str, payload: &[u8], timestamp: i64) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key");
     mac.update(timestamp.to_string().as_bytes());
     mac.update(b".");
@@ -320,7 +320,7 @@ pub(crate) fn state_with_broken_db() -> Arc<AppState> {
             database_url: "postgresql://127.0.0.1:5432/apexmail_no_such_database_cov".to_string(),
             redis_url: "redis://127.0.0.1:6379".to_string(),
             service_auth_token: "adversarial-service-token".to_string(),
-            stripe_webhook_secret: TEST_STRIPE_SECRET.to_string(),
+            adyen_hmac_key: TEST_ADYEN_SECRET.to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         },
@@ -336,21 +336,21 @@ pub(crate) fn state_with_dead_redis(pool: &PgPool) -> Arc<AppState> {
             database_url: "postgresql://127.0.0.1:5432/apexmail_no_such_database_cov".to_string(),
             redis_url: "redis://127.0.0.1:1".to_string(),
             service_auth_token: "adversarial-service-token".to_string(),
-            stripe_webhook_secret: TEST_STRIPE_SECRET.to_string(),
+            adyen_hmac_key: TEST_ADYEN_SECRET.to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         },
     )
 }
 
-/// An AppState over `pool`/`redis` with an empty Stripe webhook secret.
-pub(crate) fn state_with_empty_stripe_secret(
+/// An AppState over `pool`/`redis` with an empty Adyen webhook secret.
+pub(crate) fn state_with_empty_adyen_secret(
     pool: &PgPool,
     redis: &deadpool_redis::Pool,
     config: &BillingConfig,
 ) -> Arc<AppState> {
     let mut config = config.clone();
-    config.stripe_webhook_secret = String::new();
+    config.adyen_hmac_key = String::new();
     AppState::new(pool.clone(), redis.clone(), config)
 }
 
@@ -372,9 +372,9 @@ pub(crate) async fn seed_tenant(pool: &PgPool, tenant: &str, plan: &str) {
 pub(crate) async fn seed_plan(pool: &PgPool, name: &str, price_id: &str) {
     sqlx::query(
         "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit,
-                            stripe_price_id_monthly, is_active)
+                            adyen_plan_code_monthly, is_active)
          VALUES ($1, $2, $2, 4900, 100000, 100000, $3, true)
-         ON CONFLICT (name) DO UPDATE SET stripe_price_id_monthly = EXCLUDED.stripe_price_id_monthly,
+         ON CONFLICT (name) DO UPDATE SET adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
              is_active = true",
     )
     .bind(format!("plan_{name}"))
@@ -386,7 +386,7 @@ pub(crate) async fn seed_plan(pool: &PgPool, name: &str, price_id: &str) {
 }
 
 /// Cross-process serialization for tests whose Redis keyspace is SHARED by
-/// the whole suite (pending metering events, Stripe deadletters): a drain or
+/// the whole suite (pending metering events, Adyen deadletters): a drain or
 /// a clear-and-scan in one process otherwise races another's. A session-level
 /// Postgres advisory lock on the admin database; released when the pool drops.
 ///

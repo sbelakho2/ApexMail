@@ -591,7 +591,7 @@ def enumerate_api_surfaces() -> tuple[list[Surface], list[str]]:
                 pending.append((inner_path, inner_map))
     warnings.extend(_dedupe(list(warnings)))
 
-    # app.rs-inline routers (absolute paths; assets, grader, placement, stripe)
+    # app.rs-inline routers (absolute paths; assets, grader, placement, adyen)
     app_surfaces: list[Surface] = []
     for match in ROUTE_CALL.finditer(app_source):
         literal = match.group(2)

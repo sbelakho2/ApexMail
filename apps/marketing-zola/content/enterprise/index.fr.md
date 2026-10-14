@@ -39,7 +39,7 @@ Un acheteur qualifié peut demander la DPA actuelle, les informations sur les so
 
 ## Cycle de facturation
 
-Enterprise n'est pas achetable via le Checkout public générique. Le contrat ou l'arrangement de facturation approuvé fait foi pour les droits. Pour les forfaits self-service publics, Stripe Checkout et le webhook d'abonnement Stripe vérifié sont requis avant l'octroi d'un forfait payant.
+Enterprise n'est pas achetable via le Checkout public générique. Le contrat ou l'arrangement de facturation approuvé fait foi pour les droits. Pour les forfaits self-service publics, Adyen Checkout et le webhook d'abonnement Adyen vérifié sont requis avant l'octroi d'un forfait payant.
 
 ## Contact
 

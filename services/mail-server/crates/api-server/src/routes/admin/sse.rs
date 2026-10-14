@@ -211,15 +211,15 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
         0
     };
 
-    // MRR from stripe_subscriptions — the table the billing webhook writers
+    // MRR from adyen_subscriptions — the table the billing webhook writers
     // populate — mirroring billing-service's get_mrr_report pattern (tenants.plan
     // → plans pricing, ROUND(price_yearly / 12.0) yearly normalization).
     // The legacy `subscriptions` table has no writer and always read as zero.
-    let mrr = if table_exists(db, "stripe_subscriptions").await?
+    let mrr = if table_exists(db, "adyen_subscriptions").await?
         && table_exists(db, "plans").await?
     {
         let has_billing_interval =
-            crate::routes::helpers::column_exists(db, "stripe_subscriptions", "billing_interval")
+            crate::routes::helpers::column_exists(db, "adyen_subscriptions", "billing_interval")
                 .await?;
 
         let billing_interval_expr = if has_billing_interval {
@@ -235,7 +235,7 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
                         ELSE p.price_monthly
                     END
                 ), 0)::bigint
-             FROM stripe_subscriptions s
+             FROM adyen_subscriptions s
              JOIN tenants t ON t.id = s.tenant_id
              JOIN plans p ON p.name = t.plan
              WHERE s.status IN ('active', 'trialing', 'past_due')"
@@ -861,7 +861,7 @@ mod adversarial_tests {
             return;
         };
         // One active tenant (the seeded system tenant is active already);
-        // seed plan + active stripe subscription so MRR is non-zero.
+        // seed plan + active adyen subscription so MRR is non-zero.
         sqlx::query(
             "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
                                 email_limit, api_call_limit, features, is_active, sort_order)
@@ -877,8 +877,8 @@ mod adversarial_tests {
             .await
             .expect("set plan");
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                (id, tenant_id, stripe_subscription_id, status, billing_interval)
+            "INSERT INTO adyen_subscriptions
+                (id, tenant_id, adyen_subscription_id, status, billing_interval)
              VALUES ($1, 'system_internal_tenant01', 'sub_sse_probe', 'active', 'monthly')",
         )
         .bind(uuid::Uuid::new_v4())
@@ -928,7 +928,7 @@ mod adversarial_tests {
         assert_eq!(snapshot.health_status.as_deref(), Some("healthy"));
 
         // Yearly subscriptions normalise to price_yearly/12.
-        sqlx::query("UPDATE stripe_subscriptions SET billing_interval = 'yearly'")
+        sqlx::query("UPDATE adyen_subscriptions SET billing_interval = 'yearly'")
             .execute(&pool)
             .await
             .expect("flip interval");
@@ -1017,10 +1017,10 @@ mod adversarial_tests {
             return;
         };
 
-        // Phase 1: stripe_subscriptions WITHOUT the billing_interval column
+        // Phase 1: adyen_subscriptions WITHOUT the billing_interval column
         // — the 'monthly' literal branch — with a paid subscription so the
         // MRR join still computes through the fallback expression.
-        sqlx::query("ALTER TABLE stripe_subscriptions DROP COLUMN IF EXISTS billing_interval")
+        sqlx::query("ALTER TABLE adyen_subscriptions DROP COLUMN IF EXISTS billing_interval")
             .execute(&pool)
             .await
             .expect("drop billing_interval");
@@ -1041,8 +1041,8 @@ mod adversarial_tests {
         .await
         .expect("set plan");
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                (id, tenant_id, stripe_subscription_id, status)
+            "INSERT INTO adyen_subscriptions
+                (id, tenant_id, adyen_subscription_id, status)
              VALUES ($1, 'system_internal_tenant01', 'sub_sparse_probe', 'active')",
         )
         .bind(uuid::Uuid::new_v4())
@@ -1094,7 +1094,7 @@ mod adversarial_tests {
         // production binary; a stale memo mid-migration fails LOUDLY, which
         // is the honest outcome). The stream layer converts that Err into
         // the degraded comment event; here we pin the propagation itself.
-        sqlx::raw_sql("DROP TABLE IF EXISTS queue_jobs; DROP TABLE IF EXISTS stripe_subscriptions; DROP TABLE IF EXISTS system_alerts;")
+        sqlx::raw_sql("DROP TABLE IF EXISTS queue_jobs; DROP TABLE IF EXISTS adyen_subscriptions; DROP TABLE IF EXISTS system_alerts;")
             .execute(&pool)
             .await
             .expect("drop optional tables");

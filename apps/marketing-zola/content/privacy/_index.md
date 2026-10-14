@@ -20,7 +20,7 @@ Bel Consulting OÜ (trading as ApexMail) ("we", "us") is committed to protecting
 
 - **Website visitors (marketing site):** IP address, browser type and user agent, device information, pages visited, referring URL, and timestamps — collected automatically from server access logs. The marketing site runs no analytics scripts and embeds no tracking pixels or advertising cookies.
 - **Prospects:** name, email address, company name, phone number (if provided), and communication history, provided via contact forms or email.
-- **Account data:** name, email, company, billing address, VAT number, payment method tokens (card details are processed by Stripe and never reach our servers), API key metadata, login timestamps, IP addresses, and audit log entries.
+- **Account data:** name, email, company, billing address, VAT number, payment method tokens (card details are processed by Adyen and never reach our servers), API key metadata, login timestamps, IP addresses, and audit log entries.
 - **Usage data:** API calls, email sending volumes, delivery events, and engagement events (opens and clicks) for messages you send.
 - **Recipient data (as processor for our customers):** recipient email addresses and names, email content (subject, body, headers, attachments), and delivery and engagement metadata. When tracking is enabled by the sending customer, open and click events also record the recipient's IP address and user agent.
 - **Technical data:** IP addresses (used for authentication, rate limiting, and fraud and abuse prevention), browser type, device information.
@@ -40,7 +40,7 @@ The supplied configuration targets EEA regions for core email-service data and t
 |---|---|---|---|
 | Core email infrastructure (messages, delivery metadata, account data) | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
 | OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
-| Payment and billing records | Stripe, Inc. (US, SCCs) | Provider-managed (India for support) | US/India (SCCs) |
+| Payment and billing records | Adyen N.V. (US, SCCs) | Provider-managed (India for support) | US/India (SCCs) |
 | Support tickets | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).

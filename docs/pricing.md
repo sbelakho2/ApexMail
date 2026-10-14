@@ -6,13 +6,13 @@ runtime authority for entitlement or charging. The canonical plan facts
 [the platform catalog](../services/mail-server/crates/platform-catalog/src/lib.rs);
 the operational authority is
 [the billing plan seeds](../services/mail-server/crates/billing-service/src/plans.rs),
-the active `plans` records, and verified Stripe webhooks. See
+the active `plans` records, and verified Adyen webhooks. See
 [the authority map](pricing-authority.md) for the boundary between runtime and
 presentation data.
 
 All published prices below are EUR. A selected plan during registration is only
 an intent: new workspaces start on Free, and paid access begins only after
-Stripe confirms the subscription through a verified webhook.
+Adyen confirms the subscription through a verified webhook.
 
 ## Subscription catalog
 
@@ -95,13 +95,13 @@ to operational and abuse controls.
 ## Billing lifecycle
 
 1. A customer creates or signs in to a workspace.
-2. The authenticated billing surface creates a Stripe Checkout or billing
+2. The authenticated billing surface creates a Adyen Checkout or billing
    portal session for an allowed catalog price.
-3. ApexMail verifies Stripe's signed webhook and maps the Stripe price back to
+3. ApexMail verifies Adyen's signed webhook and maps the Adyen price back to
    an active catalog plan.
 4. Only `active` or `trialing` verified subscriptions grant the paid plan;
    incomplete, delinquent, paused, unpaid, and canceled subscriptions resolve
    to Free access.
 
 See [billing lifecycle](architecture/billing-lifecycle.md) and the
-[Stripe contract](tool-contracts/stripe.md) for the integration requirements.
+[Adyen contract](tool-contracts/adyen.md) for the integration requirements.

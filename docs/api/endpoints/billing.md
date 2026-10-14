@@ -6,7 +6,7 @@
 
 The plan catalog and entitlement lifecycle are described in
 [Pricing](../../pricing.md) and
-[the Stripe contract](../../tool-contracts/stripe.md).
+[the Adyen contract](../../tool-contracts/adyen.md).
 
 ## Catalog and usage endpoints
 
@@ -47,14 +47,14 @@ Content-Type: application/json
 }
 ```
 
-`priceId` must be a monthly or yearly Stripe price ID bound to an **active**
+`priceId` must be a monthly or yearly Adyen price ID bound to an **active**
 Starter, Pro, Growth, or Scale catalog row. The API rejects blank, unknown,
 inactive, Enterprise, PAYG, and cross-product price IDs. Both redirect URLs
 must be approved ApexMail URLs.
 
-A successful response contains the hosted Stripe Checkout URL and session ID.
+A successful response contains the hosted Adyen Checkout URL and session ID.
 It does **not** grant paid access. The API records the resolved `tenant_id` and
-`plan_name` in Stripe metadata; a verified Stripe subscription webhook is the
+`plan_name` in Adyen metadata; a verified Adyen subscription webhook is the
 only normal self-service path that activates the paid entitlement.
 
 ### Create billing portal session
@@ -71,7 +71,7 @@ Content-Type: application/json
 ```
 
 The portal is the supported path for subscription changes and cancellation.
-It requires an existing Stripe customer and an approved return URL.
+It requires an existing Adyen customer and an approved return URL.
 
 ### Retired direct-mutation endpoints
 
@@ -80,8 +80,8 @@ a local subscription or tenant plan:
 
 | Method | Endpoint | HTTP status | Code | Required action |
 |---|---|---:|---|---|
-| POST | `/switch-plan` | 409 | `CHECKOUT_REQUIRED` | Start supported Stripe Checkout and await webhook reconciliation |
-| POST | `/cancel` | 409 | `BILLING_PORTAL_REQUIRED` | Use the Stripe billing portal and await webhook reconciliation |
+| POST | `/switch-plan` | 409 | `CHECKOUT_REQUIRED` | Start supported Adyen Checkout and await webhook reconciliation |
+| POST | `/cancel` | 409 | `BILLING_PORTAL_REQUIRED` | Use the Adyen billing portal and await webhook reconciliation |
 
 Direct JSON requests cannot create, switch, cancel, or immediately downgrade a
 paid entitlement.
@@ -90,12 +90,12 @@ paid entitlement.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/subscription` | Get local Stripe subscription state for the authenticated tenant |
+| GET | `/subscription` | Get local Adyen subscription state for the authenticated tenant |
 | GET | `/invoices` | List tenant invoices |
 | GET | `/invoices/:id` | Get an invoice |
 | GET | `/invoices/:id/pdf` | Render/download invoice HTML for PDF handling |
 | GET | `/invoices/:id/xml` | Get invoice XML |
-| GET | `/proration/:planName` | Informational proration preview only; Stripe controls actual charges |
+| GET | `/proration/:planName` | Informational proration preview only; Adyen controls actual charges |
 
 ## Billing administration
 
@@ -105,7 +105,7 @@ valid active `planId` and a nonempty reason and writes an audit entry. Generic
 tenant editing cannot change a tenant plan.
 
 Other administrative routes cover tenant billing details, credits, dunning,
-invoices, reports, and export. They do not replace the normal Stripe lifecycle
+invoices, reports, and export. They do not replace the normal Adyen lifecycle
 for customer-paid subscription changes.
 
 ## Billing company information

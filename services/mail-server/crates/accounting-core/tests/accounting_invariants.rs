@@ -557,7 +557,7 @@ async fn replaying_source_document_posts_once() {
     .expect("first post");
     assert_eq!(first.status, PostStatus::Posted);
 
-    // Exact replay (Stripe webhook redelivery / invoice retry): no new entry.
+    // Exact replay (Adyen webhook redelivery / invoice retry): no new entry.
     let second = posting::post_journal_entry(
         &pool,
         &request(
@@ -994,7 +994,7 @@ async fn adapters_post_idempotently_and_feed_derivation() {
             .expect("baseline vat")
     };
 
-    // ── Invoice finalization + Stripe settlement ────────────────────────
+    // ── Invoice finalization + Adyen settlement ────────────────────────
     let invoice_id = Uuid::new_v4();
     insert_invoice(&pool, invoice_id, false, &format!("INV-{tag}-1")).await;
 
@@ -1048,10 +1048,10 @@ async fn adapters_post_idempotently_and_feed_derivation() {
     assert_eq!(replay.status, PostStatus::AlreadyPosted);
     assert_eq!(replay.entry_id, first.entry_id);
 
-    let operation_id = format!("stripe:{tag}");
+    let operation_id = format!("adyen:{tag}");
     sqlx::query(
         "INSERT INTO invoice_payment_allocations (tenant_id, invoice_id, operation_id, source, amount_cents, currency) \
-         VALUES ($1, $2, $3, 'stripe', 12400, 'EUR')",
+         VALUES ($1, $2, $3, 'adyen', 12400, 'EUR')",
     )
     .bind(TENANT)
     .bind(invoice_id)

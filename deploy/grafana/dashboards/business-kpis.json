@@ -16,11 +16,11 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
       "targets": [
         {
-          "expr": "sum by (status) (rate(apexmail_http_requests_total{job=\"apexmail-api\",path_pattern=~\"/v1/billing.*|/webhooks/stripe\"}[5m]))",
+          "expr": "sum by (status) (rate(apexmail_http_requests_total{job=\"apexmail-api\",path_pattern=~\"/v1/billing.*|/webhooks/adyen\"}[5m]))",
           "legendFormat": "{{status}}"
         }
       ],
-      "title": "Billing and Stripe Request Rate",
+      "title": "Billing and Adyen Request Rate",
       "type": "timeseries"
     },
     {

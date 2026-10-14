@@ -38,7 +38,7 @@ processes, no systemd services, no Kubernetes.
 | `apexmail-tracking-1` | `…/tracking-service:latest` | 3001 (internal; dev publishes 127.0.0.1:3001) | Email open/click tracking |
 | `apexmail-status-server-1` | `…/status-server:latest` | 3000 (internal) | Status page + status API |
 | `apexmail-sales-autopilot-1` | `…/sales-autopilot:latest` | 3010 (internal) | Internal sales engine (CRM, campaigns, inbox); public only via `api.apexmail.ee/sales-api/u/` |
-| `apexmail-billing-service-1` | `…/billing-service:latest` | 4100 (internal) | Plans, metering, invoices, Stripe webhooks |
+| `apexmail-billing-service-1` | `…/billing-service:latest` | 4100 (internal) | Plans, metering, invoices, Adyen webhooks |
 | `apexmail-compliance-1` | `…/compliance:latest` | 3011 (internal) | Audit log, DSR/GDPR automation, secrets rotation |
 | `apexmail-ai-service-1` | `…/ai-service:latest` | 3012 (internal) | Grounded AI assistant (docs corpus from `docs/`) |
 | `apexmail-pdf-renderer-1` | `…/pdf-renderer:latest` | 3004 (internal) | Typst-based invoice/report PDF rendering (prod-activated via `profiles: !override []`) |

@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     status VARCHAR(20) NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft', 'open', 'paid', 'void', 'uncollectible')),
     invoice_number VARCHAR(50),
-    stripe_invoice_id VARCHAR(255),
+    adyen_psp_reference VARCHAR(255),
     period_start TIMESTAMPTZ,
     period_end TIMESTAMPTZ,
     due_date TIMESTAMPTZ,
@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS invoices (
 CREATE INDEX idx_invoices_tenant ON invoices(tenant_id);
 CREATE INDEX idx_invoices_status ON invoices(status);
 CREATE INDEX idx_invoices_created ON invoices(created_at DESC);
-CREATE INDEX idx_invoices_stripe ON invoices(stripe_invoice_id) WHERE stripe_invoice_id IS NOT NULL;
+CREATE INDEX idx_invoices_adyen ON invoices(adyen_psp_reference) WHERE adyen_psp_reference IS NOT NULL;
 
 -- =============================================================================
 -- Fix subscriptions.tenant_id type mismatch
@@ -198,8 +198,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     billing_interval VARCHAR(20) NOT NULL DEFAULT 'monthly',
     current_period_start TIMESTAMPTZ,
     current_period_end TIMESTAMPTZ,
-    stripe_subscription_id TEXT,
-    stripe_customer_id TEXT,
+    adyen_subscription_id TEXT,
+    adyen_shopper_reference TEXT,
     cancel_at_period_end BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

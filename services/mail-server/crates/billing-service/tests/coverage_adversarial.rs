@@ -221,7 +221,7 @@ async fn provision(test_name: &str) -> Option<Harness> {
         database_url: format!("{server_part}/{db_name}"),
         redis_url: "redis://127.0.0.1:6379".to_string(),
         service_auth_token: "coverage-service-token".to_string(),
-        stripe_webhook_secret: "whsec_coverage_secret".to_string(),
+        adyen_hmac_key: "whsec_coverage_secret".to_string(),
         api_base_url: "http://127.0.0.1:9".to_string(),
         ..BillingConfig::default()
     };
@@ -356,7 +356,7 @@ async fn seed_plan(pool: &PgPool, name: &str, email_limit: i64, api_call_limit: 
     .expect("seed plan");
 }
 
-async fn seed_stripe_subscription(
+async fn seed_adyen_subscription(
     pool: &PgPool,
     tenant_id: &str,
     subscription_id: &str,
@@ -365,9 +365,9 @@ async fn seed_stripe_subscription(
     cycle_end: DateTime<Utc>,
 ) {
     sqlx::query(
-        "INSERT INTO stripe_subscriptions
-             (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, stripe_customer_id, stripe_price_id)
+        "INSERT INTO adyen_subscriptions
+             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, adyen_shopper_reference, adyen_plan_code)
          VALUES ($1, $2, 'growth', $3, $4, $5, 'cus_cov', 'price_cov')",
     )
     .bind(tenant_id)
@@ -377,7 +377,7 @@ async fn seed_stripe_subscription(
     .bind(cycle_end)
     .execute(pool)
     .await
-    .expect("seed stripe subscription");
+    .expect("seed adyen subscription");
 }
 
 async fn event_count(pool: &PgPool, tenant_id: &str, event_id: Uuid) -> i64 {
@@ -621,7 +621,7 @@ db_test!(
         let now = Utc::now();
         let cycle_start = now - chrono::Duration::days(3);
         let cycle_end = now + chrono::Duration::days(27);
-        seed_stripe_subscription(
+        seed_adyen_subscription(
             &h.pool,
             tenant,
             "sub_cov_anchor",
@@ -1115,7 +1115,7 @@ db_test!(paid_subscription_widens_email_ceiling, |h| {
     let tenant = "cov_quota_paidceil";
     seed_tenant(&h, tenant, "covceil").await;
     seed_plan(&h.pool, "covceil", 100, 100).await;
-    // The paid-subscription gate joins stripe_subscriptions.plan to plans and
+    // The paid-subscription gate joins adyen_subscriptions.plan to plans and
     // requires price_monthly > 0, so the subscription's plan needs a price.
     // Fix #10: the features column must carry a valid PlanFeatures document —
     // the '{}' column default now (correctly) fails plan lookups closed.
@@ -1130,7 +1130,7 @@ db_test!(paid_subscription_widens_email_ceiling, |h| {
     .await
     .expect("seed growth plan");
     let now = Utc::now();
-    seed_stripe_subscription(
+    seed_adyen_subscription(
         &h.pool,
         tenant,
         "sub_cov_ceil",
@@ -1649,7 +1649,7 @@ db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
     }
 
     // No foreign row may be served: test rows deactivated, never deleted
-    // (their stripe/subscription references stay resolvable).
+    // (their adyen/subscription references stay resolvable).
     let catalog_names: Vec<&str> = platform_catalog::PLANS.iter().map(|p| p.name).collect();
     let foreign_active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM plans WHERE NOT (name = ANY($1)) AND is_active = true",
@@ -2629,7 +2629,7 @@ db_test!(router_quota_and_subscription_surfaces, |h| {
 
     // A seeded active subscription is returned.
     let now = Utc::now();
-    seed_stripe_subscription(
+    seed_adyen_subscription(
         &h.pool,
         tenant,
         "sub_cov_route",
@@ -2649,7 +2649,7 @@ db_test!(router_quota_and_subscription_surfaces, |h| {
     // The subscription view resolves the EFFECTIVE plan from tenants.plan.
     assert_eq!(json["subscription"]["plan_name"], "free", "body: {json}");
     assert_eq!(
-        json["subscription"]["stripe_subscription_id"],
+        json["subscription"]["adyen_subscription_id"],
         "sub_cov_route"
     );
 });
@@ -3539,7 +3539,7 @@ db_test!(overage_sweep_applies_wallet_before_dunning, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// stripe_webhooks.rs — signature, replay, ordering, unknown events
+// adyen_webhooks.rs — signature, replay, ordering, unknown events
 // ---------------------------------------------------------------------------
 
 fn sign_payload(secret: &str, payload: &[u8], timestamp: i64) -> String {
@@ -3568,9 +3568,9 @@ async fn post_signed_webhook(
         app,
         Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe")
+            .uri("/webhooks/adyen")
             .header("content-type", "application/json")
-            .header("stripe-signature", signature)
+            .header("adyen-hmac-signature", signature)
             .body(Body::from(body))
             .expect("request"),
     )
@@ -3588,7 +3588,7 @@ async fn expect_webhook_ok(
     let (status, body) = post_signed_webhook(app, payload, Utc::now().timestamp()).await;
     if status != StatusCode::OK {
         let error: Option<String> = sqlx::query_scalar(
-            "SELECT error FROM stripe_webhook_events WHERE stripe_event_id = $1",
+            "SELECT error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
         )
         .bind(event_id)
         .fetch_optional(&h.pool)
@@ -3599,16 +3599,16 @@ async fn expect_webhook_ok(
     }
 }
 
-async fn seed_stripe_plan(h: &Harness, name: &str, price_id: &str) {
+async fn seed_adyen_plan(h: &Harness, name: &str, price_id: &str) {
     // Fix #10: the features column must carry a valid PlanFeatures document —
     // the '{}' column default now (correctly) fails plan lookups closed.
     let features = serde_json::to_value(billing_service::types::PlanFeatures::default())
         .expect("PlanFeatures serializes");
     sqlx::query(
         "INSERT INTO plans (id, name, display_name, price_cents, price_monthly,
-                            email_limit, api_call_limit, stripe_price_id_monthly, is_active, features)
+                            email_limit, api_call_limit, adyen_plan_code_monthly, is_active, features)
          VALUES ($1, $2, $2, 4900, 4900, 100000, 100000, $3, true, $4)
-         ON CONFLICT (name) DO UPDATE SET stripe_price_id_monthly = EXCLUDED.stripe_price_id_monthly,
+         ON CONFLICT (name) DO UPDATE SET adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
              is_active = true, price_monthly = 4900",
     )
     .bind(format!("plan_{name}"))
@@ -3617,10 +3617,10 @@ async fn seed_stripe_plan(h: &Harness, name: &str, price_id: &str) {
     .bind(&features)
     .execute(&h.pool)
     .await
-    .expect("seed stripe plan");
+    .expect("seed adyen plan");
 }
 
-fn stripe_event(id: &str, event_type: &str, object: serde_json::Value) -> serde_json::Value {
+fn adyen_notification(id: &str, event_type: &str, object: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "type": event_type,
@@ -3650,12 +3650,12 @@ fn subscription_object(
     })
 }
 
-db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
+db_test!(adyen_webhook_signature_attacks_write_nothing, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_sig";
     seed_tenant(&h, tenant, "free").await;
 
-    let payload = stripe_event(
+    let payload = adyen_notification(
         "evt_cov_sig_valid",
         "customer.subscription.created",
         subscription_object(
@@ -3673,7 +3673,7 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
         &app,
         Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe")
+            .uri("/webhooks/adyen")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&payload).unwrap()))
             .expect("request"),
@@ -3688,8 +3688,8 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
         &app,
         Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe")
-            .header("stripe-signature", forged)
+            .uri("/webhooks/adyen")
+            .header("adyen-hmac-signature", forged)
             .body(Body::from(body.clone()))
             .expect("request"),
     )
@@ -3705,8 +3705,8 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
         &app,
         Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe")
-            .header("stripe-signature", signature)
+            .uri("/webhooks/adyen")
+            .header("adyen-hmac-signature", signature)
             .body(Body::from(serde_json::to_vec(&tampered).unwrap()))
             .expect("request"),
     )
@@ -3723,8 +3723,8 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
         &app,
         Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe")
-            .header("stripe-signature", expired)
+            .uri("/webhooks/adyen")
+            .header("adyen-hmac-signature", expired)
             .body(Body::from(body.clone()))
             .expect("request"),
     )
@@ -3747,8 +3747,8 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
             &app,
             Request::builder()
                 .method("POST")
-                .uri("/webhooks/stripe")
-                .header("stripe-signature", header)
+                .uri("/webhooks/adyen")
+                .header("adyen-hmac-signature", header)
                 .body(Body::from(body.clone()))
                 .expect("request"),
         )
@@ -3763,8 +3763,8 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
         &app,
         Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe")
-            .header("stripe-signature", signature)
+            .uri("/webhooks/adyen")
+            .header("adyen-hmac-signature", signature)
             .body(Body::from(garbage))
             .expect("request"),
     )
@@ -3779,12 +3779,12 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
 
     // Every refusal above must have written NO webhook claim row and no
     // subscription state.
-    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_webhook_events")
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
         .fetch_one(&h.pool)
         .await
         .expect("count events");
     assert_eq!(events, 0, "failed verification must write nothing");
-    let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+    let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
         .fetch_one(&h.pool)
         .await
         .expect("count subscriptions");
@@ -3792,10 +3792,10 @@ db_test!(stripe_webhook_signature_attacks_write_nothing, |h| {
 });
 
 db_test!(
-    stripe_webhook_unknown_event_type_is_acknowledged_not_500,
+    adyen_webhook_unknown_event_type_is_acknowledged_not_500,
     |h| {
         let app = billing_service::routes::router(h.state.clone());
-        let payload = stripe_event(
+        let payload = adyen_notification(
             "evt_cov_unknown",
             "pizza.delivered",
             serde_json::json!({"id": "x"}),
@@ -3806,7 +3806,7 @@ db_test!(
         assert_eq!(json["received"], true);
 
         let (event_type, status_text): (String, String) = sqlx::query_as(
-            "SELECT event_type, status FROM stripe_webhook_events WHERE stripe_event_id = $1",
+            "SELECT event_type, status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
         )
         .bind("evt_cov_unknown")
         .fetch_one(&h.pool)
@@ -3821,15 +3821,15 @@ db_test!(
 );
 
 db_test!(
-    stripe_webhook_replay_is_idempotent_and_reclaims_stale,
+    adyen_webhook_replay_is_idempotent_and_reclaims_stale,
     |h| {
         let app = billing_service::routes::router(h.state.clone());
         let tenant = "cov_wh_replay";
         seed_tenant(&h, tenant, "free").await;
-        seed_stripe_plan(&h, "growth", "price_cov_monthly").await;
+        seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
 
         let now = Utc::now().timestamp();
-        let payload = stripe_event(
+        let payload = adyen_notification(
             "evt_cov_replay",
             "customer.subscription.created",
             subscription_object(
@@ -3854,7 +3854,7 @@ db_test!(
             "verified subscription webhook grants the plan"
         );
         let watermark_after_first: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT event_watermark FROM stripe_subscriptions WHERE tenant_id = $1",
+            "SELECT event_watermark FROM adyen_subscriptions WHERE tenant_id = $1",
         )
         .bind(tenant)
         .fetch_one(&h.pool)
@@ -3865,14 +3865,14 @@ db_test!(
         // Replay: 200, no re-application, no duplicate rows.
         expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
         let events: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_replay'",
+            "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_replay'",
         )
         .fetch_one(&h.pool)
         .await
         .expect("count replay rows");
         assert_eq!(events, 1, "one claim row per event id");
         let subs: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
                 .bind(tenant)
                 .fetch_one(&h.pool)
                 .await
@@ -3882,7 +3882,7 @@ db_test!(
         // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
         // fresh one is left alone.
         sqlx::query(
-        "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, created_at, updated_at)
+        "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, created_at, updated_at)
          VALUES (gen_random_uuid(), 'evt_cov_stale', 'customer.subscription.updated', 'pending',
                  NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '11 minutes'),
                 (gen_random_uuid(), 'evt_cov_fresh', 'customer.subscription.updated', 'pending',
@@ -3892,19 +3892,19 @@ db_test!(
     .await
     .expect("seed pending rows");
 
-        let reclaimed = billing_service::stripe_webhooks::reclaim_stale_pending_webhooks(&h.state)
+        let reclaimed = billing_service::adyen_webhooks::reclaim_stale_pending_webhooks(&h.state)
             .await
             .expect("reclaim");
         assert_eq!(reclaimed, vec!["evt_cov_stale".to_string()]);
         let stale_status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_stale'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_stale'",
         )
         .fetch_one(&h.pool)
         .await
         .expect("stale row");
         assert_eq!(stale_status, "received");
         let fresh_status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_fresh'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_fresh'",
         )
         .fetch_one(&h.pool)
         .await
@@ -3913,17 +3913,17 @@ db_test!(
     }
 );
 
-db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
+db_test!(adyen_webhook_out_of_order_events_never_rewind_state, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_order";
     seed_tenant(&h, tenant, "free").await;
-    seed_stripe_plan(&h, "growth", "price_cov_monthly").await;
+    seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
 
     let now = Utc::now().timestamp();
 
     // 1. A deleted event for an unknown subscription is a no-op: it must
     // NOT downgrade a tenant that never had this subscription.
-    let deleted = stripe_event(
+    let deleted = adyen_notification(
         "evt_cov_del_first",
         "customer.subscription.deleted",
         subscription_object(
@@ -3945,7 +3945,7 @@ db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
 
     // 2. Created with cycle T2 applies.
     let cycle_t2 = now;
-    let created = stripe_event(
+    let created = adyen_notification(
         "evt_cov_create",
         "customer.subscription.created",
         subscription_object(
@@ -3961,7 +3961,7 @@ db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
 
     // 3. An older active update (cycle T1 < T2) is stale: ignored.
     let cycle_t1 = now - 86_400;
-    let stale = stripe_event(
+    let stale = adyen_notification(
         "evt_cov_stale_update",
         "customer.subscription.updated",
         subscription_object(
@@ -3976,7 +3976,7 @@ db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
     expect_webhook_ok(&h, &app, &stale, "evt_cov_stale_update").await;
 
     let stored_start: DateTime<Utc> = sqlx::query_scalar(
-        "SELECT billing_cycle_start FROM stripe_subscriptions WHERE tenant_id = $1",
+        "SELECT billing_cycle_start FROM adyen_subscriptions WHERE tenant_id = $1",
     )
     .bind(tenant)
     .fetch_one(&h.pool)
@@ -3989,7 +3989,7 @@ db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
     );
 
     // 4. A deleted event for the known row cancels it and downgrades.
-    let deleted = stripe_event(
+    let deleted = adyen_notification(
         "evt_cov_del_known",
         "customer.subscription.deleted",
         subscription_object(
@@ -4003,7 +4003,7 @@ db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
     );
     expect_webhook_ok(&h, &app, &deleted, "evt_cov_del_known").await;
     let (sub_status, plan): (String, String) = sqlx::query_as(
-        "SELECT s.status::text, t.plan FROM stripe_subscriptions s
+        "SELECT s.status::text, t.plan FROM adyen_subscriptions s
          JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
     )
     .bind(tenant)
@@ -4014,10 +4014,10 @@ db_test!(stripe_webhook_out_of_order_events_never_rewind_state, |h| {
     assert_eq!(plan, "free");
 });
 
-db_test!(stripe_webhook_unresolvable_invoice_paid_deadletters, |h| {
+db_test!(adyen_webhook_unresolvable_invoice_paid_deadletters, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let now = Utc::now().timestamp();
-    let payload = stripe_event(
+    let payload = adyen_notification(
         "evt_cov_unresolved",
         "invoice.paid",
         serde_json::json!({
@@ -4039,7 +4039,7 @@ db_test!(stripe_webhook_unresolvable_invoice_paid_deadletters, |h| {
     );
 
     let (status_text, error): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, error FROM stripe_webhook_events WHERE stripe_event_id = $1",
+        "SELECT status, error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
     )
     .bind("evt_cov_unresolved")
     .fetch_one(&h.pool)
@@ -4061,17 +4061,17 @@ db_test!(stripe_webhook_unresolvable_invoice_paid_deadletters, |h| {
     assert_eq!(invoices, 0);
 });
 
-db_test!(stripe_webhook_invoice_paid_persists_verified_payment, |h| {
+db_test!(adyen_webhook_invoice_paid_persists_verified_payment, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_paid";
     seed_tenant(&h, tenant, "growth").await;
-    // Non-EU billing country → 0% VAT, so Stripe's tax=0 is the truth.
+    // Non-EU billing country → 0% VAT, so Adyen's tax=0 is the truth.
     seed_billing_address(&h, tenant, "US").await;
     let now = Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO stripe_subscriptions
-             (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, stripe_customer_id)
+        "INSERT INTO adyen_subscriptions
+             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, adyen_shopper_reference)
          VALUES ($1, 'sub_cov_paid', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')",
     )
     .bind(tenant)
@@ -4081,7 +4081,7 @@ db_test!(stripe_webhook_invoice_paid_persists_verified_payment, |h| {
     .await
     .expect("seed subscription");
 
-    let payload = stripe_event(
+    let payload = adyen_notification(
         "evt_cov_paid",
         "invoice.paid",
         serde_json::json!({
@@ -4099,9 +4099,9 @@ db_test!(stripe_webhook_invoice_paid_persists_verified_payment, |h| {
     );
     expect_webhook_ok(&h, &app, &payload, "evt_cov_paid").await;
 
-    let (total, status_text, stripe_id, currency): (i64, String, Option<String>, String) =
+    let (total, status_text, adyen_id, currency): (i64, String, Option<String>, String) =
         sqlx::query_as(
-            "SELECT COALESCE(total, amount), status, stripe_invoice_id, currency
+            "SELECT COALESCE(total, amount), status, adyen_psp_reference, currency
              FROM invoices WHERE tenant_id = $1",
         )
         .bind(tenant)
@@ -4110,24 +4110,24 @@ db_test!(stripe_webhook_invoice_paid_persists_verified_payment, |h| {
         .expect("local invoice");
     assert_eq!(total, 4900, "the verified payment is stored in cents");
     assert_eq!(status_text, "paid");
-    assert_eq!(stripe_id.as_deref(), Some("in_cov_paid"));
+    assert_eq!(adyen_id.as_deref(), Some("in_cov_paid"));
     assert_eq!(currency.to_uppercase(), "EUR");
 
-    // Replay of the same Stripe invoice id must not duplicate the row.
+    // Replay of the same Adyen invoice id must not duplicate the row.
     let mut replay = payload.clone();
     replay["id"] = serde_json::json!("evt_cov_paid_replay");
     let (status, _) = post_signed_webhook(&app, &replay, now).await;
     assert_eq!(status, StatusCode::OK);
     let invoices: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE stripe_invoice_id = 'in_cov_paid'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_cov_paid'")
             .fetch_one(&h.pool)
             .await
             .expect("count invoices");
-    assert_eq!(invoices, 1, "replay is idempotent on the Stripe invoice id");
+    assert_eq!(invoices, 1, "replay is idempotent on the Adyen invoice id");
 
     // The tax snapshot is immutable and reconciled.
     let snapshots: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM stripe_tax_snapshots WHERE stripe_invoice_id = 'in_cov_paid'",
+        "SELECT COUNT(*) FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_cov_paid'",
     )
     .fetch_one(&h.pool)
     .await
@@ -4551,7 +4551,7 @@ db_test!(reconciliation_reports_candidates_and_replays_once, |h| {
 db_test!(
     deadletter_retry_worker_is_a_clean_noop_without_entries,
     |h| {
-        billing_service::stripe_webhooks::retry_deadlettered_webhooks(&h.state)
+        billing_service::adyen_webhooks::retry_deadlettered_webhooks(&h.state)
             .await
             .expect("retry with an empty deadletter set");
     }
@@ -4585,8 +4585,8 @@ db_test!(
 
         // A subscription without a billing cycle cannot be prorated.
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-             (tenant_id, stripe_subscription_id, plan, status, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+             (tenant_id, adyen_subscription_id, plan, status, adyen_shopper_reference)
          VALUES ($1, 'sub_cov_proration', 'growth', 'active', 'cus_cov_proration')",
         )
         .bind(tenant)
@@ -4594,7 +4594,7 @@ db_test!(
         .await
         .expect("subscription without cycle");
         sqlx::query(
-            "UPDATE stripe_subscriptions SET billing_cycle_start = NULL WHERE tenant_id = $1",
+            "UPDATE adyen_subscriptions SET billing_cycle_start = NULL WHERE tenant_id = $1",
         )
         .bind(tenant)
         .execute(&h.pool)
@@ -4615,7 +4615,7 @@ db_test!(
         // With a real cycle the preview computes and reconciles internally.
         let now = Utc::now();
         sqlx::query(
-            "UPDATE stripe_subscriptions
+            "UPDATE adyen_subscriptions
          SET billing_cycle_start = $2, billing_cycle_end = $3, billing_interval = 'monthly'
          WHERE tenant_id = $1",
         )
@@ -5441,7 +5441,7 @@ db_test!(
         let now = Utc::now();
         let input = || CreateInvoiceInput {
             tenant_id: tenant.to_string(),
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             line_items: vec![NewLineItem {
                 description: "Usage 2026-09".into(),
                 quantity: 10,
@@ -5754,21 +5754,21 @@ db_test!(overage_sweep_backfills_legacy_pricing_snapshot_once, |h| {
 });
 
 db_test!(
-    stripe_webhook_cross_tenant_binding_and_bad_states_refuse,
+    adyen_webhook_cross_tenant_binding_and_bad_states_refuse,
     |h| {
         let app = billing_service::routes::router(h.state.clone());
         let tenant_a = "cov_wh_bind_a";
         let tenant_b = "cov_wh_bind_b";
         seed_tenant(&h, tenant_a, "free").await;
         seed_tenant(&h, tenant_b, "free").await;
-        seed_stripe_plan(&h, "growth", "price_cov_monthly").await;
+        seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
         let now = Utc::now().timestamp();
 
         // Bind the subscription to tenant A.
         expect_webhook_ok(
             &h,
             &app,
-            &stripe_event(
+            &adyen_notification(
                 "evt_cov_bind_a",
                 "customer.subscription.created",
                 subscription_object(
@@ -5790,12 +5790,12 @@ db_test!(
             .unwrap();
         assert_eq!(plan_a, "growth");
 
-        // The SAME Stripe subscription id claimed by another tenant is refused:
+        // The SAME Adyen subscription id claimed by another tenant is refused:
         // a webhook can never move a subscription (or paid entitlement) across
         // tenants.
         let (status, _) = post_signed_webhook(
             &app,
-            &stripe_event(
+            &adyen_notification(
                 "evt_cov_bind_b",
                 "customer.subscription.updated",
                 subscription_object(
@@ -5812,7 +5812,7 @@ db_test!(
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (error,): (Option<String>,) = sqlx::query_as(
-            "SELECT error FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_bind_b'",
+            "SELECT error FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_bind_b'",
         )
         .fetch_one(&h.pool)
         .await
@@ -5833,7 +5833,7 @@ db_test!(
         // An impossible status transition is refused (active -> incomplete).
         let (status, _) = post_signed_webhook(
             &app,
-            &stripe_event(
+            &adyen_notification(
                 "evt_cov_bad_transition",
                 "customer.subscription.updated",
                 subscription_object(
@@ -5850,7 +5850,7 @@ db_test!(
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let status_text: String = sqlx::query_scalar(
-        "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_cov_bound'",
+        "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_cov_bound'",
     )
     .fetch_one(&h.pool)
     .await
@@ -5869,16 +5869,16 @@ db_test!(
         no_price["items"]["data"] = serde_json::json!([]);
         let (status, _) = post_signed_webhook(
             &app,
-            &stripe_event("evt_cov_noprice", "customer.subscription.created", no_price),
+            &adyen_notification("evt_cov_noprice", "customer.subscription.created", no_price),
             now,
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        // An unknown Stripe price id cannot grant anything either.
+        // An unknown Adyen price id cannot grant anything either.
         let (status, _) = post_signed_webhook(
             &app,
-            &stripe_event(
+            &adyen_notification(
                 "evt_cov_unknownprice",
                 "customer.subscription.created",
                 subscription_object(
@@ -5901,7 +5901,7 @@ db_test!(
             .unwrap();
         assert_eq!(plan_b, "free", "no unverified price may grant a plan");
         let subs_b: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
                 .bind(tenant_b)
                 .fetch_one(&h.pool)
                 .await
@@ -6289,17 +6289,17 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
     assert_eq!(calculate_overage_cost_with_rate(101, 100, 80), 1);
 }
 
-// Stripe-unverified ≠ paid: a subscription event whose price id is not
+// Adyen-unverified ≠ paid: a subscription event whose price id is not
 // bound to a plan must never grant a paid plan (fail closed to free).
-db_test!(unverified_stripe_price_never_grants_a_paid_plan, |h| {
+db_test!(unverified_adyen_plan_code_never_grants_a_paid_plan, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_unverified_price";
     seed_tenant(&h, tenant, "free").await;
-    // A plans row exists but its stripe price id is NOT the one in the event.
-    seed_stripe_plan(&h, "growth", "price_official_monthly").await;
+    // A plans row exists but its adyen price id is NOT the one in the event.
+    seed_adyen_plan(&h, "growth", "price_official_monthly").await;
 
     let now = Utc::now().timestamp();
-    let payload = stripe_event(
+    let payload = adyen_notification(
         "evt_cov_unverified",
         "customer.subscription.updated",
         subscription_object(
@@ -6315,7 +6315,7 @@ db_test!(unverified_stripe_price_never_grants_a_paid_plan, |h| {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "an unbound Stripe price must be refused, not silently mapped"
+        "an unbound Adyen price must be refused, not silently mapped"
     );
 
     let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
@@ -6323,9 +6323,9 @@ db_test!(unverified_stripe_price_never_grants_a_paid_plan, |h| {
         .fetch_one(&h.pool)
         .await
         .expect("tenant plan");
-    assert_eq!(plan, "free", "Stripe-unverified must never equal paid");
+    assert_eq!(plan, "free", "Adyen-unverified must never equal paid");
     let subs: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
             .bind(tenant)
             .fetch_one(&h.pool)
             .await
@@ -6341,13 +6341,13 @@ db_test!(
         let app = billing_service::routes::router(h.state.clone());
         let tenant = "cov_wh_double";
         seed_tenant(&h, tenant, "free").await;
-        seed_stripe_plan(&h, "growth", "price_cov_monthly").await;
+        seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
         seed_billing_address(&h, tenant, "US").await;
 
         let now = Utc::now().timestamp();
 
         // ── customer.subscription.updated, delivered twice ────────────────
-        let sub_payload = stripe_event(
+        let sub_payload = adyen_notification(
             "evt_cov_double_sub",
             "customer.subscription.updated",
             subscription_object(
@@ -6363,7 +6363,7 @@ db_test!(
         expect_webhook_ok(&h, &app, &sub_payload, "evt_cov_double_sub").await;
 
         let (sub_rows, plan): (i64, String) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint, MIN(t.plan) FROM stripe_subscriptions s
+            "SELECT COUNT(*)::bigint, MIN(t.plan) FROM adyen_subscriptions s
          JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
         )
         .bind(tenant)
@@ -6376,7 +6376,7 @@ db_test!(
         );
         assert_eq!(plan, "growth", "one plan transition to growth");
         let watermark: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT event_watermark FROM stripe_subscriptions WHERE tenant_id = $1",
+            "SELECT event_watermark FROM adyen_subscriptions WHERE tenant_id = $1",
         )
         .bind(tenant)
         .fetch_one(&h.pool)
@@ -6384,20 +6384,20 @@ db_test!(
         .expect("watermark");
         assert!(watermark.is_some(), "watermark recorded exactly once");
         let claims: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_double_sub'",
+        "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_double_sub'",
     )
     .fetch_one(&h.pool)
     .await
     .expect("webhook claim rows");
-        assert_eq!(claims, 1, "one claim row per Stripe event id");
+        assert_eq!(claims, 1, "one claim row per Adyen event id");
 
         // ── invoice.paid, delivered twice ─────────────────────────────────
         sqlx::query(
-        "INSERT INTO stripe_subscriptions
-             (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, stripe_customer_id)
+        "INSERT INTO adyen_subscriptions
+             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, adyen_shopper_reference)
          VALUES ($1, 'sub_cov_double', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')
-         ON CONFLICT (stripe_subscription_id) DO NOTHING",
+         ON CONFLICT (adyen_subscription_id) DO NOTHING",
     )
     .bind(tenant)
     .bind((now - 86_400) as f64)
@@ -6406,7 +6406,7 @@ db_test!(
     .await
     .expect("ensure subscription row for invoice resolution");
 
-        let invoice_payload = stripe_event(
+        let invoice_payload = adyen_notification(
             "evt_cov_double_inv",
             "invoice.paid",
             serde_json::json!({
@@ -6426,7 +6426,7 @@ db_test!(
         expect_webhook_ok(&h, &app, &invoice_payload, "evt_cov_double_inv").await;
 
         let invoices: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoices WHERE stripe_invoice_id = 'in_cov_double'",
+            "SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_cov_double'",
         )
         .fetch_one(&h.pool)
         .await
@@ -6436,14 +6436,14 @@ db_test!(
             "duplicate invoice.paid must settle exactly one local invoice"
         );
         let inv_claims: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_double_inv'",
+        "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_double_inv'",
     )
     .fetch_one(&h.pool)
     .await
     .expect("invoice webhook claim rows");
         assert_eq!(inv_claims, 1, "one claim row for the invoice event id");
         let processed: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_double_inv'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_double_inv'",
         )
         .fetch_one(&h.pool)
         .await

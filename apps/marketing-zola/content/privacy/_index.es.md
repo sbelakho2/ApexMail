@@ -20,7 +20,7 @@ Bel Consulting OÜ (nombre comercial ApexMail) («nosotros») se compromete a pr
 
 - **Visitantes del sitio web (sitio de marketing):** dirección IP, tipo de navegador y user agent, información del dispositivo, páginas visitadas, URL de referencia y marcas de tiempo — recopilados automáticamente de los registros de acceso del servidor. El sitio de marketing no ejecuta scripts de analítica ni incrusta píxeles de seguimiento ni cookies publicitarias.
 - **Prospectos:** nombre, correo electrónico, nombre de la empresa, número de teléfono (si se proporciona) e historial de comunicaciones, proporcionados mediante formularios de contacto o correo electrónico.
-- **Datos de cuenta:** nombre, correo electrónico, empresa, dirección de facturación, número de IVA, tokens del método de pago (los datos de tarjeta los procesa Stripe y nunca llegan a nuestros servidores), metadatos de claves API, marcas de tiempo de inicio de sesión, direcciones IP y entradas del registro de auditoría.
+- **Datos de cuenta:** nombre, correo electrónico, empresa, dirección de facturación, número de IVA, tokens del método de pago (los datos de tarjeta los procesa Adyen y nunca llegan a nuestros servidores), metadatos de claves API, marcas de tiempo de inicio de sesión, direcciones IP y entradas del registro de auditoría.
 - **Datos de uso:** llamadas a la API, volúmenes de envío de correo, eventos de entrega y eventos de interacción (aperturas y clics) de los mensajes que envía.
 - **Datos de destinatarios (como encargado del tratamiento de nuestros clientes):** direcciones de correo electrónico y nombres de los destinatarios, contenido del correo (asunto, cuerpo, encabezados, adjuntos) y metadatos de entrega e interacción. Cuando el cliente remitente activa el seguimiento, los eventos de apertura y clic también registran la dirección IP y el user agent del destinatario.
 - **Datos técnicos:** direcciones IP (usadas para autenticación, limitación de tasa y prevención de fraude y abuso), tipo de navegador, información del dispositivo.
@@ -40,7 +40,7 @@ La configuración proporcionada apunta a regiones del EEE para los datos princip
 |---|---|---|---|
 | Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE — sin transferencia a terceros países |
 | Tokens de autenticación OAuth | Google LLC / GitHub, Inc. (entidades estadounidenses, CCT) | Gestionado por el proveedor | EE. UU. (CCT) |
-| Datos de pago y facturación | Stripe, Inc. (EE. UU., CCT) | Gestionado por el proveedor (India para soporte) | EE. UU./India (CCT) |
+| Datos de pago y facturación | Adyen N.V. (EE. UU., CCT) | Gestionado por el proveedor (India para soporte) | EE. UU./India (CCT) |
 | Tickets de soporte | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE — sin transferencia a terceros países |
 
 No transferimos datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).

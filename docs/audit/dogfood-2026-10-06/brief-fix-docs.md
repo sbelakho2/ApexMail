@@ -20,7 +20,7 @@ another agent; skip it). Do NOT touch `services/mail-server/**`, `apps/ai/**`,
 ## Items
 
 P1 (fix all):
-1. Stale price ladder: `docs/tool-contracts/stripe.md:16-24` and
+1. Stale price ladder: `docs/tool-contracts/adyen.md:16-24` and
    `docs/architecture/billing-lifecycle.md:20-28` — align to the canonical
    catalog (services/mail-server/crates/platform-catalog/src/lib.rs +
    billing plans.rs seeds). These are the same numbers the knowledge gate
@@ -71,7 +71,7 @@ P1 (fix all):
 
 P2/P3: fix the mounted-route doc gaps against the real api-server routes
 (`/v1/account/usage`, `POST /v1/suppressions/check`, contacts/suppressions
-exports), the removed-system references (`stripe-integration.ts`,
+exports), the removed-system references (`adyen-integration.ts`,
 `ses_monitoring.rs`), `status.apexmail.io` drift, the cache-warming K8s
 self-contradiction, and the stale line/path citations the review lists.
 

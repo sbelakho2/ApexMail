@@ -123,7 +123,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 | SOC 2 Type II | Planned — after Type I completion | Scope TBD (dependent on Type I scope) | ApexMail Platform | Same as Type I auditor | N/A | Q2 2028 — Type II audit (6–12 months after Type I) | Not yet available | security@apexmail.ee |
 | ISO 27001 | Planned — evaluated based on customer demand | Scope TBD | ApexMail Platform | To be selected (accredited certification body) | N/A | Timeline dependent on customer demand | Not yet available | security@apexmail.ee |
 | HIPAA | Not currently available | N/A | Enterprise / Dedicated Tenant only | N/A | N/A | BAA template available now for regulatory alignment | BAA template (upon request, under NDA) | security@apexmail.ee |
-| PCI DSS | Not applicable | Payment processing (via Stripe) | N/A — Stripe is PCI DSS Level 1 certified | Stripe, Inc. | Valid — Continuous by Stripe | N/A | Stripe PCI DSS Attestation of Compliance (via Stripe dashboard) | support@apexmail.ee |
+| PCI DSS | Not applicable | Payment processing (via Adyen) | N/A — Adyen is PCI DSS Level 1 certified | Adyen N.V. | Valid — Continuous by Adyen | N/A | Adyen PCI DSS Attestation of Compliance (via Adyen dashboard) | support@apexmail.ee |
 
 **Status labels used**:
 | Label | Definition |
@@ -145,7 +145,7 @@ ApexMail operates a responsible disclosure program with safe harbor for security
   - Key fingerprint: `AB12 CD34 EF56 7890 1234 5678 90AB CDEF 1234 5678`
 - **Safe harbor**: We will not pursue legal action against researchers who follow our [Responsible Disclosure Policy](responsible-disclosure.md)
 - **Scope**: `*.apexmail.ee`, API endpoints (`api.apexmail.com`), dashboard (`app.apexmail.com`), SMTP infrastructure, support portal, status page
-- **Out of scope**: Third-party services (Stripe, Hetzner, Let's Encrypt), social media accounts, physical security
+- **Out of scope**: Third-party services (Adyen, Hetzner, Let's Encrypt), social media accounts, physical security
 - **Prohibited**: DoS/DDoS testing, bulk/spam email, social engineering, data exfiltration, credential harvesting
 - **Response target**: Initial acknowledgment within 48 hours; triage within 5 business days; updates at least every 14 days
 - **Disclosure process**: Coordinate disclosure timeline with researcher; publish advisories after remediation; credit researchers in release notes

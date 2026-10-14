@@ -2,7 +2,7 @@
   "_description": "Company identity and public-claim snapshot for static marketing. This is not a billing, product, entitlement, invoice, email, or application source of truth.",
   "_version": "2.0.0",
   "_source": "company and claims fields mirror compliance/src/legal_entity.rs",
-  "_pricing_authority": "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Stripe webhooks)",
+  "_pricing_authority": "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Adyen webhooks)",
   "company": {
     "trading_name": "ApexMail",
     "legal_name": "Bel Consulting OÜ",
@@ -41,7 +41,7 @@
     "data_residency_wording": "Data-residency commitments depend on the active deployment and applicable agreement. The supplied production configuration defaults telemetry object storage to an EU/EEA region; confirm active storage locations and transfer safeguards with ApexMail.",
     "security_status_wording": "An independent penetration test has not yet been completed. Internal defense-in-depth controls include WAF, rate limiting, DDoS protection, audit logging, and encryption at rest and in transit.",
     "compliance_status_wording": "GDPR-oriented data-processing service. DPA available for review. Subprocessor list maintained. HIPAA not currently available. ISO 27001 certification is not currently offered.",
-    "certification_status": "ISO 27001: not currently certified. PCI DSS: not applicable (Stripe processes payments).",
+    "certification_status": "ISO 27001: not currently certified. PCI DSS: not applicable (Adyen processes payments).",
     "penetration_test_status": "Planned — annual independent penetration test not yet completed."
   }
 }

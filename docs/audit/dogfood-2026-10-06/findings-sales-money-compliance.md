@@ -44,9 +44,9 @@ Evidence: `materialize_due_cash_special` carries its own admission:
 /// NOTE: scheduling is not wired into the maintenance loop by this change;
 /// the function is exposed so operations can run it (and tests can call it).
 ```
-A repo-wide search finds callers only in `billing-service/tests/coverage_adversarial.rs:4824,4837` — `start_periodic_jobs` (maintenance.rs:60-…, the only job registry) never invokes it, and no other crate does either. Yet `stripe_webhooks.rs:2529-2533` states the cash-accounting case is "recognised on payment (or the third-month fallback, handled by the sweep)".
+A repo-wide search finds callers only in `billing-service/tests/coverage_adversarial.rs:4824,4837` — `start_periodic_jobs` (maintenance.rs:60-…, the only job registry) never invokes it, and no other crate does either. Yet `adyen_webhooks.rs:2529-2533` states the cash-accounting case is "recognised on payment (or the third-month fallback, handled by the sweep)".
 Why it is a defect: for `cash_special` VAT-accounting tenants, an invoice that stays unpaid past the third month never gets its `cash_special_due` recognition entry materialized, so the KMD aggregation (`KMD_RECOGNITION_TOTALS_SQL`) silently omits that output VAT. The code claims a sweep exists that does not.
-Suggested fix: call `materialize_due_cash_special` from the periodic VAT/KMD job in `maintenance.rs` (e.g. alongside `generate_kmd_if_due`) and correct the stripe_webhooks comment if scheduling remains manual.
+Suggested fix: call `materialize_due_cash_special` from the periodic VAT/KMD job in `maintenance.rs` (e.g. alongside `generate_kmd_if_due`) and correct the adyen_webhooks comment if scheduling remains manual.
 
 ### P1 services/mail-server/crates/compliance/src/consent_enforcement.rs:141 — the send-time consent enforcer has zero callers: no outbound send path ever checks consent, only suppression
 

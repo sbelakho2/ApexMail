@@ -1244,7 +1244,7 @@ pub(crate) async fn enforce_tenant_not_restricted(
 ///
 /// * view invoices (list/detail/PDF/XML exports) — `GET /v1/billing/invoices…`
 /// * enter the billing portal (payment-method management happens inside
-///   the Stripe-hosted portal) — `POST /v1/billing/portal`
+///   the Adyen-hosted portal) — `POST /v1/billing/portal`
 /// * pay/reactivate through checkout — `POST /v1/billing/checkout`
 /// * view the current subscription — `GET /v1/billing/subscription`
 ///
@@ -1742,7 +1742,7 @@ mod tests {
             );
         }
         // Billing portal + checkout (payment-method updates happen inside
-        // the Stripe-hosted portal).
+        // the Adyen-hosted portal).
         assert!(is_billing_recovery_request(
             &Method::POST,
             "/v1/billing/portal"

@@ -612,7 +612,7 @@ const CLAIM_PAYMENT_ALLOCATION_SQL: &str = r#"
       AND a.source <> 'credit_note'
       AND NOT EXISTS (
             SELECT 1 FROM accounting_source_documents d
-            WHERE d.source_type IN ('stripe_settlement', 'wallet_settlement', 'manual_settlement')
+            WHERE d.source_type IN ('adyen_settlement', 'wallet_settlement', 'manual_settlement')
               AND d.source_table = 'invoice_payment_allocations'
               AND d.source_id = a.operation_id
           )
@@ -836,7 +836,7 @@ mod tests {
         );
         assert!(
             CLAIM_PAYMENT_ALLOCATION_SQL
-                .contains("'stripe_settlement', 'wallet_settlement', 'manual_settlement'"),
+                .contains("'adyen_settlement', 'wallet_settlement', 'manual_settlement'"),
             "the marker check must cover every settlement source_type the adapter registers"
         );
 

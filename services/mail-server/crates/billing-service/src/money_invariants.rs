@@ -403,7 +403,7 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ("src/credit_notes.rs", "src/credit_notes.rs"),
     ("src/subscriptions.rs", "src/subscriptions.rs"),
     (
-        // The sweep + collection path (wallet debit, Stripe invoice item,
+        // The sweep + collection path (wallet debit, Adyen invoice item,
         // overage/PAYG pricing) is money movement — gated.
         "src/overage.rs",
         "src/overage.rs",
@@ -417,8 +417,8 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     (
         // Invoice payment events move wallet/dunning money; VAT rate
         // snapshots are rates, not amounts.
-        "src/stripe_webhooks.rs",
-        "src/stripe_webhooks.rs",
+        "src/adyen_webhooks.rs",
+        "src/adyen_webhooks.rs",
     ),
     (
         // Auto-pay retries, SLA credit issuance (percent-of-cents ladder)

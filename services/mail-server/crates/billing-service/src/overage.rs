@@ -15,7 +15,7 @@
 //! # Period records (audits F30/F31)
 //!
 //! Billable periods live in the immutable `billing_periods` table
-//! (migration 137), written by the Stripe subscription webhook at every
+//! (migration 137), written by the Adyen subscription webhook at every
 //! period transition and by a catch-up insert at the top of the sweep. A
 //! renewal can no longer overwrite the period bounds before the sweep
 //! reads them. The sweep selects only `invoice_state = 'unbilled'` rows —
@@ -67,19 +67,19 @@
 //!    credits; audit F60) — wallet application never invents its own
 //!    total-minus-this-debit fallback, and an unavailable balance is a
 //!    retryable failure, never the basis of an external amount (F33).
-//! 2. **Stripe invoice (finalized).** For tenants with a Stripe customer
-//!    on file and a configured `STRIPE_SECRET_KEY`, the REMAINING amount
+//! 2. **Adyen invoice (finalized).** For tenants with a Adyen customer
+//!    on file and a configured `ADYEN_API_KEY`, the REMAINING amount
 //!    is posted as an invoice item AND collected immediately by creating
-//!    and FINALIZING a Stripe invoice (audit F34: a pending
+//!    and FINALIZING a Adyen invoice (audit F34: a pending
 //!    `/invoiceitems` entry was never linked to a real invoice, so
 //!    `invoice.paid` never matched and final usage went uncollected).
 //!    Idempotency keys carry the immutable local operation identity
 //!    (invoice id + usage kind) AND the frozen amount/currency, so a
-//!    retry with a changed wallet balance can never reuse one Stripe key
+//!    retry with a changed wallet balance can never reuse one Adyen key
 //!    with different parameters. The local ↔ external mapping (invoice
 //!    id, item id, currency, amount) is persisted before finalization
 //!    commits, and `invoice.paid` reconciles through
-//!    `stripe_invoice_id`. The HTTP calls run OUTSIDE any wallet-lock
+//!    `adyen_psp_reference`. The HTTP calls run OUTSIDE any wallet-lock
 //!    transaction (audit F33).
 //! 3. **Dunning handoff.** Whatever remains flips the invoice from
 //!    `draft` to `pending` WITH a transactional handoff to the durable
@@ -151,7 +151,7 @@ const SWEEP_PAGE: i64 = 500;
 /// reconciled, never aged out with the raw metering events. Pinned by
 /// unit tests.
 const SWEEP_UNBILLED_PERIODS_SQL: &str = r#"
-    SELECT id, tenant_id, stripe_subscription_id, period_start, period_end,
+    SELECT id, tenant_id, adyen_subscription_id, period_start, period_end,
            plan_name, email_allowance,
            -- billing_periods.overage_rate_millicents is INT4; the Rust row
            -- decodes i64, so project an explicit bigint cast.
@@ -184,7 +184,7 @@ pub struct OverageSweepResult {
     pub payg_invoices_created: u64,
     /// Invoices fully covered by the wallet and marked paid.
     pub wallet_paid: u64,
-    /// Invoices left `pending` for the dunning flow / Stripe next cycle.
+    /// Invoices left `pending` for the dunning flow / Adyen next cycle.
     pub pending_dunning: u64,
     /// Periods whose invoice already existed when claimed (unique index
     /// backstop) — the existing invoice was reused, never double-collected
@@ -219,7 +219,7 @@ pub struct OverageSweepResult {
 struct BillingPeriodRow {
     id: Uuid,
     tenant_id: String,
-    stripe_subscription_id: Option<String>,
+    adyen_subscription_id: Option<String>,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
     plan_name: Option<String>,
@@ -262,7 +262,7 @@ const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
              ELSE ss.plan
         END AS plan_name,
         p.email_limit
-    FROM stripe_subscriptions ss
+    FROM adyen_subscriptions ss
     JOIN tenants t ON t.id = ss.tenant_id
     LEFT JOIN plan_overrides po
       ON po.tenant_id = t.id
@@ -274,7 +274,7 @@ const EFFECTIVE_PERIOD_PLAN_SQL: &str = r#"
                        ELSE ss.plan
                   END
     WHERE ss.tenant_id = $1
-      AND ss.stripe_subscription_id = $2
+      AND ss.adyen_subscription_id = $2
     LIMIT 1
 "#;
 
@@ -288,12 +288,12 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
     sqlx::query(
         r#"
         INSERT INTO billing_periods (
-            tenant_id, stripe_subscription_id, usage_kind,
+            tenant_id, adyen_subscription_id, usage_kind,
             period_start, period_end, currency, plan_name, email_allowance,
             overage_rate_millicents, pricing_snapshot, pricing_resolved_at
         )
         SELECT
-            ss.tenant_id, ss.stripe_subscription_id, 'subscription',
+            ss.tenant_id, ss.adyen_subscription_id, 'subscription',
             ss.billing_cycle_start, ss.billing_cycle_end,
             eff.currency, eff.plan_name, p.email_limit,
             rate.rate_millicents,
@@ -306,7 +306,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
                 'source', 'catchup'
             ),
             NOW()
-        FROM stripe_subscriptions ss
+        FROM adyen_subscriptions ss
         JOIN tenants t ON t.id = ss.tenant_id
         LEFT JOIN LATERAL (
             SELECT po.plan AS override_plan
@@ -615,7 +615,7 @@ async fn process_subscription_period(
     if plan_name.as_deref().map(str::trim).unwrap_or("").is_empty() {
         let live: Option<(String, Option<i64>)> = sqlx::query_as(EFFECTIVE_PERIOD_PLAN_SQL)
             .bind(&period.tenant_id)
-            .bind(&period.stripe_subscription_id)
+            .bind(&period.adyen_subscription_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("overage sweep: plan limit query failed: {e}"))?;
@@ -801,7 +801,7 @@ async fn process_subscription_period(
 
     let input = CreateInvoiceInput {
         tenant_id: period.tenant_id.clone(),
-        stripe_invoice_id: None,
+        adyen_psp_reference: None,
         line_items: vec![NewLineItem {
             description: description.clone(),
             quantity: 1,
@@ -966,10 +966,10 @@ async fn process_subscription_period(
 
 /// PAYG half of the sweep (audit 1.3 — PAYG was priced and displayed but
 /// never billed). PAYG tenants (unlimited email limit, zero base price,
-/// typically no Stripe subscription) are invoiced per COMPLETED calendar
+/// typically no Adyen subscription) are invoiced per COMPLETED calendar
 /// month — the same period the quota/reporting paths use for tenants
 /// without a subscription cycle — from the existing metering events.
-/// Usage-record pushing to Stripe Meter is deliberately NOT used; the
+/// Usage-record pushing to Adyen Meter is deliberately NOT used; the
 /// invoice-item mechanism in [`collect_usage_invoice`] collects the cost.
 /// A month that computes to zero is skipped silently.
 async fn sweep_payg_calendar_months(
@@ -1181,7 +1181,7 @@ async fn process_payg_month(
 
     let input = CreateInvoiceInput {
         tenant_id: tenant_id.to_string(),
-        stripe_invoice_id: None,
+        adyen_psp_reference: None,
         line_items,
         period_start: month_start,
         period_end: month_end,
@@ -1646,7 +1646,7 @@ async fn collect_usage_invoice(
 
     // Outstanding AFTER the wallet application — the single derivation.
     // An UNAVAILABLE balance is a retryable failure (audit F33): never
-    // initiate an external Stripe amount from a fallback total.
+    // initiate an external Adyen amount from a fallback total.
     let remaining_cents = match invoice_outstanding_cents(&state.db, invoice.id).await {
         Ok(outstanding) => outstanding,
         Err(error) => {
@@ -1673,21 +1673,21 @@ async fn collect_usage_invoice(
         return Ok(());
     }
 
-    // (c) Stripe-managed tenants: post the REMAINING amount as an invoice
-    // item AND create + FINALIZE the Stripe invoice (audit F34 — the old
-    // pending-item-only path never set stripe_invoice_id, so invoice.paid
+    // (c) Adyen-managed tenants: post the REMAINING amount as an invoice
+    // item AND create + FINALIZE the Adyen invoice (audit F34 — the old
+    // pending-item-only path never set adyen_psp_reference, so invoice.paid
     // never matched and final usage could wait forever for a renewal that
     // never comes). Idempotency keys carry the local invoice id, usage
     // kind AND the frozen amount/currency; the local ↔ external mapping is
     // persisted before finalize. The HTTP calls run OUTSIDE every
-    // wallet-lock transaction (audit F33). A Stripe failure is a
+    // wallet-lock transaction (audit F33). A Adyen failure is a
     // retryable error: the outbox keeps the work and backs off — the
     // invoice is NOT pushed to done on the back of a failure.
     //
     // Audit SM7 F3: the collection amount is FROZEN on the outbox payload at
-    // the first Stripe attempt and every retry reuses the frozen figure —
+    // the first Adyen attempt and every retry reuses the frozen figure —
     // hence the EXACT same idempotency keys. Recomputing the live remainder
-    // per attempt used to mint a NEW key (and a SECOND Stripe invoice for
+    // per attempt used to mint a NEW key (and a SECOND Adyen invoice for
     // the delta) whenever an allocation landed between attempts.
     let outbox_payload = collection_outbox_payload(&state.db, invoice.id).await?;
     let collection_cents = match frozen_collection_amount(outbox_payload.as_ref()) {
@@ -1697,7 +1697,7 @@ async fn collect_usage_invoice(
                     invoice_id = %invoice.id,
                     frozen,
                     live_outstanding = remaining_cents,
-                    "usage invoice collection: reusing the frozen Stripe collection amount — \
+                    "usage invoice collection: reusing the frozen Adyen collection amount — \
                      the live outstanding moved after the first attempt"
                 );
             }
@@ -1705,7 +1705,7 @@ async fn collect_usage_invoice(
         }
         None => freeze_collection_amount(&state.db, invoice.id, remaining_cents).await?,
     };
-    let stripe = match create_and_finalize_stripe_usage_invoice(
+    let adyen = match create_and_finalize_adyen_usage_invoice(
         state,
         invoice,
         collection_cents,
@@ -1716,22 +1716,22 @@ async fn collect_usage_invoice(
     )
     .await
     {
-        Ok(stripe) => stripe,
+        Ok(adyen) => adyen,
         Err(error) => {
             record_collection_failure(state, invoice.id, &owner_token, &error).await;
-            return Err(format!("Stripe collection failed: {error}"));
+            return Err(format!("Adyen collection failed: {error}"));
         }
     };
 
-    if let Some(mapping) = stripe.as_ref() {
+    if let Some(mapping) = adyen.as_ref() {
         let persisted = sqlx::query(
             r#"
             UPDATE invoices
-            SET stripe_invoice_id = $2,
-                stripe_invoice_item_id = $3,
+            SET adyen_psp_reference = $2,
+                adyen_payment_reference = $3,
                 updated_at = NOW()
             WHERE id = $1
-              AND (stripe_invoice_id IS NULL OR stripe_invoice_id = $2)
+              AND (adyen_psp_reference IS NULL OR adyen_psp_reference = $2)
             "#,
         )
         .bind(invoice.id)
@@ -1743,13 +1743,13 @@ async fn collect_usage_invoice(
             Ok(execution) if execution.rows_affected() > 0 => {}
             Ok(_) => warn!(
                 invoice_id = %invoice.id,
-                existing = ?invoice.stripe_invoice_id,
-                "usage invoice collection: Stripe mapping not stored — invoice already bound to a different Stripe invoice"
+                existing = ?invoice.adyen_psp_reference,
+                "usage invoice collection: Adyen mapping not stored — invoice already bound to a different Adyen invoice"
             ),
             Err(error) => {
                 // The external operation exists; the mapping must not be
                 // lost — keep the outbox retryable (audit F34).
-                let error = format!("storing Stripe mapping failed: {error}");
+                let error = format!("storing Adyen mapping failed: {error}");
                 record_collection_failure(state, invoice.id, &owner_token, &error).await;
                 return Err(error);
             }
@@ -1772,8 +1772,8 @@ async fn collect_usage_invoice(
         invoice_number = %invoice.invoice_number,
         applied_cents,
         remaining_cents,
-        stripe_invoice = stripe.as_ref().map(|m| m.invoice_id.clone()),
-        "usage invoice moved to pending — wallet applied, remainder handed to dunning/Stripe"
+        adyen_payment = adyen.as_ref().map(|m| m.invoice_id.clone()),
+        "usage invoice moved to pending — wallet applied, remainder handed to dunning/Adyen"
     );
 
     invalidate_wallet_balance_cache(state, &invoice.tenant_id).await;
@@ -1785,8 +1785,8 @@ async fn collect_usage_invoice(
 const COLLECTION_LEASE_SECS: i64 = 600;
 
 /// The outbox-payload key that freezes the external collection amount at the
-/// first Stripe attempt (audit SM7 F3).
-const FROZEN_COLLECTION_AMOUNT_KEY: &str = "stripeCollectionCents";
+/// first Adyen attempt (audit SM7 F3).
+const FROZEN_COLLECTION_AMOUNT_KEY: &str = "adyenCollectionCents";
 
 /// The frozen collection amount carried by an outbox payload (pure — audit
 /// SM7 F3, pinned by unit tests). `Some(cents)` ONLY for a positive integer
@@ -1817,7 +1817,7 @@ async fn collection_outbox_payload(
 
 /// Freeze the external collection amount on the outbox payload (audit
 /// SM7 F3). The FIRST freeze wins: a concurrent collector that took over an
-/// expired lease mid-attempt cannot move the figure — and with it the Stripe
+/// expired lease mid-attempt cannot move the figure — and with it the Adyen
 /// idempotency keys — once another attempt has frozen it. Returns the
 /// EFFECTIVE frozen amount: the caller's proposal only when this call
 /// performed the freeze, the pre-existing frozen figure otherwise (the
@@ -2230,34 +2230,34 @@ async fn finalize_collection(
     Ok(())
 }
 
-/// The persisted local ↔ external Stripe mapping for a collected usage
+/// The persisted local ↔ external Adyen mapping for a collected usage
 /// invoice (audit F34): the REAL invoice id (`in_...`) that
 /// `invoice.paid` reconciles against, plus the pending item id it was
 /// built from.
 #[derive(Debug, Clone)]
-struct StripeUsageInvoice {
+struct AdyenUsageInvoice {
     invoice_id: String,
     item_id: String,
 }
 
-/// Immediate Stripe collection of a usage invoice's remaining amount
+/// Immediate Adyen collection of a usage invoice's remaining amount
 /// (audit F34): post the remaining amount as an invoice item, then CREATE
-/// and FINALIZE a Stripe invoice for that item — the charge happens now,
+/// and FINALIZE a Adyen invoice for that item — the charge happens now,
 /// not "on some future renewal" (which never comes for cancelled/PAYG
 /// tenants).
 ///
 /// * `quantity`/`unit_amount` reproduce the integer-cents amount EXACTLY
-///   (1 × amount_cents) — Stripe cannot express millicents.
+///   (1 × amount_cents) — Adyen cannot express millicents.
 /// * Every idempotency key embeds the immutable local operation identity
 ///   (invoice id + usage kind) AND the FROZEN amount/currency, so a retry
-///   after a wallet-balance change can never replay one Stripe key with
+///   after a wallet-balance change can never replay one Adyen key with
 ///   different request parameters (F34).
-/// * Stripe metadata carries the local invoice id, usage kind and period,
+/// * Adyen metadata carries the local invoice id, usage kind and period,
 ///   so callbacks reconcile through the persisted mapping.
-/// * Returns `Ok(None)` when the tenant has no Stripe customer or no
-///   `STRIPE_SECRET_KEY` is configured (the wallet + dunning path covers
+/// * Returns `Ok(None)` when the tenant has no Adyen customer or no
+///   `ADYEN_API_KEY` is configured (the wallet + dunning path covers
 ///   them).
-async fn create_and_finalize_stripe_usage_invoice(
+async fn create_and_finalize_adyen_usage_invoice(
     state: &AppState,
     invoice: &Invoice,
     amount_cents: i64,
@@ -2265,12 +2265,12 @@ async fn create_and_finalize_stripe_usage_invoice(
     description: &str,
     period_start: DateTime<Utc>,
     usage_kind: &str,
-) -> Result<Option<StripeUsageInvoice>, String> {
+) -> Result<Option<AdyenUsageInvoice>, String> {
     if amount_cents <= 0 {
         return Ok(None);
     }
-    let Ok(secret_key) = std::env::var("STRIPE_SECRET_KEY") else {
-        return Ok(None); // not Stripe-configured — wallet + dunning path
+    let Ok(secret_key) = std::env::var("ADYEN_API_KEY") else {
+        return Ok(None); // not Adyen-configured — wallet + dunning path
     };
     if secret_key.trim().is_empty() {
         return Ok(None);
@@ -2278,10 +2278,10 @@ async fn create_and_finalize_stripe_usage_invoice(
 
     let customer: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT stripe_customer_id
-        FROM stripe_subscriptions
+        SELECT adyen_shopper_reference
+        FROM adyen_subscriptions
         WHERE tenant_id = $1
-          AND stripe_customer_id IS NOT NULL
+          AND adyen_shopper_reference IS NOT NULL
         ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
         LIMIT 1
         "#,
@@ -2289,13 +2289,13 @@ async fn create_and_finalize_stripe_usage_invoice(
     .bind(&invoice.tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| format!("Stripe customer lookup failed: {e}"))?;
+    .map_err(|e| format!("Adyen customer lookup failed: {e}"))?;
     let Some(customer) = customer else {
-        return Ok(None); // no Stripe customer — wallet + dunning path
+        return Ok(None); // no Adyen customer — wallet + dunning path
     };
 
     let base_url =
-        std::env::var("STRIPE_API_BASE_URL").unwrap_or_else(|_| "https://api.stripe.com".into());
+        std::env::var("ADYEN_API_BASE_URL").unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into());
     let client = reqwest::Client::new();
     let currency_code = currency.trim().to_lowercase();
     // Frozen external operation identity: local invoice + usage kind +
@@ -2329,20 +2329,20 @@ async fn create_and_finalize_stripe_usage_invoice(
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("Stripe invoice item request failed: {e}"))?;
+        .map_err(|e| format!("Adyen invoice item request failed: {e}"))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("Stripe invoice item returned {status}: {body}"));
+        return Err(format!("Adyen invoice item returned {status}: {body}"));
     }
     let parsed: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Stripe invoice item decode failed: {e}"))?;
+        .map_err(|e| format!("Adyen invoice item decode failed: {e}"))?;
     let Some(item_id) = parsed
         .get("id")
         .and_then(|value| value.as_str())
         .map(str::to_string)
     else {
-        return Err("Stripe invoice item response carried no id".into());
+        return Err("Adyen invoice item response carried no id".into());
     };
 
     // 2. Create the invoice that carries the item — the REAL `in_...`
@@ -2361,48 +2361,48 @@ async fn create_and_finalize_stripe_usage_invoice(
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("Stripe invoice create request failed: {e}"))?;
+        .map_err(|e| format!("Adyen invoice create request failed: {e}"))?;
     let create_status = response.status();
     let create_body = response.text().await.unwrap_or_default();
     if !create_status.is_success() {
         return Err(format!(
-            "Stripe invoice create returned {create_status}: {create_body}"
+            "Adyen invoice create returned {create_status}: {create_body}"
         ));
     }
     let created: serde_json::Value = serde_json::from_str(&create_body)
-        .map_err(|e| format!("Stripe invoice create decode failed: {e}"))?;
-    let Some(stripe_invoice_id) = created
+        .map_err(|e| format!("Adyen invoice create decode failed: {e}"))?;
+    let Some(adyen_psp_reference) = created
         .get("id")
         .and_then(|value| value.as_str())
         .map(str::to_string)
     else {
-        return Err("Stripe invoice create response carried no id".into());
+        return Err("Adyen invoice create response carried no id".into());
     };
 
     // 3. FINALIZE — the charge is attempted immediately (audit F34: an
     // immediate final-usage collection path that does not rely on another
     // renewal). Settlement is confirmed by the invoice.paid webhook
-    // reconciling stripe_invoice_id; this call only opens the attempt.
+    // reconciling adyen_psp_reference; this call only opens the attempt.
     let response = client
         .post(format!(
-            "{base_url}/v1/invoices/{stripe_invoice_id}/finalize"
+            "{base_url}/v1/invoices/{adyen_psp_reference}/finalize"
         ))
         .bearer_auth(&secret_key)
         .header("Idempotency-Key", format!("{key_seed}_finalize"))
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| format!("Stripe invoice finalize request failed: {e}"))?;
+        .map_err(|e| format!("Adyen invoice finalize request failed: {e}"))?;
     let finalize_status = response.status();
     let finalize_body = response.text().await.unwrap_or_default();
     if !finalize_status.is_success() {
         return Err(format!(
-            "Stripe invoice finalize returned {finalize_status}: {finalize_body}"
+            "Adyen invoice finalize returned {finalize_status}: {finalize_body}"
         ));
     }
 
-    Ok(Some(StripeUsageInvoice {
-        invoice_id: stripe_invoice_id,
+    Ok(Some(AdyenUsageInvoice {
+        invoice_id: adyen_psp_reference,
         item_id,
     }))
 }
@@ -2611,7 +2611,7 @@ pub async fn tenant_has_active_paid_subscription(
 const PAID_SUBSCRIPTION_EXISTS_SQL: &str = r#"
     SELECT EXISTS(
         SELECT 1
-        FROM stripe_subscriptions ss
+        FROM adyen_subscriptions ss
         JOIN plans p ON p.name = ss.plan
         WHERE ss.tenant_id = $1
           AND ss.status = 'active'
@@ -2684,7 +2684,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Audit SM7 F3 — the collection amount is frozen on the outbox payload
-    // at the first Stripe attempt; retries reuse it (hence the EXACT
+    // at the first Adyen attempt; retries reuse it (hence the EXACT
     // idempotency keys) instead of re-deriving a moved remainder.
     // ------------------------------------------------------------------
 
@@ -2693,7 +2693,7 @@ mod tests {
         let payload = serde_json::json!({
             "periodStart": "2026-08-01T00:00:00+00:00",
             "usageKind": "payg",
-            "stripeCollectionCents": 4_321,
+            "adyenCollectionCents": 4_321,
         });
         assert_eq!(frozen_collection_amount(Some(&payload)), Some(4_321));
 
@@ -2707,23 +2707,23 @@ mod tests {
 
         // A non-integer or non-positive "frozen" figure is corruption, not a
         // freeze — the caller re-freezes the live remainder.
-        let float_payload = serde_json::json!({ "stripeCollectionCents": 4_321.5 });
+        let float_payload = serde_json::json!({ "adyenCollectionCents": 4_321.5 });
         assert_eq!(frozen_collection_amount(Some(&float_payload)), None);
-        let zero_payload = serde_json::json!({ "stripeCollectionCents": 0 });
+        let zero_payload = serde_json::json!({ "adyenCollectionCents": 0 });
         assert_eq!(frozen_collection_amount(Some(&zero_payload)), None);
-        let negative_payload = serde_json::json!({ "stripeCollectionCents": -7 });
+        let negative_payload = serde_json::json!({ "adyenCollectionCents": -7 });
         assert_eq!(frozen_collection_amount(Some(&negative_payload)), None);
-        let string_payload = serde_json::json!({ "stripeCollectionCents": "4321" });
+        let string_payload = serde_json::json!({ "adyenCollectionCents": "4321" });
         assert_eq!(frozen_collection_amount(Some(&string_payload)), None);
     }
 
     /// The frozen amount is the idempotency-key seed: the SAME (invoice,
     /// usage kind, amount, currency) tuple must derive the SAME key, which is
-    /// what makes a changed remainder unable to mint a second Stripe invoice.
+    /// what makes a changed remainder unable to mint a second Adyen invoice.
     /// The seed format itself is pinned here (it is load-bearing across
     /// attempts).
     #[test]
-    fn stripe_collection_key_seed_is_stable_per_frozen_amount() {
+    fn adyen_collection_key_seed_is_stable_per_frozen_amount() {
         let invoice_id = Uuid::parse_str("0123456789abcdef0123456789abcdef").expect("uuid");
         let seed = |amount_cents: i64, usage_kind: &str, currency: &str| {
             format!(
@@ -2790,12 +2790,12 @@ mod tests {
     }
 
     #[test]
-    fn stripe_idempotency_key_shape_is_stable_per_invoice_amount_currency() {
+    fn adyen_idempotency_key_shape_is_stable_per_invoice_amount_currency() {
         // (Documented contract; the key is built inline in
-        // create_and_finalize_stripe_usage_invoice — pin the shape.) The
+        // create_and_finalize_adyen_usage_invoice — pin the shape.) The
         // key embeds the local invoice id, usage kind AND the frozen
         // amount/currency (audit F34): a retry with changed parameters
-        // gets a DIFFERENT key, so Stripe never replays one key with
+        // gets a DIFFERENT key, so Adyen never replays one key with
         // different request parameters.
         let invoice_id = Uuid::new_v4();
         let key_seed = format!(
@@ -3162,7 +3162,7 @@ mod coverage_adversarial {
             database_url,
             redis_url: "redis://127.0.0.1:6379".to_string(),
             service_auth_token: "coverage".to_string(),
-            stripe_webhook_secret: "whsec_coverage".to_string(),
+            adyen_hmac_key: "whsec_coverage".to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         };
@@ -3409,7 +3409,7 @@ mod coverage_adversarial {
 
         // …a concurrent collector re-deriving a moved remainder (an
         // allocation landed: 4_000) must NOT move the freeze — it collects
-        // under the first attempt's figure so both share ONE Stripe key.
+        // under the first attempt's figure so both share ONE Adyen key.
         let effective = freeze_collection_amount(&env.pool, invoice_id, 4_000)
             .await
             .expect("second freeze");
@@ -3437,7 +3437,7 @@ mod coverage_adversarial {
         let invoice = seed_invoice(env, tenant, 2500, "EUR").await;
         seed_outbox(env, invoice, tenant, "in_progress", 1, None).await;
 
-        record_collection_failure(&env.state, invoice, "col-owner-1", "stripe down").await;
+        record_collection_failure(&env.state, invoice, "col-owner-1", "adyen down").await;
         let (status, error, next, owner): (
             String,
             Option<String>,
@@ -3452,7 +3452,7 @@ mod coverage_adversarial {
         .await
         .expect("outbox");
         assert_eq!(status, "pending", "retryable failure returns to pending");
-        assert_eq!(error.as_deref(), Some("stripe down"));
+        assert_eq!(error.as_deref(), Some("adyen down"));
         assert!(owner.is_none(), "the lease is released");
         let delay = (next.expect("backoff") - Utc::now()).num_seconds();
         assert!((295..=300).contains(&delay), "~5min backoff, got {delay}");
@@ -3475,7 +3475,7 @@ mod coverage_adversarial {
         .expect("outbox");
         assert_eq!(
             error.as_deref(),
-            Some("stripe down"),
+            Some("adyen down"),
             "a non-owner cannot record state"
         );
 
@@ -3632,10 +3632,10 @@ mod coverage_adversarial {
         assert_eq!(deferred_status, "pending", "the backoff is honored");
     });
 
-    // ---------------- Stripe usage collection ----------------
+    // ---------------- Adyen usage collection ----------------
 
     env_test!(
-        stripe_usage_collection_finalizes_and_keeps_retryable_state,
+        adyen_usage_collection_finalizes_and_keeps_retryable_state,
         |env| {
             let mock = Mock::default();
             mock.route("/v1/invoiceitems", 200, r#"{"id":"ii_ov_1"}"#);
@@ -3645,18 +3645,18 @@ mod coverage_adversarial {
 
             let guard = ENV_LOCK.lock().await;
             let previous = (
-                std::env::var("STRIPE_SECRET_KEY").ok(),
-                std::env::var("STRIPE_API_BASE_URL").ok(),
+                std::env::var("ADYEN_API_KEY").ok(),
+                std::env::var("ADYEN_API_BASE_URL").ok(),
             );
-            std::env::set_var("STRIPE_SECRET_KEY", "sk_test_ovcov");
-            std::env::set_var("STRIPE_API_BASE_URL", &base);
+            std::env::set_var("ADYEN_API_KEY", "sk_test_ovcov");
+            std::env::set_var("ADYEN_API_BASE_URL", &base);
 
-            let tenant = "ovcov_stripe";
+            let tenant = "ovcov_adyen";
             seed_tenant(env, tenant, "growth").await;
             sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, 'sub_ov', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_ov')",
         )
         .bind(tenant)
@@ -3673,9 +3673,9 @@ mod coverage_adversarial {
             assert_eq!(mock.call_count("/v1/invoiceitems"), 1);
             assert_eq!(mock.call_count("/v1/invoices"), 1);
             assert_eq!(mock.call_count("/v1/invoices/in_ov_1/finalize"), 1);
-            let (status, stripe_invoice, stripe_item): (String, Option<String>, Option<String>) =
+            let (status, adyen_payment, adyen_item): (String, Option<String>, Option<String>) =
                 sqlx::query_as(
-                    "SELECT status, stripe_invoice_id, stripe_invoice_item_id
+                    "SELECT status, adyen_psp_reference, adyen_payment_reference
                  FROM invoices WHERE id = $1",
                 )
                 .bind(invoice)
@@ -3683,8 +3683,8 @@ mod coverage_adversarial {
                 .await
                 .expect("invoice");
             assert_eq!(status, "pending");
-            assert_eq!(stripe_invoice.as_deref(), Some("in_ov_1"));
-            assert_eq!(stripe_item.as_deref(), Some("ii_ov_1"));
+            assert_eq!(adyen_payment.as_deref(), Some("in_ov_1"));
+            assert_eq!(adyen_item.as_deref(), Some("ii_ov_1"));
             let (dunning, retry): (String, Option<DateTime<Utc>>) = sqlx::query_as(
                 "SELECT status, next_retry_at FROM dunning_records WHERE tenant_id = $1",
             )
@@ -3695,9 +3695,9 @@ mod coverage_adversarial {
             assert_eq!(dunning, "warning");
             assert!(retry.is_some(), "dunning retry is scheduled");
 
-            // A Stripe outage on the NEXT invoice keeps the outbox retryable:
+            // A Adyen outage on the NEXT invoice keeps the outbox retryable:
             // the invoice is not pushed to done on the back of a failure.
-            mock.route("/v1/invoiceitems", 500, "stripe exploded");
+            mock.route("/v1/invoiceitems", 500, "adyen exploded");
             let failing = seed_invoice(env, tenant, 700, "EUR").await;
             seed_outbox(env, failing, tenant, "pending", 0, None).await;
             let stats = resume_pending_collections(&env.state)
@@ -3728,12 +3728,12 @@ mod coverage_adversarial {
 
             match previous {
                 (Some(key), Some(url)) => {
-                    std::env::set_var("STRIPE_SECRET_KEY", key);
-                    std::env::set_var("STRIPE_API_BASE_URL", url);
+                    std::env::set_var("ADYEN_API_KEY", key);
+                    std::env::set_var("ADYEN_API_BASE_URL", url);
                 }
                 _ => {
-                    std::env::remove_var("STRIPE_SECRET_KEY");
-                    std::env::remove_var("STRIPE_API_BASE_URL");
+                    std::env::remove_var("ADYEN_API_KEY");
+                    std::env::remove_var("ADYEN_API_BASE_URL");
                 }
             }
             drop(guard);
@@ -3741,11 +3741,11 @@ mod coverage_adversarial {
     );
 
     env_test!(
-        stripe_usage_invoice_guards_amount_and_missing_config,
+        adyen_usage_invoice_guards_amount_and_missing_config,
         |env| {
             let guard = ENV_LOCK.lock().await;
-            let previous = std::env::var("STRIPE_SECRET_KEY").ok();
-            std::env::remove_var("STRIPE_SECRET_KEY");
+            let previous = std::env::var("ADYEN_API_KEY").ok();
+            std::env::remove_var("ADYEN_API_KEY");
 
             let tenant = "ovcov_zero";
             seed_tenant(env, tenant, "growth").await;
@@ -3755,8 +3755,8 @@ mod coverage_adversarial {
                 .expect("load invoice")
                 .expect("invoice exists");
 
-            // Zero remaining: nothing to collect, no Stripe configuration needed.
-            let none = create_and_finalize_stripe_usage_invoice(
+            // Zero remaining: nothing to collect, no Adyen configuration needed.
+            let none = create_and_finalize_adyen_usage_invoice(
                 &env.state,
                 &invoice,
                 0,
@@ -3769,7 +3769,7 @@ mod coverage_adversarial {
             .expect("zero amount");
             assert!(none.is_none());
             // Negative remaining is equally refused.
-            let none = create_and_finalize_stripe_usage_invoice(
+            let none = create_and_finalize_adyen_usage_invoice(
                 &env.state,
                 &invoice,
                 -5,
@@ -3782,9 +3782,9 @@ mod coverage_adversarial {
             .expect("negative amount");
             assert!(none.is_none());
 
-            // Positive amount but Stripe not configured: the wallet+dunning
+            // Positive amount but Adyen not configured: the wallet+dunning
             // path is chosen, never a half-configured HTTP call.
-            let none = create_and_finalize_stripe_usage_invoice(
+            let none = create_and_finalize_adyen_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -3797,10 +3797,10 @@ mod coverage_adversarial {
             .expect("unconfigured");
             assert!(none.is_none());
 
-            // Configured with a blank secret and no Stripe customer: still a
-            // clean `None` (no attempt to reach Stripe).
-            std::env::set_var("STRIPE_SECRET_KEY", "   ");
-            let none = create_and_finalize_stripe_usage_invoice(
+            // Configured with a blank secret and no Adyen customer: still a
+            // clean `None` (no attempt to reach Adyen).
+            std::env::set_var("ADYEN_API_KEY", "   ");
+            let none = create_and_finalize_adyen_usage_invoice(
                 &env.state,
                 &invoice,
                 100,
@@ -3814,8 +3814,8 @@ mod coverage_adversarial {
             assert!(none.is_none());
 
             match previous {
-                Some(key) => std::env::set_var("STRIPE_SECRET_KEY", key),
-                None => std::env::remove_var("STRIPE_SECRET_KEY"),
+                Some(key) => std::env::set_var("ADYEN_API_KEY", key),
+                None => std::env::remove_var("ADYEN_API_KEY"),
             }
             drop(guard);
         }
@@ -3853,7 +3853,7 @@ mod coverage_adversarial {
         BillingPeriodRow {
             id,
             tenant_id: tenant.to_string(),
-            stripe_subscription_id: None,
+            adyen_subscription_id: None,
             period_start: period_end - chrono::Duration::days(30),
             period_end,
             plan_name: plan_name.map(str::to_string),
@@ -4180,7 +4180,7 @@ mod coverage_adversarial {
     // -------------------------------------------------------------------
     // W6C adversarial coverage: sweep pagination/failure isolation, the
     // snapshot backfill and mismatch arms, PAYG adoption, and the wallet /
-    // lease / Stripe fault arms of the collection ladder.
+    // lease / Adyen fault arms of the collection ladder.
     // -------------------------------------------------------------------
 
     async fn break_table(env: &Env, table: &str) {
@@ -4379,9 +4379,9 @@ mod coverage_adversarial {
         seed_plan(env, "growth", 1000, serde_json::json!({})).await;
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, 'sub_backfill', 'growth', 'active', NOW() - INTERVAL '30 days',
                      NOW(), 'cus_backfill')",
         )
@@ -4401,7 +4401,7 @@ mod coverage_adversarial {
         let period = BillingPeriodRow {
             id: Uuid::new_v4(),
             tenant_id: tenant.to_string(),
-            stripe_subscription_id: Some("sub_backfill".to_string()),
+            adyen_subscription_id: Some("sub_backfill".to_string()),
             period_start: now - chrono::Duration::days(32),
             period_end: now - chrono::Duration::days(2),
             plan_name: None,
@@ -4411,7 +4411,7 @@ mod coverage_adversarial {
         };
         sqlx::query(
             "INSERT INTO billing_periods
-                 (id, tenant_id, stripe_subscription_id, usage_kind, period_start, period_end,
+                 (id, tenant_id, adyen_subscription_id, usage_kind, period_start, period_end,
                   currency)
              VALUES ($1, $2, $3, 'subscription', $4, $5, 'EUR')",
         )
@@ -5117,10 +5117,10 @@ mod coverage_adversarial {
         assert_eq!(dunning, 0, "no dunning entry from a failed finalization");
     });
 
-    // The persisted local ↔ external Stripe mapping can never rebind an
-    // invoice that is ALREADY bound to a different Stripe invoice — the
+    // The persisted local ↔ external Adyen mapping can never rebind an
+    // invoice that is ALREADY bound to a different Adyen invoice — the
     // prior binding wins and the collection still completes.
-    env_test!(stripe_mapping_never_rebinds_a_bound_invoice, |env| {
+    env_test!(adyen_mapping_never_rebinds_a_bound_invoice, |env| {
         let mock = Mock::default();
         mock.route("/v1/invoiceitems", 200, r#"{"id":"ii_rebind"}"#);
         mock.route("/v1/invoices", 200, r#"{"id":"in_new"}"#);
@@ -5129,18 +5129,18 @@ mod coverage_adversarial {
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("STRIPE_SECRET_KEY").ok(),
-            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
         );
-        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c");
-        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_API_KEY", "sk_test_w6c");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
 
         let tenant = "ovcov_rebind";
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, 'sub_rebind', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days',
                      'cus_rebind')",
         )
@@ -5149,7 +5149,7 @@ mod coverage_adversarial {
         .await
         .expect("subscription");
         let invoice_id = seed_invoice(env, tenant, 1000, "EUR").await;
-        sqlx::query("UPDATE invoices SET stripe_invoice_id = 'in_prior' WHERE id = $1")
+        sqlx::query("UPDATE invoices SET adyen_psp_reference = 'in_prior' WHERE id = $1")
             .bind(invoice_id)
             .execute(&env.pool)
             .await
@@ -5160,8 +5160,8 @@ mod coverage_adversarial {
             .await
             .expect("resume");
         assert_eq!(stats.resumed, 1, "{stats:?}");
-        let (stripe_invoice, outbox): (Option<String>, String) = sqlx::query_as(
-            "SELECT i.stripe_invoice_id, o.status FROM invoices i
+        let (adyen_payment, outbox): (Option<String>, String) = sqlx::query_as(
+            "SELECT i.adyen_psp_reference, o.status FROM invoices i
              JOIN invoice_collection_outbox o ON o.invoice_id = i.id WHERE i.id = $1",
         )
         .bind(invoice_id)
@@ -5169,7 +5169,7 @@ mod coverage_adversarial {
         .await
         .expect("invoice");
         assert_eq!(
-            stripe_invoice.as_deref(),
+            adyen_payment.as_deref(),
             Some("in_prior"),
             "the prior external binding is never overwritten"
         );
@@ -5177,37 +5177,37 @@ mod coverage_adversarial {
 
         match previous {
             (Some(key), Some(url)) => {
-                std::env::set_var("STRIPE_SECRET_KEY", key);
-                std::env::set_var("STRIPE_API_BASE_URL", url);
+                std::env::set_var("ADYEN_API_KEY", key);
+                std::env::set_var("ADYEN_API_BASE_URL", url);
             }
             _ => {
-                std::env::remove_var("STRIPE_SECRET_KEY");
-                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::remove_var("ADYEN_API_BASE_URL");
             }
         }
         drop(guard);
     });
 
-    // Stripe responses without the identity fields are HARD errors at each
+    // Adyen responses without the identity fields are HARD errors at each
     // step (item, invoice create, finalize) — never half-recorded mappings.
-    env_test!(stripe_responses_without_ids_or_failures_are_errors, |env| {
+    env_test!(adyen_responses_without_ids_or_failures_are_errors, |env| {
         let mock = Mock::default();
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("STRIPE_SECRET_KEY").ok(),
-            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
         );
-        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c");
-        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_API_KEY", "sk_test_w6c");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
 
-        let tenant = "ovcov_stripe_bad";
+        let tenant = "ovcov_adyen_bad";
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, 'sub_bad', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days',
                      'cus_bad')",
         )
@@ -5223,7 +5223,7 @@ mod coverage_adversarial {
 
         // 1. Item response without an id.
         mock.route("/v1/invoiceitems", 200, r#"{"object":"invoiceitem"}"#);
-        let error = create_and_finalize_stripe_usage_invoice(
+        let error = create_and_finalize_adyen_usage_invoice(
             &env.state,
             &invoice,
             100,
@@ -5239,7 +5239,7 @@ mod coverage_adversarial {
         // 2. Invoice create response without an id.
         mock.route("/v1/invoiceitems", 200, r#"{"id":"ii_ok"}"#);
         mock.route("/v1/invoices", 200, r#"{"object":"invoice"}"#);
-        let error = create_and_finalize_stripe_usage_invoice(
+        let error = create_and_finalize_adyen_usage_invoice(
             &env.state,
             &invoice,
             100,
@@ -5255,7 +5255,7 @@ mod coverage_adversarial {
         // 3. Finalize failure.
         mock.route("/v1/invoices", 200, r#"{"id":"in_bad"}"#);
         mock.route("/v1/invoices/in_bad/finalize", 500, "card declined");
-        let error = create_and_finalize_stripe_usage_invoice(
+        let error = create_and_finalize_adyen_usage_invoice(
             &env.state,
             &invoice,
             100,
@@ -5275,30 +5275,30 @@ mod coverage_adversarial {
 
         match previous {
             (Some(key), Some(url)) => {
-                std::env::set_var("STRIPE_SECRET_KEY", key);
-                std::env::set_var("STRIPE_API_BASE_URL", url);
+                std::env::set_var("ADYEN_API_KEY", key);
+                std::env::set_var("ADYEN_API_BASE_URL", url);
             }
             _ => {
-                std::env::remove_var("STRIPE_SECRET_KEY");
-                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::remove_var("ADYEN_API_BASE_URL");
             }
         }
         drop(guard);
     });
 
-    // A tenant with NO Stripe customer on file takes the wallet + dunning
-    // path cleanly, even with Stripe fully configured.
-    env_test!(stripe_collection_skips_tenants_without_a_customer, |env| {
+    // A tenant with NO Adyen customer on file takes the wallet + dunning
+    // path cleanly, even with Adyen fully configured.
+    env_test!(adyen_collection_skips_tenants_without_a_customer, |env| {
         let mock = Mock::default();
         let base = spawn_mock(mock.clone()).await;
 
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("STRIPE_SECRET_KEY").ok(),
-            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
         );
-        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c");
-        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_API_KEY", "sk_test_w6c");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
 
         let tenant = "ovcov_no_customer";
         seed_tenant(env, tenant, "growth").await;
@@ -5307,7 +5307,7 @@ mod coverage_adversarial {
             .await
             .expect("load")
             .expect("exists");
-        let none = create_and_finalize_stripe_usage_invoice(
+        let none = create_and_finalize_adyen_usage_invoice(
             &env.state,
             &invoice,
             400,
@@ -5318,7 +5318,7 @@ mod coverage_adversarial {
         )
         .await
         .expect("no customer is not an error");
-        assert!(none.is_none(), "no Stripe customer → wallet+dunning path");
+        assert!(none.is_none(), "no Adyen customer → wallet+dunning path");
         assert_eq!(
             mock.call_count("/v1/invoiceitems"),
             0,
@@ -5327,12 +5327,12 @@ mod coverage_adversarial {
 
         match previous {
             (Some(key), Some(url)) => {
-                std::env::set_var("STRIPE_SECRET_KEY", key);
-                std::env::set_var("STRIPE_API_BASE_URL", url);
+                std::env::set_var("ADYEN_API_KEY", key);
+                std::env::set_var("ADYEN_API_BASE_URL", url);
             }
             _ => {
-                std::env::remove_var("STRIPE_SECRET_KEY");
-                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::remove_var("ADYEN_API_BASE_URL");
             }
         }
         drop(guard);
@@ -5346,8 +5346,8 @@ mod coverage_adversarial {
         seed_plan(env, "growth", 1000, serde_json::json!({})).await;
         seed_tenant(env, tenant, "growth").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end)
              VALUES ($1, 'sub_gate', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days')",
         )
@@ -5365,7 +5365,7 @@ mod coverage_adversarial {
         );
 
         // Downgrade: the cache still answers true until invalidated.
-        sqlx::query("UPDATE stripe_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
+        sqlx::query("UPDATE adyen_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
             .bind(tenant)
             .execute(&env.pool)
             .await
@@ -5388,8 +5388,8 @@ mod coverage_adversarial {
         let ghost = "ovcov_gate_ghost";
         seed_tenant(env, ghost, "ghost_plan").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
                   billing_cycle_end)
              VALUES ($1, 'sub_gate_ghost', 'ghost_plan', 'active', NOW(), NOW())",
         )

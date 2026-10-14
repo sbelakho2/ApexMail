@@ -619,7 +619,7 @@ pub fn calculate_vat_with_evidence(
 /// This convenience wrapper carries no authoritative evidence, so a
 /// well-formed EU VAT number does NOT trigger a 0 % reverse charge: the
 /// destination rate is charged. Callers that have evidence (the invoice
-/// writer, the Stripe reconciliation path) must use
+/// writer, the Adyen reconciliation path) must use
 /// [`calculate_vat_with_evidence`]; reverse charge is only authorised there
 /// when a valid VIES evidence row is passed. This closes the previously
 /// possible "structurally valid ⇒ zero-rated" under-collection.

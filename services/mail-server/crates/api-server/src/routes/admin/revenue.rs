@@ -62,7 +62,7 @@ pub struct RevenueStats {
     pub churn_rate: f64,
     /// Expansion revenue from plan changes. Omitted when no plan-change
     /// history source exists (the `plan.changed` audit action is never
-    /// emitted and stripe webhook events store no plan payload).
+    /// emitted and adyen webhook events store no plan payload).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expansion_revenue: Option<f64>,
     pub new_customers: i64,
@@ -178,7 +178,7 @@ fn recent_month_starts(now: DateTime<Utc>, count: u32) -> Vec<DateTime<Utc>> {
         .collect()
 }
 
-/// Subscriptions are read from `stripe_subscriptions` — the table the
+/// Subscriptions are read from `adyen_subscriptions` — the table the
 /// billing-service webhook writers populate (the legacy `subscriptions`
 /// table has no writer) — joined via `tenants.plan` to `plans` pricing,
 /// mirroring billing-service's `get_mrr_report` pattern. `cancel_expr` is
@@ -200,7 +200,7 @@ fn build_subscription_revenue_sql(has_billing_interval: bool, cancel_expr: &str)
                 {cancel_expr} as canceled_at,
                 COALESCE(p.price_monthly, 0) as price_monthly,
                 COALESCE(p.price_yearly, 0) as price_yearly
-         FROM stripe_subscriptions s
+         FROM adyen_subscriptions s
          JOIN tenants t ON t.id = s.tenant_id
          LEFT JOIN plans p ON p.name = t.plan"
     )
@@ -320,10 +320,10 @@ async fn get_revenue(
     let mut notes: Vec<String> = Vec::new();
 
     let subscriptions =
-        if table_exists(db, "stripe_subscriptions").await? && table_exists(db, "plans").await? {
+        if table_exists(db, "adyen_subscriptions").await? && table_exists(db, "plans").await? {
             let has_billing_interval =
-                column_exists(db, "stripe_subscriptions", "billing_interval").await?;
-            let cancel_expr = if column_exists(db, "stripe_subscriptions", "canceled_at").await? {
+                column_exists(db, "adyen_subscriptions", "billing_interval").await?;
+            let cancel_expr = if column_exists(db, "adyen_subscriptions", "canceled_at").await? {
                 validated_column("s.canceled_at")?
             } else {
                 // Hardcoded CASE expression - not from user input, safe from injection
@@ -355,7 +355,7 @@ async fn get_revenue(
 
     // Plan-change velocity (upgrades/downgrades/expansion MRR) is omitted:
     // the `plan.changed` audit action it was derived from is never emitted
-    // by any writer, and stripe_webhook_events stores only event ids/types
+    // by any writer, and adyen_webhook_events stores only event ids/types
     // (no plan payload) — there is no honest data source to derive from.
     notes.push(
         "plan-change velocity (upgrades, downgrades, expansion revenue) omitted: no writer \
@@ -589,13 +589,13 @@ mod tests {
     }
 
     #[test]
-    fn revenue_subscription_sql_reads_stripe_subscriptions() {
+    fn revenue_subscription_sql_reads_adyen_subscriptions() {
         let sql = build_subscription_revenue_sql(
             true,
             "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END",
         );
 
-        assert!(sql.contains("FROM stripe_subscriptions s"));
+        assert!(sql.contains("FROM adyen_subscriptions s"));
         assert!(sql.contains("JOIN tenants t ON t.id = s.tenant_id"));
         assert!(sql.contains("LEFT JOIN plans p ON p.name = t.plan"));
         assert!(sql.contains("COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free')"));
@@ -781,7 +781,7 @@ mod adversarial_tests {
         // One active yearly subscription created today, one 60-day-old
         // active monthly (previous MRR), one canceled 10 days ago.
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
              VALUES ($1, $2, $3, 'active', 'yearly', NOW(), NOW(), NULL)",
         )
         .bind(&tenant_new)
@@ -791,7 +791,7 @@ mod adversarial_tests {
         .await
         .expect("seed new sub");
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
              VALUES ($1, $2, $3, 'active', 'monthly', NOW() - INTERVAL '60 days', NOW(), NULL)",
         )
         .bind(&tenant_old)
@@ -801,7 +801,7 @@ mod adversarial_tests {
         .await
         .expect("seed old sub");
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
              VALUES ($1, $2, $3, 'canceled', 'monthly', NOW() - INTERVAL '90 days', NOW(), NOW() - INTERVAL '10 days')",
         )
         .bind(apexmail_lib::id::generate_id("", 26))
@@ -852,7 +852,7 @@ mod adversarial_tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        sqlx::query("DELETE FROM stripe_subscriptions WHERE stripe_subscription_id LIKE $1")
+        sqlx::query("DELETE FROM adyen_subscriptions WHERE adyen_subscription_id LIKE $1")
             .bind(format!("sub_%_{tag}"))
             .execute(&pool)
             .await

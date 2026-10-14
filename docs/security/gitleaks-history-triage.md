@@ -7,7 +7,7 @@ records the studied review of what surfaced.
 
 ## Totals
 
-286 findings: generic-api-key 168, curl-auth-header 102, stripe-access-token 8,
+286 findings: generic-api-key 168, curl-auth-header 102, adyen-access-token 8,
 private-key 7, linkedin-client-id 1.
 
 ## Classification (by path and manual sampling of every high-risk class)
@@ -16,7 +16,7 @@ private-key 7, linkedin-client-id 1.
 |---|---|---|---|---|
 | generic-api-key | 93 | 19 | 56 | — |
 | curl-auth-header | — | 91 | 11 | — |
-| stripe-access-token | 3 | — | 5 | — |
+| adyen-access-token | 3 | — | 5 | — |
 | private-key | 4 | 1 | 1 | 1 |
 | linkedin-client-id | — | — | 1 | — |
 
@@ -29,7 +29,7 @@ private-key 7, linkedin-client-id 1.
   default (`kiwi_secret_key` defaults to the literal `"dev"`, and
   production rejects it — verified at config.rs:682,746). No production
   key material found.
-- **stripe-access-token (8)** — all benign. `dlp-engine` hits are the
+- **adyen-access-token (8)** — all benign. `dlp-engine` hits are the
   detector's own pattern strings and test vectors (a scanner that detects
   `sk_live_` necessarily contains it); the `apps/billing` hits are test
   fixtures with synthetic keys.

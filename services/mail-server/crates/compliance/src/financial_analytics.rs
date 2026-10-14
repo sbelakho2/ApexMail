@@ -293,7 +293,7 @@ fn next_month_start(month_start_ts: DateTime<Utc>) -> DateTime<Utc> {
 
 /// Categorize an actual line item from its description (F80): the billing
 /// writers' canonical descriptions are "Overage: …" and "PAYG usage: …"
-/// (usage) and "Subscription …" / Stripe's "Subscription" default
+/// (usage) and "Subscription …" / Adyen's "Subscription" default
 /// (subscription); anything else is one-time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RevenueCategory {

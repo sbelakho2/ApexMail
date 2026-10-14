@@ -54,7 +54,7 @@ the platform mail pipeline with retry/backoff/park semantics.
 
 ### Claim
 Billing notifications (usage alerts, cost alerts, dunning, `payment_failed`,
-`trial_ending`, `messages_purged`, duplicate-Stripe refusal) are INSERTed as
+`trial_ending`, `messages_purged`, duplicate-Adyen refusal) are INSERTed as
 `status='pending'` and were **never read by any production code** — so no
 email was ever sent, while `send_usage_alert` set `delivered = true` from the
 INSERT alone (a best-effort sole-write that is a silent no-op).
@@ -75,7 +75,7 @@ inside a `#[cfg(test)]` module:
 
 ```
 $ python3: list non-test notification_queue refs after each file's #[cfg(test)] line
-stripe_webhooks.rs (cfg(test) @4316): 2755 INSERT, 3095 INSERT, 3125 INSERT, 3562 INSERT
+adyen_webhooks.rs (cfg(test) @4316): 2755 INSERT, 3095 INSERT, 3125 INSERT, 3562 INSERT
 maintenance.rs   (cfg(test) @3924): 1352 INSERT, 2158 INSERT, 2993 INSERT
 → 7 producer sites, 0 non-test readers/updaters
 ```

@@ -221,7 +221,7 @@ async fn generate_invoice_number_tx(
 
 pub struct CreateInvoiceInput {
     pub tenant_id: String,
-    pub stripe_invoice_id: Option<String>,
+    pub adyen_psp_reference: Option<String>,
     pub line_items: Vec<NewLineItem>,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
@@ -232,7 +232,7 @@ pub struct CreateInvoiceInput {
     /// invoice settles. `invoices.overage_period` is written in the SAME
     /// INSERT as the invoice row, so the check-then-insert idempotency in
     /// the overage sweep can never observe a marker-less invoice. `None`
-    /// for non-sweep writers (Stripe webhook invoice persistence, the
+    /// for non-sweep writers (Adyen webhook invoice persistence, the
     /// admin invoice writer).
     pub overage_period: Option<DateTime<Utc>>,
 }
@@ -486,7 +486,7 @@ pub async fn create_invoice_in_tx(
     sqlx::query(
         r#"
         INSERT INTO invoices (
-            id, tenant_id, stripe_invoice_id, invoice_number, status,
+            id, tenant_id, adyen_psp_reference, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
             billing_country, vat_rate, overage_period, billing_address,
@@ -504,7 +504,7 @@ pub async fn create_invoice_in_tx(
     )
     .bind(id)
     .bind(&input.tenant_id)
-    .bind(&input.stripe_invoice_id)
+    .bind(&input.adyen_psp_reference)
     .bind(&invoice_number)
     .bind(&currency)
     .bind(subtotal)
@@ -550,7 +550,7 @@ pub async fn create_invoice_in_tx(
     Ok(Invoice {
         id,
         tenant_id: input.tenant_id,
-        stripe_invoice_id: input.stripe_invoice_id,
+        adyen_psp_reference: input.adyen_psp_reference,
         invoice_number,
         status: InvoiceStatus::Draft,
         currency,
@@ -587,7 +587,7 @@ pub fn compute_outstanding(
 /// payment allocations (migration 140) minus the DEBT-REDUCTION part of
 /// credit notes (migration 183 — only that part reduces the unpaid
 /// obligation; the refunded part returned value that was actually paid).
-/// This is the single derivation UI, wallet application, Stripe
+/// This is the single derivation UI, wallet application, Adyen
 /// collection, dunning and credit limits must use (audits F35/F60).
 pub async fn invoice_outstanding_cents(
     pool: &PgPool,
@@ -896,7 +896,7 @@ pub async fn list_invoices(
     let rows: Vec<InvoiceRow> = sqlx::query_as(
         r#"
         SELECT
-            id, tenant_id, stripe_invoice_id, invoice_number,
+            id, tenant_id, adyen_psp_reference, invoice_number,
             status, currency, subtotal, vat_total, total,
             line_items,
             issued_at, due_at, paid_at,
@@ -932,7 +932,7 @@ pub async fn get_invoice_by_id(
     let row: Option<InvoiceRow> = sqlx::query_as(
         r#"
         SELECT
-            id, tenant_id, stripe_invoice_id, invoice_number,
+            id, tenant_id, adyen_psp_reference, invoice_number,
             status, currency, subtotal, vat_total, total,
             line_items,
             issued_at, due_at, paid_at,
@@ -987,23 +987,23 @@ pub enum InvoiceVoidError {
     /// the refusing state verbatim.
     #[error("invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided")]
     NotVoidable { invoice_id: Uuid, status: String },
-    /// The invoice carries a Stripe-side invoice (`stripe_invoice_id`) but
-    /// this deployment cannot reach Stripe (no `STRIPE_SECRET_KEY`): refused
+    /// The invoice carries a Adyen-side invoice (`adyen_psp_reference`) but
+    /// this deployment cannot reach Adyen (no `ADYEN_API_KEY`): refused
     /// HONESTLY — the local row is left untouched rather than drifting from
     /// the provider state.
     #[error(
-        "invoice {invoice_id} has a Stripe-side invoice ({stripe_invoice_id}) but Stripe is not \
-         configured (STRIPE_SECRET_KEY): the provider-side invoice cannot be voided from this \
+        "invoice {invoice_id} has a Adyen-side invoice ({adyen_psp_reference}) but Adyen is not \
+         configured (ADYEN_API_KEY): the provider-side invoice cannot be voided from this \
          deployment, so the local invoice was left in status '{status}'"
     )]
-    StripeUnavailable {
+    AdyenUnavailable {
         invoice_id: Uuid,
-        stripe_invoice_id: String,
+        adyen_psp_reference: String,
         status: String,
     },
-    /// Stripe was configured but refused/completed-with-error on the void.
-    #[error("Stripe refused the invoice void: {message}")]
-    StripeFailed { message: String },
+    /// Adyen was configured but refused/completed-with-error on the void.
+    #[error("Adyen refused the invoice void: {message}")]
+    AdyenFailed { message: String },
     #[error("audit log failure: {0}")]
     Audit(String),
     /// The void committed but the re-read of the voided invoice failed
@@ -1013,31 +1013,31 @@ pub enum InvoiceVoidError {
     Readback(#[from] InvoiceError),
 }
 
-/// One Stripe-side invoice void, isolated for testability (tests point
-/// `STRIPE_API_BASE_URL` at a local mock). `Err(StripeVoidError::Unavailable)`
-/// means the deployment lacks Stripe credentials; `Err(Failed)` means Stripe
+/// One Adyen-side invoice void, isolated for testability (tests point
+/// `ADYEN_API_BASE_URL` at a local mock). `Err(AdyenVoidError::Unavailable)`
+/// means the deployment lacks Adyen credentials; `Err(Failed)` means Adyen
 /// itself refused or the exchange failed.
 #[derive(Debug, Clone)]
-pub struct StripeVoidConfig {
+pub struct AdyenVoidConfig {
     pub base_url: String,
     pub secret_key: String,
 }
 
-fn stripe_void_config_from_env() -> Result<StripeVoidConfig, ()> {
-    let secret_key = std::env::var("STRIPE_SECRET_KEY")
+fn adyen_void_config_from_env() -> Result<AdyenVoidConfig, ()> {
+    let secret_key = std::env::var("ADYEN_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
         .ok_or(())?;
-    Ok(StripeVoidConfig {
-        base_url: std::env::var("STRIPE_API_BASE_URL")
-            .unwrap_or_else(|_| "https://api.stripe.com".into()),
+    Ok(AdyenVoidConfig {
+        base_url: std::env::var("ADYEN_API_BASE_URL")
+            .unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into()),
         secret_key,
     })
 }
 
-async fn stripe_void_invoice(
-    config: &StripeVoidConfig,
-    stripe_invoice_id: &str,
+async fn adyen_void_invoice(
+    config: &AdyenVoidConfig,
+    adyen_psp_reference: &str,
     idempotency_key: &str,
 ) -> Result<(), InvoiceVoidError> {
     let client = reqwest::Client::new();
@@ -1045,18 +1045,18 @@ async fn stripe_void_invoice(
         .post(format!(
             "{}/v1/invoices/{}/void",
             config.base_url.trim_end_matches('/'),
-            // Stripe ids are `[a-zA-Z0-9_]+`; the path segment is still built
+            // Adyen ids are `[a-zA-Z0-9_]+`; the path segment is still built
             // through the typed client URL, never a raw string concat of
             // user input (the id comes from our own DB column).
-            stripe_invoice_id,
+            adyen_psp_reference,
         ))
         .bearer_auth(&config.secret_key)
         .header("Idempotency-Key", idempotency_key)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|error| InvoiceVoidError::StripeFailed {
-            message: format!("Stripe void request failed: {error}"),
+        .map_err(|error| InvoiceVoidError::AdyenFailed {
+            message: format!("Adyen void request failed: {error}"),
         })?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -1067,8 +1067,8 @@ async fn stripe_void_invoice(
         if message.len() > 300 {
             message.truncate(300);
         }
-        return Err(InvoiceVoidError::StripeFailed {
-            message: format!("Stripe returned {status}: {message}"),
+        return Err(InvoiceVoidError::AdyenFailed {
+            message: format!("Adyen returned {status}: {message}"),
         });
     }
     Ok(())
@@ -1093,20 +1093,20 @@ fn is_voidable_status(status: &str) -> bool {
 /// * `paid` (and `uncollectible`) refuse with [`InvoiceVoidError::
 ///   NotVoidable`] naming the current status; a paid invoice is refunded via
 ///   a credit note (`credit_notes::create_credit_note`), never voided.
-/// * When the invoice carries a `stripe_invoice_id`, the provider-side
-///   invoice is voided FIRST (Stripe idempotency key derived from the local
+/// * When the invoice carries a `adyen_psp_reference`, the provider-side
+///   invoice is voided FIRST (Adyen idempotency key derived from the local
 ///   operation identity, so a retried void replays the same provider
-///   request); a Stripe refusal or an unconfigured Stripe deployment leaves
+///   request); a Adyen refusal or an unconfigured Adyen deployment leaves
 ///   the local row untouched — never a fake local-only success.
 pub async fn void_invoice(
     pool: &PgPool,
     input: VoidInvoiceInput,
 ) -> Result<Invoice, InvoiceVoidError> {
     // ── 1. Lock + validate the current state ────────────────────────────
-    let (status, stripe_invoice_id): (String, Option<String>) = {
+    let (status, adyen_psp_reference): (String, Option<String>) = {
         let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
         let row: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT status::text, stripe_invoice_id FROM invoices
+            "SELECT status::text, adyen_psp_reference FROM invoices
              WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
         )
         .bind(input.invoice_id)
@@ -1117,7 +1117,7 @@ pub async fn void_invoice(
         let Some(row) = row else {
             return Err(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
         };
-        let (status, stripe_invoice_id) = row;
+        let (status, adyen_psp_reference) = row;
         if status == "void" {
             // Idempotent replay: the requested end-state is already the
             // stored state — return it, write nothing.
@@ -1132,35 +1132,35 @@ pub async fn void_invoice(
                 status,
             });
         }
-        // The DB lock is released before any Stripe HTTP call: no database
-        // transaction is held across provider I/O. The post-Stripe append
+        // The DB lock is released before any Adyen HTTP call: no database
+        // transaction is held across provider I/O. The post-Adyen append
         // re-locks and re-validates below.
         tx.rollback().await.map_err(InvoiceVoidError::Db)?;
-        (status, stripe_invoice_id)
+        (status, adyen_psp_reference)
     };
 
-    // ── 2. Stripe-side void FIRST (when a provider invoice exists) ──────
-    let mut stripe_voided = false;
-    if let Some(stripe_invoice_id) = stripe_invoice_id.as_deref() {
+    // ── 2. Adyen-side void FIRST (when a provider invoice exists) ──────
+    let mut adyen_voided = false;
+    if let Some(adyen_psp_reference) = adyen_psp_reference.as_deref() {
         // Idempotency on the provider call is derived from the immutable
         // local operation identity, never from a caller-supplied value
-        // alone — a retried void replays the SAME Stripe request.
+        // alone — a retried void replays the SAME Adyen request.
         let key = format!(
             "invoice-void:{}:{}",
             input.invoice_id.simple(),
             input.idempotency_key
         );
-        match stripe_void_config_from_env() {
+        match adyen_void_config_from_env() {
             Ok(config) => {
-                stripe_void_invoice(&config, stripe_invoice_id, &key).await?;
-                stripe_voided = true;
+                adyen_void_invoice(&config, adyen_psp_reference, &key).await?;
+                adyen_voided = true;
             }
             // Honest degradation: without provider credentials the void
             // cannot complete both sides, so NEITHER side moves.
             Err(()) => {
-                return Err(InvoiceVoidError::StripeUnavailable {
+                return Err(InvoiceVoidError::AdyenUnavailable {
                     invoice_id: input.invoice_id,
-                    stripe_invoice_id: stripe_invoice_id.to_string(),
+                    adyen_psp_reference: adyen_psp_reference.to_string(),
                     status,
                 });
             }
@@ -1219,8 +1219,8 @@ pub async fn void_invoice(
             "invoiceId": input.invoice_id,
             "reason": input.reason,
             "idempotencyKey": input.idempotency_key,
-            "stripeVoided": stripe_voided,
-            "stripeInvoiceId": stripe_invoice_id,
+            "adyenVoided": adyen_voided,
+            "adyenInvoiceId": adyen_psp_reference,
         }),
         now,
     )
@@ -1242,7 +1242,7 @@ pub async fn void_invoice(
 struct InvoiceRow {
     id: Uuid,
     tenant_id: String,
-    stripe_invoice_id: Option<String>,
+    adyen_psp_reference: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -1331,7 +1331,7 @@ impl InvoiceRow {
         Ok(Invoice {
             id: self.id,
             tenant_id: self.tenant_id,
-            stripe_invoice_id: self.stripe_invoice_id,
+            adyen_psp_reference: self.adyen_psp_reference,
             invoice_number: self.invoice_number,
             status,
             currency: self.currency,
@@ -1626,7 +1626,7 @@ mod tests {
         let row = InvoiceRow {
             id: invoice_id,
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             invoice_number: "2026-000002".into(),
             status: "pending".into(),
             currency: "eur".into(),
@@ -1825,7 +1825,7 @@ mod tests {
         let row = InvoiceRow {
             id: Uuid::new_v4(),
             tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             invoice_number: "2026-000001".into(),
             status: "paid".into(),
             currency: "eur".into(),
@@ -2355,7 +2355,7 @@ mod coverage_adversarial {
         let now = Utc::now();
         CreateInvoiceInput {
             tenant_id: tenant.to_string(),
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             line_items: vec![line("Coverage line", 1, 10_000)],
             period_start: now,
             period_end: now,
@@ -2909,7 +2909,7 @@ mod coverage_adversarial {
     // -------------------------------------------------------------------
     // DF-5 finding B — the invoice VOID transition (previously referenced
     // by status filters but expressible NOWHERE). The transition matrix,
-    // idempotency, Stripe honesty and audit re-derivability.
+    // idempotency, Adyen honesty and audit re-derivability.
     // -------------------------------------------------------------------
 
     fn void_input(tenant: &str, invoice: Uuid, key: &str) -> VoidInvoiceInput {
@@ -2926,12 +2926,12 @@ mod coverage_adversarial {
         tenant: &str,
         status: &str,
         total: i64,
-        stripe_invoice_id: Option<&str>,
+        adyen_psp_reference: Option<&str>,
     ) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
-                                   subtotal, vat_total, total, stripe_invoice_id,
+                                   subtotal, vat_total, total, adyen_psp_reference,
                                    issued_at, due_at, period_start, period_end,
                                    created_at, updated_at)
              VALUES ($1, $2, $3, 'EUR', $4, $5, $3, 0, $3, $6,
@@ -2942,7 +2942,7 @@ mod coverage_adversarial {
         .bind(total)
         .bind(status)
         .bind(format!("IVCOV-{}", id.simple()))
-        .bind(stripe_invoice_id)
+        .bind(adyen_psp_reference)
         .execute(&env.pool)
         .await
         .expect("seed invoice");
@@ -3105,9 +3105,9 @@ mod coverage_adversarial {
         assert_eq!(resource, "invoice");
         assert_eq!(resource_id.as_deref(), Some(draft.to_string().as_str()));
         assert_eq!(
-            details["stripeVoided"],
+            details["adyenVoided"],
             serde_json::Value::Bool(false),
-            "a local-only invoice records an honest stripeVoided=false"
+            "a local-only invoice records an honest adyenVoided=false"
         );
 
         // Byte-exact re-derivation: the canonical 7-segment formula over the
@@ -3155,37 +3155,37 @@ mod coverage_adversarial {
         drop(guard);
     });
 
-    // Stripe honesty: an invoice WITH a provider id must refuse the void
-    // when Stripe is unconfigured (status untouched — never a fake local
-    // success), and void BOTH sides when a Stripe (mock) accepts.
-    env_test!(void_with_a_stripe_invoice_is_honest_both_sides, |env| {
+    // Adyen honesty: an invoice WITH a provider id must refuse the void
+    // when Adyen is unconfigured (status untouched — never a fake local
+    // success), and void BOTH sides when a Adyen (mock) accepts.
+    env_test!(void_with_a_adyen_payment_is_honest_both_sides, |env| {
         let guard = ENV_LOCK.lock().await;
         let previous = (
-            std::env::var("STRIPE_SECRET_KEY").ok(),
-            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
         );
 
-        let tenant = "ivcov_voidstripe";
+        let tenant = "ivcov_voidadyen";
         seed_tenant(env, tenant).await;
         let invoice =
             seed_invoice_status(env, tenant, "pending", 6_000, Some("in_test_void_cov")).await;
 
-        // 1. Stripe UNCONFIGURED: refused, nothing changed, audit empty.
-        std::env::remove_var("STRIPE_SECRET_KEY");
-        std::env::remove_var("STRIPE_API_BASE_URL");
-        let error = void_invoice(&env.pool, void_input(tenant, invoice, "k-stripe-unconf"))
+        // 1. Adyen UNCONFIGURED: refused, nothing changed, audit empty.
+        std::env::remove_var("ADYEN_API_KEY");
+        std::env::remove_var("ADYEN_API_BASE_URL");
+        let error = void_invoice(&env.pool, void_input(tenant, invoice, "k-adyen-unconf"))
             .await
-            .expect_err("unconfigured Stripe refuses");
+            .expect_err("unconfigured Adyen refuses");
         match &error {
-            InvoiceVoidError::StripeUnavailable {
-                stripe_invoice_id,
+            InvoiceVoidError::AdyenUnavailable {
+                adyen_psp_reference,
                 status,
                 ..
             } => {
-                assert_eq!(stripe_invoice_id, "in_test_void_cov");
+                assert_eq!(adyen_psp_reference, "in_test_void_cov");
                 assert_eq!(status, "pending");
             }
-            other => panic!("expected StripeUnavailable, got {other:?}"),
+            other => panic!("expected AdyenUnavailable, got {other:?}"),
         }
         let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
             .bind(invoice)
@@ -3194,7 +3194,7 @@ mod coverage_adversarial {
             .expect("status");
         assert_eq!(
             status, "pending",
-            "the local row never moves without Stripe"
+            "the local row never moves without Adyen"
         );
         let audit_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.invoice_voided'",
@@ -3204,7 +3204,7 @@ mod coverage_adversarial {
         .expect("audit count");
         assert_eq!(audit_rows, 0, "a refused void writes no audit event");
 
-        // 2. Stripe CONFIGURED (local mock accepting the void): both sides
+        // 2. Adyen CONFIGURED (local mock accepting the void): both sides
         // move, and the provider call carries the derived idempotency key.
         let mock = Mock::default();
         mock.route(
@@ -3213,21 +3213,21 @@ mod coverage_adversarial {
             r#"{"id":"in_test_void_cov","status":"void"}"#,
         );
         let base = spawn_mock(mock.clone()).await;
-        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_ivcov");
-        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("ADYEN_API_KEY", "sk_test_ivcov");
+        std::env::set_var("ADYEN_API_BASE_URL", &base);
 
-        let voided = void_invoice(&env.pool, void_input(tenant, invoice, "k-stripe-ok"))
+        let voided = void_invoice(&env.pool, void_input(tenant, invoice, "k-adyen-ok"))
             .await
             .expect("voids both sides");
         assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
 
         let call = mock
             .last_call("/v1/invoices/in_test_void_cov/void")
-            .expect("Stripe void called");
+            .expect("Adyen void called");
         assert_eq!(call.method, "POST");
         assert_eq!(
             call.headers.get("idempotency-key").map(String::as_str),
-            Some(format!("invoice-void:{}:k-stripe-ok", invoice.simple()).as_str()),
+            Some(format!("invoice-void:{}:k-adyen-ok", invoice.simple()).as_str()),
             "the provider idempotency key derives from the local operation identity"
         );
         let audit_rows: i64 = sqlx::query_scalar(
@@ -3238,7 +3238,7 @@ mod coverage_adversarial {
         .expect("audit count");
         assert_eq!(audit_rows, 1);
 
-        // 3. Stripe REFUSES (e.g. provider-side state): honest 4xx-shaped
+        // 3. Adyen REFUSES (e.g. provider-side state): honest 4xx-shaped
         // error, local row untouched.
         let refused =
             seed_invoice_status(env, tenant, "pending", 6_100, Some("in_test_refused")).await;
@@ -3247,11 +3247,11 @@ mod coverage_adversarial {
             400,
             r#"{"error":{"message":"Invoice is already voided"}}"#,
         );
-        let error = void_invoice(&env.pool, void_input(tenant, refused, "k-stripe-refused"))
+        let error = void_invoice(&env.pool, void_input(tenant, refused, "k-adyen-refused"))
             .await
-            .expect_err("Stripe refusal propagates");
+            .expect_err("Adyen refusal propagates");
         assert!(
-            matches!(&error, InvoiceVoidError::StripeFailed { message }
+            matches!(&error, InvoiceVoidError::AdyenFailed { message }
                 if message.contains("already voided")),
             "{error:?}"
         );
@@ -3260,24 +3260,24 @@ mod coverage_adversarial {
             .fetch_one(&env.pool)
             .await
             .expect("status");
-        assert_eq!(status, "pending", "a Stripe refusal leaves the row pending");
+        assert_eq!(status, "pending", "a Adyen refusal leaves the row pending");
 
         match &previous {
             (Some(key), Some(base_url)) => {
-                std::env::set_var("STRIPE_SECRET_KEY", key);
-                std::env::set_var("STRIPE_API_BASE_URL", base_url);
+                std::env::set_var("ADYEN_API_KEY", key);
+                std::env::set_var("ADYEN_API_BASE_URL", base_url);
             }
             (Some(key), None) => {
-                std::env::set_var("STRIPE_SECRET_KEY", key);
-                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::set_var("ADYEN_API_KEY", key);
+                std::env::remove_var("ADYEN_API_BASE_URL");
             }
             (None, Some(base_url)) => {
-                std::env::remove_var("STRIPE_SECRET_KEY");
-                std::env::set_var("STRIPE_API_BASE_URL", base_url);
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::set_var("ADYEN_API_BASE_URL", base_url);
             }
             (None, None) => {
-                std::env::remove_var("STRIPE_SECRET_KEY");
-                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::remove_var("ADYEN_API_KEY");
+                std::env::remove_var("ADYEN_API_BASE_URL");
             }
         }
         drop(guard);

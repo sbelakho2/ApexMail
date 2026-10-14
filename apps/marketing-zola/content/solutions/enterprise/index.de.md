@@ -47,9 +47,9 @@ Das Vertriebsteam bestätigt vor Vertragsschluss das verfügbare Bereitstellungs
 
 ## Abrechnungs- und Anspruchs-Lebenszyklus
 
-Enterprise-Zugang wird über den genehmigten Vertragsprozess erstellt. Bei Self-Service-Tarifen wird ein gewählter Tarif erst aktiviert, nachdem Stripe die Abrechnung bestätigt und ApexMail den verifizierten Subscription-Webhook verarbeitet hat. Eine abgeschlossene Checkout-Seite allein gewährt keinen Anspruch.
+Enterprise-Zugang wird über den genehmigten Vertragsprozess erstellt. Bei Self-Service-Tarifen wird ein gewählter Tarif erst aktiviert, nachdem Adyen die Abrechnung bestätigt und ApexMail den verifizierten Subscription-Webhook verarbeitet hat. Eine abgeschlossene Checkout-Seite allein gewährt keinen Anspruch.
 
-Änderungen und Kündigungen bestehender Abonnements erfolgen über das Stripe-Billing-Portal. Enterprise-Änderungen, Verlängerungen und Beendigungen folgen dem unterzeichneten Vertrag.
+Änderungen und Kündigungen bestehender Abonnements erfolgen über das Adyen-Billing-Portal. Enterprise-Änderungen, Verlängerungen und Beendigungen folgen dem unterzeichneten Vertrag.
 
 ## Beschaffungsunterlagen
 

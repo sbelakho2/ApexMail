@@ -112,7 +112,7 @@ midnight (`next_day_start`); no operator trigger existed.
 * `services/mail-server/crates/billing-service/src/bin/server.rs` — new one-shot flag
   `--sweep-overage-only` (env `BILLING_SWEEP_OVERAGE_ONLY`), the `--reconcile-plans-only`
   pattern: builds db+redis state, runs the sweep, prints a one-line report, exits. Placed
-  BEFORE the Stripe webhook-secret fail-fast so closing a period works even when the inbound
+  BEFORE the Adyen webhook-secret fail-fast so closing a period works even when the inbound
   transport secret is absent.
 
 **Tests.**

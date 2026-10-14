@@ -47,9 +47,9 @@ El equipo de ventas confirmará el modelo de implementación disponible, las con
 
 ## Ciclo de vida de facturación y derechos
 
-El acceso Enterprise se crea a través del proceso contractual aprobado. En los planes de autoservicio, un plan seleccionado solo se activa después de que Stripe confirma la facturación y ApexMail procesa el webhook de suscripción verificado. Solo una página de finalización de Checkout no otorga un derecho.
+El acceso Enterprise se crea a través del proceso contractual aprobado. En los planes de autoservicio, un plan seleccionado solo se activa después de que Adyen confirma la facturación y ApexMail procesa el webhook de suscripción verificado. Solo una página de finalización de Checkout no otorga un derecho.
 
-Los cambios y cancelaciones de suscripciones existentes usan el portal de facturación de Stripe. Los cambios, renovaciones y terminaciones de Enterprise siguen el contrato firmado.
+Los cambios y cancelaciones de suscripciones existentes usan el portal de facturación de Adyen. Los cambios, renovaciones y terminaciones de Enterprise siguen el contrato firmado.
 
 ## Materiales de adquisición
 

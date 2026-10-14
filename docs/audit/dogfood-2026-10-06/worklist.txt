@@ -789,7 +789,7 @@ docs/tool-contracts/postgresql.md
 docs/tool-contracts/prometheus.md
 docs/tool-contracts/redis.md
 docs/tool-contracts/ses.md
-docs/tool-contracts/stripe.md
+docs/tool-contracts/adyen.md
 docs/tool-contracts/zone-ee.md
 docs/user-guide/assistant.md
 docs/user-guide/contacts.md
@@ -1857,7 +1857,7 @@ services/mail-server/crates/billing-service/src/plans.rs
 services/mail-server/crates/billing-service/src/routes.rs
 services/mail-server/crates/billing-service/src/send_admission.rs
 services/mail-server/crates/billing-service/src/simulation.rs
-services/mail-server/crates/billing-service/src/stripe_webhooks.rs
+services/mail-server/crates/billing-service/src/adyen_webhooks.rs
 services/mail-server/crates/billing-service/src/subscriptions.rs
 services/mail-server/crates/billing-service/src/test_support.rs
 services/mail-server/crates/billing-service/src/types.rs
@@ -2905,7 +2905,7 @@ services/mail-server/migrations/070_fix_column_mismatches.sql
 services/mail-server/migrations/071_fix_live_sim_schema.sql
 services/mail-server/migrations/072_seed_system_tenant_domain.sql
 services/mail-server/migrations/073_fix_messages_table_schema.sql
-services/mail-server/migrations/074_stripe_billing_schema_fixes.sql
+services/mail-server/migrations/074_adyen_billing_schema_fixes.sql
 services/mail-server/migrations/075_create_missing_tables.sql
 services/mail-server/migrations/076_fix_column_mismatches.sql
 services/mail-server/migrations/077_add_hipaa_event_signature.sql
@@ -2965,11 +2965,11 @@ services/mail-server/migrations/131_plan_overrides_updated_at.sql
 services/mail-server/migrations/132_billing_addresses_state_email.sql
 services/mail-server/migrations/133_abuse_reports_status.sql
 services/mail-server/migrations/134_credit_notes.sql
-services/mail-server/migrations/135_stripe_subscriptions_plan_backfill.sql
+services/mail-server/migrations/135_adyen_subscriptions_plan_backfill.sql
 services/mail-server/migrations/136_invoices_unique_overage_period.sql
 services/mail-server/migrations/137_billing_periods.sql
 services/mail-server/migrations/138_invoice_collection_outbox.sql
-services/mail-server/migrations/139_invoices_stripe_item_id.sql
+services/mail-server/migrations/139_invoices_adyen_item_id.sql
 services/mail-server/migrations/140_invoice_payment_allocations.sql
 services/mail-server/migrations/150_contacts_tags_canonical.sql
 services/mail-server/migrations/153_idempotency_ledger_queue_metadata_repair.sql
@@ -2994,7 +2994,7 @@ services/mail-server/migrations/180_invoice_collection_outbox_lease.sql
 services/mail-server/migrations/181_tenant_restrictions.sql
 services/mail-server/migrations/182_abuse_reports_legacy_reconciliation.sql
 services/mail-server/migrations/183_credit_notes_disposition.sql
-services/mail-server/migrations/184_stripe_subscription_event_watermark.sql
+services/mail-server/migrations/184_adyen_subscription_event_watermark.sql
 services/mail-server/migrations/185_invoices_billing_registry_code.sql
 services/mail-server/migrations/186_recipient_delivery_state.sql
 services/mail-server/migrations/187_message_category.sql

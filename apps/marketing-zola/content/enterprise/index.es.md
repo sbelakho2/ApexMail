@@ -39,7 +39,7 @@ Un comprador cualificado puede solicitar la DPA vigente, información sobre subp
 
 ## Ciclo de vida de facturación
 
-Enterprise no puede adquirirse a través del Checkout público genérico. El contrato o la disposición de facturación aprobada constituyen la autoridad del derecho. Para los planes públicos de autoservicio, se requieren Stripe Checkout y el webhook verificado de suscripción de Stripe antes de conceder un plan de pago.
+Enterprise no puede adquirirse a través del Checkout público genérico. El contrato o la disposición de facturación aprobada constituyen la autoridad del derecho. Para los planes públicos de autoservicio, se requieren Adyen Checkout y el webhook verificado de suscripción de Adyen antes de conceder un plan de pago.
 
 ## Contacto
 

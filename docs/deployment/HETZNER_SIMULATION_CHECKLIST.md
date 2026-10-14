@@ -3,7 +3,7 @@
 This is the simulation/staging deployment runbook for ApexMail on Hetzner infrastructure. It documents the shadow-production environment for realistic load testing, chaos engineering, and continuous verification.
 
 > **Infrastructure Overview:**  
-> - **API Server:** `apex-sim-api` (API + SSR browser surfaces + Stripe webhook handler)  
+> - **API Server:** `apex-sim-api` (API + SSR browser surfaces + Adyen webhook handler)  
 > - **Worker Server:** `apex-sim-worker` (queue workers + sender + webhook dispatcher)  
 > - **Data Server:** `apex-sim-data` (PostgreSQL + Redis)  
 > - **SSH Access:** `ssh -i ~/.ssh/apex-sim-key root@<SERVER_IP>`  
@@ -21,7 +21,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 6. [CLI Automation](#5-cli-automation)
 7. [Provisioning](#6-provisioning)
 8. [AWS SES Plumbing](#7-aws-ses-plumbing)
-9. [Stripe Billing Simulation](#8-stripe-billing-simulation)
+9. [Adyen Billing Simulation](#8-adyen-billing-simulation)
 10. [Deployment](#9-deployment)
 11. [Load Testing](#10-load-testing)
 12. [Chaos Engineering](#11-chaos-engineering)
@@ -77,7 +77,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 │  └──────────────────────┘  │  │  └──────────────────────┘  │  │  │  - Session cache     │  │
 │                            │  │                            │  │  └──────────────────────┘  │
 │  ┌──────────────────────┐  │  │  ┌──────────────────────┐  │  │                            │
-│  │  Stripe Webhooks     │  │  │  │  Webhook Dispatcher  │  │  │  ┌──────────────────────┐  │
+│  │  Adyen Webhooks     │  │  │  │  Webhook Dispatcher  │  │  │  ┌──────────────────────┐  │
 │  │  :3000/webhooks      │  │  │  │  - Outbound webhooks │  │  │  │  Toxiproxy           │  │
 │  │  - Subscription mgmt │  │  │  │  - Retry logic       │  │  │  │  - Network chaos     │  │
 │  │  - Entitlement sync  │  │  │  │  - DLQ handling      │  │  │  │  - Latency injection │  │
@@ -151,10 +151,10 @@ ufw allow from 10.0.0.0/24 to any port 8474 comment 'Toxiproxy'
 **Services running:**
 - [x] API Server (Rust on port 3000)
 - [x] SSR browser surfaces (`web` + `control-plane` on port 3000)
-- [x] Stripe webhook handler
+- [x] Adyen webhook handler
 - [x] Assertion daemon
 - [x] Prometheus (port 9090)
-- [x] Stripe CLI (webhook forwarding)
+- [x] Adyen CLI (webhook forwarding)
 
 **Environment:**
 ```bash
@@ -162,8 +162,8 @@ ufw allow from 10.0.0.0/24 to any port 8474 comment 'Toxiproxy'
 NODE_ENV=staging
 DATABASE_URL=postgresql://apexmail:${DB_PASSWORD}@10.0.0.3:5432/apexmail
 REDIS_URL=redis://:${REDIS_PASSWORD}@10.0.0.3:6379/0
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
+ADYEN_API_KEY=sk_test_...
+ADYEN_HMAC_KEY=whsec_...
 SES_REGION=eu-west-1
 SES_CONFIGURATION_SET=apexmail-staging-sim
 RECIPIENT_ALLOWLIST=@example.com,@test.apexmail.dev
@@ -302,8 +302,8 @@ WHERE status = 'accepted'
 |-----------|-----------|----------|
 | **B1:** Tenant sends while not entitled (plan canceled/past due/no subscription) | Cross-reference sends with entitlement state at send time | CRITICAL |
 | **B2:** Tenant blocked while entitled (paid but rejected) | Check rejected sends against active subscriptions | CRITICAL |
-| **B3:** Overage meter ≠ usage ledger (drift) | Compare Stripe meter aggregates with internal usage | HIGH |
-| **B4:** Stripe event replay causes duplicate entitlement transitions | Check for duplicate subscription state changes | CRITICAL |
+| **B3:** Overage meter ≠ usage ledger (drift) | Compare Adyen meter aggregates with internal usage | HIGH |
+| **B4:** Adyen event replay causes duplicate entitlement transitions | Check for duplicate subscription state changes | CRITICAL |
 
 ```sql
 -- B1: Sends without entitlement
@@ -316,15 +316,15 @@ WHERE m.created_at > NOW() - INTERVAL '1 hour'
 -- B3: Usage drift detection
 SELECT 
   t.id as tenant_id,
-  t.stripe_customer_id,
+  t.adyen_shopper_reference,
   COUNT(m.id) as internal_count,
-  t.stripe_usage_reported as stripe_count,
-  ABS(COUNT(m.id) - COALESCE(t.stripe_usage_reported, 0)) as drift
+  t.adyen_usage_reported as adyen_count,
+  ABS(COUNT(m.id) - COALESCE(t.adyen_usage_reported, 0)) as drift
 FROM tenants t
 LEFT JOIN messages m ON m.tenant_id = t.id 
   AND m.created_at > DATE_TRUNC('month', NOW())
 GROUP BY t.id
-HAVING ABS(COUNT(m.id) - COALESCE(t.stripe_usage_reported, 0)) > 0;
+HAVING ABS(COUNT(m.id) - COALESCE(t.adyen_usage_reported, 0)) > 0;
 ```
 
 ### 4.4 Systems Invariants (C)
@@ -340,7 +340,7 @@ HAVING ABS(COUNT(m.id) - COALESCE(t.stripe_usage_reported, 0)) > 0;
 ### 4.5 Assertion Daemon Output
 
 On invariant breach:
-1. Print exact failing keys (`tenant_id`, `message_id`, `event_id`, `stripe_event_id`)
+1. Print exact failing keys (`tenant_id`, `message_id`, `event_id`, `adyen_notification_id`)
 2. Snapshot relevant rows to report bundle
 3. Dump service logs
 4. Exit with nonzero status code
@@ -382,7 +382,7 @@ ops/sim/
 │   ├── provision.sh
 │   ├── teardown.sh
 │   └── ssh.sh
-├── stripe/                    # Stripe CLI scripts
+├── adyen/                    # Adyen CLI scripts
 │   ├── setup-webhooks.sh
 │   ├── trigger-scenarios.sh
 │   └── create-test-customers.sh
@@ -422,7 +422,7 @@ ops/sim/
   --fail-fast
 
 # Phased execution
-./ops/sim/apexsim bootstrap   # hcloud + aws + stripe prep
+./ops/sim/apexsim bootstrap   # hcloud + aws + adyen prep
 ./ops/sim/apexsim deploy      # Deploy stack
 ./ops/sim/apexsim smoke       # 5–10 min, strict invariants
 ./ops/sim/apexsim load        # 60–180 min load test
@@ -549,51 +549,51 @@ Historical implementation example removed. Refer to the current Rust services an
 
 ---
 
-## 8. Stripe Billing Simulation
+## 8. Adyen Billing Simulation
 
-### 8.1 Stripe Webhook Feed (CLI)
+### 8.1 Adyen Webhook Feed (CLI)
 
-Run on API server to forward Stripe events to webhook handler:
+Run on API server to forward Adyen events to webhook handler:
 
 ```bash
 # Start webhook forwarding
-stripe listen --forward-to http://127.0.0.1:3000/webhooks/stripe
+adyen listen --forward-to http://127.0.0.1:3000/webhooks/adyen
 
-# The webhook handler MUST verify the signing secret emitted by stripe listen
-# STRIPE_WEBHOOK_SECRET will be printed when stripe listen starts
+# The webhook handler MUST verify the signing secret emitted by adyen listen
+# ADYEN_HMAC_KEY will be printed when adyen listen starts
 ```
 
 ### 8.2 Trigger Realistic Billing Events
 
 ```bash
 # Standard lifecycle events
-stripe trigger customer.subscription.created
-stripe trigger invoice.payment_succeeded
-stripe trigger invoice.payment_failed
-stripe trigger customer.subscription.deleted
+adyen trigger customer.subscription.created
+adyen trigger invoice.payment_succeeded
+adyen trigger invoice.payment_failed
+adyen trigger customer.subscription.deleted
 
 # Trial-to-active conversion
-stripe trigger customer.subscription.trial_will_end
-stripe trigger invoice.paid
+adyen trigger customer.subscription.trial_will_end
+adyen trigger invoice.paid
 
 # Upgrade/downgrade scenarios (via API)
-stripe subscriptions update sub_xxx --price price_premium
-stripe subscriptions update sub_xxx --price price_basic
+adyen subscriptions update sub_xxx --price price_premium
+adyen subscriptions update sub_xxx --price price_basic
 
 # Past due + recovery
-stripe trigger invoice.payment_failed
-stripe trigger invoice.payment_action_required
-stripe trigger invoice.paid
+adyen trigger invoice.payment_failed
+adyen trigger invoice.payment_action_required
+adyen trigger invoice.paid
 
 # Dispute scenario
-stripe trigger charge.dispute.created
+adyen trigger charge.dispute.created
 ```
 
 ### 8.3 Automated Billing Churn Script
 
 ```bash
 # Run billing churn simulation
-./ops/sim/stripe/trigger-scenarios.sh --scenario full-lifecycle --tenants 100
+./ops/sim/adyen/trigger-scenarios.sh --scenario full-lifecycle --tenants 100
 
 # Scenarios:
 # - trial-to-active: Trial → Active subscription
@@ -792,9 +792,9 @@ reports/2026-02-22T14:30:00Z/
 ├── chaos/
 │   ├── timeline.json         # What chaos was injected when
 │   └── recovery-times.json   # Time to recover from each failure
-└── stripe/
-    ├── events-received.json  # All Stripe events received
-    └── reconciliation.json   # Internal vs Stripe state diff
+└── adyen/
+    ├── events-received.json  # All Adyen events received
+    └── reconciliation.json   # Internal vs Adyen state diff
 ```
 
 ### 12.2 Verification Queries
@@ -814,10 +814,10 @@ WHERE created_at > NOW() - INTERVAL '24 hours';
 -- Billing reconciliation
 SELECT 
   t.id as tenant_id,
-  t.stripe_customer_id,
+  t.adyen_shopper_reference,
   t.subscription_status,
   COUNT(m.id) as internal_sends,
-  t.stripe_usage_reported as stripe_usage,
+  t.adyen_usage_reported as adyen_usage,
   t.plan_limit,
   CASE 
     WHEN COUNT(m.id) > t.plan_limit THEN 'OVERAGE'
@@ -843,7 +843,7 @@ A run is **PASS** only if ALL of the following are true:
 | **Backlog growth** | Bounded | Queue depth never exceeds 2x normal |
 | **P95 latency** | < target | Under SLO during target load |
 | **Chaos recovery** | Automatic | No manual intervention required |
-| **Stripe webhook replay** | Idempotent | No duplicate entitlement transitions |
+| **Adyen webhook replay** | Idempotent | No duplicate entitlement transitions |
 | **SES throttle handling** | Backoff | No retry storms (retry rate < 10% of sends) |
 | **Retention/cleanup jobs** | Stable | No impact on system stability |
 
@@ -882,7 +882,7 @@ INVARIANT CHECKS:
   ✓ B1: No unauthorized sends
   ✓ B2: No false rejections
   ✓ B3: Usage drift < 0.01%
-  ✓ B4: Stripe replay idempotent
+  ✓ B4: Adyen replay idempotent
   ✓ C1: Queue age < threshold
   ✓ C2: No worker crash loops
   ✓ C3: DB pool healthy

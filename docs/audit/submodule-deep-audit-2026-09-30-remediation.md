@@ -55,7 +55,7 @@ The adversarial wave caught and repaired **12 real defects beyond the original a
 10. **AI sanitizer case-fold bypass (SM9)** — stripper regexes lacked `(?i)`: `<SCRIPT>`
     uppercase sailed through. **Embedding NaN laundering (SM9)**: finite-but-huge components
     squared to +Inf → all-zero embedding shipped 200.
-11. **Stripe freeze TOCTOU (SM7)** — last-writer-wins amount freeze let overlapping collectors
+11. **Adyen freeze TOCTOU (SM7)** — last-writer-wins amount freeze let overlapping collectors
     mint two idempotency keys. Now first-writer-wins returning the effective amount.
 12. **Explorer key invalidation storm (SM3)** — per-process cache + single row meant every
     cold replica re-minted and invalidated the others. Now Redis-published with adoption.

@@ -2,7 +2,7 @@
 //!
 //! Producers (`billing-service`): usage alerts, cost alerts, dunning
 //! (`payment_reminder` / `account_soft_suspended` / `account_hard_suspended`),
-//! `payment_failed`, `trial_ending`, `messages_purged`, duplicate-Stripe-
+//! `payment_failed`, `trial_ending`, `messages_purged`, duplicate-Adyen-
 //! collection refusals. Every one of them INSERTs a row with
 //! `status = 'pending'` and, for usage alerts, treats the INSERT itself as
 //! delivery (`send_usage_alert` sets `delivered = true` on enqueue).
@@ -287,9 +287,9 @@ fn render_notification(
                 ),
             )
         }
-        "duplicate_stripe_collection_refused" => (
+        "duplicate_adyen_collection_refused" => (
             "ApexMail billing safety notice".to_string(),
-            "A duplicate Stripe collection attempt was refused to protect your account. \
+            "A duplicate Adyen collection attempt was refused to protect your account. \
              No extra charge was made. Our team has been notified."
                 .to_string(),
         ),

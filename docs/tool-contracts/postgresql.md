@@ -123,7 +123,7 @@ JSONB is permitted for **semi-structured metadata only**. Do NOT store data that
 ### Allowed Uses
 
 - `email_headers JSONB` — raw RFC headers, queried rarely.
-- `webhook_payload JSONB` — incoming Stripe/SES payloads, stored for audit.
+- `webhook_payload JSONB` — incoming Adyen/SES payloads, stored for audit.
 - `custom_fields JSONB` — tenant-defined contact attributes.
 
 ### Prohibited Uses

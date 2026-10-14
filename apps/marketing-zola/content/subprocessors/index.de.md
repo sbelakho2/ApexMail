@@ -21,7 +21,7 @@ Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im 
 | Amazon Web Services, Inc. | AWS SES | E-Mail-Zustelltransport | E-Mail-Zustellung, wenn aktiviert | E-Mail-Inhalte und Empfängeradressen | Konfigurierte SES-Region | Konfigurierte SES-Region | USA | EU-Standardvertragsklauseln (AWS-DPA) | Nein — nur wenn die aktive Bereitstellung SES verwendet |
 | Google LLC | Google | OAuth-Authentifizierung | Anmeldung über Google OAuth | OAuth-Tokens, E-Mail-Adresse, Name | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein — nur wenn der Kunde Google OAuth aktiviert |
 | GitHub, Inc. | GitHub | OAuth-Authentifizierung | Anmeldung über GitHub OAuth | OAuth-Tokens, Benutzername, E-Mail-Adresse | Global (EU-Daten) | Nutzer mit Sitz im EWR: EWR | USA | Standardvertragsklauseln (SCCs) | Nein — nur wenn der Kunde GitHub OAuth aktiviert |
-| Stripe, Inc. | Stripe | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | USA (primär); Indien (Support) | USA | USA | Standardvertragsklauseln (SCCs) gemäß Stripe-DPA | Ja — erforderlich für kostenpflichtige Tarife |
+| Adyen N.V. | Adyen | Zahlungsabwicklung | Abonnement-Abrechnung, Rechnungsstellung, Speicherung von Zahlungsmethoden | Tokens für Zahlungsmethoden, Transaktionsmetadaten, Rechnungsdaten | USA (primär); Indien (Support) | USA | USA | Standardvertragsklauseln (SCCs) gemäß Adyen-DPA | Ja — erforderlich für kostenpflichtige Tarife |
 
 ### Selbst gehostete Infrastruktur (keine Drittanbieter-Unterauftragsverarbeiter)
 
@@ -44,4 +44,4 @@ Wenn Sie aus berechtigten datenschutzrechtlichen Gründen Widerspruch gegen eine
 
 | Datum | Änderung | Beschreibung |
 |---|---|---|
-| 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit Hetzner (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Stripe (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |
+| 2026-07-29 | Erstveröffentlichung | Unterauftragsverarbeiter-Register veröffentlicht mit Hetzner (Infrastruktur), AWS (S3/SES, wenn aktiviert), Google (OAuth), GitHub (OAuth) und Adyen (Zahlungen). ClickHouse und Redis sind selbst gehostete Software und keine Unterauftragsverarbeiter (siehe oben). |

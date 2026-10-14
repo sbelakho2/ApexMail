@@ -49,7 +49,7 @@ Gebühren werden monatlich oder jährlich gemäß dem gewählten Tarif abgerechn
 
 ### 7.1 Automatische Verlängerung
 
-Abonnements verlängern sich automatisch am Ende jedes Abrechnungszeitraums, sofern sie nicht vor dem Verlängerungsdatum gekündigt werden. Selbstbedienungsänderungen und Kündigungen erfolgen über das Stripe-Billing-Portal. Die Kündigung wird gemäß dem bestätigten Stripe-Abrechnungsereignis wirksam; für Teilzeiträume werden keine Rückerstattungen gewährt.
+Abonnements verlängern sich automatisch am Ende jedes Abrechnungszeitraums, sofern sie nicht vor dem Verlängerungsdatum gekündigt werden. Selbstbedienungsänderungen und Kündigungen erfolgen über das Adyen-Billing-Portal. Die Kündigung wird gemäß dem bestätigten Adyen-Abrechnungsereignis wirksam; für Teilzeiträume werden keine Rückerstattungen gewährt.
 
 ### 7.2 Preisänderungen
 

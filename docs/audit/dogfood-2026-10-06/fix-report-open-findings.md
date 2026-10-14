@@ -571,7 +571,7 @@ Decision, per the code's own documented contract:
 
 - **VAT `cash_special` third-month fallback: SCHEDULED.** `materialize_due_cash_special`
   now runs in the periodic KMD job **before** `generate_kmd_if_due`, so the period being
-  filed includes the recognition entries; the `stripe_webhooks.rs` claim is now true.
+  filed includes the recognition entries; the `adyen_webhooks.rs` claim is now true.
   Regression test: `billing-service maintenance::tests::cash_accounting_third_month_sweep_is_scheduled_before_kmd_generation`.
 - **Wallet-reservation sweep: REMOVED, with the reservation model it served.** No
   production path ever inserted a `wallet_reservations` row or incremented

@@ -20,7 +20,7 @@ Bel Consulting OÜ (Handelsname ApexMail) („wir", „uns") verpflichtet sich, 
 
 - **Webseitenbesucher (Marketing-Website):** IP-Adresse, Browsertyp und User-Agent, Geräteinformationen, besuchte Seiten, Referrer-URL und Zeitstempel — automatisch über Server-Zugriffsprotokolle erhoben. Die Marketing-Website setzt keine Analyse-Skripte ein und bettet keine Tracking-Pixel oder Werbe-Cookies ein.
 - **Interessenten:** Name, E-Mail-Adresse, Unternehmensname, Telefonnummer (falls angegeben) und Kommunikationsverlauf, bereitgestellt über Kontaktformulare oder E-Mail.
-- **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse, USt-IdNr., Zahlungsdaten-Tokens (Kartendaten werden von Stripe verarbeitet und erreichen niemals unsere Server), API-Schlüssel-Metadaten, Anmeldezeitstempel, IP-Adressen und Audit-Log-Einträge.
+- **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse, USt-IdNr., Zahlungsdaten-Tokens (Kartendaten werden von Adyen verarbeitet und erreichen niemals unsere Server), API-Schlüssel-Metadaten, Anmeldezeitstempel, IP-Adressen und Audit-Log-Einträge.
 - **Nutzungsdaten:** API-Aufrufe, E-Mail-Versandvolumen, Zustellereignisse sowie Engagement-Ereignisse (Öffnungen und Klicks) für Ihre gesendeten Nachrichten.
 - **Empfängerdaten (als Auftragsverarbeiter für unsere Kunden):** E-Mail-Adressen und Namen der Empfänger, E-Mail-Inhalte (Betreff, Text, Header, Anhänge) sowie Zustell- und Engagement-Metadaten. Wenn der versendende Kunde das Tracking aktiviert, werden bei Öffnungs- und Klick-Ereignissen zusätzlich IP-Adresse und User-Agent des Empfängers erfasst.
 - **Technische Daten:** IP-Adressen (für Authentifizierung, Rate-Limiting sowie Betrugs- und Missbrauchsprävention), Browsertyp, Geräteinformationen.
@@ -40,7 +40,7 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 |---|---|---|---|
 | Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
-| Zahlungs- und Abrechnungsdaten | Stripe, Inc. (US, SCCs) | Anbieter-verwaltet (Indien für Support) | US/Indien (SCCs) |
+| Zahlungs- und Abrechnungsdaten | Adyen N.V. (US, SCCs) | Anbieter-verwaltet (Indien für Support) | US/Indien (SCCs) |
 | Support-Tickets | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).

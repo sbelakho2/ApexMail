@@ -943,7 +943,7 @@ impl EstoniaOuCompliance {
                 category: format!("Billing revenue ({})", r.currency),
                 amount_cents: r.total_cents.unwrap_or(0),
                 invoice_count: r.invoice_count.unwrap_or(0),
-                description: "Revenue from customer invoices (Stripe)".into(),
+                description: "Revenue from customer invoices (Adyen)".into(),
             })
             .collect();
 
@@ -974,11 +974,11 @@ impl EstoniaOuCompliance {
             .await
             {
                 if let Some(total_revenue) = row.total_cents {
-                    let stripe_fee_est = ((total_revenue as f64) * 0.029 + 30.0) as i64;
+                    let adyen_fee_est = ((total_revenue as f64) * 0.029 + 30.0) as i64;
                     expenses.push(ExpenseCategory {
-                        category: "Payment processing (Stripe fees)".into(),
-                        amount_cents: stripe_fee_est,
-                        description: "Estimated 2.9% + 0,30 € Stripe processing fees".into(),
+                        category: "Payment processing (Adyen fees)".into(),
+                        amount_cents: adyen_fee_est,
+                        description: "Estimated 2.9% + 0,30 € Adyen processing fees".into(),
                     });
                 }
             }
@@ -3564,7 +3564,7 @@ mod adversarial_tests {
         let fees: i64 = report
             .expense_breakdown
             .iter()
-            .filter(|e| e.category.contains("Stripe"))
+            .filter(|e| e.category.contains("Adyen"))
             .map(|e| e.amount_cents)
             .sum();
         // The fee estimate applies to the gross charged amount

@@ -4,7 +4,7 @@
 //!
 //! This module uses the **actual** `days_in_period` derived from the
 //! subscription's `current_period_end - current_period_start` timestamps.
-//! For yearly subscriptions created by Stripe, this is typically 365 days
+//! For yearly subscriptions created by Adyen, this is typically 365 days
 //! (or 366 in leap years), **not** a fixed 360-day convention.
 //!
 //! # Source files replaced

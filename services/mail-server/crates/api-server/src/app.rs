@@ -392,13 +392,13 @@ pub fn build_app(state: AppState) -> Router {
         // No-JS cookie consent endpoint (marketing banner links here).
         // Same public rate-limit stack = the light per-IP bucketing.
         .merge(routes::web::consent_router())
-        // Stripe webhook ingest — previously mounted ONLY by the
+        // Adyen webhook ingest — previously mounted ONLY by the
         // billing-service binary, which has no container in any deployed
         // topology, so signature-valid webhook deliveries 404'd and cycle
         // close never saw provider events (dogfood finding A, 2026-10-05).
         // The route is unauthenticated by design: the handler verifies the
-        // Stripe HMAC signature and is idempotent per event id.
-        .merge(stripe_webhook_router(&state))
+        // Adyen HMAC signature and is idempotent per event id.
+        .merge(adyen_webhook_router(&state))
         // Data-backed SSR detail pages (/domains/{id}, /campaigns/{id}).
         // Browser pages: the handlers resolve the session and redirect
         // anonymous visitors to /login?next=… (same contract as the SSR
@@ -7246,24 +7246,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stripe_webhook_ingest_mounts_when_secret_configured() {
-        // Dogfood finding A (2026-10-05): /webhooks/stripe was mounted only
+    async fn adyen_webhook_ingest_mounts_when_secret_configured() {
+        // Dogfood finding A (2026-10-05): /webhooks/adyen was mounted only
         // by the billing-service binary, which has no container in any
         // deployed topology — every provider delivery 404'd. The route is
         // now ALWAYS mounted: with a secret a garbage signature is refused
-        // (400); without a secret the handler answers a retryable 503 (Stripe
+        // (400); without a secret the handler answers a retryable 503 (Adyen
         // keeps replaying across the misconfiguration window) and NEVER 404.
         // nextest runs one process per test, so the env pin is isolated.
-        std::env::set_var("STRIPE_WEBHOOK_SECRET", "whsec_dogfood_mount_probe");
+        std::env::set_var("ADYEN_HMAC_KEY", "whsec_dogfood_mount_probe");
         let app = test_app().await;
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/stripe")
+                    .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
-                    .header("stripe-signature", "t=1,v1=deadbeef")
+                    .header("adyen-hmac-signature", "t=1,v1=deadbeef")
                     .body(Body::from("{\"id\":\"evt_probe\"}"))
                     .unwrap(),
             )
@@ -7272,7 +7272,7 @@ mod tests {
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "ingest route must be mounted when STRIPE_WEBHOOK_SECRET is set"
+            "ingest route must be mounted when ADYEN_HMAC_KEY is set"
         );
         assert_eq!(
             resp.status(),
@@ -7281,15 +7281,15 @@ mod tests {
         );
 
         // Unconfigured secret: still mounted, retryable 503 — never 404.
-        std::env::remove_var("STRIPE_WEBHOOK_SECRET");
+        std::env::remove_var("ADYEN_HMAC_KEY");
         let app_unconfigured = test_app().await;
         let resp = app_unconfigured
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/stripe")
+                    .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
-                    .header("stripe-signature", "t=1,v1=deadbeef")
+                    .header("adyen-hmac-signature", "t=1,v1=deadbeef")
                     .body(Body::from("{\"id\":\"evt_probe\"}"))
                     .unwrap(),
             )
@@ -8353,21 +8353,21 @@ mod adversarial_helper_tests {
     }
 }
 
-/// The Stripe webhook ingest, ALWAYS mounted on the public rate-limited
-/// stack. The handler authenticates purely by Stripe's HMAC signature (no
+/// The Adyen webhook ingest, ALWAYS mounted on the public rate-limited
+/// stack. The handler authenticates purely by Adyen's HMAC signature (no
 /// session/API-key applies to provider callbacks) and is idempotent per
-/// event id, so replays and Stripe's at-least-once redelivery are safe.
-/// A deployment without `STRIPE_WEBHOOK_SECRET` gets a retryable 503 from
+/// event id, so replays and Adyen's at-least-once redelivery are safe.
+/// A deployment without `ADYEN_HMAC_KEY` gets a retryable 503 from
 /// the handler — never a 404 (which would silently drop provider events
 /// and make the route's existence unverifiable).
-fn stripe_webhook_router(state: &AppState) -> Router<AppState> {
+fn adyen_webhook_router(state: &AppState) -> Router<AppState> {
     let billing_state = billing_service::AppState::new(
         state.db.clone(),
         state.redis.clone(),
         billing_service::config::BillingConfig {
-            stripe_webhook_secret: std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default(),
+            adyen_hmac_key: std::env::var("ADYEN_HMAC_KEY").unwrap_or_default(),
             ..Default::default()
         },
     );
-    billing_service::stripe_webhooks::router().with_state(billing_state)
+    billing_service::adyen_webhooks::router().with_state(billing_state)
 }

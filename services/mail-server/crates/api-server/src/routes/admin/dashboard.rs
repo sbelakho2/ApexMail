@@ -93,7 +93,7 @@ async fn fetch_count_or_zero(db: &sqlx::PgPool, sql: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// MRR computed from `stripe_subscriptions` — the table the billing-service
+/// MRR computed from `adyen_subscriptions` — the table the billing-service
 /// webhook writers actually populate — mirroring the proven pattern in
 /// billing-service `routes.rs` (`get_mrr_report`): joined via
 /// `tenants.plan` to `plans` pricing, with yearly prices normalized to
@@ -113,7 +113,7 @@ fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
                     ELSE p.price_monthly
                 END
             ), 0)::bigint
-         FROM stripe_subscriptions s
+         FROM adyen_subscriptions s
          JOIN tenants t ON t.id = s.tenant_id
          JOIN plans p ON p.name = t.plan
          WHERE s.status IN ('active', 'trialing', 'past_due')"
@@ -124,12 +124,12 @@ fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
 /// storage failures — `get_dashboard_stats` surfaces them as a 5xx instead
 /// of a fabricated zero on a degraded database.
 async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> Result<f64, sqlx::Error> {
-    if !(table_exists(db, "stripe_subscriptions").await? && table_exists(db, "plans").await?) {
+    if !(table_exists(db, "adyen_subscriptions").await? && table_exists(db, "plans").await?) {
         return Ok(0.0);
     }
 
     let has_billing_interval =
-        column_exists(db, "stripe_subscriptions", "billing_interval").await?;
+        column_exists(db, "adyen_subscriptions", "billing_interval").await?;
     let sql = build_subscription_mrr_sql(has_billing_interval);
 
     let cents = sqlx::query_scalar::<_, i64>(&sql).fetch_one(db).await?;
@@ -426,7 +426,7 @@ mod tests {
         let sql = build_subscription_mrr_sql(true);
 
         // Reads the table billing actually writes, with proper yearly rounding.
-        assert!(sql.contains("FROM stripe_subscriptions s"));
+        assert!(sql.contains("FROM adyen_subscriptions s"));
         assert!(sql.contains("JOIN tenants t ON t.id = s.tenant_id"));
         assert!(sql.contains("JOIN plans p ON p.name = t.plan"));
         assert!(sql.contains("ROUND(p.price_yearly / 12.0)::bigint"));
@@ -517,7 +517,7 @@ mod adversarial_tests {
         .await
         .expect("seed plan");
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at)
+            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, plan, status, billing_interval, created_at, updated_at)
              VALUES ($1, $2, $3, 'active', 'monthly', NOW(), NOW())",
         )
         .bind(&tenant)
@@ -597,7 +597,7 @@ mod adversarial_tests {
             .execute(&pool)
             .await
             .expect("cleanup messages");
-        sqlx::query("DELETE FROM stripe_subscriptions WHERE tenant_id = $1")
+        sqlx::query("DELETE FROM adyen_subscriptions WHERE tenant_id = $1")
             .bind(&tenant)
             .execute(&pool)
             .await

@@ -529,7 +529,7 @@ async fn rc03_subscription_status_override_concurrent_is_serialized() {
 
     for tenant in [&tenant_id, &other_tenant] {
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (id, tenant_id, stripe_subscription_id, status)
+            "INSERT INTO adyen_subscriptions (id, tenant_id, adyen_subscription_id, status)
              VALUES ($1, $2, $3, 'active')",
         )
         .bind(Uuid::new_v4())
@@ -583,7 +583,7 @@ async fn rc03_subscription_status_override_concurrent_is_serialized() {
 
     // The surviving status is one of the two writes — never anything else.
     let (final_status,): (String,) =
-        sqlx::query_as("SELECT status FROM stripe_subscriptions WHERE tenant_id = $1")
+        sqlx::query_as("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
             .bind(&tenant_id)
             .fetch_one(&pool)
             .await
@@ -595,7 +595,7 @@ async fn rc03_subscription_status_override_concurrent_is_serialized() {
 
     // Tenant scoping: the OTHER tenant's subscription is untouched.
     let (other_status,): (String,) =
-        sqlx::query_as("SELECT status FROM stripe_subscriptions WHERE tenant_id = $1")
+        sqlx::query_as("SELECT status FROM adyen_subscriptions WHERE tenant_id = $1")
             .bind(&other_tenant)
             .fetch_one(&pool)
             .await

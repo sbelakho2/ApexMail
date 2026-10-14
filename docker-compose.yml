@@ -950,7 +950,7 @@ services:
       - /tmp
 
   # ===========================================================================
-  # BILLING SERVICE (plans, metering, invoices, Stripe webhooks)
+  # BILLING SERVICE (plans, metering, invoices, Adyen webhooks)
   # ===========================================================================
   billing-service:
     profiles: ["dev", "full-stack"]
@@ -984,9 +984,9 @@ services:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       # ── Internal service auth (shared with api-server / pdf-renderer) ─────
       SERVICE_AUTH_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
-      # ── Stripe (webhook secret is required — the binary fails fast without it)
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-dev-stripe-webhook-secret-change-me}
+      # ── Adyen (webhook secret is required — the binary fails fast without it)
+      ADYEN_API_KEY: ${ADYEN_API_KEY:-}
+      ADYEN_HMAC_KEY: ${ADYEN_HMAC_KEY:-dev-adyen-webhook-secret-change-me}
       # Dedicated-IP auto-provisioning calls the api-server internal API.
       API_BASE_URL: ${BILLING_API_BASE_URL:-http://api-server:8080}
       # ── Invoice PDF rendering (pdf-renderer on the shared backend network) ─
@@ -2132,7 +2132,7 @@ secrets:
 #     mta          — inbound/outbound mail → frontend/backend kept.
 #     tracking     — none today, but serves public traffic → backend kept.
 #     enterprise   — SSO callback egress   → backend kept.
-#     billing      — Stripe API egress     → backend kept.
+#     billing      — Adyen API egress     → backend kept.
 #     observability, exporters — scrape/metrics only, monitoring kept.
 networks:
   apexmail_frontend:

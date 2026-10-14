@@ -9912,8 +9912,8 @@ mod tests {
             "__NEXT_DATA__",
             "data-reactroot",
             "_next/static",
-            "https://js.stripe.com",
-            "checkout.stripe.com",
+            "https://js.adyen.com",
+            "checkout.adyen.com",
         ];
 
         for (name, html) in &fns {

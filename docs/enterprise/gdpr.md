@@ -229,7 +229,7 @@ curl -X POST https://api.apexmail.ee/v1/account/export \
 | **AWS (Amazon Web Services)** | SES email delivery | eu-west-1 (Ireland) | Email content in transit only | DPA executed, SCCs |
 | **Redis Ltd** | Caching / rate limiting | Same as primary infra | Ephemeral cache data | No persistent storage |
 | **ClickHouse Inc** | Analytics database | Same as primary infra | Aggregated analytics data | EU-hosted |
-| **Stripe Inc** | Payment processing | US (PCI-DSS compliant) | Billing data only | DPA executed, SCCs |
+| **Adyen Inc** | Payment processing | US (PCI-DSS compliant) | Billing data only | DPA executed, SCCs |
 | **Elastic.co** | Log aggregation | Same as primary infra | Operational logs | EU-hosted |
 
 ### Sub-processor Changes
@@ -253,7 +253,7 @@ Where data is processed within the EEA (Finland, Germany, Estonia), no SCCs are 
 | Destination | Legal Basis | Mechanism |
 |-------------|-------------|-----------|
 | AWS Ireland (eu-west-1) | Adequacy decision | EEA-based processing |
-| Stripe (US) | SCCs | Module 2 (processor-to-processor) |
+| Adyen (US) | SCCs | Module 2 (processor-to-processor) |
 | Hetzner Finland/Germany | Adequacy decision | EEA-based processing |
 
 ### SCC Execution
@@ -370,7 +370,7 @@ Data subjects can submit DSARs via the same channels listed in §3 (Right to Era
 | PostgreSQL | Account, messages, delivery logs | Direct query via [`compliance/src/routes.rs`](../../services/mail-server/crates/compliance/src/routes.rs) |
 | ClickHouse | Analytics data | Query via [`analytics/src/clickhouse_engine.rs`](../../services/mail-server/crates/analytics/src/clickhouse_engine.rs) |
 | Redis | Session data (ephemeral) | Not collected — ephemeral |
-| Billing (Stripe) | Payment history | API call to Stripe |
+| Billing (Adyen) | Payment history | API call to Adyen |
 
 ---
 

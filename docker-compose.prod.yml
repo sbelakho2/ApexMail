@@ -635,7 +635,7 @@ services:
   # EX_CONFIG): both come from their Docker secrets, never ephemeral values.
   # Invoice PDF renderer — REQUIRED in production: billing-service points
   # at pdf-renderer:3004 (PDF_RENDERER_URL) and every invoice-creating path
-  # (Stripe webhooks, admin invoices, the overage sweep) renders through it.
+  # (Adyen webhooks, admin invoices, the overage sweep) renders through it.
   # It was previously dev-profile-only, so production invoice PDFs silently
   # failed. The base service is profile-gated; !override [] activates it here.
   # F9 (audit): the per-workload dedicated token IS wired — pdf-renderer
@@ -1586,7 +1586,7 @@ services:
           memory: 128M
 
   # ===========================================================================
-  # BILLING SERVICE (plans, metering, invoices, Stripe webhooks)
+  # BILLING SERVICE (plans, metering, invoices, Adyen webhooks)
   # ===========================================================================
   billing-service:
     image: ghcr.io/sbelakho2/apexmail/billing-service:latest
@@ -1627,11 +1627,11 @@ services:
       # universal token via SERVICE_AUTH_TOKEN above.
       INTERNAL_SERVICE_TOKEN: ""
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/pdf_renderer_auth_token
-      # ── Stripe (secrets via wrapper-managed _FILE bridging) ────────────────
-      STRIPE_SECRET_KEY: ""
-      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret_key
-      STRIPE_WEBHOOK_SECRET: ""
-      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
+      # ── Adyen (secrets via wrapper-managed _FILE bridging) ────────────────
+      ADYEN_API_KEY: ""
+      ADYEN_API_KEY_FILE: /run/secrets/adyen_api_key
+      ADYEN_HMAC_KEY: ""
+      ADYEN_HMAC_KEY_FILE: /run/secrets/adyen_hmac_key
       # Dedicated-IP auto-provisioning calls the api-server internal API
       # (prod api-server binds :3000 per this overlay).
       API_BASE_URL: ${BILLING_API_BASE_URL:-http://api-server:3000}
@@ -1641,8 +1641,8 @@ services:
       - redis_password
       - internal_service_token
       - pdf_renderer_auth_token
-      - stripe_secret_key
-      - stripe_webhook_secret
+      - adyen_api_key
+      - adyen_hmac_key
     healthcheck:
       # F12 (audit): GET /health (billing-service routes.rs) instead of a
       # bare TCP connect; wget ships in the runtime-base image.
@@ -1986,7 +1986,7 @@ volumes:
 # (postgres, redis, clickhouse, mailstore) can only be
 # reached by containers explicitly attached to it. Services that need
 # outbound connectivity (api-server/worker → SES, mta → mail, billing →
-# Stripe, certbot → ACME) keep their frontend/backend memberships.
+# Adyen, certbot → ACME) keep their frontend/backend memberships.
 #
 # F1 — apexmail_backup_egress is a dedicated NON-internal bridge used ONLY by
 # the two backup containers (postgres-backup, clickhouse-backup). Their data
@@ -2079,10 +2079,10 @@ secrets:
     file: ${PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE:?PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE is required in production}
   kiwi_secret_key:
     file: ${PROD_KIWI_SECRET_KEY_FILE:?PROD_KIWI_SECRET_KEY_FILE is required in production}
-  stripe_secret_key:
-    file: ${PROD_STRIPE_SECRET_KEY_FILE:?PROD_STRIPE_SECRET_KEY_FILE is required in production}
-  stripe_webhook_secret:
-    file: ${PROD_STRIPE_WEBHOOK_SECRET_FILE:?PROD_STRIPE_WEBHOOK_SECRET_FILE is required in production}
+  adyen_api_key:
+    file: ${PROD_ADYEN_API_KEY_FILE:?PROD_ADYEN_API_KEY_FILE is required in production}
+  adyen_hmac_key:
+    file: ${PROD_ADYEN_HMAC_KEY_FILE:?PROD_ADYEN_HMAC_KEY_FILE is required in production}
   # Audit G — AWS SES credentials for api-server + worker.
   aws_access_key_id:
     file: ${PROD_AWS_ACCESS_KEY_ID_FILE:?PROD_AWS_ACCESS_KEY_ID_FILE is required in production}

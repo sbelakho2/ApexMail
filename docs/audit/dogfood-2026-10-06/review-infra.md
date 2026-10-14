@@ -439,7 +439,7 @@ no repository leak exists.
 
 Verified anyway, because the files exist on disk and are what the dev compose mounts:
 
-* **(a) No real external credential.** Stripe files are 64-hex strings, not `sk_live_`/`sk_test_`
+* **(a) No real external credential.** Adyen files are 64-hex strings, not `sk_live_`/`sk_test_`
   or `whsec_` patterns; `aws_access_key_id.txt`, `aws_secret_access_key.txt`, `smtp_username.txt`,
   `smtp_password.txt` are 0 bytes; `jwt_public_key_pem.txt` is the literal
   `placeholder-public-key`; the rest are random values generated for the dev stack
@@ -453,7 +453,7 @@ Verified anyway, because the files exist on disk and are what the dev compose mo
   guarded with `${PROD_*_FILE:?…}` in `docker-compose.prod.yml` (verified all 34), with no
   `./secrets/…` fallback; the dev `docker-compose.yml` defaults are a separate file tree that is
   never synced (`Makefile:97-99,120-125`).
-* **(d) `trivy-secret.yaml` matches reality.** Its single allow-rule covers Stripe's *public
+* **(d) `trivy-secret.yaml` matches reality.** Its single allow-rule covers Adyen's *public
   documentation example keys* used as DLP detection-corpus constants — the constants really exist in
   `services/mail-server/crates/dlp-engine/src/entropy.rs:366,373,387,412` with matching `nosemgrep`
   justifications; it is not papering over a live secret. One policy note: `trivy fs` also skips the

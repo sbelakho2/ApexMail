@@ -63,7 +63,7 @@ helpers), the ai_chat route table, and the published docs tree
 | SDK/API | 5 SDK languages; unpublished-to-registries status; REST + SMTP available today |
 | Feature gates | REST/SMTP (all), webhooks/templates/advanced analytics/export (Starter+), tracking domain/send-time optimisation (Pro+), A/B testing/audit logs/custom retention (Growth+), SSO/inbound/approval workflow/subaccounts (Business+), white-label/private cloud/BYOIP (Enterprise) |
 | Dedicated IPs | add-on prices (€49 first / €69 each additional), plan inclusions |
-| Billing lifecycle | Stripe-verified subscription start; overage invoicing; plan-change request path |
+| Billing lifecycle | Adyen-verified subscription start; overage invoicing; plan-change request path |
 | SLA | contract terms only — the verifier forbids inventing uptime percentages |
 | Console session surface | `POST /v1/ai/chat`, `GET /v1/ai/chat/history`, `POST|GET /v1/ai/chat/sessions`, `POST|GET /v1/ai/chat/sessions/:id/turns`; scope `ai:read`; per-tenant `ai_chat` flag; per-user 20/min bucket; contact-intent lead capture (the only write) |
 | `assistant.rs` | NOT part of the chat's answerable space: it is a deterministic helper library (subject lines/sentiment/summarize) with no route, so it contributes no chat-answerable rows. Its behaviour is covered by its own unit tests. |

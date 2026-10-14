@@ -16,7 +16,7 @@ The following table provides the current status of ApexMail's alignment with ind
 | **GDPR** | Controls being mapped | Data processing, subject rights, breach notification | All products | Internal assessment | 2026-05 | Ongoing monitoring | DPA, subprocessor list, data location summary | privacy@apexmail.ee |
 | **HIPAA** | Planned | Technical and administrative safeguards for PHI | ApexMail Cloud (Enterprise) | To be selected | N/A | Readiness assessment Q2 2027 | BAA template available | compliance@apexmail.ee |
 | **ISO 27001** | Not planned | ISMS for email delivery platform | N/A | N/A | N/A | Under evaluation | N/A | compliance@apexmail.ee |
-| **PCI DSS** | Not planned | Credit card payment processing | Stripe (handled externally) | N/A | N/A | N/A | Stripe PCI Attestation of Compliance | compliance@apexmail.ee |
+| **PCI DSS** | Not planned | Credit card payment processing | Adyen (handled externally) | N/A | N/A | N/A | Adyen PCI Attestation of Compliance | compliance@apexmail.ee |
 
 ---
 

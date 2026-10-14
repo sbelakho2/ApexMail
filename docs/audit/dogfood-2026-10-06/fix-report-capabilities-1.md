@@ -607,7 +607,7 @@ Env: `TEST_DATABASE_URL=postgresql://apexmail:…@127.0.0.1:5432/apexmail`
 | `python3 tools/check_knowledge_consistency.py` / `validate_pricing_drift.py` / `check_feature_entitlements.py` | PASS / PASS / PASS |
 
 Gate note: some billing coverage tests require `TEST_REDIS_URL` (they panic
-at `stripe_webhooks.rs:5585` without it); a run with only
+at `adyen_webhooks.rs:5585` without it); a run with only
 `TEST_DATABASE_URL` produced 155 unrelated failures that all vanish with the
 redis var set — the 627/0 numbers above are with it set.
 

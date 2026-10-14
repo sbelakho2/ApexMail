@@ -547,7 +547,7 @@ pub fn seed_cost_model() -> CostModel {
         monthly_estimate_eur: 200.0,
         unit: CostUnit::Per1000Recipients,
         unit_cost_eur: 0.005,
-        notes: Some("Stripe fees ~1.5% + €0.25 per transaction".into()),
+        notes: Some("Adyen fees ~1.5% + €0.25 per transaction".into()),
     });
 
     model.add_line_item(CostLineItem {

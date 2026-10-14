@@ -15,11 +15,11 @@ owned paths (root `README.md`, `apps/ai/**`) and are named below for their
 owners. P0: investigate-only table with implementation order delivered (no
 service edits, no change to `docs/pricing.md:44-46`).
 
-## P1-1 — Stale price ladder in the Stripe contract and the billing-lifecycle doc
+## P1-1 — Stale price ladder in the Adyen contract and the billing-lifecycle doc
 
 FIXED.
 
-- `docs/tool-contracts/stripe.md`: the price table now carries the canonical
+- `docs/tool-contracts/adyen.md`: the price table now carries the canonical
   ladder with plan IDs (Free / Developer `starter` €29 / Pro €89 / Growth €229
   / Business `scale` €699 / Enterprise Cloud €1,750; annual 10×; Free launch
   allowance noted). The Checkout paragraph now names the real self-service IDs
@@ -29,7 +29,7 @@ FIXED.
   (2,900 / 8,900 / 22,900 / 69,900 / 175,000; Free 3,000 + one-time 30,000
   launch allowance) plus canonical display names.
 - Pinned: `tools/check_knowledge_consistency.py` grew
-  `parse_stripe_contract_plans()`, `parse_billing_lifecycle_plans()` and
+  `parse_adyen_contract_plans()`, `parse_billing_lifecycle_plans()` and
   `check_doc_plan_tables_match_catalog()`; both docs are now in the gate's
   source set and its `--self-test` (two new mutation cases, both PASS).
 - Evidence: `python3 tools/check_knowledge_consistency.py` →
@@ -231,8 +231,8 @@ Fixed in owned paths:
   `GET /check/:email`, `DELETE /:id` and states there is no CSV pipeline; the
   GDPR export row now cites the shipped CSV/analytics exports and the
   not-implemented DSAR state.
-- P2-5: `stripe-integration.ts`/`autoProvisionDedicatedIps()` replaced with
-  `billing-service/src/stripe_webhooks.rs::auto_provision_dedicated_ips_background`
+- P2-5: `adyen-integration.ts`/`autoProvisionDedicatedIps()` replaced with
+  `billing-service/src/adyen_webhooks.rs::auto_provision_dedicated_ips_background`
   in `docs/architecture/hybrid-email-infrastructure.md` and
   `docs/deployment/PRODUCTION_SETUP.md`; `ses_monitoring.rs` →
   `routes/ses_notifications.rs`; the SES DKIM bullet corrected to
@@ -311,7 +311,7 @@ page claims remain the one open honesty gap of this slice.
 
 | Gate | Result |
 |---|---|
-| `python3 tools/check_knowledge_consistency.py` | PASS (incl. new stripe/lifecycle doc pinning) |
+| `python3 tools/check_knowledge_consistency.py` | PASS (incl. new adyen/lifecycle doc pinning) |
 | `python3 tools/check_knowledge_consistency.py --self-test` | PASS (all cases, incl. 2 new) |
 | `python3 tools/validate_pricing_drift.py` | PASS (incl. new dedicated-IP and SLA-cap pins) |
 | `python3 docs/marketing/check_pricing_parity.py` | PASS — 6 plans, exit 0 |

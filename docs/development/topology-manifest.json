@@ -116,7 +116,7 @@
       "alerts": [
         "BillingServiceDown"
       ],
-      "notes": "Stripe + wallet + invoicing"
+      "notes": "Adyen + wallet + invoicing"
     },
     {
       "name": "sales-autopilot",

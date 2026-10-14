@@ -28,7 +28,7 @@ AUTH_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/auth.rs"
 API_BILLING_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/billing.rs"
 UI_ROUTER = ROOT / "services/mail-server/crates/ui-foundation/src/axum_router.rs"
 UI_VIEWS = ROOT / "services/mail-server/crates/ui-foundation/src/leptos_views.rs"
-STRIPE_WEBHOOKS = ROOT / "services/mail-server/crates/billing-service/src/stripe_webhooks.rs"
+ADYEN_WEBHOOKS = ROOT / "services/mail-server/crates/billing-service/src/adyen_webhooks.rs"
 # The root compliance/ package was removed in the 2026-09-30 audit campaign
 # (SM8 F9: dead drifted duplicate); the live legal-entity module is the crate copy.
 ROOT_CANONICAL_RUST = ROOT / "services/mail-server/crates/compliance/src/legal_entity.rs"
@@ -46,7 +46,7 @@ MARKETING_FAQ = ROOT / "apps/marketing-zola/templates/partials/generated/pricing
 EXPLORER_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/explorer.rs"
 DOCS_PRICING = ROOT / "docs/pricing.md"
 BILLING_LIFECYCLE = ROOT / "docs/architecture/billing-lifecycle.md"
-STRIPE_CONTRACT = ROOT / "docs/tool-contracts/stripe.md"
+ADYEN_CONTRACT = ROOT / "docs/tool-contracts/adyen.md"
 PRICING_AUTHORITY = ROOT / "docs/pricing-authority.md"
 GENERATED_MARKETING = ROOT / "apps/marketing-zola/public"
 
@@ -553,7 +553,7 @@ def display_limit(value: int) -> str:
 
 def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
     text = read(DOCS_PRICING)
-    check_contains(DOCS_PRICING, "the active `plans` records, and verified Stripe webhooks", errors)
+    check_contains(DOCS_PRICING, "the active `plans` records, and verified Adyen webhooks", errors)
     check_contains(DOCS_PRICING, "HIPAA availability is **not currently offered**", errors)
     check_contains(DOCS_PRICING, "Only `active` or `trialing`", errors)
     for plan_id in MARKETING_PLAN_IDS:
@@ -765,8 +765,8 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
     for needle in (
         "€0.80, Pro €0.60, Growth/Business €0.35",
         "HIPAA availability is not currently offered",
-        "Stripe billing portal",
-        "verified Stripe webhook",
+        "Adyen billing portal",
+        "verified Adyen webhook",
     ):
         check(needle in faq, f"pricing FAQ is missing {needle!r}", errors)
     if savings_needle is not None:
@@ -795,7 +795,7 @@ def validate_canonical_artifacts(errors: list[str]) -> None:
         return
     check("pricing_plans" not in canonical, "canonical.json must not contain a duplicate pricing catalog", errors)
     check(
-        canonical.get("_pricing_authority") == "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Stripe webhooks)",
+        canonical.get("_pricing_authority") == "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Adyen webhooks)",
         "canonical.json must point to the runtime pricing authority",
         errors,
     )
@@ -824,7 +824,7 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
     # public signup options.
     signup_view_implementation = views.split("\n#[cfg(test)]", 1)[0]
     billing = read(API_BILLING_ROUTE)
-    webhooks = read(STRIPE_WEBHOOKS)
+    webhooks = read(ADYEN_WEBHOOKS)
 
     for source_name, source in (("auth", auth), ("UI router", router)):
         allowed = extract_string_array(source, "PUBLIC_SIGNUP_PLAN_IDS")
@@ -854,7 +854,7 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         errors,
     )
     for needle in (
-        "active_plan_name_for_stripe_price",
+        "active_plan_name_for_adyen_plan_code",
         "is_active = true",
         "SELF_SERVE_CHECKOUT_PLAN_IDS.contains",
         '"metadata[tenant_id]"',
@@ -875,10 +875,10 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         "WHERE is_active = true",
         "$2 = 'monthly'",
         "$2 = 'yearly'",
-        "Stripe subscription {} is already bound to a different tenant",
+        "Adyen subscription {} is already bound to a different tenant",
         "checkout completed; awaiting subscription state webhook",
     ):
-        check(needle in webhooks, f"Stripe webhook reconciliation is missing {needle!r}", errors)
+        check(needle in webhooks, f"Adyen webhook reconciliation is missing {needle!r}", errors)
 
 
 def extract_sla_credit_caps(errors: list[str]) -> dict[str, int]:
@@ -943,32 +943,32 @@ def validate_sla_credit_docs(errors: list[str]) -> None:
 
 def validate_lifecycle_docs(errors: list[str]) -> None:
     lifecycle = read(BILLING_LIFECYCLE)
-    stripe = read(STRIPE_CONTRACT)
+    adyen = read(ADYEN_CONTRACT)
     authority = read(PRICING_AUTHORITY)
     for needle in (
         "does not change tenant status or grant an entitlement",
-        "Only verified `active` and `trialing` Stripe subscriptions grant",
+        "Only verified `active` and `trialing` Adyen subscriptions grant",
         "`409 BILLING_PORTAL_REQUIRED`",
-        "persists monthly and yearly Stripe price IDs",
+        "persists monthly and yearly Adyen price IDs",
     ):
         check(needle in lifecycle, f"billing lifecycle doc is missing {needle!r}", errors)
-    check("does not persist Stripe price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
+    check("does not persist Adyen price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
     for needle in (
         "The public Checkout endpoint accepts",
         "A `checkout.session.completed` event is informational only",
         "Only `active` and `trialing` statuses grant",
     ):
-        check(needle in stripe, f"Stripe contract is missing {needle!r}", errors)
+        check(needle in adyen, f"Adyen contract is missing {needle!r}", errors)
     check(
         re.search(
             r"direct\s+`/switch-plan`\s+and\s+`/cancel`\s+endpoints\s+return\s+a\s+conflict",
-            stripe,
+            adyen,
         ) is not None,
-        "Stripe contract is missing the direct switch/cancel conflict boundary",
+        "Adyen contract is missing the direct switch/cancel conflict boundary",
         errors,
     )
-    for stale in ("14-day free trial", "stripe.subscriptions.update", "Full access for 7 d grace period"):
-        check(stale not in stripe, f"Stripe contract contains unsupported claim {stale!r}", errors)
+    for stale in ("14-day free trial", "adyen.subscriptions.update", "Full access for 7 d grace period"):
+        check(stale not in adyen, f"Adyen contract contains unsupported claim {stale!r}", errors)
     check("Operational authority" in authority, "pricing authority map is missing operational authority section", errors)
 
 

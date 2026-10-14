@@ -29,10 +29,10 @@ pub mod overage;
 pub mod plans;
 pub mod routes;
 pub mod send_admission;
-pub mod stripe_webhooks;
+pub mod adyen_webhooks;
 pub mod subscriptions;
 /// Shared harness for in-crate adversarial coverage tests (private canonical
-/// DB clones, schema fault injection, dead Redis pools, Stripe signing).
+/// DB clones, schema fault injection, dead Redis pools, Adyen signing).
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod types;

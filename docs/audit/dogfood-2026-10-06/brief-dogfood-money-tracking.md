@@ -1,4 +1,4 @@
-# LIVE DOGFOOD — E: billing/Stripe, tracking service, compliance — end to end
+# LIVE DOGFOOD — E: billing/Adyen, tracking service, compliance — end to end
 
 You are a live dogfooding agent. The stack serves the CURRENT tree. Drive
 REAL money/compliance/tracking flows — the product, not its tests.
@@ -8,8 +8,8 @@ with per-probe evidence (requests, DB rows, Mailpit where mail is involved).
 Fix real defects in owned paths (billing-service, tracking-service,
 compliance) with fail-before tests; no docker builds.
 
-## 1. Billing / Stripe
-- **Signed webhook simulation**: POST the documented Stripe events with the
+## 1. Billing / Adyen
+- **Signed webhook simulation**: POST the documented Adyen events with the
   dev webhook secret and valid signatures (invoice.paid, subscription
   updated/deleted, payment_failed) → verify: subscription/plan state,
   invoices, credit notes, dunning cadence entry, ledger rows; REPLAY must
@@ -56,7 +56,7 @@ compliance) with fail-before tests; no docker builds.
 
 ## Rules
 - Evidence per probe (command + output + DB select); NOT-VERIFIED when
-  unreachable; fix or file with severity + repro; unique suffixes. Stripe
+  unreachable; fix or file with severity + repro; unique suffixes. Adyen
   test secrets live in `.env`/`secrets/`; use them, never invent.
 - No docker builds. Host test env:
   TEST_DATABASE_URL=postgresql://apexmail:bebc8cefdc096e5247f8864e5c0edf78099df23058133321@127.0.0.1:5432/apexmail

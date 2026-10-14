@@ -46,7 +46,7 @@ use crate::{
 pub fn router(state: Arc<AppState>) -> Router {
     let shared = state.clone();
     Router::new()
-        .merge(crate::stripe_webhooks::router())
+        .merge(crate::adyen_webhooks::router())
         // Plans
         .route("/plans", get(list_plans).post(create_plan))
         .route("/plans/tenant/current", get(get_current_plan))
@@ -260,8 +260,8 @@ struct LegacyPlanDto {
     email_limit: i64,
     api_call_limit: i64,
     features: LegacyPlanFeaturesPayload,
-    stripe_price_id_monthly: Option<String>,
-    stripe_price_id_yearly: Option<String>,
+    adyen_plan_code_monthly: Option<String>,
+    adyen_plan_code_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -280,8 +280,8 @@ impl From<Plan> for LegacyPlanDto {
             email_limit: plan.email_limit,
             api_call_limit: plan.api_call_limit,
             features: plan.features.into(),
-            stripe_price_id_monthly: plan.stripe_price_id_monthly,
-            stripe_price_id_yearly: plan.stripe_price_id_yearly,
+            adyen_plan_code_monthly: plan.adyen_plan_code_monthly,
+            adyen_plan_code_yearly: plan.adyen_plan_code_yearly,
             is_active: plan.is_active,
             sort_order: plan.sort_order,
             created_at: plan.created_at,
@@ -341,8 +341,8 @@ struct LegacyPlanCreateBody {
     price_yearly: i64,
     features: LegacyPlanFeaturesPayload,
     limits: LegacyPlanCreateLimitsInput,
-    stripe_price_id_monthly: Option<String>,
-    stripe_price_id_yearly: Option<String>,
+    adyen_plan_code_monthly: Option<String>,
+    adyen_plan_code_yearly: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,8 +354,8 @@ struct LegacyPlanPatchBody {
     price_yearly: Option<i64>,
     features: Option<LegacyPlanFeaturesPayload>,
     limits: Option<LegacyPlanPatchLimitsInput>,
-    stripe_price_id_monthly: Option<String>,
-    stripe_price_id_yearly: Option<String>,
+    adyen_plan_code_monthly: Option<String>,
+    adyen_plan_code_yearly: Option<String>,
 }
 
 fn legacy_support_level(level: SupportLevel) -> &'static str {
@@ -573,8 +573,8 @@ async fn create_plan(
             api_call_limit: body.limits.api_calls_per_month,
             sort_order: 0,
             features: body.features.into(),
-            stripe_price_id_monthly: body.stripe_price_id_monthly,
-            stripe_price_id_yearly: body.stripe_price_id_yearly,
+            adyen_plan_code_monthly: body.adyen_plan_code_monthly,
+            adyen_plan_code_yearly: body.adyen_plan_code_yearly,
         },
     )
     .await?;
@@ -624,12 +624,12 @@ async fn update_plan(
                 .unwrap_or(existing.api_call_limit),
             sort_order: existing.sort_order,
             features: body.features.map(Into::into).unwrap_or(existing.features),
-            stripe_price_id_monthly: body
-                .stripe_price_id_monthly
-                .or(existing.stripe_price_id_monthly),
-            stripe_price_id_yearly: body
-                .stripe_price_id_yearly
-                .or(existing.stripe_price_id_yearly),
+            adyen_plan_code_monthly: body
+                .adyen_plan_code_monthly
+                .or(existing.adyen_plan_code_monthly),
+            adyen_plan_code_yearly: body
+                .adyen_plan_code_yearly
+                .or(existing.adyen_plan_code_yearly),
         },
     )
     .await?;
@@ -649,7 +649,7 @@ async fn seed_plans(
     // and never deactivated foreign/test rows, so the live table kept serving
     // Free 30k / Pro €10 / Business €50 and active `DF5 Small` rows forever.
     // The reconcile forces the canonical catalog values and deactivates rows
-    // whose name is not a catalog plan; stripe price ids survive.
+    // whose name is not a catalog plan; adyen price ids survive.
     let report = plans::reconcile_plans_with_catalog(&state.db).await?;
 
     Ok(Json(serde_json::json!({
@@ -727,7 +727,7 @@ struct LegacyOverageEstimateBody {
 /// money surface (see the money_invariants gate, audit item 4).
 ///
 /// Renders EUR, not USD: plans are seeded EUR-denominated, checkout creates
-/// EUR Stripe prices, invoices carry EE 24% VAT, and the KMD return is
+/// EUR Adyen prices, invoices carry EE 24% VAT, and the KMD return is
 /// EUR-only — no USD amount is ever charged anywhere in the platform. The
 /// `$` prefix quoted a currency the billing system never charges to a
 /// European customer base. (Field names keep their `*_usd` suffix for API
@@ -1099,7 +1099,7 @@ fn preview_plan_proration(
 // Proration preview (deployed-config aware — audit item 3a)
 // ---------------------------------------------------------------------------
 
-/// Subscription shape loaded from `stripe_subscriptions` (migration 071
+/// Subscription shape loaded from `adyen_subscriptions` (migration 071
 /// columns) for the proration preview.
 #[derive(sqlx::FromRow)]
 struct ProrationSubscriptionRow {
@@ -1137,7 +1137,7 @@ async fn preview_proration_for_tenant(
     let subscription = sqlx::query_as::<_, ProrationSubscriptionRow>(
         r#"
         SELECT billing_interval, billing_cycle_start, billing_cycle_end
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
         ORDER BY created_at DESC
@@ -1415,7 +1415,7 @@ pub(crate) async fn append_audit_log(
     .map_err(|error| format!("{error:?}"))
 }
 
-/// Plan activation is driven exclusively by verified Stripe webhooks. This
+/// Plan activation is driven exclusively by verified Adyen webhooks. This
 /// legacy internal endpoint remains only to return a clear migration error;
 /// mutating subscription and tenant rows here would bypass payment proof.
 async fn switch_plan(
@@ -1431,13 +1431,13 @@ async fn switch_plan(
 
     tracing::warn!(
         tenant_id = %q.tenant_id,
-        "rejected direct internal billing plan transition; verified Stripe lifecycle is required"
+        "rejected direct internal billing plan transition; verified Adyen lifecycle is required"
     );
 
     Ok(error_response(
         StatusCode::CONFLICT,
         ErrorCode::Conflict,
-        "Direct plan changes are disabled. Complete checkout and wait for the verified Stripe webhook before paid access is activated.",
+        "Direct plan changes are disabled. Complete checkout and wait for the verified Adyen webhook before paid access is activated.",
     ))
 }
 
@@ -1454,13 +1454,13 @@ async fn cancel_subscription_request(
 
     tracing::warn!(
         tenant_id = %q.tenant_id,
-        "rejected direct internal subscription cancellation; Stripe lifecycle is required"
+        "rejected direct internal subscription cancellation; Adyen lifecycle is required"
     );
 
     Ok(error_response(
         StatusCode::CONFLICT,
         ErrorCode::Conflict,
-        "Direct cancellation is disabled. Use the Stripe billing portal and wait for the verified Stripe webhook before subscription access changes.",
+        "Direct cancellation is disabled. Use the Adyen billing portal and wait for the verified Adyen webhook before subscription access changes.",
     ))
 }
 
@@ -1658,7 +1658,7 @@ pub const MRR_REPORT_SQL: &str = r#"
                         ELSE p.price_monthly
                     END
                 ) as mrr
-            FROM stripe_subscriptions s
+            FROM adyen_subscriptions s
             JOIN tenants t ON t.id = s.tenant_id
             JOIN plans p ON p.name = t.plan
             WHERE s.status = 'active'
@@ -1675,7 +1675,7 @@ async fn get_mrr_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    // Fix C — MRR is computed from stripe_subscriptions (the table the
+    // Fix C — MRR is computed from adyen_subscriptions (the table the
     // webhook writers populate) joined via tenants.plan to plans pricing.
     // Fix I9 — yearly prices are normalized with proper rounding and rows
     // are bucketed by the subscription's active month (billing cycle start,
@@ -1689,8 +1689,8 @@ async fn get_mrr_report(
 }
 
 /// Monthly churn report. `churned_mrr` prices each canceled subscription
-/// from its own price snapshot — the subscription's `stripe_price_id`
-/// resolved against `plans.stripe_price_id_monthly/yearly` (falling back to
+/// from its own price snapshot — the subscription's `adyen_plan_code`
+/// resolved against `plans.adyen_plan_code_monthly/yearly` (falling back to
 /// the tenant's current plan only while it is still non-free) — because
 /// `tenants.plan` is set to `'free'` on cancellation (audit F10): pricing
 /// churn from `t.plan` made `churned_mrr` always ≈ 0. Subscriptions with no
@@ -1699,7 +1699,7 @@ async fn get_mrr_report(
 /// `churned_mrr_unpriced` so the metric's coverage is explicit.
 /// Shared churn report SQL (Fix C + Fix F10) — single source for both the
 /// billing-service route and api-server's twin admin route. Prices churn
-/// from the subscription's own `stripe_price_id` snapshot (falling back to
+/// from the subscription's own `adyen_plan_code` snapshot (falling back to
 /// the tenant's plan only while still non-free); rounds yearly/12.
 pub const CHURN_REPORT_SQL: &str = r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1722,13 +1722,13 @@ pub const CHURN_REPORT_SQL: &str = r#"
                         END
                     ) as churned_mrr,
                     COUNT(*) FILTER (WHERE sp.id IS NULL AND tp.id IS NULL) as churned_mrr_unpriced
-                FROM stripe_subscriptions s
+                FROM adyen_subscriptions s
                 JOIN tenants t ON t.id = s.tenant_id
-                LEFT JOIN plans sp ON s.stripe_price_id IS NOT NULL AND (
+                LEFT JOIN plans sp ON s.adyen_plan_code IS NOT NULL AND (
                     (s.billing_interval = 'yearly'
-                        AND sp.stripe_price_id_yearly = s.stripe_price_id)
+                        AND sp.adyen_plan_code_yearly = s.adyen_plan_code)
                     OR (COALESCE(s.billing_interval, 'monthly') <> 'yearly'
-                        AND sp.stripe_price_id_monthly = s.stripe_price_id)
+                        AND sp.adyen_plan_code_monthly = s.adyen_plan_code)
                 )
                 LEFT JOIN plans tp ON tp.name = t.plan AND t.plan <> 'free'
                 WHERE s.status = 'canceled'
@@ -1739,7 +1739,7 @@ pub const CHURN_REPORT_SQL: &str = r#"
                     c.month,
                     COUNT(DISTINCT s.tenant_id) as starting_count
                 FROM churned c
-                LEFT JOIN stripe_subscriptions s
+                LEFT JOIN adyen_subscriptions s
                   ON s.created_at < c.month
                 GROUP BY c.month
             )
@@ -1763,9 +1763,9 @@ async fn get_churn_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    // Fix C — churn computed from stripe_subscriptions (join tenants/plans).
+    // Fix C — churn computed from adyen_subscriptions (join tenants/plans).
     // Fix F10 — churned_mrr prices the CHURNED SUBSCRIPTION via its own
-    // stripe_price_id snapshot, not the tenant's (post-cancellation, free)
+    // adyen_plan_code snapshot, not the tenant's (post-cancellation, free)
     // plan; see CHURN_REPORT_SQL above.
     let report: serde_json::Value = sqlx::query_scalar(CHURN_REPORT_SQL)
         .fetch_one(&state.db)
@@ -1929,7 +1929,7 @@ async fn export_billing_data(
                         WHEN s.billing_interval = 'yearly' THEN p.price_yearly
                         ELSE p.price_monthly
                     END as amount,
-                    -- Plans are EUR-denominated (checkout creates EUR Stripe
+                    -- Plans are EUR-denominated (checkout creates EUR Adyen
                     -- prices; the KMD return is EUR-only): an accountant
                     -- importing this export must book euros, not dollars.
                     'eur'::text as currency,
@@ -2534,7 +2534,7 @@ async fn require_service_auth(
     mut req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if matches!(req.uri().path(), "/health" | "/webhooks/stripe") {
+    if matches!(req.uri().path(), "/health" | "/webhooks/adyen") {
         return Ok(next.run(req).await);
     }
 
@@ -2846,14 +2846,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stripe_webhook_route_bypasses_service_auth_and_requires_signature() {
+    async fn adyen_webhook_route_bypasses_service_auth_and_requires_signature() {
         let app = test_router().await;
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/stripe")
+                    .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"id":"evt_missing_sig"}"#))
                     .expect("request"),
@@ -2865,16 +2865,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stripe_webhook_route_rejects_invalid_json_without_service_auth() {
+    async fn adyen_webhook_route_rejects_invalid_json_without_service_auth() {
         let app = test_router().await;
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/stripe")
+                    .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
-                    .header("stripe-signature", "t=1,v1=deadbeef")
+                    .header("adyen-hmac-signature", "t=1,v1=deadbeef")
                     .body(Body::from("not valid json {{{"))
                     .expect("request"),
             )
@@ -2885,9 +2885,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stripe_webhook_route_rejects_invalid_signature_before_processing() {
+    async fn adyen_webhook_route_rejects_invalid_signature_before_processing() {
         let config = BillingConfig {
-            stripe_webhook_secret: "whsec_test_secret".into(),
+            adyen_hmac_key: "whsec_test_secret".into(),
             ..Default::default()
         };
 
@@ -2898,9 +2898,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/stripe")
+                    .uri("/webhooks/adyen")
                     .header("content-type", "application/json")
-                    .header("stripe-signature", signature)
+                    .header("adyen-hmac-signature", signature)
                     .body(Body::from(r#"{"id":"evt_bad_sig","type":"checkout.session.completed","data":{"object":{}}}"#))
                     .expect("request"),
             )
@@ -2993,8 +2993,8 @@ mod tests {
             email_limit: 10_000,
             api_call_limit: 100_000,
             features: PlanFeatures::default(),
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,
@@ -3010,8 +3010,8 @@ mod tests {
             email_limit: 50_000,
             api_call_limit: 250_000,
             features: PlanFeatures::default(),
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 1,
             created_at: now,
@@ -3058,8 +3058,8 @@ mod tests {
             email_limit: 10_000,
             api_call_limit: 100_000,
             features: PlanFeatures::default(),
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,
@@ -3075,8 +3075,8 @@ mod tests {
             email_limit: 50_000,
             api_call_limit: 250_000,
             features: PlanFeatures::default(),
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 1,
             created_at: now,
@@ -3276,8 +3276,8 @@ mod tests {
             email_limit: 30_000,
             api_call_limit: 300_000,
             features: PlanFeatures::default(),
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: now,

@@ -1,8 +1,8 @@
-# LIVE DOGFOOD — E: billing/Stripe, tracking service, compliance (2026-10-08)
+# LIVE DOGFOOD — E: billing/Adyen, tracking service, compliance (2026-10-08)
 
 Ran against the running compose stack per `brief-dogfood-money-tracking.md`, ZERO SKIPS:
 
-* api-server `127.0.0.1:8080` (Host `app.apexmail.ee`; Stripe webhook `/webhooks/stripe`),
+* api-server `127.0.0.1:8080` (Host `app.apexmail.ee`; Adyen webhook `/webhooks/adyen`),
   tracking `127.0.0.1:3001`, compliance container `apexmail-compliance-1` (port 3011, internal),
   ClickHouse `127.0.0.1:8123`, Mailpit `127.0.0.1:8025`, Postgres `127.0.0.1:5432`, Redis (container).
 * Throwaway tenant `edx0ltwfgugh1gi2k3h8x5bgqe` (`dogfood-mt-1791458984@dogfood.test`), provisioned
@@ -20,42 +20,42 @@ Ran against the running compose stack per `brief-dogfood-money-tracking.md`, ZER
   has no container at all and was run from `target/debug` for the sweep — the prior audit's
   "no deployed caller" gap, re-confirmed). Every such run is labelled `[container]` or
   `[current-tree host]`.
-* **Stripe secret.** The running api-server verifies with the compose dev secret
-  `dev-stripe-webhook-secret-local-only-0123456789` (`docker exec apexmail-api-server-1 env`);
-  `secrets/stripe_webhook_secret.txt` is a different (prod) value. All signed events below were
+* **Adyen secret.** The running api-server verifies with the compose dev secret
+  `dev-adyen-webhook-secret-local-only-0123456789` (`docker exec apexmail-api-server-1 env`);
+  `secrets/adyen_webhook_secret.txt` is a different (prod) value. All signed events below were
   signed with the value the live verifier actually uses — never invented.
-* Fixtures used (disclosed): the verified `.test` domain; `plans.stripe_price_id_*` on `pro`
-  (no production writer binds Stripe price ids in this topology); `billing_addresses` rows;
+* Fixtures used (disclosed): the verified `.test` domain; `plans.adyen_price_id_*` on `pro`
+  (no production writer binds Adyen price ids in this topology); `billing_addresses` rows;
   backdated `billing_periods`; `tenants.retention_days`/`legal_hold`; one `oss_registrations` +
   `oss_returns` + `oss_supply_entries`, one `fiscal_periods`+`annual_reports` row; the operator
   fixture (see E-OPS). Unique suffix everywhere: `1791458984`.
 
 ---
 
-## 1. Billing / Stripe
+## 1. Billing / Adyen
 
 ### 1.1 Signed webhook simulation — PASS (with two live findings)
 
-Harness: `stripe_event.py` (HMAC-SHA256 over `t.payload` in `Stripe-Signature: t=…,v1=…`).
+Harness: `adyen_event.py` (HMAC-SHA256 over `t.payload` in `Adyen-Signature: t=…,v1=…`).
 All DB reads are Postgres selects shown inline.
 
 **Wrong signature → 400, nothing written — PASS**
 
 ```
-POST /webhooks/stripe  (Stripe-Signature t=<now>,v1=0000…)
+POST /webhooks/adyen  (Adyen-Signature t=<now>,v1=0000…)
 -> HTTP 400 {"error":{"code":"BAD_REQUEST","message":"Webhook processing failed"}}
-select count(*) from stripe_webhook_events where stripe_event_id like 'evt_mtbad%';  -> 0
-select count(*) from stripe_subscriptions where stripe_subscription_id like 'sub_mtbad%'; -> 0
+select count(*) from adyen_webhook_events where adyen_event_id like 'evt_mtbad%';  -> 0
+select count(*) from adyen_subscriptions where adyen_subscription_id like 'sub_mtbad%'; -> 0
 ```
 
 **customer.subscription.updated (active, pro) — PASS**
 
 ```
 evt_mtsub_1791458984 -> HTTP 200 {"received":true}
-stripe_subscriptions: sub_mtpro_1791458984 | plan=pro | status=active |
-  stripe_price_id=price_mt_pro_month | billing_interval=monthly | event_watermark=2026-10-07 11:39:31+00
+adyen_subscriptions: sub_mtpro_1791458984 | plan=pro | status=active |
+  adyen_price_id=price_mt_pro_month | billing_interval=monthly | event_watermark=2026-10-07 11:39:31+00
 tenants.plan: edx0ltwfgugh1gi2k3h8x5bgqe -> pro
-stripe_webhook_events: evt_mtsub_1791458984 | processed
+adyen_webhook_events: evt_mtsub_1791458984 | processed
 billing_periods (snapshot): plan_name=pro, email_allowance=150000, overage_rate_millicents=60 (canonical Pro rate)
 ```
 
@@ -71,8 +71,8 @@ After deletion (below) it flips back to `customTrackingDomain:false`, `7` days, 
 evt_mtinv_1791458984 (subtotal 8900, tax 2136 = EE 24%, total 11036, automatic_tax complete)
 -> HTTP 200 {"received":true}
 invoices: MT-1791459604 | paid | subtotal 8900 | vat_total 2136 | total 11036 | vat_rate 24 |
-          billing_country EE | stripe_invoice_id in_mt_1791458984_1 | paid_at set | snapshot linked
-stripe_tax_snapshots: authority=stripe_tax validation_status=validated
+          billing_country EE | adyen_invoice_id in_mt_1791458984_1 | paid_at set | snapshot linked
+adyen_tax_snapshots: authority=adyen_tax validation_status=validated
           apexmail_expected_total_cents=11036 discrepancy_cents=0
 vat_recognition_entries: supply 2026-10 | taxable 8900 | vat_rate 24 | vat 2136 | scheme general
 journal_entries: entry_no 3 "Invoice MT-1791459604 issued" | idempotency_key invoice:<id>:issued | posted
@@ -83,7 +83,7 @@ journal_entries: entry_no 3 "Invoice MT-1791459604 issued" | idempotency_key inv
 ```
 same event id evt_mtinv_1791458984 replayed -> HTTP 200
 select count(*)…: invoices 1, vat_recognition_entries 1, journal_entries 2 (unchanged);
-stripe_webhook_events stays `processed` (single row)
+adyen_webhook_events stays `processed` (single row)
 ```
 
 **invoice.payment_failed → dunning cadence entry — PASS**
@@ -99,7 +99,7 @@ notification_queue: payment_failed(pending, dunningStatus=warning) + payment_rem
 
 ```
 evt_mtdel_1791458984 (status canceled) -> HTTP 200
-stripe_subscriptions: plan=pro status=canceled; tenants.plan -> free;
+adyen_subscriptions: plan=pro status=canceled; tenants.plan -> free;
 billing_periods cycle preserved (150000/60, unbilled)
 ```
 

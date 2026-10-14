@@ -236,8 +236,8 @@ struct LegacyPlanDto {
     email_limit: i64,
     api_call_limit: i64,
     features: LegacyPlanFeaturesPayload,
-    stripe_price_id_monthly: Option<String>,
-    stripe_price_id_yearly: Option<String>,
+    adyen_plan_code_monthly: Option<String>,
+    adyen_plan_code_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: chrono::DateTime<Utc>,
@@ -256,8 +256,8 @@ impl From<Plan> for LegacyPlanDto {
             email_limit: plan.email_limit,
             api_call_limit: plan.api_call_limit,
             features: plan.features.into(),
-            stripe_price_id_monthly: plan.stripe_price_id_monthly,
-            stripe_price_id_yearly: plan.stripe_price_id_yearly,
+            adyen_plan_code_monthly: plan.adyen_plan_code_monthly,
+            adyen_plan_code_yearly: plan.adyen_plan_code_yearly,
             is_active: plan.is_active,
             sort_order: plan.sort_order,
             created_at: plan.created_at,
@@ -623,24 +623,24 @@ struct PortalSessionBody {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TenantStripeSettings {
+struct TenantAdyenSettings {
     billing_email: Option<String>,
     default_from_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct StripeCustomerResponse {
+struct AdyenShopperResponse {
     id: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct StripeCheckoutSessionResponse {
+struct AdyenCheckoutSessionResponse {
     id: String,
     url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct StripePortalSessionResponse {
+struct AdyenPortalSessionResponse {
     url: String,
 }
 
@@ -817,12 +817,12 @@ struct AdminBillingAddressRow {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LegacyStripeSubscriptionDto {
+struct LegacyAdyenSubscriptionDto {
     id: String,
     tenant_id: String,
-    stripe_subscription_id: String,
-    stripe_customer_id: String,
-    stripe_price_id: String,
+    adyen_subscription_id: String,
+    adyen_shopper_reference: String,
+    adyen_plan_code: String,
     status: String,
     billing_interval: String,
     billing_cycle_start: chrono::DateTime<Utc>,
@@ -835,12 +835,12 @@ struct LegacyStripeSubscriptionDto {
 }
 
 #[derive(sqlx::FromRow)]
-struct LegacyStripeSubscriptionRow {
+struct LegacyAdyenSubscriptionRow {
     id: String,
     tenant_id: String,
-    stripe_subscription_id: String,
-    stripe_customer_id: String,
-    stripe_price_id: String,
+    adyen_subscription_id: String,
+    adyen_shopper_reference: String,
+    adyen_plan_code: String,
     status: String,
     billing_interval: String,
     billing_cycle_start: chrono::DateTime<Utc>,
@@ -852,14 +852,14 @@ struct LegacyStripeSubscriptionRow {
     updated_at: chrono::DateTime<Utc>,
 }
 
-impl From<LegacyStripeSubscriptionRow> for LegacyStripeSubscriptionDto {
-    fn from(row: LegacyStripeSubscriptionRow) -> Self {
+impl From<LegacyAdyenSubscriptionRow> for LegacyAdyenSubscriptionDto {
+    fn from(row: LegacyAdyenSubscriptionRow) -> Self {
         Self {
             id: row.id,
             tenant_id: row.tenant_id,
-            stripe_subscription_id: row.stripe_subscription_id,
-            stripe_customer_id: row.stripe_customer_id,
-            stripe_price_id: row.stripe_price_id,
+            adyen_subscription_id: row.adyen_subscription_id,
+            adyen_shopper_reference: row.adyen_shopper_reference,
+            adyen_plan_code: row.adyen_plan_code,
             status: row.status,
             billing_interval: row.billing_interval,
             billing_cycle_start: row.billing_cycle_start,
@@ -917,7 +917,7 @@ struct LegacyBillingAddressDto {
 struct LegacyInvoiceDto {
     id: String,
     tenant_id: String,
-    stripe_invoice_id: Option<String>,
+    adyen_psp_reference: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -950,7 +950,7 @@ struct LegacyInvoiceDto {
 struct LegacyInvoiceRow {
     id: String,
     tenant_id: String,
-    stripe_invoice_id: Option<String>,
+    adyen_psp_reference: Option<String>,
     invoice_number: String,
     status: String,
     currency: String,
@@ -958,7 +958,7 @@ struct LegacyInvoiceRow {
     vat_total: i64,
     total: i64,
     line_items: String,
-    /// Nullable on the table (rows written by the Stripe invoice.paid
+    /// Nullable on the table (rows written by the Adyen invoice.paid
     /// persistence predate address snapshotting) — decoded as an empty
     /// address so a NULL snapshot can never fail the whole list/detail
     /// query (audit F05).
@@ -995,48 +995,48 @@ fn validate_usage_alert_channel(channel: &str) -> bool {
     matches!(channel, "email" | "webhook" | "both")
 }
 
-const DEFAULT_STRIPE_API_VERSION: &str = "2026-04-22.dahlia";
+const DEFAULT_ADYEN_API_VERSION: &str = "2026-04-22.dahlia";
 
-fn stripe_api_base_url() -> String {
-    std::env::var("STRIPE_API_BASE_URL").unwrap_or_else(|_| "https://api.stripe.com".into())
+fn adyen_api_base_url() -> String {
+    std::env::var("ADYEN_API_BASE_URL").unwrap_or_else(|_| "https://checkout-test.adyen.com/v71".into())
 }
 
-fn stripe_api_version() -> String {
-    std::env::var("STRIPE_API_VERSION")
+fn adyen_api_version() -> String {
+    std::env::var("ADYEN_API_VERSION")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_STRIPE_API_VERSION.into())
+        .unwrap_or_else(|| DEFAULT_ADYEN_API_VERSION.into())
 }
 
 #[derive(Clone)]
-struct StripeClient {
+struct AdyenClient {
     http: reqwest::Client,
     base_url: String,
     api_version: String,
     secret_key: String,
 }
 
-impl StripeClient {
+impl AdyenClient {
     fn from_env(http: &reqwest::Client) -> Result<Self, String> {
-        let secret_key = std::env::var("STRIPE_SECRET_KEY")
-            .map_err(|_| "Stripe secret key is not configured".to_string())?;
+        let secret_key = std::env::var("ADYEN_API_KEY")
+            .map_err(|_| "Adyen secret key is not configured".to_string())?;
 
         // A test-mode key must never silently drive real customer billing.
         // It is only accepted when the deployment explicitly opts in.
         if secret_key.starts_with("sk_test_")
-            && std::env::var("STRIPE_ALLOW_TEST_KEY").as_deref() != Ok("true")
+            && std::env::var("ADYEN_ALLOW_TEST_KEY").as_deref() != Ok("true")
         {
             return Err(
-                "STRIPE_SECRET_KEY is a Stripe test key; set STRIPE_ALLOW_TEST_KEY=true only in non-production development deployments"
+                "ADYEN_API_KEY is a Adyen test key; set ADYEN_ALLOW_TEST_KEY=true only in non-production development deployments"
                     .to_string(),
             );
         }
 
         Ok(Self {
             http: http.clone(),
-            base_url: stripe_api_base_url(),
-            api_version: stripe_api_version(),
+            base_url: adyen_api_base_url(),
+            api_version: adyen_api_version(),
             secret_key,
         })
     }
@@ -1066,17 +1066,17 @@ impl StripeClient {
             .form_request(path, form, idempotency_key)
             .send()
             .await
-            .map_err(|error| format!("Stripe request failed: {error}"))?;
+            .map_err(|error| format!("Adyen request failed: {error}"))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("Stripe returned {status}: {body}"));
+            return Err(format!("Adyen returned {status}: {body}"));
         }
 
         response
             .json::<T>()
             .await
-            .map_err(|error| format!("Stripe response decode failed: {error}"))
+            .map_err(|error| format!("Adyen response decode failed: {error}"))
     }
 
     fn form_request(
@@ -1089,7 +1089,7 @@ impl StripeClient {
             .http
             .post(format!("{}{}", self.base_url, path))
             .bearer_auth(&self.secret_key)
-            .header("Stripe-Version", &self.api_version)
+            .header("Adyen-Version", &self.api_version)
             .form(form);
 
         if let Some(idempotency_key) = idempotency_key {
@@ -1141,11 +1141,11 @@ fn billing_operation_failed_response() -> Response {
 }
 
 fn tenant_billing_email(settings_raw: &str) -> Option<String> {
-    let settings: TenantStripeSettings = serde_json::from_str(settings_raw).unwrap_or_default();
+    let settings: TenantAdyenSettings = serde_json::from_str(settings_raw).unwrap_or_default();
     settings.billing_email.or(settings.default_from_email)
 }
 
-async fn get_or_create_stripe_customer_id(
+async fn get_or_create_adyen_shopper_reference(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<String, String> {
@@ -1159,20 +1159,20 @@ async fn get_or_create_stripe_customer_id(
         .bind(tenant_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| format!("Failed to acquire Stripe customer lock: {error}"))?;
+        .map_err(|error| format!("Failed to acquire Adyen customer lock: {error}"))?;
 
-    if let Some(stripe_customer_id) = sqlx::query_scalar::<_, String>(
-        "SELECT stripe_customer_id FROM stripe_customers WHERE tenant_id = $1",
+    if let Some(adyen_shopper_reference) = sqlx::query_scalar::<_, String>(
+        "SELECT adyen_shopper_reference FROM adyen_shoppers WHERE tenant_id = $1",
     )
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to query Stripe customer: {error}"))?
+    .map_err(|error| format!("Failed to query Adyen customer: {error}"))?
     {
         tx.commit()
             .await
             .map_err(|error| format!("Failed to close billing transaction: {error}"))?;
-        return Ok(stripe_customer_id);
+        return Ok(adyen_shopper_reference);
     }
 
     let Some((tenant_name, settings_raw)) = sqlx::query_as::<_, (String, String)>(
@@ -1181,7 +1181,7 @@ async fn get_or_create_stripe_customer_id(
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to query tenant for Stripe checkout: {error}"))?
+    .map_err(|error| format!("Failed to query tenant for Adyen checkout: {error}"))?
     else {
         return Err("Tenant not found".into());
     };
@@ -1190,9 +1190,9 @@ async fn get_or_create_stripe_customer_id(
         return Err("No billing email configured".into());
     };
 
-    let stripe = StripeClient::from_env(&state.http_client)?;
-    let customer = stripe
-        .form_post::<StripeCustomerResponse>(
+    let adyen = AdyenClient::from_env(&state.http_client)?;
+    let customer = adyen
+        .form_post::<AdyenShopperResponse>(
             "/v1/customers",
             &[
                 ("email", email.clone()),
@@ -1205,8 +1205,8 @@ async fn get_or_create_stripe_customer_id(
 
     sqlx::query(
         r#"
-        INSERT INTO stripe_customers (
-            id, tenant_id, stripe_customer_id, email, name, created_at, updated_at
+        INSERT INTO adyen_shoppers (
+            id, tenant_id, adyen_shopper_reference, email, name, created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW()
         )
@@ -1218,11 +1218,11 @@ async fn get_or_create_stripe_customer_id(
     .bind(&tenant_name)
     .execute(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to persist Stripe customer: {error}"))?;
+    .map_err(|error| format!("Failed to persist Adyen customer: {error}"))?;
 
     tx.commit()
         .await
-        .map_err(|error| format!("Failed to commit Stripe customer transaction: {error}"))?;
+        .map_err(|error| format!("Failed to commit Adyen customer transaction: {error}"))?;
 
     Ok(customer.id)
 }
@@ -2193,7 +2193,7 @@ fn map_invoice_row(row: LegacyInvoiceRow) -> LegacyInvoiceDto {
     LegacyInvoiceDto {
         id: row.id,
         tenant_id: row.tenant_id,
-        stripe_invoice_id: row.stripe_invoice_id,
+        adyen_psp_reference: row.adyen_psp_reference,
         invoice_number: row.invoice_number,
         status: row.status,
         currency: row.currency,
@@ -2264,7 +2264,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
         SELECT
             id::text AS id,
             tenant_id,
-            stripe_invoice_id,
+            adyen_psp_reference,
             invoice_number,
             status::text AS status,
             currency,
@@ -2309,7 +2309,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
                 SELECT
                     id::text AS id,
                     tenant_id,
-                    stripe_invoice_id,
+                    adyen_psp_reference,
                     invoice_number,
                     status::text AS status,
                     currency,
@@ -2355,7 +2355,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
         SELECT
             id::text AS id,
             tenant_id,
-            stripe_invoice_id,
+            adyen_psp_reference,
             invoice_number,
             status::text AS status,
             currency,
@@ -2392,7 +2392,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
                 SELECT
                     id::text AS id,
                     tenant_id,
-                    stripe_invoice_id,
+                    adyen_psp_reference,
                     invoice_number,
                     status::text AS status,
                     currency,
@@ -2575,14 +2575,14 @@ async fn get_route_subscription(
     tenant_id: &str,
 ) -> Result<Option<RouteSubscription>, ApiError> {
     // The legacy `subscriptions` table is never populated in production; the
-    // live record is `stripe_subscriptions`. Read the live table first and
+    // live record is `adyen_subscriptions`. Read the live table first and
     // fall back to the legacy one only for old deployments.
     let row: Option<RouteSubscriptionRow> = sqlx::query_as(
         r#"
         SELECT plan AS plan_name, billing_interval,
                billing_cycle_start AS current_period_start,
                billing_cycle_end AS current_period_end
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
         ORDER BY created_at DESC
@@ -3111,11 +3111,11 @@ async fn create_checkout_session(
             .into_response());
     }
 
-    // Never forward an arbitrary Stripe price identifier supplied by a
+    // Never forward an arbitrary Adyen price identifier supplied by a
     // customer. The price must map to an active ApexMail plan in our catalog,
     // which prevents cross-product purchases and makes the plan selection
     // independently verifiable when the webhook arrives.
-    let plan_name = match active_plan_name_for_stripe_price(&state.db, price_id).await? {
+    let plan_name = match active_plan_name_for_adyen_plan_code(&state.db, price_id).await? {
         Some(plan_name) => plan_name,
         None => {
             return Ok((
@@ -3141,24 +3141,24 @@ async fn create_checkout_session(
             .into_response());
     }
 
-    let customer_id = match get_or_create_stripe_customer_id(&state, &auth.tenant_id).await {
+    let customer_id = match get_or_create_adyen_shopper_reference(&state, &auth.tenant_id).await {
         Ok(customer_id) => customer_id,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve Stripe customer for checkout");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to resolve Adyen customer for checkout");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let stripe = match StripeClient::from_env(&state.http_client) {
-        Ok(stripe) => stripe,
+    let adyen = match AdyenClient::from_env(&state.http_client) {
+        Ok(adyen) => adyen,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Stripe client for checkout");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Adyen client for checkout");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let session = match stripe
-        .form_post::<StripeCheckoutSessionResponse>(
+    let session = match adyen
+        .form_post::<AdyenCheckoutSessionResponse>(
             "/v1/checkout/sessions",
             &[
                 ("customer", customer_id),
@@ -3178,12 +3178,12 @@ async fn create_checkout_session(
                 ("allow_promotion_codes", "true".into()),
                 ("billing_address_collection", "required".into()),
                 ("tax_id_collection[enabled]", "true".into()),
-                // TAX-TRUTH P0: Stripe Tax is the charging authority for the
+                // TAX-TRUTH P0: Adyen Tax is the charging authority for the
                 // actual charge. Address collection is required above; the
                 // customer address is written back so automatic tax can
                 // resolve the place of supply, and the finalized invoice's
                 // tax decision is snapshotted + validated by
-                // billing-service's invoice.paid handler. If Stripe rejects
+                // billing-service's invoice.paid handler. If Adyen rejects
                 // automatic_tax (e.g. account not yet activated), the
                 // webhook records the local-computation fallback and blocks
                 // any charged total that disagrees with it.
@@ -3201,13 +3201,13 @@ async fn create_checkout_session(
     {
         Ok(session) => session,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create Stripe checkout session");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create Adyen checkout session");
             return Ok(billing_operation_failed_response());
         }
     };
 
     let Some(url) = session.url else {
-        tracing::error!(tenant_id = %auth.tenant_id, session_id = %session.id, "Stripe checkout session returned without URL");
+        tracing::error!(tenant_id = %auth.tenant_id, session_id = %session.id, "Adyen checkout session returned without URL");
         return Ok(billing_operation_failed_response());
     };
 
@@ -3217,13 +3217,13 @@ async fn create_checkout_session(
     })))
 }
 
-/// Resolve a Stripe price only when it is attached to an active self-service
+/// Resolve a Adyen price only when it is attached to an active self-service
 /// ApexMail plan. Enterprise and PAYG follow managed/contractual flows and
 /// must not be purchased through the generic public Checkout endpoint.
-/// Stripe webhooks separately resolve all active catalog prices before
+/// Adyen webhooks separately resolve all active catalog prices before
 /// granting an entitlement, so manual Enterprise subscriptions can still be
-/// reconciled through their verified Stripe lifecycle.
-async fn active_plan_name_for_stripe_price(
+/// reconciled through their verified Adyen lifecycle.
+async fn active_plan_name_for_adyen_plan_code(
     pool: &sqlx::PgPool,
     price_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -3232,7 +3232,7 @@ async fn active_plan_name_for_stripe_price(
         SELECT name
         FROM plans
         WHERE is_active = true
-          AND (stripe_price_id_monthly = $1 OR stripe_price_id_yearly = $1)
+          AND (adyen_plan_code_monthly = $1 OR adyen_plan_code_yearly = $1)
         LIMIT 1
         "#,
     )
@@ -3257,33 +3257,33 @@ async fn create_portal_session(
             .into_response());
     }
 
-    let stripe_customer_id = match sqlx::query_scalar::<_, String>(
-        "SELECT stripe_customer_id FROM stripe_customers WHERE tenant_id = $1",
+    let adyen_shopper_reference = match sqlx::query_scalar::<_, String>(
+        "SELECT adyen_shopper_reference FROM adyen_shoppers WHERE tenant_id = $1",
     )
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     {
-        Some(stripe_customer_id) => stripe_customer_id,
+        Some(adyen_shopper_reference) => adyen_shopper_reference,
         None => {
-            tracing::error!(tenant_id = %auth.tenant_id, "Stripe portal requested without a Stripe customer");
+            tracing::error!(tenant_id = %auth.tenant_id, "Adyen portal requested without a Adyen customer");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let stripe = match StripeClient::from_env(&state.http_client) {
-        Ok(stripe) => stripe,
+    let adyen = match AdyenClient::from_env(&state.http_client) {
+        Ok(adyen) => adyen,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Stripe client for portal session");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Adyen client for portal session");
             return Ok(billing_operation_failed_response());
         }
     };
 
-    let session = match stripe
-        .form_post::<StripePortalSessionResponse>(
+    let session = match adyen
+        .form_post::<AdyenPortalSessionResponse>(
             "/v1/billing_portal/sessions",
             &[
-                ("customer", stripe_customer_id.clone()),
+                ("customer", adyen_shopper_reference.clone()),
                 ("return_url", body.return_url),
             ],
             // Retry-safe without serving a stale expired portal URL for a
@@ -3298,7 +3298,7 @@ async fn create_portal_session(
     {
         Ok(session) => session,
         Err(error) => {
-            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create Stripe portal session");
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to create Adyen portal session");
             return Ok(billing_operation_failed_response());
         }
     };
@@ -3360,7 +3360,7 @@ async fn get_proration_preview(
     }
 }
 
-/// Direct mutation of a tenant's plan bypasses Stripe's payment confirmation
+/// Direct mutation of a tenant's plan bypasses Adyen's payment confirmation
 /// and webhook reconciliation. Keep the legacy endpoint as an explicit,
 /// safe failure so old clients receive a deterministic migration signal rather
 /// than an accidental paid entitlement.
@@ -3368,7 +3368,7 @@ fn checkout_required_response() -> Response {
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({
-            "error": "Direct plan changes are disabled. Create a Stripe Checkout session and wait for the verified Stripe webhook before paid access is activated.",
+            "error": "Direct plan changes are disabled. Create a Adyen Checkout session and wait for the verified Adyen webhook before paid access is activated.",
             "code": "CHECKOUT_REQUIRED",
         })),
     )
@@ -3385,7 +3385,7 @@ async fn switch_plan(
 
     tracing::warn!(
         tenant_id = %auth.tenant_id,
-        "rejected direct billing plan transition; checkout and verified Stripe webhooks are required"
+        "rejected direct billing plan transition; checkout and verified Adyen webhooks are required"
     );
 
     Ok(checkout_required_response())
@@ -3395,7 +3395,7 @@ fn billing_portal_required_response() -> Response {
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({
-            "error": "Direct cancellation is disabled. Create a Stripe billing portal session and wait for the verified Stripe webhook before subscription access changes.",
+            "error": "Direct cancellation is disabled. Create a Adyen billing portal session and wait for the verified Adyen webhook before subscription access changes.",
             "code": "BILLING_PORTAL_REQUIRED",
         })),
     )
@@ -3410,13 +3410,13 @@ async fn cancel_subscription_request(
     crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
     let _ = (body.reason, body.feedback, body.cancel_immediately);
 
-    // Cancellation must be executed by Stripe (normally through the billing
+    // Cancellation must be executed by Adyen (normally through the billing
     // portal) and then reconciled from a verified webhook. Updating the local
-    // subscription record here can leave ApexMail and Stripe in different
+    // subscription record here can leave ApexMail and Adyen in different
     // states and may revoke access without a confirmed cancellation.
     tracing::warn!(
         tenant_id = %auth.tenant_id,
-        "rejected direct subscription cancellation; Stripe billing portal and verified webhooks are required"
+        "rejected direct subscription cancellation; Adyen billing portal and verified webhooks are required"
     );
 
     Ok(billing_portal_required_response())
@@ -3430,14 +3430,14 @@ async fn get_subscription(
     // scope (fail-closed — see get_usage).
     crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
 
-    let query = sqlx::query_as::<_, LegacyStripeSubscriptionRow>(
+    let query = sqlx::query_as::<_, LegacyAdyenSubscriptionRow>(
         r#"
         SELECT
             id::text AS id,
             tenant_id,
-            stripe_subscription_id,
-            stripe_customer_id,
-            stripe_price_id,
+            adyen_subscription_id,
+            adyen_shopper_reference,
+            adyen_plan_code,
             status::text AS status,
             billing_interval,
             billing_cycle_start,
@@ -3447,7 +3447,7 @@ async fn get_subscription(
             trial_end,
             created_at,
             updated_at
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1 AND status != 'canceled'
         ORDER BY created_at DESC
         LIMIT 1
@@ -3463,7 +3463,7 @@ async fn get_subscription(
 
     match subscription {
         Some(subscription) => Ok(billing_success_response(serde_json::json!({
-            "subscription": LegacyStripeSubscriptionDto::from(subscription),
+            "subscription": LegacyAdyenSubscriptionDto::from(subscription),
         }))),
         None => Ok(billing_success_response(serde_json::json!({
             "subscription": null,
@@ -3650,7 +3650,7 @@ async fn admin_list_tenants(
                     d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
-                LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id
+                LEFT JOIN adyen_subscriptions s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
@@ -3680,7 +3680,7 @@ async fn admin_list_tenants(
                     d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
-                LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id
+                LEFT JOIN adyen_subscriptions s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
@@ -3711,14 +3711,14 @@ async fn admin_get_tenant_details(
         return Ok(response);
     }
 
-    let subscription = match sqlx::query_as::<_, LegacyStripeSubscriptionRow>(
+    let subscription = match sqlx::query_as::<_, LegacyAdyenSubscriptionRow>(
         r#"
         SELECT
             id::text AS id,
             tenant_id,
-            stripe_subscription_id,
-            stripe_customer_id,
-            stripe_price_id,
+            adyen_subscription_id,
+            adyen_shopper_reference,
+            adyen_plan_code,
             status::text AS status,
             billing_interval,
             billing_cycle_start,
@@ -3728,7 +3728,7 @@ async fn admin_get_tenant_details(
             trial_end,
             created_at,
             updated_at
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1 AND status != 'canceled'
         ORDER BY created_at DESC
         LIMIT 1
@@ -3738,7 +3738,7 @@ async fn admin_get_tenant_details(
     .fetch_optional(&state.db)
     .await
     {
-        Ok(subscription) => subscription.map(LegacyStripeSubscriptionDto::from),
+        Ok(subscription) => subscription.map(LegacyAdyenSubscriptionDto::from),
         Err(error) if is_postgres_error_code(&error, "42P01") => None,
         Err(error) => return Err(ApiError::from(error)),
     };
@@ -4165,7 +4165,7 @@ async fn admin_force_subscription_status(
 
     let update = sqlx::query(
         r#"
-        UPDATE stripe_subscriptions
+        UPDATE adyen_subscriptions
         SET status = $2,
             admin_override_at = NOW(),
             admin_override_by = $3,
@@ -4518,7 +4518,7 @@ async fn admin_create_invoice(
     let inserted: (String, chrono::DateTime<Utc>, chrono::DateTime<Utc>) = sqlx::query_as(
         r#"
         INSERT INTO invoices (
-            id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
+            id, tenant_id, adyen_psp_reference, invoice_number, status, currency,
             amount, subtotal, vat_total, total, line_items, billing_address,
             billing_registry_code,
             issued_at, due_at, period_start, period_end,
@@ -4557,7 +4557,7 @@ async fn admin_create_invoice(
         billing_success(serde_json::to_value(LegacyInvoiceDto {
             id: inserted.0,
             tenant_id,
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             invoice_number,
             status: "draft".to_string(),
             currency,
@@ -4612,7 +4612,7 @@ fn invoice_void_error_response(error: billing_service::invoices::InvoiceVoidErro
             StatusCode::CONFLICT,
             format!("Invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided; refund a paid invoice with a credit note instead"),
         ),
-        VoidError::StripeUnavailable { .. } | VoidError::StripeFailed { .. } => {
+        VoidError::AdyenUnavailable { .. } | VoidError::AdyenFailed { .. } => {
             (StatusCode::CONFLICT, error.to_string())
         }
         // Infra faults (DB / audit pipeline): these are genuine 5xx-s —
@@ -4692,7 +4692,7 @@ fn admin_operation_idempotency_key(headers: &HeaderMap) -> Result<String, Respon
 /// POST /v1/billing/admin/tenants/:tenantId/invoices/:invoiceId/void
 ///
 /// DF-5 finding B: the `void` transition the status filters referenced but
-/// no surface could express. The state machine (idempotency, Stripe-side
+/// no surface could express. The state machine (idempotency, Adyen-side
 /// void, audit event) lives in `billing_service::invoices::void_invoice`;
 /// this handler gates the operator, enforces the header idempotency
 /// contract, maps refusals to honest 4xx-s and attributes the operator on
@@ -4920,7 +4920,7 @@ async fn admin_get_churn_report(
     // Shared with billing-service (audit 2: this local copy priced churn
     // from the tenant's post-cancellation 'free' plan — structurally ~0 —
     // and truncated yearly/12). Single source:
-    // billing_service::routes::CHURN_REPORT_SQL (stripe_price_id snapshot
+    // billing_service::routes::CHURN_REPORT_SQL (adyen_plan_code snapshot
     // join + unpriced-churn coverage).
     let report: serde_json::Value = sqlx::query_scalar(billing_service::routes::CHURN_REPORT_SQL)
         .fetch_one(&state.db)
@@ -5072,7 +5072,7 @@ async fn admin_export_billing_data(
                     s.billing_interval,
                     s.billing_cycle_start as current_period_start, s.current_period_end,
                     s.created_at, s.canceled_at
-                FROM stripe_subscriptions s
+                FROM adyen_subscriptions s
                 JOIN tenants t ON s.tenant_id = t.id
                 LEFT JOIN plans p ON p.name = s.plan
                 WHERE s.created_at >= $1 AND s.created_at < $2
@@ -5459,7 +5459,7 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .expect("error should be a string")
-            .contains("verified Stripe webhook"));
+            .contains("verified Adyen webhook"));
     }
 
     #[tokio::test]
@@ -5471,7 +5471,7 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .expect("error should be a string")
-            .contains("Stripe billing portal"));
+            .contains("Adyen billing portal"));
     }
 
     #[test]
@@ -5529,7 +5529,7 @@ mod tests {
         LegacyInvoiceDto {
             id: "inv_test_123".into(),
             tenant_id: "tenant_123".into(),
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             invoice_number: "2026-TEST-001".into(),
             status: "paid".into(),
             currency: "eur".into(),
@@ -5865,14 +5865,14 @@ mod tests {
     }
 
     #[test]
-    fn billing_routes_stripe_request_builder_pins_api_version_and_idempotency() {
-        let stripe = StripeClient::new(
+    fn billing_routes_adyen_request_builder_pins_api_version_and_idempotency() {
+        let adyen = AdyenClient::new(
             reqwest::Client::new(),
-            "https://api.stripe.com".into(),
-            DEFAULT_STRIPE_API_VERSION.into(),
+            "https://checkout-test.adyen.com/v71".into(),
+            DEFAULT_ADYEN_API_VERSION.into(),
             "sk_test_123".into(),
         );
-        let request = stripe
+        let request = adyen
             .form_request(
                 "/v1/customers",
                 &[("email", "billing@example.com".to_string())],
@@ -5883,16 +5883,16 @@ mod tests {
 
         assert_eq!(
             request.url().as_str(),
-            "https://api.stripe.com/v1/customers"
+            "https://checkout-test.adyen.com/v71/v1/customers"
         );
         assert_eq!(
             request
                 .headers()
-                .get("stripe-version")
-                .expect("stripe version header")
+                .get("adyen-version")
+                .expect("adyen version header")
                 .to_str()
-                .expect("stripe version string"),
-            DEFAULT_STRIPE_API_VERSION,
+                .expect("adyen version string"),
+            DEFAULT_ADYEN_API_VERSION,
         );
         assert_eq!(
             request
@@ -6304,14 +6304,14 @@ mod adversarial_tests {
         email_limit: i64,
         api_limit: i64,
         features: &serde_json::Value,
-        stripe_monthly: Option<&str>,
-        stripe_yearly: Option<&str>,
+        adyen_monthly: Option<&str>,
+        adyen_yearly: Option<&str>,
         is_active: bool,
     ) {
         sqlx::query(
             "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
                                 email_limit, api_call_limit, features, is_active, sort_order,
-                                stripe_price_id_monthly, stripe_price_id_yearly, created_at, updated_at)
+                                adyen_plan_code_monthly, adyen_plan_code_yearly, created_at, updated_at)
              VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $2, '', $3, $4,
                      $5, $6, $7, $8, 0, $9, $10, NOW(), NOW())
              ON CONFLICT (name) DO UPDATE SET
@@ -6321,8 +6321,8 @@ mod adversarial_tests {
                  api_call_limit = EXCLUDED.api_call_limit,
                  features = EXCLUDED.features,
                  is_active = EXCLUDED.is_active,
-                 stripe_price_id_monthly = EXCLUDED.stripe_price_id_monthly,
-                 stripe_price_id_yearly = EXCLUDED.stripe_price_id_yearly",
+                 adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
+                 adyen_plan_code_yearly = EXCLUDED.adyen_plan_code_yearly",
         )
         .bind(name)
         .bind(format!("{name} display"))
@@ -6332,8 +6332,8 @@ mod adversarial_tests {
         .bind(api_limit)
         .bind(features)
         .bind(is_active)
-        .bind(stripe_monthly)
-        .bind(stripe_yearly)
+        .bind(adyen_monthly)
+        .bind(adyen_yearly)
         .execute(pool)
         .await
         .expect("seed plan");
@@ -6591,7 +6591,7 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/plans/advpro").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["name"], "advpro");
-        assert_eq!(body["data"]["stripePriceIdMonthly"], "price_pro_m");
+        assert_eq!(body["data"]["adyenPriceIdMonthly"], "price_pro_m");
         // An inactive plan is still readable by name (legacy clients need
         // it for renewal copy) but is never in the catalog — asserted above.
         let (status, body) = get(&env, "/v1/billing/plans/advlegacy").await;
@@ -7199,7 +7199,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "BILLING_PORTAL_REQUIRED");
         let subscriptions: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
@@ -7210,7 +7210,7 @@ mod adversarial_tests {
         let (status, _) = post_json(
             &env,
             "/v1/billing/switch-plan",
-            r#"{"planName":"x","stripeKey":"sk_live_leak"}"#,
+            r#"{"planName":"x","adyenKey":"sk_live_leak"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -7251,17 +7251,17 @@ mod adversarial_tests {
         assert_eq!(body["data"]["message"], "No active subscription");
 
         // Seed one active + one canceled row: the active one wins.
-        for (status, stripe_id) in [("canceled", "sub_old"), ("active", "sub_live")] {
+        for (status, adyen_id) in [("canceled", "sub_old"), ("active", "sub_live")] {
             sqlx::query(
-                "INSERT INTO stripe_subscriptions
-                 (id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+                "INSERT INTO adyen_subscriptions
+                 (id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
                   status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
                   cancel_at_period_end, created_at, updated_at)
                  VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, 'advsub', 'monthly',
                          NOW() - INTERVAL '5 days' - INTERVAL '6 hours', NOW() - INTERVAL '5 days' - INTERVAL '6 hours' + INTERVAL '30 days', false, NOW(), NOW())",
             )
             .bind(&tenant)
-            .bind(stripe_id)
+            .bind(adyen_id)
             .bind(status)
             .execute(&pool)
             .await
@@ -7270,7 +7270,7 @@ mod adversarial_tests {
         let (status, body) = get(&env, "/v1/billing/subscription").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
-            body["data"]["subscription"]["stripeSubscriptionId"],
+            body["data"]["subscription"]["adyenSubscriptionId"],
             "sub_live"
         );
         assert_eq!(body["data"]["subscription"]["status"], "active");
@@ -7296,7 +7296,7 @@ mod adversarial_tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices
-             (id, tenant_id, stripe_invoice_id, invoice_number, status, currency, amount,
+             (id, tenant_id, adyen_psp_reference, invoice_number, status, currency, amount,
               subtotal, vat_total, total, line_items, billing_address, issued_at, due_at,
               paid_at, period_start, period_end, created_at, updated_at)
              VALUES ($1, $2, NULL, $3, $4, 'USD', $5, $5, 0, $5, $6, $7,
@@ -7369,7 +7369,7 @@ mod adversarial_tests {
             Some(hostile_addr.clone()),
         )
         .await;
-        // A Stripe-era row with NULL billing_address and non-array line_items
+        // A Adyen-era row with NULL billing_address and non-array line_items
         // must still list (audit F05).
         seed_invoice(
             &pool,
@@ -7536,7 +7536,7 @@ mod adversarial_tests {
     }
 
     /// A row with NULL period bounds (nullable columns; no migration
-    /// backfills them — legacy Stripe-era or externally imported rows) used
+    /// backfills them — legacy Adyen-era or externally imported rows) used
     /// to 500 the ENTIRE invoice surface: the FromRow decode demanded a
     /// non-Option timestamp. Same class as audit F05's nullable
     /// billing_address: decode as Option, render null, never fail the read.
@@ -7564,7 +7564,7 @@ mod adversarial_tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices
-             (id, tenant_id, stripe_invoice_id, invoice_number, status, currency, amount,
+             (id, tenant_id, adyen_psp_reference, invoice_number, status, currency, amount,
               subtotal, vat_total, total, line_items, issued_at, due_at,
               period_start, period_end, created_at, updated_at)
              VALUES ($1, $2, NULL, '2026-000042', 'paid', 'EUR', 5000, 5000, 0, 5000, $3::jsonb,
@@ -7611,15 +7611,15 @@ mod adversarial_tests {
             String::from_utf8_lossy(&bytes)
         );
     }
-    // ── Stripe checkout / portal (against a local mock) ─────────
+    // ── Adyen checkout / portal (against a local mock) ─────────
 
-    /// Serialises tests that mutate Stripe process env vars.
-    static STRIPE_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// Serialises tests that mutate Adyen process env vars.
+    static ADYEN_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// Held across awaits on purpose (serialises Stripe env mutation for the
+    /// Held across awaits on purpose (serialises Adyen env mutation for the
     /// duration of the request) — async-aware so the guard is legitimate.
-    async fn lock_stripe_env() -> tokio::sync::MutexGuard<'static, ()> {
-        STRIPE_ENV_MUTEX.lock().await
+    async fn lock_adyen_env() -> tokio::sync::MutexGuard<'static, ()> {
+        ADYEN_ENV_MUTEX.lock().await
     }
 
     /// RAII restore for one env var.
@@ -7649,7 +7649,7 @@ mod adversarial_tests {
     }
 
     #[derive(Default)]
-    struct MockStripeState {
+    struct MockAdyenState {
         customer_calls: usize,
         checkout_calls: usize,
         portal_calls: usize,
@@ -7658,20 +7658,20 @@ mod adversarial_tests {
         fail_checkout: bool,
     }
 
-    type MockStripe = Arc<std::sync::Mutex<MockStripeState>>;
+    type MockAdyen = Arc<std::sync::Mutex<MockAdyenState>>;
 
-    fn record_call(state: &MockStripe, kind: &str, headers: &HeaderMap) {
+    fn record_call(state: &MockAdyen, kind: &str, headers: &HeaderMap) {
         let observed = json!({
             "kind": kind,
             "authorization": headers.get("authorization").and_then(|v| v.to_str().ok()),
             "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
-            "stripeVersion": headers.get("stripe-version").and_then(|v| v.to_str().ok()),
+            "adyenVersion": headers.get("adyen-version").and_then(|v| v.to_str().ok()),
         });
         state.lock().unwrap().observed.push(observed);
     }
 
     async fn mock_create_customer(
-        State(state): State<MockStripe>,
+        State(state): State<MockAdyen>,
         headers: HeaderMap,
     ) -> axum::Json<serde_json::Value> {
         record_call(&state, "customers", &headers);
@@ -7683,7 +7683,7 @@ mod adversarial_tests {
     }
 
     async fn mock_checkout_session(
-        State(state): State<MockStripe>,
+        State(state): State<MockAdyen>,
         headers: HeaderMap,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
@@ -7694,29 +7694,29 @@ mod adversarial_tests {
         let no_url = guard.checkout_without_url;
         drop(guard);
         if fail {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "stripe exploded").into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, "adyen exploded").into_response();
         }
         if no_url {
             return axum::Json(json!({ "id": "cs_mock_no_url" })).into_response();
         }
         axum::Json(json!({
             "id": "cs_mock_1",
-            "url": "https://checkout.stripe.com/pay/cs_mock_1",
+            "url": "https://checkout.adyen.com/pay/cs_mock_1",
         }))
         .into_response()
     }
 
     async fn mock_portal_session(
-        State(state): State<MockStripe>,
+        State(state): State<MockAdyen>,
         headers: HeaderMap,
     ) -> axum::Json<serde_json::Value> {
         record_call(&state, "portal", &headers);
         state.lock().unwrap().portal_calls += 1;
-        axum::Json(json!({ "url": "https://billing.stripe.com/p/session_mock" }))
+        axum::Json(json!({ "url": "https://billing.adyen.com/p/session_mock" }))
     }
 
-    async fn start_mock_stripe() -> (String, MockStripe) {
-        let state: MockStripe = Arc::new(std::sync::Mutex::new(MockStripeState::default()));
+    async fn start_mock_adyen() -> (String, MockAdyen) {
+        let state: MockAdyen = Arc::new(std::sync::Mutex::new(MockAdyenState::default()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let mock = Router::new()
@@ -7756,13 +7756,13 @@ mod adversarial_tests {
     }
 
     #[tokio::test]
-    async fn adversarial_checkout_validation_without_stripe_credentials() {
+    async fn adversarial_checkout_validation_without_adyen_credentials() {
         let Some(pool) = pool_for("checkout_validation").await else {
             return;
         };
-        let _guard = lock_stripe_env().await;
-        let _key = EnvRestore::set("STRIPE_SECRET_KEY", None);
-        let _allow = EnvRestore::set("STRIPE_ALLOW_TEST_KEY", None);
+        let _guard = lock_adyen_env().await;
+        let _key = EnvRestore::set("ADYEN_API_KEY", None);
+        let _allow = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", None);
         seed_checkout_plan(&pool, "pro").await;
         let (tenant, read_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
         set_billing_email(&pool, &tenant, json!({"billingEmail": "billing@acme.test"})).await;
@@ -7801,7 +7801,7 @@ mod adversarial_tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         // Exactly 128 chars passes the length gate but must still be in the
-        // active catalog (never forwarded to Stripe).
+        // active catalog (never forwarded to Adyen).
         let max_len = format!("price_{}", "x".repeat(122));
         assert_eq!(max_len.len(), 128);
         let (status, body) = post_json(
@@ -7855,8 +7855,8 @@ mod adversarial_tests {
             );
         }
 
-        // Happy metadata but Stripe is not configured: fail closed with the
-        // generic operation-failed body and NO stripe customer row.
+        // Happy metadata but Adyen is not configured: fail closed with the
+        // generic operation-failed body and NO adyen customer row.
         let (status, body) = post_json(
             &env,
             "/v1/billing/checkout",
@@ -7869,14 +7869,14 @@ mod adversarial_tests {
         assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
         assert_eq!(body["error"]["message"], "Operation failed");
         let customers: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_customers WHERE tenant_id = $1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_shoppers WHERE tenant_id = $1")
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(customers, 0);
 
-        // Tenant without any billing email: refused before Stripe.
+        // Tenant without any billing email: refused before Adyen.
         let (_no_email_tenant, no_email_key) =
             tenant_with_key(&pool, "pro", &["billing:write"]).await;
         let no_email = env_for(pool.clone(), no_email_key).await;
@@ -7907,7 +7907,7 @@ mod adversarial_tests {
         assert_eq!(
             status,
             StatusCode::INTERNAL_SERVER_ERROR,
-            "still Stripe-unconfigured, but the email fallback must be reached first"
+            "still Adyen-unconfigured, but the email fallback must be reached first"
         );
 
         // The `system` sentinel has no tenants row: Tenant-not-found arm.
@@ -7923,15 +7923,15 @@ mod adversarial_tests {
     }
 
     #[tokio::test]
-    async fn adversarial_checkout_and_portal_against_stripe_mock() {
+    async fn adversarial_checkout_and_portal_against_adyen_mock() {
         let Some(pool) = pool_for("checkout_mock").await else {
             return;
         };
-        let _guard = lock_stripe_env().await;
-        let (base_url, mock) = start_mock_stripe().await;
-        let _key = EnvRestore::set("STRIPE_SECRET_KEY", Some("sk_test_mock"));
-        let _allow = EnvRestore::set("STRIPE_ALLOW_TEST_KEY", Some("true"));
-        let _base = EnvRestore::set("STRIPE_API_BASE_URL", Some(&base_url));
+        let _guard = lock_adyen_env().await;
+        let (base_url, mock) = start_mock_adyen().await;
+        let _key = EnvRestore::set("ADYEN_API_KEY", Some("sk_test_mock"));
+        let _allow = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", Some("true"));
+        let _base = EnvRestore::set("ADYEN_API_BASE_URL", Some(&base_url));
 
         seed_checkout_plan(&pool, "pro").await;
         let (tenant, write_key) = tenant_with_key(&pool, "pro", &["billing:write"]).await;
@@ -7953,10 +7953,10 @@ mod adversarial_tests {
         assert_eq!(body_resp["data"]["sessionId"], "cs_mock_1");
         assert_eq!(
             body_resp["data"]["url"],
-            "https://checkout.stripe.com/pay/cs_mock_1"
+            "https://checkout.adyen.com/pay/cs_mock_1"
         );
         let (customer_id, name, email): (String, String, String) = sqlx::query_as(
-            "SELECT stripe_customer_id, name, email FROM stripe_customers WHERE tenant_id = $1",
+            "SELECT adyen_shopper_reference, name, email FROM adyen_shoppers WHERE tenant_id = $1",
         )
         .bind(&tenant)
         .fetch_one(&pool)
@@ -7983,9 +7983,9 @@ mod adversarial_tests {
                     .as_str()
                     .unwrap_or_default()
                     .starts_with("Bearer "),
-                "Stripe call must be authenticated: {create}"
+                "Adyen call must be authenticated: {create}"
             );
-            assert_eq!(create["stripeVersion"], DEFAULT_STRIPE_API_VERSION);
+            assert_eq!(create["adyenVersion"], DEFAULT_ADYEN_API_VERSION);
             let checkout = state
                 .observed
                 .iter()
@@ -8004,13 +8004,13 @@ mod adversarial_tests {
         assert_eq!(mock.lock().unwrap().customer_calls, 1);
         assert_eq!(mock.lock().unwrap().checkout_calls, 2);
 
-        // Stripe session without a URL: fail closed, no fake redirect.
+        // Adyen session without a URL: fail closed, no fake redirect.
         mock.lock().unwrap().checkout_without_url = true;
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
         mock.lock().unwrap().checkout_without_url = false;
 
-        // Stripe 5xx: fail closed with the generic body.
+        // Adyen 5xx: fail closed with the generic body.
         mock.lock().unwrap().fail_checkout = true;
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
@@ -8019,19 +8019,19 @@ mod adversarial_tests {
         // A test-mode key without the explicit opt-in must not drive
         // checkout (the scope restores the opt-in on exit).
         {
-            let _opt_out = EnvRestore::set("STRIPE_ALLOW_TEST_KEY", None);
+            let _opt_out = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", None);
             let (status, _) = post_json(&env, "/v1/billing/checkout", &body).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         }
 
-        // Portal: an existing Stripe customer is required.
+        // Portal: an existing Adyen customer is required.
         let (portal_tenant, portal_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
         let portal = env_for(pool.clone(), portal_key).await;
         let portal_body = json!({"returnUrl": valid_url}).to_string();
         let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
 
-        // Bad return URL is rejected before any Stripe call.
+        // Bad return URL is rejected before any Adyen call.
         let (status, _) = post_json(
             &env,
             "/v1/billing/portal",
@@ -8042,7 +8042,7 @@ mod adversarial_tests {
 
         // With a customer row the portal session is created.
         sqlx::query(
-            "INSERT INTO stripe_customers (id, tenant_id, stripe_customer_id, created_at)
+            "INSERT INTO adyen_shoppers (id, tenant_id, adyen_shopper_reference, created_at)
              VALUES (gen_random_uuid(), $1, 'cus_portal', NOW())",
         )
         .bind(&portal_tenant)
@@ -8053,15 +8053,15 @@ mod adversarial_tests {
         assert_eq!(
             status,
             StatusCode::OK,
-            "{body_resp} observed={:?} stripe_key={:?} allow={:?} base={:?}",
+            "{body_resp} observed={:?} adyen_key={:?} allow={:?} base={:?}",
             mock.lock().unwrap().observed,
-            std::env::var("STRIPE_SECRET_KEY").ok(),
-            std::env::var("STRIPE_ALLOW_TEST_KEY").ok(),
-            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("ADYEN_API_KEY").ok(),
+            std::env::var("ADYEN_ALLOW_TEST_KEY").ok(),
+            std::env::var("ADYEN_API_BASE_URL").ok(),
         );
         assert_eq!(
             body_resp["data"]["url"],
-            "https://billing.stripe.com/p/session_mock"
+            "https://billing.adyen.com/p/session_mock"
         );
         assert_eq!(mock.lock().unwrap().portal_calls, 1);
     }
@@ -8078,8 +8078,8 @@ mod adversarial_tests {
         status: &str,
     ) {
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-             (id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+            "INSERT INTO adyen_subscriptions
+             (id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, $4, $5,
@@ -8248,7 +8248,7 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // Legacy `subscriptions` table is the documented fallback when the
-        // live stripe_subscriptions row is absent.
+        // live adyen_subscriptions row is absent.
         let (legacy_tenant, legacy_key) =
             tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
         sqlx::query(
@@ -8272,8 +8272,8 @@ mod adversarial_tests {
 
     async fn seed_admin_subscription(pool: &PgPool, tenant: &str, plan: &str, status: &str) {
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-             (id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+            "INSERT INTO adyen_subscriptions
+             (id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cus_admin', 'price_admin', $3, $4, 'monthly',
@@ -9020,7 +9020,7 @@ mod adversarial_tests {
             "",
             "ACTIVE",
             "deleted",
-            "suspended'; DROP TABLE stripe_subscriptions;--",
+            "suspended'; DROP TABLE adyen_subscriptions;--",
         ] {
             let (status_code, body) = post_json(
                 &env,
@@ -9050,7 +9050,7 @@ mod adversarial_tests {
         let (row_status, override_by, override_reason): (String, Option<String>, Option<String>) =
             sqlx::query_as(
                 "SELECT status, admin_override_by, admin_override_reason
-                 FROM stripe_subscriptions WHERE tenant_id = $1",
+                 FROM adyen_subscriptions WHERE tenant_id = $1",
             )
             .bind(&tenant)
             .fetch_one(&pool)
@@ -9553,7 +9553,7 @@ mod adversarial_tests {
         LegacyInvoiceDto {
             id: "inv".into(),
             tenant_id: "t".into(),
-            stripe_invoice_id: None,
+            adyen_psp_reference: None,
             invoice_number: "2026-1".into(),
             status: "open".into(),
             currency: "EUR".into(),
@@ -9767,7 +9767,7 @@ mod adversarial_tests {
             // One invoice row so the fallback has data to return. Every
             // column the row type decodes as non-optional is populated.
             sqlx::query(
-                "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+                "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
                      currency, subtotal, vat_total, total, line_items, issued_at, due_at,
                      paid_at, period_start, period_end, created_at, updated_at)
                  VALUES (gen_random_uuid(), $1, 'in_probe', 'INV-PROBE-1', 'paid',
@@ -10282,8 +10282,8 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    /// The portal's Stripe failure arms: a tenant with no Stripe customer,
-    /// and an unusable Stripe credential, both return the honest generic
+    /// The portal's Adyen failure arms: a tenant with no Adyen customer,
+    /// and an unusable Adyen credential, both return the honest generic
     /// 500 instead of leaking provider detail.
     #[tokio::test]
     async fn portal_fails_closed_without_a_customer_or_credentials() {
@@ -10293,7 +10293,7 @@ mod adversarial_tests {
         let state = crate::app::test_support::test_state_over(pool).await;
         let auth = auth_user(&["billing:read"], "ten_portal_none");
 
-        // No stripe_customers row → generic 500 (never a fabricated URL).
+        // No adyen_shoppers row → generic 500 (never a fabricated URL).
         let response = create_portal_session(
             State(state.clone()),
             auth.clone(),
@@ -10305,17 +10305,17 @@ mod adversarial_tests {
         .expect("portal response");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        // With a customer row but NO Stripe credential → client init fails.
-        let _guard = lock_stripe_env().await;
-        let _key = EnvRestore::set("STRIPE_SECRET_KEY", None);
+        // With a customer row but NO Adyen credential → client init fails.
+        let _guard = lock_adyen_env().await;
+        let _key = EnvRestore::set("ADYEN_API_KEY", None);
         sqlx::query(
-            "INSERT INTO stripe_customers (id, tenant_id, stripe_customer_id, created_at)
+            "INSERT INTO adyen_shoppers (id, tenant_id, adyen_shopper_reference, created_at)
              VALUES (gen_random_uuid(), $1, 'cus_portal_fail', NOW())",
         )
         .bind(auth.tenant_id.as_str())
         .execute(&state.db)
         .await
-        .expect("seed stripe customer");
+        .expect("seed adyen customer");
         let response = create_portal_session(
             State(state),
             auth,
@@ -10339,9 +10339,9 @@ mod adversarial_tests {
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let auth = auth_user(&["billing:read"], "ten_sub_none");
 
-        crate::routes::fault::hide_table(&pool, "stripe_subscriptions")
+        crate::routes::fault::hide_table(&pool, "adyen_subscriptions")
             .await
-            .expect("hide stripe_subscriptions");
+            .expect("hide adyen_subscriptions");
         let response = get_subscription(State(state), auth).await.expect("read");
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -10378,8 +10378,8 @@ mod adversarial_tests {
             email_limit: 1000,
             api_call_limit: 1000,
             features: billing_service::types::PlanFeatures::default(),
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            adyen_plan_code_monthly: None,
+            adyen_plan_code_yearly: None,
             is_active: true,
             sort_order: 0,
             created_at: Utc::now(),

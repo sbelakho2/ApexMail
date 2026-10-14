@@ -13,7 +13,7 @@
 //! The operational tables (`invoices`, `payroll_records`, …) are evidence,
 //! not the ledger, and are never read here. This replaces the previous
 //! `estonia_ou::generate_annual_report`, which summed paid invoices and
-//! estimated Stripe fees, with a hard-coded company identity.
+//! estimated Adyen fees, with a hard-coded company identity.
 //!
 //! # The state machine (human legal acts are not automatic)
 //!

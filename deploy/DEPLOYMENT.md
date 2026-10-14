@@ -90,8 +90,8 @@ rendered (empty) so the guards stay satisfied when running the SES transport.
 | `CSRF_SECRET` | `PROD_CSRF_SECRET_FILE` |
 | `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | `PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE` |
 | `KIWI_SECRET_KEY` | `PROD_KIWI_SECRET_KEY_FILE` |
-| `STRIPE_SECRET_KEY` | `PROD_STRIPE_SECRET_KEY_FILE` |
-| `STRIPE_WEBHOOK_SECRET` | `PROD_STRIPE_WEBHOOK_SECRET_FILE` |
+| `ADYEN_API_KEY` | `PROD_ADYEN_API_KEY_FILE` |
+| `ADYEN_HMAC_KEY` | `PROD_ADYEN_HMAC_KEY_FILE` |
 | `AWS_ACCESS_KEY_ID` *(optional)* | `PROD_AWS_ACCESS_KEY_ID_FILE` |
 | `AWS_SECRET_ACCESS_KEY` *(optional)* | `PROD_AWS_SECRET_ACCESS_KEY_FILE` |
 | `SMTP_USERNAME` *(optional)* | `PROD_SMTP_USERNAME_FILE` |
@@ -197,9 +197,9 @@ Notes:
   references; only the image name is canonical.
 - `billing-service` binds `0.0.0.0:4100` (no host port mapping — it is
   service-auth protected and only reachable on the internal Docker networks).
-  Its production Stripe credentials come from the Docker secrets
-  `stripe_secret_key` / `stripe_webhook_secret` (`PROD_STRIPE_SECRET_KEY_FILE`
-  / `PROD_STRIPE_WEBHOOK_SECRET_FILE` in the deployment `.env`); the webhook
+  Its production Adyen credentials come from the Docker secrets
+  `adyen_api_key` / `adyen_hmac_key` (`PROD_ADYEN_API_KEY_FILE`
+  / `PROD_ADYEN_HMAC_KEY_FILE` in the deployment `.env`); the webhook
   secret is mandatory — the binary fail-fasts at startup without it.
 - `sales-autopilot` (internal sales engine: CRM, campaigns, inbox, scheduler)
   binds port `3010` with no host port mapping — the control plane reaches it

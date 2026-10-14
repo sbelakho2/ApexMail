@@ -21,7 +21,7 @@ Les entités tierces suivantes traitent des données personnelles de clients pou
 | Amazon Web Services, Inc. | AWS SES | Transport de livraison d'emails | Livraison d'emails lorsqu'elle est activée | Contenu des emails et adresses des destinataires | Région SES configurée | Région SES configurée | États-Unis | Clauses contractuelles types de l'UE (DPA AWS) | Non — uniquement lorsque le déploiement actif utilise SES |
 | Google LLC | Google | Authentification OAuth | Connexion via Google OAuth | Jetons OAuth, adresse email, nom | Mondial (données UE) | Utilisateurs établis dans l'EEE : EEE | États-Unis | Clauses contractuelles types (CCT) | Non — uniquement si le client active Google OAuth |
 | GitHub, Inc. | GitHub | Authentification OAuth | Connexion via GitHub OAuth | Jetons OAuth, nom d'utilisateur, adresse email | Mondial (données UE) | Utilisateurs établis dans l'EEE : EEE | États-Unis | Clauses contractuelles types (CCT) | Non — uniquement si le client active GitHub OAuth |
-| Stripe, Inc. | Stripe | Traitement des paiements | Facturation par abonnement, facturation, stockage des moyens de paiement | Jetons de moyens de paiement, métadonnées de transaction, données de facturation | États-Unis (principal) ; Inde (assistance) | États-Unis | États-Unis | Clauses contractuelles types (CCT) selon le DPA Stripe | Oui — requis pour les forfaits payants |
+| Adyen N.V. | Adyen | Traitement des paiements | Facturation par abonnement, facturation, stockage des moyens de paiement | Jetons de moyens de paiement, métadonnées de transaction, données de facturation | États-Unis (principal) ; Inde (assistance) | États-Unis | États-Unis | Clauses contractuelles types (CCT) selon le DPA Adyen | Oui — requis pour les forfaits payants |
 
 ### Infrastructure auto-hébergée (pas des sous-traitants tiers)
 
@@ -44,4 +44,4 @@ Si vous vous opposez à un nouveau sous-traitant pour des motifs raisonnables de
 
 | Date | Modification | Description |
 |---|---|---|
-| 2026-07-29 | Publication initiale | Registre des sous-traitants publié avec Hetzner (infrastructure), AWS (S3/SES, lorsqu'ils sont activés), Google (OAuth), GitHub (OAuth) et Stripe (paiements). ClickHouse et Redis sont des logiciels auto-hébergés, et non des sous-traitants (voir ci-dessus). |
+| 2026-07-29 | Publication initiale | Registre des sous-traitants publié avec Hetzner (infrastructure), AWS (S3/SES, lorsqu'ils sont activés), Google (OAuth), GitHub (OAuth) et Adyen (paiements). ClickHouse et Redis sont des logiciels auto-hébergés, et non des sous-traitants (voir ci-dessus). |

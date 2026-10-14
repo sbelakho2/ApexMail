@@ -287,16 +287,16 @@ Dedicated IPs are managed as **Hetzner Cloud floating IPs** by the [`DedicatedIp
 
 #### 3.5.1 Provisioning
 
-Triggered automatically when a tenant upgrades to a plan with dedicated IPs (Stripe webhook → `auto_provision_dedicated_ips_background()`), or manually via `POST /v1/dedicated-ips`.
+Triggered automatically when a tenant upgrades to a plan with dedicated IPs (Adyen webhook → `auto_provision_dedicated_ips_background()`), or manually via `POST /v1/dedicated-ips`.
 
 ```mermaid
 sequenceDiagram
-    participant Stripe as Stripe Webhook
+    participant Adyen as Adyen Webhook
     participant API as API Server
     participant Hetzner as Hetzner Cloud API
     participant DB as PostgreSQL
 
-    Stripe->>API: plan_change event
+    Adyen->>API: plan_change event
     API->>API: auto_provision_dedicated_ips_background()
     API->>Hetzner: POST /v1/floating_ips (create)
     Hetzner-->>API: floating_ip { id, ip }
@@ -304,7 +304,7 @@ sequenceDiagram
     API->>Hetzner: POST /v1/floating_ips/{id}/actions/change_dns_ptr (rDNS: mail.<domain>)
     API->>DB: INSERT dedicated_ips (status='warming')
     Note over DB: Trigger updates transport_routing_cache
-    API-->>Stripe: 200 OK
+    API-->>Adyen: 200 OK
 ```
 
 The provisioning flow in detail:
@@ -738,7 +738,7 @@ All events are:
 - [ ] Health endpoints respond: `GET /health`, `GET /ready`
 - [ ] Database migrations applied (the deploy runs the `migrator` one-shot job automatically — see deploy/DEPLOYMENT.md § "Database migrations"; verify `SELECT count(*) FROM _sqlx_migrations` matches the migration count)
 - [ ] WAL archiving and automated backups configured (to Hetzner S3)
-- [ ] Stripe webhook endpoint configured for billing integration
+- [ ] Adyen webhook endpoint configured for billing integration
 - [ ] Alerting rules configured in Grafana/Prometheus
 
 ---
@@ -771,7 +771,7 @@ All events are:
 |---------|-------------|------------|
 | Messages unexpectedly routed to SES | `transport_routing_cache` not updated after IP assignment | Check DB trigger `trg_update_transport_routing` is active; verify `transport_routing_cache` table has the tenant entry |
 | Messages unexpectedly routed to SMTP | Tenant incorrectly has active dedicated IP | Verify `dedicated_ips` table for the tenant; check if retired IPs are still in cache |
-| Upgrade/downgrade not triggering IP provision/release | Stripe webhook not firing | Check Stripe webhook logs; verify the Stripe webhook reaches `POST /v1/dedicated-ips` |
+| Upgrade/downgrade not triggering IP provision/release | Adyen webhook not firing | Check Adyen webhook logs; verify the Adyen webhook reaches `POST /v1/dedicated-ips` |
 
 ### 7.4 Warmup Schedule Discrepancy
 

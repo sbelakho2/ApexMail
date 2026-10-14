@@ -172,7 +172,7 @@ See:
 - [Hybrid Email Infrastructure](../architecture/hybrid-email-infrastructure.md) for architecture overview
 - [Delivery Transport](../architecture/delivery-transport.md) for routing details
 
-Dedicated IPs are auto-provisioned when a customer upgrades their plan (handled by the billing service's Stripe webhook).
+Dedicated IPs are auto-provisioned when a customer upgrades their plan (handled by the billing service's Adyen webhook).
 
 ---
 

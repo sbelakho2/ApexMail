@@ -54,10 +54,10 @@ SALES_KB_REEXPORT = (
 )
 DOCS_PRICING = ROOT / "docs/pricing.md"
 # These two contract/architecture docs restate the plan ladder and drifted
-# silently (adversarial docs review 2026-10-06: stripe.md still carried the
+# silently (adversarial docs review 2026-10-06: adyen.md still carried the
 # pre-2026-09-08 ladder, billing-lifecycle.md misstated every paid tier).
 # Their plan tables are now parsed and pinned to the catalog.
-STRIPE_CONTRACT = ROOT / "docs/tool-contracts/stripe.md"
+ADYEN_CONTRACT = ROOT / "docs/tool-contracts/adyen.md"
 BILLING_LIFECYCLE = ROOT / "docs/architecture/billing-lifecycle.md"
 # The Python training/eval pipeline restates the catalog; it must agree with
 # it (the inverted table here shipped wrong prices into AI training data —
@@ -303,8 +303,8 @@ def _table_rows_after(src: str, heading: str) -> list[list[str]]:
     return rows
 
 
-def parse_stripe_contract_plans(src: str) -> dict[str, dict]:
-    """The `All prices are EUR` plan table in docs/tool-contracts/stripe.md."""
+def parse_adyen_contract_plans(src: str) -> dict[str, dict]:
+    """The `All prices are EUR` plan table in docs/tool-contracts/adyen.md."""
     rows = {}
     for cells in _table_rows_after(src, "All prices are EUR"):
         if len(cells) != 5:
@@ -316,7 +316,7 @@ def parse_stripe_contract_plans(src: str) -> dict[str, dict]:
             "monthly_cents": None if "usage" in monthly else _money_cents(cells[2]),
             "yearly_cents": None if "usage" in annual else _money_cents(cells[3]),
         }
-    assert rows, "docs/tool-contracts/stripe.md price table parse produced no rows"
+    assert rows, "docs/tool-contracts/adyen.md price table parse produced no rows"
     return rows
 
 
@@ -487,15 +487,15 @@ def check_docs_matches_catalog(
 
 def check_doc_plan_tables_match_catalog(
     catalog: list[dict],
-    stripe_rows: dict[str, dict],
+    adyen_rows: dict[str, dict],
     lifecycle_rows: dict[str, dict],
 ) -> None:
-    """The stripe contract and billing-lifecycle plan tables restate the
+    """The adyen contract and billing-lifecycle plan tables restate the
     catalog; pin every row so the retired ladder cannot reappear."""
     for row in catalog:
         name = row["name"]
         for label, rows in (
-            ("docs/tool-contracts/stripe.md", stripe_rows),
+            ("docs/tool-contracts/adyen.md", adyen_rows),
             ("docs/architecture/billing-lifecycle.md", lifecycle_rows),
         ):
             doc = rows.get(name)
@@ -507,12 +507,12 @@ def check_doc_plan_tables_match_catalog(
                     f"{label} '{name}'.display_name = {doc['display_name']!r} but the "
                     f"canonical catalog says {row['display_name']!r}"
                 )
-        stripe = stripe_rows.get(name)
-        if stripe is not None and name != "payg":
+        adyen = adyen_rows.get(name)
+        if adyen is not None and name != "payg":
             for field in ("monthly_cents", "yearly_cents"):
-                if stripe[field] != row[field]:
+                if adyen[field] != row[field]:
                     fail(
-                        f"docs/tool-contracts/stripe.md '{name}'.{field} = {stripe[field]} "
+                        f"docs/tool-contracts/adyen.md '{name}'.{field} = {adyen[field]} "
                         f"but the canonical catalog says {row[field]}"
                     )
         lifecycle = lifecycle_rows.get(name)
@@ -660,7 +660,7 @@ def run_checks(root: Path) -> list[str]:
         verifier_src = (root / AI_VERIFIER.relative_to(ROOT)).read_text()
         sales_src = (root / SALES_KB.relative_to(ROOT)).read_text()
         docs_src = (root / DOCS_PRICING.relative_to(ROOT)).read_text()
-        stripe_src = (root / STRIPE_CONTRACT.relative_to(ROOT)).read_text()
+        adyen_src = (root / ADYEN_CONTRACT.relative_to(ROOT)).read_text()
         lifecycle_src = (root / BILLING_LIFECYCLE.relative_to(ROOT)).read_text()
 
         catalog = parse_catalog(catalog_src)
@@ -679,7 +679,7 @@ def run_checks(root: Path) -> list[str]:
         )
         check_doc_plan_tables_match_catalog(
             catalog,
-            parse_stripe_contract_plans(stripe_src),
+            parse_adyen_contract_plans(adyen_src),
             parse_billing_lifecycle_plans(lifecycle_src),
         )
         check_ai_knowledge_derives_from_catalog(production_only(knowledge_src))
@@ -713,7 +713,7 @@ _SOURCES = (
     SALES_KB,
     SALES_KB_REEXPORT,
     DOCS_PRICING,
-    STRIPE_CONTRACT,
+    ADYEN_CONTRACT,
     BILLING_LIFECYCLE,
     AI_TRAINING_PRICING,
 )
@@ -827,11 +827,11 @@ def _self_test() -> int:
         "PAYG tiers",
     )
     expect_failure(
-        "stripe contract table drift vs catalog",
-        STRIPE_CONTRACT,
+        "adyen contract table drift vs catalog",
+        ADYEN_CONTRACT,
         "| Pro | `pro` | €89 | €890/year | Yes |",
         "| Pro | `pro` | €65 | €650/year | Yes |",
-        "docs/tool-contracts/stripe.md 'pro'.monthly_cents",
+        "docs/tool-contracts/adyen.md 'pro'.monthly_cents",
     )
     expect_failure(
         "billing lifecycle table drift vs catalog",

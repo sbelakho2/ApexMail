@@ -115,7 +115,7 @@ of the 1768 surfaces has a probe.
   wrong content types, prototype-pollution keys, NUL/bidi/zero-width.
 - **state** — idempotency replay, concurrent double-submit (4 threads, DB invariant asserted),
   out-of-order transitions (login-before-verify, pause/resume on draft, edit-after-send, empty
-  audience), Stripe event replay (HMAC + event-id idempotency).
+  audience), Adyen event replay (HMAC + event-id idempotency).
 - **errors** — the error taxonomy: named {code,message} for malformed JSON, missing/invalid/empty
   required fields, unknown routes, invalid UUIDs, unknown enums; 401/403 taxonomy; duplicate 409;
   absent-resource 404 (no silent 204); no internal detail leakage.

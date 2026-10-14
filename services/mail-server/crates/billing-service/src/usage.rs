@@ -724,15 +724,15 @@ async fn load_metering_subscription_context(
     tenant_id: &str,
     recorded_at: DateTime<Utc>,
 ) -> Result<Option<MeteringSubscriptionContext>, UsageError> {
-    // Fix C — subscription state is written exclusively by the Stripe
-    // webhook handlers into stripe_subscriptions; the legacy `subscriptions`
-    // table is never populated, so enrichment must read stripe_subscriptions.
+    // Fix C — subscription state is written exclusively by the Adyen
+    // webhook handlers into adyen_subscriptions; the legacy `subscriptions`
+    // table is never populated, so enrichment must read adyen_subscriptions.
     let matched = sqlx::query_as::<_, MeteringSubscriptionContextRow>(
         r#"
-        SELECT stripe_subscription_id AS subscription_id,
+        SELECT adyen_subscription_id AS subscription_id,
                billing_cycle_start AS period_start,
                billing_cycle_end AS period_end
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start <= $2
@@ -750,10 +750,10 @@ async fn load_metering_subscription_context(
     let fallback = if matched.is_none() {
         sqlx::query_as::<_, MeteringSubscriptionContextRow>(
             r#"
-            SELECT stripe_subscription_id AS subscription_id,
+            SELECT adyen_subscription_id AS subscription_id,
                    billing_cycle_start AS period_start,
                    billing_cycle_end AS period_end
-            FROM stripe_subscriptions
+            FROM adyen_subscriptions
             WHERE tenant_id = $1
               AND status IN ('active', 'trialing', 'past_due')
             ORDER BY created_at DESC
@@ -1257,7 +1257,7 @@ fn usage_counter_key_anchored(
 /// `(cycle_year, cycle_month, cycle_start_utc)`. Walks back month-by-month
 /// from `at` to the most recent anchored cycle start (same day-of-month;
 /// clamped to the month's length so a 31st anchor still fires in shorter
-/// months — mirroring Stripe's own cycle proration semantics closely enough
+/// months — mirroring Adyen's own cycle proration semantics closely enough
 /// for a period LABEL). Shared by the counter-key builder, the Redis-outage
 /// fallback window (Fix F3) and the exported key helper (Fix F6) so every
 /// path agrees on the period in force.
@@ -1301,7 +1301,7 @@ fn anchored_date(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
 }
 
 /// The tenant's billing-cycle anchor date (most recent cycle start at or
-/// before `at`), when an active/trialing/past-due Stripe subscription
+/// before `at`), when an active/trialing/past-due Adyen subscription
 /// defines one.
 async fn tenant_cycle_anchor(
     pool: &PgPool,
@@ -1311,7 +1311,7 @@ async fn tenant_cycle_anchor(
     let start: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
         r#"
         SELECT billing_cycle_start
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL
@@ -1338,7 +1338,7 @@ async fn tenant_cycle_anchor(
 /// rollback path ([`rollback_usage_record`]) and the pending-event drain all
 /// increment.
 ///
-/// * Tenant with an active/trialing/past-due Stripe subscription (cycle
+/// * Tenant with an active/trialing/past-due Adyen subscription (cycle
 ///   anchor known): the billing-cycle-anchored key
 ///   `meter:rt:{tenant}:{event_type}:c{year}-{month:02}`, where `(year,
 ///   month)` labels the month the CURRENT cycle started in.
@@ -1719,7 +1719,7 @@ mod tests {
         // A 31st anchor clamps in short months: the January cycle runs
         // Jan 31 .. Feb 27 and the February cycle begins on the clamped
         // Feb 28 — one boundary per month, never a skipped or doubled
-        // cycle. (Stripe refreshes billing_cycle_start/end every cycle via
+        // cycle. (Adyen refreshes billing_cycle_start/end every cycle via
         // webhook, so the anchor's day self-corrects each period.)
         let anchor31 = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
         let jan_cycle_still = DateTime::parse_from_rfc3339("2026-02-27T23:59:59Z")
@@ -2440,7 +2440,7 @@ mod tests {
         let t_anchor = unique_tenant("usg_anchor");
         crate::test_support::seed_tenant(&env.pool, &t_anchor, "growth").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start)
+            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start)
              VALUES ($1, $2, 'growth', 'active', $3)",
         )
         .bind(&t_anchor)

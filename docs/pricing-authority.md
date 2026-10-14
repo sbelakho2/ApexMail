@@ -4,19 +4,19 @@
 
 ApexMail plan entitlements, prices, limits, and feature gates are operationally
 owned by [the billing plan seeds](../services/mail-server/crates/billing-service/src/plans.rs),
-the active `plans` database rows, and verified Stripe webhooks. The plan facts
+the active `plans` database rows, and verified Adyen webhooks. The plan facts
 themselves (names, prices, limits, overage rates) are defined once in the
 canonical [platform catalog](../services/mail-server/crates/platform-catalog/src/lib.rs);
 `plans.rs` seeds the runtime tables from it. The database
-rows also bind approved Stripe price IDs to plan IDs.
+rows also bind approved Adyen price IDs to plan IDs.
 
-A tenant receives paid access only after the verified Stripe subscription
+A tenant receives paid access only after the verified Adyen subscription
 lifecycle reports an entitled status. Contractually executed Enterprise
 agreements are the separate, audited exception.
 
 ## Public self-service boundary
 
-The public signup and Stripe Checkout paths support these self-service plans:
+The public signup and Adyen Checkout paths support these self-service plans:
 
 - `starter`
 - `pro`
@@ -38,7 +38,7 @@ runtime billing configuration:
 - [company/claims Rust constants](../../services/mail-server/crates/compliance/src/legal_entity.rs)
 
 The canonical company snapshot deliberately contains no plan catalog. It must
-not be used to calculate bills, grant entitlement, or configure Stripe.
+not be used to calculate bills, grant entitlement, or configure Adyen.
 
 ## Drift control
 

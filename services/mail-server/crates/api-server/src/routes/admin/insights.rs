@@ -656,10 +656,10 @@ async fn get_recommendations(
         recommendations.push(recommendation);
     }
 
-    // Check for stale trials (stripe_subscriptions — the table billing
+    // Check for stale trials (adyen_subscriptions — the table billing
     // webhooks write; the legacy `subscriptions` table has no writer)
     let stale_trials: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM stripe_subscriptions
+        "SELECT COUNT(*)::bigint FROM adyen_subscriptions
          WHERE status = 'trialing'
            AND created_at < NOW() - INTERVAL '30 days'",
     )
@@ -990,7 +990,7 @@ mod adversarial_tests {
 
         // Stale trial.
         sqlx::query(
-            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, status, created_at, updated_at)
+            "INSERT INTO adyen_subscriptions (tenant_id, adyen_subscription_id, status, created_at, updated_at)
              VALUES ($1, $2, 'trialing', NOW() - INTERVAL '45 days', NOW())",
         )
         .bind(&tenant)
@@ -1119,7 +1119,7 @@ mod adversarial_tests {
             .execute(&pool)
             .await
             .expect("cleanup queue");
-        sqlx::query("DELETE FROM stripe_subscriptions WHERE tenant_id = $1")
+        sqlx::query("DELETE FROM adyen_subscriptions WHERE tenant_id = $1")
             .bind(&tenant)
             .execute(&pool)
             .await

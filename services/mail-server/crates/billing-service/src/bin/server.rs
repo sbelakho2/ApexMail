@@ -32,9 +32,9 @@ struct Cli {
     #[arg(long, env = "SERVICE_AUTH_TOKEN", default_value = "")]
     service_auth_token: String,
 
-    /// Stripe webhook signing secret.
-    #[arg(long, env = "STRIPE_WEBHOOK_SECRET", default_value = "")]
-    stripe_webhook_secret: String,
+    /// Adyen webhook signing secret.
+    #[arg(long, env = "ADYEN_HMAC_KEY", default_value = "")]
+    adyen_hmac_key: String,
 
     /// Internal API base URL.
     #[arg(long, env = "API_BASE_URL", default_value = "http://localhost:3001")]
@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     // F1 (audit): bootstrap reconciliation — the `plans` table is converged
     // to the canonical `platform-catalog` catalog on every boot (insert
     // missing tiers, repair drifted prices/limits/features, deactivate
-    // rows that are not catalog plans). Idempotent; stripe price ids
+    // rows that are not catalog plans). Idempotent; adyen price ids
     // survive. The one-shot flag runs the same pass and exits, so ops can
     // converge a live deployment without a restart.
     let reconcile_report = billing_service::plans::reconcile_plans_with_catalog(&db).await?;
@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // E-SWEEP-TRIGGER: the on-demand overage sweep (the reconcile-plans
-    // one-shot pattern). Deliberately BEFORE the Stripe webhook-secret
+    // one-shot pattern). Deliberately BEFORE the Adyen webhook-secret
     // fail-fast: closing a period is an ops action that must work even when
     // the inbound webhook transport secret is absent — the sweep itself
     // needs only Postgres plus the Redis pool.
@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             redis_url: cli.redis_url,
             listen_addr: cli.listen.clone(),
             service_auth_token: cli.service_auth_token,
-            stripe_webhook_secret: cli.stripe_webhook_secret,
+            adyen_hmac_key: cli.adyen_hmac_key,
             api_base_url: cli.api_base_url,
             ..BillingConfig::default()
         };
@@ -160,18 +160,18 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // BS-001: Fail-fast if Stripe webhook secret is not configured.
-    // The /webhooks/stripe endpoint is exempt from service auth and relies
+    // BS-001: Fail-fast if Adyen webhook secret is not configured.
+    // The /webhooks/adyen endpoint is exempt from service auth and relies
     // entirely on HMAC-SHA256 signature verification. An empty secret would
     // cause all webhook requests to be rejected, but it's better to fail at
     // startup than silently drop webhook events in production.
-    if cli.stripe_webhook_secret.trim().is_empty() {
+    if cli.adyen_hmac_key.trim().is_empty() {
         tracing::error!(
-            "STRIPE_WEBHOOK_SECRET is not configured. Stripe webhook signature \
+            "ADYEN_HMAC_KEY is not configured. Adyen webhook signature \
              verification requires this secret. Set the environment variable or \
-             pass --stripe-webhook-secret."
+             pass --adyen-webhook-secret."
         );
-        anyhow::bail!("STRIPE_WEBHOOK_SECRET is required");
+        anyhow::bail!("ADYEN_HMAC_KEY is required");
     }
 
     // Migrations are managed externally (apexmail-db crate or deploy tooling).
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
         redis_url: cli.redis_url,
         listen_addr: cli.listen.clone(),
         service_auth_token: cli.service_auth_token,
-        stripe_webhook_secret: cli.stripe_webhook_secret,
+        adyen_hmac_key: cli.adyen_hmac_key,
         api_base_url: cli.api_base_url,
         ..BillingConfig::default()
     };
@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(db, redis, config);
     let app = routes::router(state.clone());
     maintenance::start_periodic_jobs(state.clone());
-    billing_service::stripe_webhooks::spawn_deadletter_retry_worker(state.clone());
+    billing_service::adyen_webhooks::spawn_deadletter_retry_worker(state.clone());
 
     // Bind & serve.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;

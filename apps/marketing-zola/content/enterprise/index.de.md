@@ -39,7 +39,7 @@ Qualifizierte Käufer können die aktuelle AVV, Unterauftragsverarbeiter-Informa
 
 ## Abrechnungslebenszyklus
 
-Enterprise ist nicht über den generischen öffentlichen Checkout kaufbar. Der Vertrag oder die genehmigte Abrechnungsregelung ist die maßgebliche Berechtigungsgrundlage. Für die öffentlichen Self-Service-Tarife sind Stripe Checkout und der verifizierte Stripe-Subscription-Webhook erforderlich, bevor ein kostenpflichtiger Tarif freigeschaltet wird.
+Enterprise ist nicht über den generischen öffentlichen Checkout kaufbar. Der Vertrag oder die genehmigte Abrechnungsregelung ist die maßgebliche Berechtigungsgrundlage. Für die öffentlichen Self-Service-Tarife sind Adyen Checkout und der verifizierte Adyen-Subscription-Webhook erforderlich, bevor ein kostenpflichtiger Tarif freigeschaltet wird.
 
 ## Kontakt
 

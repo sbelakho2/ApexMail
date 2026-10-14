@@ -510,7 +510,7 @@ mod tests {
         assert!(validator.is_blocked_hostname("kubernetes.default"));
 
         assert!(!validator.is_blocked_hostname("example.com"));
-        assert!(!validator.is_blocked_hostname("api.stripe.com"));
+        assert!(!validator.is_blocked_hostname("checkout-test.adyen.com/v71"));
     }
 
     #[tokio::test]

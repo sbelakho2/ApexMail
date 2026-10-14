@@ -108,7 +108,7 @@ All other columns are optional and will be mapped to standard or custom fields d
 You can store arbitrary key-value metadata on any contact using the `metadata` object. Metadata is useful for:
 
 - Enrichment data (industry, job title, company size)
-- Internal identifiers (CRM ID, Stripe customer ID)
+- Internal identifiers (CRM ID, Adyen customer ID)
 - Segmentation attributes (plan tier, signup cohort)
 
 Metadata values can be strings, numbers, or booleans. Nested objects are not supported.

@@ -39,7 +39,7 @@ A qualified buyer can request the current DPA, subprocessor information, securit
 
 ## Billing Lifecycle
 
-Enterprise is not purchasable through generic public Checkout. The contract or approved billing arrangement is the entitlement authority. For the public self-service plans, Stripe Checkout and the verified Stripe subscription webhook are required before a paid plan is granted.
+Enterprise is not purchasable through generic public Checkout. The contract or approved billing arrangement is the entitlement authority. For the public self-service plans, Adyen Checkout and the verified Adyen subscription webhook are required before a paid plan is granted.
 
 ## Contact
 

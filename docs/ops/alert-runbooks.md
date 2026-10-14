@@ -75,10 +75,10 @@ If an alert is caused by monitoring drift rather than a service failure, fix the
 - Check ingestion queues, worker consumers, and any Redis or database dependency needed for event flow.
 - Compare against recent frontend or redirect changes that could have stopped event generation at the source.
 
-<h2 id="stripe-webhook-failures">StripeWebhookFailures</h2>
+<h2 id="adyen-webhook-failures">AdyenWebhookFailures</h2>
 
 - Inspect webhook signature validation, payload parsing, and billing-side database writes.
-- Check whether Stripe is retrying the same events or whether new events are failing uniformly.
+- Check whether Adyen is retrying the same events or whether new events are failing uniformly.
 - If necessary, pause automated billing side effects until webhook correctness is restored.
 
 <h2 id="postgres-down">PostgresDown</h2>

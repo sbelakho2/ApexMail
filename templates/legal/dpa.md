@@ -104,7 +104,7 @@ https://apexmail.ee/subprocessors
 
 ### 6.1 Primary Location
 
-Core infrastructure processing in Germany and Finland. Optional Google and GitHub OAuth processing. Stripe payment processing. International transfers protected through applicable safeguards.
+Core infrastructure processing in Germany and Finland. Optional Google and GitHub OAuth processing. Adyen payment processing. International transfers protected through applicable safeguards.
 
 ### 6.2 Transfer Safeguards
 

@@ -82,10 +82,10 @@ services:
       CSRF_SECRET: ${CSRF_SECRET:-local-dev-csrf-secret-32chars-min}
       IMPERSONATION_SECRET: ${IMPERSONATION_SECRET:-local-dev-impersonation-secret-32chars}
       CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:-local-dev-control-plane-api-key-32chars}
-      # Dev Stripe webhook ingest parity (dogfood finding A, 2026-10-05):
-      # api-server mounts /webhooks/stripe only when this secret exists.
+      # Dev Adyen webhook ingest parity (dogfood finding A, 2026-10-05):
+      # api-server mounts /webhooks/adyen only when this secret exists.
       # Local-only literal; production supplies the real secret.
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-dev-stripe-webhook-secret-local-only-0123456789}
+      ADYEN_HMAC_KEY: ${ADYEN_HMAC_KEY:-dev-adyen-webhook-secret-local-only-0123456789}
       # Same transport selection as the worker: the REST send gate's domain
       # readiness reads EMAIL_TRANSPORT_TYPE (unset = SES, demanding
       # ses_verified on every sender domain — which rejected every REST send

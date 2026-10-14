@@ -409,7 +409,7 @@ class Client
      * and signs the message "{timestamp_millis}.{payload}" with HMAC-SHA256.
      *
      * Pass BOTH headers; the timestamp may be milliseconds (platform) or
-     * seconds and is auto-detected. The legacy Stripe-style single header
+     * seconds and is auto-detected. The legacy Adyen-style single header
      * "t=<seconds>,v1=<hex>" is still accepted for backwards compatibility,
      * as is an explicit $timestamp override (seconds or milliseconds).
      */

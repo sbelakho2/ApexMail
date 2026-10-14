@@ -110,7 +110,7 @@ backup is absent (RPO ≤ 24 h by design — there is no WAL archiving or PITR).
    untrusted; rely on the **offsite** encrypted mirror only.
 2. Rebuild on a fresh host (Scenario 1), restoring **only** from offsite
    backups. Rotate *every* secret during rebuild: database passwords,
-   `JWT_SECRET`, API key hash secret, webhook signing secret, Stripe keys,
+   `JWT_SECRET`, API key hash secret, webhook signing secret, Adyen keys,
    `INTERNAL_SERVICE_TOKEN`, KiwiCaptcha key, DKIM encryption key.
 3. After restore, audit for persistence: recently created admin/operator
    users, new API keys, changed SCIM/SSO bindings (SQL checks against

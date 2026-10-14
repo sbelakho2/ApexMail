@@ -48,12 +48,12 @@ See `docs/pricing.md` for the user-facing plan summary.
 - `checkout.session.completed` is recorded as an informational event only; it
 	does not change tenant status or grant an entitlement.
 - `customer.subscription.created` and `customer.subscription.updated` upsert
-	`stripe_subscriptions` after signature, tenant-binding, catalog-price, and
+	`adyen_subscriptions` after signature, tenant-binding, catalog-price, and
 	status-transition checks.
-- The live `plans` table persists monthly and yearly Stripe price IDs. A
+- The live `plans` table persists monthly and yearly Adyen price IDs. A
 	generic public Checkout request is accepted only for an active Starter, Pro,
 	Growth, or Scale price; Enterprise and PAYG use managed flows.
-- Only verified `active` and `trialing` Stripe subscriptions grant the mapped
+- Only verified `active` and `trialing` Adyen subscriptions grant the mapped
 	paid tenant plan. Incomplete, delinquent, paused, unpaid, and canceled
 	states resolve the tenant to `free`.
 - When a subscription becomes active, the billing service can auto-provision
@@ -62,17 +62,17 @@ See `docs/pricing.md` for the user-facing plan summary.
 ### Plan changes
 
 `POST /checkout` is the only self-service plan-change entry point. It accepts
-only a Stripe price ID that maps to an active self-service ApexMail plan and
-adds the tenant and resolved plan ID to Stripe Checkout and subscription
+only a Adyen price ID that maps to an active self-service ApexMail plan and
+adds the tenant and resolved plan ID to Adyen Checkout and subscription
 metadata.
 
 - Checkout creation does not change the tenant plan.
 - `customer.subscription.created` and `customer.subscription.updated` map the
-	confirmed Stripe price back to the active ApexMail plan and update the tenant
+	confirmed Adyen price back to the active ApexMail plan and update the tenant
 	in a transaction.
 - `POST /switch-plan` is a retained compatibility endpoint that always returns
 	`409 CHECKOUT_REQUIRED`; it cannot update tenant or subscription records.
-- Plan-change proration is calculated and applied by Stripe. Any ApexMail
+- Plan-change proration is calculated and applied by Adyen. Any ApexMail
   proration preview is informational only and never changes a subscription or
   tenant entitlement.
 
@@ -80,9 +80,9 @@ metadata.
 
 `POST /cancel` is retained as a compatibility endpoint and always returns
 `409 BILLING_PORTAL_REQUIRED`. A cancellation must be initiated through a
-Stripe billing portal session, then reconciled from a verified Stripe webhook.
+Adyen billing portal session, then reconciled from a verified Adyen webhook.
 
-Stripe `customer.subscription.deleted` events mark the known Stripe
+Adyen `customer.subscription.deleted` events mark the known Adyen
 subscription canceled and downgrade the matching tenant to `free`.
 
 ### Enterprise contracts
@@ -96,11 +96,11 @@ The contract cancellation API supports immediate termination only. It rejects a
 future effective date rather than pretending that a scheduler will later change
 access. Immediate termination is transactional: it downgrades the tenant to
 Free only when no other current active Enterprise contract remains. It never
-substitutes another paid plan or creates a Stripe entitlement locally.
+substitutes another paid plan or creates a Adyen entitlement locally.
 
 ## Proration Logic
 
-Plan-change previews are diagnostic estimates only; Stripe is the source of
+Plan-change previews are diagnostic estimates only; Adyen is the source of
 truth for charge and credit calculations.
 
 The current implementation:
@@ -194,14 +194,14 @@ VAT is calculated in `calculate_vat()`:
 
 ### Payment-state updates
 
-Stripe webhooks drive the current invoice state transitions:
+Adyen webhooks drive the current invoice state transitions:
 
 - `invoice.paid` marks matching invoices as paid and sets `paid_at`
 - `invoice.payment_failed` records dunning state and enqueues a `payment_failed` notification
 
 ## Operational Notes
 
-- Dedicated IP auto-provisioning is tied to active Stripe subscription state and the plan's `dedicated_ip_count` feature flag.
+- Dedicated IP auto-provisioning is tied to active Adyen subscription state and the plan's `dedicated_ip_count` feature flag.
 - The billing service also exposes PAYG pricing and estimate endpoints backed by `PaygPricing::default()`.
 - The pricing tiers for PAYG are `0-10k`, `10k-100k`, `100k-1M`, and `1M+` emails, with API-call billing after the first `100,000` monthly API calls.
 
@@ -212,6 +212,6 @@ Stripe webhooks drive the current invoice state transitions:
 - `services/mail-server/crates/billing-service/src/subscriptions.rs`
 - `services/mail-server/crates/billing-service/src/usage.rs`
 - `services/mail-server/crates/billing-service/src/invoices.rs`
-- `services/mail-server/crates/billing-service/src/stripe_webhooks.rs`
+- `services/mail-server/crates/billing-service/src/adyen_webhooks.rs`
 - `services/mail-server/crates/billing-service/src/types.rs`
 - `services/mail-server/crates/billing-service/src/config.rs`

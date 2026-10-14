@@ -52,8 +52,8 @@ We process personal data about the following categories of individuals.
 | Source | Directly from the account holder during registration and account management |
 | Purpose | Service provision, authentication, billing, support, security, compliance |
 | Legal basis | Contract performance (GDPR Art. 6(1)(b)); Legal obligation (Art. 6(1)(c)) — accounting/tax |
-| Processor or recipient | Stripe (payment processing), Hetzner (infrastructure), internal support team |
-| Location | EU data centers (Hetzner Germany, Finland) — account data; Stripe processes payment data per their own infrastructure |
+| Processor or recipient | Adyen (payment processing), Hetzner (infrastructure), internal support team |
+| Location | EU data centers (Hetzner Germany, Finland) — account data; Adyen processes payment data per their own infrastructure |
 | Retention | Duration of contract + 30 days; billing records 7 years per Estonian accounting law |
 | Rights | Access, rectification, erasure (subject to legal obligations), data portability, restriction |
 
@@ -103,7 +103,7 @@ We process login credentials (email, hashed password), session tokens, and IP ad
 
 ### 3.2 Billing
 
-Payment card details are processed by Stripe and never touch our servers. We receive tokens and transaction metadata. Invoice data (amounts, timestamps, VAT) is retained for 7 years per Estonian accounting law (Raamatupidamise seadus § 12).
+Payment card details are processed by Adyen and never touch our servers. We receive tokens and transaction metadata. Invoice data (amounts, timestamps, VAT) is retained for 7 years per Estonian accounting law (Raamatupidamise seadus § 12).
 
 ### 3.3 Analytics
 

@@ -2,7 +2,7 @@
 
 Reviewed revision: 1b18516935e008c2c57bbff31d54f0168dddcd5e. Compared with 0c27984d1d551a245d86869525dbe418ba6de62a: 70 commits, 598 changed files. A final branch check found 29 additional commits after the initially inspected 0c0111e; those changes were incorporated and the available checks repeated. References below are pinned to the final reviewed revision.
 
-The strongest release concerns are consent/tenant enforcement (F18/F55), caller-controlled SES attribution (F74), non-authoritative Stripe settlement and collection (F33/F34/F72/F73), broken contact persistence (F07/F70), and idempotency under replay/cancellation (F19/F20/F21). Fixing the reported SQL line alone is insufficient where the failure spans an operation, ledger or transport contract.
+The strongest release concerns are consent/tenant enforcement (F18/F55), caller-controlled SES attribution (F74), non-authoritative Adyen settlement and collection (F33/F34/F72/F73), broken contact persistence (F07/F70), and idempotency under replay/cancellation (F19/F20/F21). Fixing the reported SQL line alone is insufficient where the failure spans an operation, ledger or transport contract.
 
 P1 means a significant security, billing, data-integrity, common-flow or required-gate defect. P2 means a narrower feature/operational defect, including explicitly conditional components. No P0 or observed production compromise is asserted. F49/F50 were already closed in the preceding final review; do not count them as new repairs. F43 retains the pagination identity in the archived final F01–F69 report, correcting the older JSON title.
 
@@ -76,7 +76,7 @@ Rust was parsed for syntax, not compiled or executed: cargo/rustc and a live ful
 
 Canonical SQL migrations were applied on PostgreSQL 18.3 in PGlite 0.5.8, not through the production SQLx runner or production database. This validates the tested schema/query cases, not every live upgrade lineage, extension, lock schedule or driver result type.
 
-No live SMTP/SES send, Stripe charge/refund, SCIM IdP exchange, production database write, load/chaos exercise or deployment was performed.
+No live SMTP/SES send, Adyen charge/refund, SCIM IdP exchange, production database write, load/chaos exercise or deployment was performed.
 
 Python SDK tests ran using available dependencies and source paths; clean wheel installation and Go/Java/PHP/Ruby runtime suites were not executed.
 
@@ -324,7 +324,7 @@ P1
 
 partial
 
-Stripe items still have no complete mapping to the original local invoice
+Adyen items still have no complete mapping to the original local invoice
 
 Production code path
 
@@ -464,7 +464,7 @@ P1
 
 new
 
-Stripe invoice.paid infers a persisted invoice from a constant SELECT result
+Adyen invoice.paid infers a persisted invoice from a constant SELECT result
 
 Production code path
 
@@ -474,7 +474,7 @@ P1
 
 new
 
-Stripe paid callbacks allocate the full invoice total instead of the confirmed payment
+Adyen paid callbacks allocate the full invoice total instead of the confirmed payment
 
 Production code path
 
@@ -916,7 +916,7 @@ F08 · P1 · Invoice-address snapshots still fall back to mutable values field b
 
 Status: partial. Scope: Production code path. Prerequisites: None beyond the stated canonical fixture/environment.
 
-Files and exact locations: services/mail-server/crates/billing-service/src/accounting_export.rs:89; services/mail-server/crates/billing-service/src/accounting_export.rs:106; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1685.
+Files and exact locations: services/mail-server/crates/billing-service/src/accounting_export.rs:89; services/mail-server/crates/billing-service/src/accounting_export.rs:106; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1685.
 
 Already repaired: Migration 132 adds state/email; invoice writers and exports now include an address snapshot.
 
@@ -928,7 +928,7 @@ Choose snapshot versus legacy live fallback once for the whole invoice, not sepa
 
 Add a versioned snapshot DTO and require its successful parsing for issued documents. Surface corrupt snapshots for repair; allow an explicit, labelled legacy fallback only for invoices that genuinely predate snapshotting.
 
-Freeze every export-relevant identity field at issue time, including company/registry identity used by the export. Use the same snapshot contract in the API admin writer and Stripe importer.
+Freeze every export-relevant identity field at issue time, including company/registry identity used by the export. Use the same snapshot contract in the API admin writer and Adyen importer.
 
 Verification: Issue an invoice whose optional address/VAT fields are empty, edit those fields on the account, and export again: the historical values must be byte-for-byte unchanged.
 
@@ -990,7 +990,7 @@ F32 · P1 · Period pricing still reads mutable rates and defaults currency to E
 
 Status: partial. Scope: Production code path. Prerequisites: F01
 
-Files and exact locations: services/mail-server/crates/billing-service/src/overage.rs:118; services/mail-server/crates/billing-service/src/overage.rs:373; services/mail-server/crates/billing-service/src/overage.rs:491; services/mail-server/crates/billing-service/src/overage.rs:533; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1248; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1278; services/mail-server/migrations/137_billing_periods.sql:1.
+Files and exact locations: services/mail-server/crates/billing-service/src/overage.rs:118; services/mail-server/crates/billing-service/src/overage.rs:373; services/mail-server/crates/billing-service/src/overage.rs:491; services/mail-server/crates/billing-service/src/overage.rs:533; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1248; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1278; services/mail-server/migrations/137_billing_periods.sql:1.
 
 Already repaired: The immediate base-plan/override-plan mismatch was removed and an immutable period table was introduced.
 
@@ -1034,11 +1034,11 @@ Evidence: Source/control-flow review; service integration not executed.
 
 <a id="f72"></a>
 
-F72 · P1 · Stripe invoice.paid infers a persisted invoice from a constant SELECT result
+F72 · P1 · Adyen invoice.paid infers a persisted invoice from a constant SELECT result
 
 Status: new. Scope: Production code path. Prerequisites: F01
 
-Files and exact locations: services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1496; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1525.
+Files and exact locations: services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1496; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1525.
 
 Remaining defect: The paid handler executes a modifying CTE ending in SELECT 1, then treats rows_affected > 0 as proof that an invoice was updated. PostgreSQL returns CommandComplete SELECT 1 even when the matched/marked invoice CTEs contain zero rows. Counting that result cannot distinguish a real update from a missing invoice, so the fallback import can be bypassed.
 
@@ -1046,11 +1046,11 @@ Required changes:
 
 Return the actual marked/matched row count with SELECT COUNT(*)::bigint FROM marked and fetch_one/query_scalar, or fetch explicitly returned invoice identities. Never use the top-level constant SELECT command count as mutation evidence.
 
-If no owned invoice matches, invoke the intended external-invoice reconciliation/import path with a unique Stripe invoice identity. Preserve local overage mappings from F34.
+If no owned invoice matches, invoke the intended external-invoice reconciliation/import path with a unique Adyen invoice identity. Preserve local overage mappings from F34.
 
 Add a real SQLx integration assertion for both zero matches and one match; keep CTE allocation and invoice-state transitions transactionally linked.
 
-Verification: Process invoice.paid for an unknown Stripe invoice and then a known one. Each must persist exactly the intended invoice/allocation and replay without creating another logical invoice.
+Verification: Process invoice.paid for an unknown Adyen invoice and then a known one. Each must persist exactly the intended invoice/allocation and replay without creating another logical invoice.
 
 Evidence: Exact CTE returns one result row with zero invoices persisted; an independent PostgreSQL protocol probe returns CommandComplete SELECT 1. PGlite affectedRows is 0, showing adapter semantics differ. The SQLx branch consequence is source inference, not an executed Rust integration test.
 Primary references: PostgreSQL protocol — CommandComplete counts SELECT rows retrieved.
@@ -1073,7 +1073,7 @@ Split credit treatment into reduction of unpaid obligation and refund of previou
 
 Link credit notes to invoice lines, payment/refund allocations and a unique operation. Lock and derive the remaining credit/refund capacity from that ledger in the same transaction.
 
-Use a single outstanding-balance function in wallet application, Stripe collection, console, dunning and credit limits. Validate tenant/currency identity and prevent double application.
+Use a single outstanding-balance function in wallet application, Adyen collection, console, dunning and credit limits. Validate tenant/currency identity and prevent double application.
 
 Verification: Test unpaid, partially paid and fully paid invoices. A 20-unit credit must produce exactly 20 units of benefit across debt reduction plus refunds, under replay and concurrent requests.
 
@@ -1081,13 +1081,13 @@ Evidence: Database statement reproduction: debt 10000→8000 and wallet increase
 
 <a id="f73"></a>
 
-F73 · P1 · Stripe paid callbacks allocate the full invoice total instead of the confirmed payment
+F73 · P1 · Adyen paid callbacks allocate the full invoice total instead of the confirmed payment
 
 Status: new. Scope: Production code path. Prerequisites: F60, F72
 
-Files and exact locations: services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1507; services/mail-server/migrations/140_invoice_payment_allocations.sql:1.
+Files and exact locations: services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1507; services/mail-server/migrations/140_invoice_payment_allocations.sql:1.
 
-Remaining defect: The CTE records invoices.total as the Stripe allocation. It does not use the actual confirmed remaining payment. On a 100-unit invoice with 40 wallet units already allocated, a 60-unit Stripe payment records another 100 units. A zero-value paid invoice instead violates the allocation amount_cents > 0 CHECK and fails the callback.
+Remaining defect: The CTE records invoices.total as the Adyen allocation. It does not use the actual confirmed remaining payment. On a 100-unit invoice with 40 wallet units already allocated, a 60-unit Adyen payment records another 100 units. A zero-value paid invoice instead violates the allocation amount_cents > 0 CHECK and fails the callback.
 
 Required changes:
 
@@ -1097,33 +1097,33 @@ Handle zero-value invoices as settled without inserting a positive payment alloc
 
 Represent refunds, credits and wallet payments through the same balance model, retaining each independent payment identity and rejecting over-allocation instead of marking arbitrary totals paid.
 
-Verification: Test zero-value settlement, wallet 40 + Stripe 60, replay, a mismatched currency and a refund. Allocations must total actual paid value and leave the correct balance.
+Verification: Test zero-value settlement, wallet 40 + Adyen 60, replay, a mismatched currency and a refund. Allocations must total actual paid value and leave the correct balance.
 
 Evidence: Executed zero-value callback CTE fails with SQLSTATE 23514. Partial-wallet over-allocation follows directly from SELECT total in the allocation INSERT.
 
 <a id="f34"></a>
 
-F34 · P1 · Stripe items still have no complete mapping to the original local invoice
+F34 · P1 · Adyen items still have no complete mapping to the original local invoice
 
 Status: partial. Scope: Production code path. Prerequisites: F08, F32, F72, F73
 
-Files and exact locations: services/mail-server/crates/billing-service/src/overage.rs:1172; services/mail-server/crates/billing-service/src/overage.rs:1501; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1496; services/mail-server/migrations/139_invoices_stripe_item_id.sql:1.
+Files and exact locations: services/mail-server/crates/billing-service/src/overage.rs:1172; services/mail-server/crates/billing-service/src/overage.rs:1501; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:1496; services/mail-server/migrations/139_invoices_adyen_item_id.sql:1.
 
-Already repaired: Migration 139 separates stripe_invoice_item_id from stripe_invoice_id.
+Already repaired: Migration 139 separates adyen_invoice_item_id from adyen_invoice_id.
 
-Remaining defect: The ii_ identifier now has its own column, but creation still only posts a pending /invoiceitems entry. There is no explicit local-invoice → Stripe invoice/line mapping or finalization. invoice.paid matches stripe_invoice_id, which this path never sets. Final usage for a cancelled/PAYG customer can remain uncollected when no future subscription invoice occurs.
+Remaining defect: The ii_ identifier now has its own column, but creation still only posts a pending /invoiceitems entry. There is no explicit local-invoice → Adyen invoice/line mapping or finalization. invoice.paid matches adyen_invoice_id, which this path never sets. Final usage for a cancelled/PAYG customer can remain uncollected when no future subscription invoice occurs.
 
 Required changes:
 
-Create/finalize the intended Stripe invoice, or explicitly associate its line item with a known invoice; persist local invoice ID, external invoice/item IDs and confirmed payment identity.
+Create/finalize the intended Adyen invoice, or explicitly associate its line item with a known invoice; persist local invoice ID, external invoice/item IDs and confirmed payment identity.
 
-Include immutable local operation identity in Stripe metadata and idempotency keys, including usage kind. Reconcile callbacks by the persisted mapping rather than creating an unrelated second local invoice.
+Include immutable local operation identity in Adyen metadata and idempotency keys, including usage kind. Reconcile callbacks by the persisted mapping rather than creating an unrelated second local invoice.
 
-Freeze the external operation amount/currency before issuing its idempotency key. Retries with a changed wallet balance must not reuse one Stripe key with different request parameters.
+Freeze the external operation amount/currency before issuing its idempotency key. Retries with a changed wallet balance must not reuse one Adyen key with different request parameters.
 
 Provide an immediate final-usage collection path that does not rely on another renewal. Apply confirmed remaining amounts through the allocation ledger, together with F72/F73.
 
-Verification: Create a 100-unit invoice, pay 40 from wallet and 60 through Stripe, cancel the subscription and replay callbacks. Exactly the original invoice must become settled; no second logical invoice or orphan item may remain.
+Verification: Create a 100-unit invoice, pay 40 from wallet and 60 through Adyen, cancel the subscription and replay callbacks. Exactly the original invoice must become settled; no second logical invoice or orphan item may remain.
 
 Evidence: Source/control-flow review; service integration not executed.
 
@@ -1159,7 +1159,7 @@ Files and exact locations: services/mail-server/crates/billing-service/src/overa
 
 Already repaired: Collection outbox, checked commits and invoice payment allocations were added; external calls moved outside the wallet lock.
 
-Remaining defect: Claiming accepts pending and in_progress rows without an owner lease; claim failure only logs and collection proceeds. An outstanding-query error falls back to total minus this attempt’s wallet debit, ignoring prior payments/credits. Stripe failure is converted to None, then finalize_collection marks the outbox done and writes dunning_events only. No producer/consumer was found that turns dunning_entered into the dunning_records work the retry jobs actually read.
+Remaining defect: Claiming accepts pending and in_progress rows without an owner lease; claim failure only logs and collection proceeds. An outstanding-query error falls back to total minus this attempt’s wallet debit, ignoring prior payments/credits. Adyen failure is converted to None, then finalize_collection marks the outbox done and writes dunning_events only. No producer/consumer was found that turns dunning_entered into the dunning_records work the retry jobs actually read.
 
 Required changes:
 
@@ -1169,7 +1169,7 @@ Treat an unavailable authoritative balance as retryable failure. Never initiate 
 
 Only mark an outbox operation done after confirmed settlement or a committed handoff to an actual durable retry/dunning operation. Insert/update dunning_records (or an explicitly consumed invoice collection job) transactionally with the handoff.
 
-Propagate Stripe, database and commit errors. Verify affected counts, preserve pending work after any failure, and expose exhausted attempts rather than silently omitting rows after the attempt cap.
+Propagate Adyen, database and commit errors. Verify affected counts, preserve pending work after any failure, and expose exhausted attempts rather than silently omitting rows after the attempt cap.
 
 Verification: Inject failures after claim, wallet debit, external item creation, local ID persistence and finalize. Restart two collectors. Verify one external operation, correct remaining amount, and durable retry or settlement in every case.
 
@@ -1181,7 +1181,7 @@ F36 · P1 · Subscription updates still accept stale state across the new entitl
 
 Status: partial. Scope: Production code path. Prerequisites: F32
 
-Files and exact locations: services/mail-server/crates/billing-service/src/stripe_webhooks.rs:787; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:893; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:928; services/mail-server/crates/billing-service/src/stripe_webhooks.rs:969.
+Files and exact locations: services/mail-server/crates/billing-service/src/adyen_webhooks.rs:787; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:893; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:928; services/mail-server/crates/billing-service/src/adyen_webhooks.rs:969.
 
 Already repaired: The old-subscription deletion path now uses the tenant transaction and reconciles remaining active/trialing subscriptions.
 
@@ -1191,7 +1191,7 @@ Required changes:
 
 Read/lock current subscription and tenant entitlement state inside the same transaction after acquiring the tenant lock. Recheck ownership and permitted transition against that state.
 
-Persist an event/version ordering watermark or reconcile against authoritative current Stripe subscription state before applying stale-sensitive fields. Define same-timestamp ordering/replay behavior.
+Persist an event/version ordering watermark or reconcile against authoritative current Adyen subscription state before applying stale-sensitive fields. Define same-timestamp ordering/replay behavior.
 
 Cancel a superseded subscription only after proving the incoming event represents the current replacement. Snapshot closing periods from the locked state and recompute entitlement from the surviving authoritative subscriptions.
 
@@ -1508,7 +1508,7 @@ Replace this SUM with the shared authoritative invoice balance: invoice obligati
 
 Aggregate the entire eligible invoice set, independently of list pagination, and keep distinct currency buckets. Propagate an unavailable balance instead of displaying zero.
 
-Verification: Create a 100-unit invoice, allocate 40 wallet units and issue an eligible credit. The console, API, collector and dunning service must agree on the remaining amount before and after Stripe settlement.
+Verification: Create a 100-unit invoice, allocate 40 wallet units and issue an eligible credit. The console, API, collector and dunning service must agree on the remaining amount before and after Adyen settlement.
 
 Evidence: Exact console SQL on canonical fixtures returns 10000; allocation-aware SQL returns 6000.
 
@@ -1930,7 +1930,7 @@ services/mail-server/crates/billing-service/src/overage.rs
 
 F29: line 540; F31: line 118, line 285, line 292; F32: line 118, line 373, line 491, line 533; F33: line 1121, line 1133, line 1185, line 1247, line 1417, line 1461, line 1475; F34: line 1172, line 1501; F60: line 1079, line 1332
 
-services/mail-server/crates/billing-service/src/stripe_webhooks.rs
+services/mail-server/crates/billing-service/src/adyen_webhooks.rs
 
 F08: line 1685; F32: line 1248, line 1278; F34: line 1496; F36: line 787, line 893, line 928, line 969; F72: line 1496, line 1525; F73: line 1507
 
@@ -2022,7 +2022,7 @@ services/mail-server/migrations/137_billing_periods.sql
 
 F32: line 1
 
-services/mail-server/migrations/139_invoices_stripe_item_id.sql
+services/mail-server/migrations/139_invoices_adyen_item_id.sql
 
 F34: line 1
 
@@ -2130,9 +2130,9 @@ Cancellation locks the queue before the parent and rejects a worker-claimed oper
 
 F27
 
-Stripe subscription upsert omits the stored plan and preserves stale prices
+Adyen subscription upsert omits the stored plan and preserves stale prices
 
-The upsert now persists plan and updates Stripe price; existing subscription rows have a canonical backfill. Stale event ordering is separate under F36. services/mail-server/crates/billing-service/src/stripe_webhooks.rs:969. Evidence: Current source and applicable repository/schema checks; Rust integration not executed.
+The upsert now persists plan and updates Adyen price; existing subscription rows have a canonical backfill. Stale event ordering is separate under F36. services/mail-server/crates/billing-service/src/adyen_webhooks.rs:969. Evidence: Current source and applicable repository/schema checks; Rust integration not executed.
 
 F28
 
@@ -2144,7 +2144,7 @@ F30
 
 Renewal can erase the period before overage billing reads it
 
-Subscription transition now records the closing billing period inside the transaction before replacing live cycle fields. Snapshot completeness and eventual sweep progress remain F32/F31. services/mail-server/crates/billing-service/src/stripe_webhooks.rs:903. Evidence: Current source and applicable repository/schema checks; Rust integration not executed.
+Subscription transition now records the closing billing period inside the transaction before replacing live cycle fields. Snapshot completeness and eventual sweep progress remain F32/F31. services/mail-server/crates/billing-service/src/adyen_webhooks.rs:903. Evidence: Current source and applicable repository/schema checks; Rust integration not executed.
 
 F35
 
@@ -2276,7 +2276,7 @@ F66
 
 Hourly subscription cleanup targets a nonexistent persistence model
 
-The hourly cleanup no longer targets an unimplemented subscription saga table. Current subscription operations use their implemented Stripe checkout/portal and webhook persistence flows; no missing-table hourly cleanup remains. services/mail-server/crates/billing-service/src/maintenance.rs:337. Evidence: Current source and applicable repository/schema checks; Rust integration not executed.
+The hourly cleanup no longer targets an unimplemented subscription saga table. Current subscription operations use their implemented Adyen checkout/portal and webhook persistence flows; no missing-table hourly cleanup remains. services/mail-server/crates/billing-service/src/maintenance.rs:337. Evidence: Current source and applicable repository/schema checks; Rust integration not executed.
 
 F68
 
@@ -2320,11 +2320,11 @@ console_outstanding_ignores_confirmed_wallet_payment
 
 reproduced: {"console":[{"currency":"EUR","coalesce":10000}],"authoritative":{"outstanding":"6000"}}
 
-stripe_paid_reports_affected_row_when_no_invoice_exists
+adyen_paid_reports_affected_row_when_no_invoice_exists
 
 reproduced: {"pglite_affectedRows":0,"result_rows":[{"?column?":1}],"persisted_invoices":0,"note":"Top-level SELECT returns one row despite zero invoice mutations. The independent PostgreSQL wire probe returns SELECT 1; this is not an executed Rust/SQLx integration test."}
 
-stripe_paid_zero_invoice_fails_allocation_check
+adyen_paid_zero_invoice_fails_allocation_check
 
 reproduced: new row for relation "invoice_payment_allocations" violates check constraint "invoice_payment_allocations_amount_cents_check"
 
@@ -2340,7 +2340,7 @@ invoice_unique_violation_recovery_transaction_is_aborted
 
 reproduced: {"conflict":{"code":"23505","error":"duplicate key value violates unique constraint "uq_invoices_tenant_overage_period""},"recovery":{"code":"25P02","error":"current transaction is aborted, commands ignored until end of transaction block"}}
 
-stripe_paid_wire_command_tag_is_select_one
+adyen_paid_wire_command_tag_is_select_one
 
 reproduced: {"command_complete_tags":["SELECT 1"],"matched_invoices":0}
 
@@ -2360,7 +2360,7 @@ ses_delivery_canonical_timestamp_column_missing
 
 reproduced: column "delivered_at" of relation "messages" does not exist
 
-The duplicate-wallet-debit suspicion was discarded because uq_wallet_transactions_reference blocks the second debit and rolls back that attempt. F35 remains closed. F60 is different: a newly accepted unpaid-invoice credit both reduces debt and mints wallet value. The Stripe constant-SELECT check reports both PGlite’s affectedRows=0 and PostgreSQL’s SELECT 1 wire tag; the driver-sensitive distinction is not hidden.
+The duplicate-wallet-debit suspicion was discarded because uq_wallet_transactions_reference blocks the second debit and rolls back that attempt. F35 remains closed. F60 is different: a newly accepted unpaid-invoice credit both reduces debt and mints wallet value. The Adyen constant-SELECT check reports both PGlite’s affectedRows=0 and PostgreSQL’s SELECT 1 wire tag; the driver-sensitive distinction is not hidden.
 
 SQL triage classification
 
@@ -2420,7 +2420,7 @@ Run the canonical fresh migration gate and representative populated upgrade line
 
 Run controlled send/queue/provider tests for cancellation, Redis loss, handler timeout, DB failure, consent changes on another replica, every recipient terminal outcome and actual SMTP/SES MIME. Use sandbox providers and no real customer recipients.
 
-Run Stripe sandbox cases for unknown external invoices, wallet-partial settlement, zero-value invoices, credits/refunds, concurrent collectors, retry/restart and stale subscription events. Reconcile every invoice and payment to one ledger identity.
+Run Adyen sandbox cases for unknown external invoices, wallet-partial settlement, zero-value invoices, credits/refunds, concurrent collectors, retry/restart and stale subscription events. Reconcile every invoice and payment to one ledger identity.
 
 Run real IdP-shaped SCIM User/Group operations, clean installations and end-to-end contract suites for all supported SDKs, plus tenant ownership tests for each exposed integration.
 

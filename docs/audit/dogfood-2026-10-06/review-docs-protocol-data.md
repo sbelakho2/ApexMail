@@ -11,7 +11,7 @@
 
 ## Verdict summary
 
-The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly disclaims the ML pipeline; DSAR doc says "does not exist yet"; runbook index marks planned runbooks; `marketing_audit_v2.md` and `fixes.md` carry explicit superseded banners). **But the pricing surface is not honest against the shipped catalog**: `docs/pricing.md` sells capabilities the runtime classifies `NotYetImplemented`, publishes dedicated-IP counts that contradict the seed, and states a dedicated-IP price that contradicts the marketing calculator pinned by the repo's own validator. The Stripe contract and the billing-lifecycle doc still carry the pre-2026-09-08 price ladder. The root scratch corpus still contains the old ladder, and its retirement note says it was removed. The VDP claims a published `security.txt`/PGP key that are not shipped.
+The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly disclaims the ML pipeline; DSAR doc says "does not exist yet"; runbook index marks planned runbooks; `marketing_audit_v2.md` and `fixes.md` carry explicit superseded banners). **But the pricing surface is not honest against the shipped catalog**: `docs/pricing.md` sells capabilities the runtime classifies `NotYetImplemented`, publishes dedicated-IP counts that contradict the seed, and states a dedicated-IP price that contradicts the marketing calculator pinned by the repo's own validator. The Adyen contract and the billing-lifecycle doc still carry the pre-2026-09-08 price ladder. The root scratch corpus still contains the old ladder, and its retirement note says it was removed. The VDP claims a published `security.txt`/PGP key that are not shipped.
 
 **P0: 1 · P1: 9 · P2: 11 · P3: 13 · Verified-clean areas noted below.**
 
@@ -43,10 +43,10 @@ The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly
 - Why it matters: the dedicated-IP column is sold on the public pricing page; "3 included" vs runtime 1 (and 10 vs 3) is a money/entitlement promise the billing seed cannot honour, and the add-on price has three different values across surfaces, two of which are pinned simultaneously by the drift gate.
 - Fix: set Scale = 1 and Enterprise = 3 in both pricing docs; pick one add-on price, encode it in one place, and make `validate_pricing_drift.py` check it only once (drop the conflicting assertion); change `ses.md` to EUR.
 
-### P1-2 — `docs/tool-contracts/stripe.md` still publishes the pre-2026-09-08 price ladder
+### P1-2 — `docs/tool-contracts/adyen.md` still publishes the pre-2026-09-08 price ladder
 
-- Evidence: `docs/tool-contracts/stripe.md:16-24` — Starter €25/€250, Pro €65/€650, Growth €150/€1,500, Scale €350/€3,500, Enterprise €3,000/€30,000. Canonical: Developer €29/€290, Pro €89/€890, Growth €229/€2,290, Business €699/€6,990, Enterprise Cloud €1,750/€17,500 (`services/mail-server/crates/platform-catalog/src/lib.rs:52-107`; `plans.rs:129-249`). Display names are also stale (Starter/Scale/Enterprise vs Developer/Business/Enterprise Cloud).
-- Why it matters: the Stripe integration contract is the document engineers use to reason about which catalog prices may be sold through Checkout; it currently names prices that no longer exist. The drift validator checks only a few sentences of this file (`tools/validate_pricing_drift.py:690-704`), never the table.
+- Evidence: `docs/tool-contracts/adyen.md:16-24` — Starter €25/€250, Pro €65/€650, Growth €150/€1,500, Scale €350/€3,500, Enterprise €3,000/€30,000. Canonical: Developer €29/€290, Pro €89/€890, Growth €229/€2,290, Business €699/€6,990, Enterprise Cloud €1,750/€17,500 (`services/mail-server/crates/platform-catalog/src/lib.rs:52-107`; `plans.rs:129-249`). Display names are also stale (Starter/Scale/Enterprise vs Developer/Business/Enterprise Cloud).
+- Why it matters: the Adyen integration contract is the document engineers use to reason about which catalog prices may be sold through Checkout; it currently names prices that no longer exist. The drift validator checks only a few sentences of this file (`tools/validate_pricing_drift.py:690-704`), never the table.
 - Fix: regenerate the table from `platform-catalog` (or delete it and link to `docs/pricing.md`), and add the table to the drift gate.
 
 ### P1-3 — `docs/architecture/billing-lifecycle.md` plan catalog is the retired ladder
@@ -126,9 +126,9 @@ The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly
 - Evidence: `docs/user-guide/contacts.md:310` (`GET /v1/suppressions/export`) and `:352-356` (`GET /v1/contacts/:id/export` as the data-portability endpoint). Neither exists: the suppressions router has no export; `routes/contacts.rs` has no export handler (the shipped CSV export is the session form route `/web/contacts/export.csv`, `routes/web.rs:318`), and analytics exports live under `/v1/analytics/export`.
 - Fix: document the shipped export surfaces (or the GDPR DSAR workflow that actually exists), and drop `/v1/suppressions/export`.
 
-### P2-5 — architecture/tool-contract docs describe the removed TypeScript Stripe integration and a removed SES monitor module
+### P2-5 — architecture/tool-contract docs describe the removed TypeScript Adyen integration and a removed SES monitor module
 
-- Evidence: `docs/architecture/hybrid-email-infrastructure.md:83,173` and `docs/tool-contracts/ses.md:152` reference `stripe-integration.ts` (and `autoProvisionDedicatedIps()`); no such file exists anywhere in the repo. The shipped path is Rust: `billing-service/src/stripe_webhooks.rs:1136-1230` (`auto_provision_dedicated_ips_background`, `POST {api_base_url}/v1/dedicated-ips`). `docs/architecture/hybrid-email-infrastructure.md:151` references `ses_monitoring.rs` (does not exist); SNS/SES events are handled by `routes/ses_notifications.rs` (mounted at `/v1/ses`, `app.rs:498`).
+- Evidence: `docs/architecture/hybrid-email-infrastructure.md:83,173` and `docs/tool-contracts/ses.md:152` reference `adyen-integration.ts` (and `autoProvisionDedicatedIps()`); no such file exists anywhere in the repo. The shipped path is Rust: `billing-service/src/adyen_webhooks.rs:1136-1230` (`auto_provision_dedicated_ips_background`, `POST {api_base_url}/v1/dedicated-ips`). `docs/architecture/hybrid-email-infrastructure.md:151` references `ses_monitoring.rs` (does not exist); SNS/SES events are handled by `routes/ses_notifications.rs` (mounted at `/v1/ses`, `app.rs:498`).
 - Why it matters: the brief's "docs describing removed or renamed systems" class — engineers grepping for the named files find nothing.
 - Fix: replace both references with the shipped Rust files/functions.
 
@@ -199,7 +199,7 @@ The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly
 - **`docs/compliance/dsar-rate-limiting.md`** explicitly labels DSAR as unimplemented ("`dsar.rs` … does not exist", table says "planned — does not exist yet") — no violation.
 - **`docs/architecture/rate-limit-budgets.md` / `rate-limit-budget-enforcement.md`** are written as design/plan docs ("currently enforced globally… this document defines…"), consistent with `rate-limiter/src/budget.rs` being absent.
 - **`docs/architecture/control-plane-data-contracts.md`** is explicitly "Historical migration inventory", so its `/api/*` contracts are exempt.
-- **`marketing_audit_v2.md`** carries a superseded banner (historical only); **`fixes.md`** carries a "HISTORICAL — DO NOT USE" banner with three explicit CORRECTION notes. Spot checks of its "FIXED" claims: API Explorer rename is real (`apps/marketing-zola/templates/api-explorer.html`, no "Execute Request"/"API Console" remnants), ODR removal is real (no ODR references in terms), DPA subprocessors are real (Hetzner/Google/GitHub/Stripe at `content/dpa/index.md:48-53`). Its item-8 reference `docs/api/index.md` no longer exists — excused by the banner but worth knowing.
+- **`marketing_audit_v2.md`** carries a superseded banner (historical only); **`fixes.md`** carries a "HISTORICAL — DO NOT USE" banner with three explicit CORRECTION notes. Spot checks of its "FIXED" claims: API Explorer rename is real (`apps/marketing-zola/templates/api-explorer.html`, no "Execute Request"/"API Console" remnants), ODR removal is real (no ODR references in terms), DPA subprocessors are real (Hetzner/Google/GitHub/Adyen at `content/dpa/index.md:48-53`). Its item-8 reference `docs/api/index.md` no longer exists — excused by the banner but worth knowing.
 - **Repo-native checks run and passing**: `tools/check_docs_architecture_truth.py` (261 docs scanned, 3 ROADMAP exemptions), `tools/check_knowledge_consistency.py`, `tools/check_claim_expiry.py`, `tools/check_capability_claims.py`, `tools/check_feature_entitlements.py`, `tools/check_eval_corpora.py`, `data/system_prompts.schema.json` manual validation (missing `jsonschema` module, checked by hand: schemaVersion/prompt shape/pattern OK).
 - **`docs/api/openapi.yaml`** parses (OpenAPI 3.1.0, 203 paths).
 - **JSONL corpus internal validity**: all 18 root `data/*.jsonl` parse line-by-line with zero invalid lines.
@@ -208,7 +208,7 @@ The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly
 
 ## NOT-VERIFIED
 
-- **Live external state**: HSTS served by `https://apexmail.ee`, DNS records, Hetzner/Stripe console configuration, whether `apexmail.ee/.well-known/security.txt` returns 200 today (no network calls made). The repo-side evidence (P1-9) shows the artifact is not shipped; live state may differ if deployed out-of-band.
+- **Live external state**: HSTS served by `https://apexmail.ee`, DNS records, Hetzner/Adyen console configuration, whether `apexmail.ee/.well-known/security.txt` returns 200 today (no network calls made). The repo-side evidence (P1-9) shows the artifact is not shipped; live state may differ if deployed out-of-band.
 - **Hetzner cost table** (`docs/tool-contracts/hetzner.md:149-168`, €24/CAX41, €4/floating IP): external pricing, not verifiable offline; marked with its own "last verified 2026-05-10".
 - **"8 security crates, 230 tests"** (`docs/architecture/overview.md:203`): test count not verified (no test run performed in this read-only pass).
 - **Rust/PHP test-suite execution for risk-v1**: verified by reading consumers, byte-comparing resources, and recomputing fixtures — the suites themselves were not run.
@@ -232,7 +232,7 @@ The docs tree is mostly honest about its own uncertainty (ai-pipeline explicitly
 | `docs/domains/`, `docs/sending/`, `docs/user-guide/`, `docs/getting-started/`, `docs/glossary/`, `docs/enterprise/` | 50 | Claim-scan (paths/envs/routes/scripts); targeted reads: enterprise sub-accounts/template-approval, user-guide/contacts |
 | `docs/operations/` + `runbooks/` | 26 | Full read: cache-warming; claim-scan (scripts/commands) across all; targeted: emergency-key-revocation |
 | `docs/security/` | 17 | Full read: hsts-preload, kiwicaptcha-login, framework-status, vulnerability-disclosure-program (targeted); claim-scan across all; rbac/pgp targeted |
-| `docs/tool-contracts/` | 8 | Full read: stripe; targeted: ses, hetzner, prometheus; claim-scan across all |
+| `docs/tool-contracts/` | 8 | Full read: adyen; targeted: ses, hetzner, prometheus; claim-scan across all |
 | `docs/marketing/` | 15 | Full read: pricing.md (targeted) + both checkers executed; comparison freshness executed |
 | `docs/adr/`, `docs/analysis/`, `docs/design/`, `docs/eval/`, `docs/evaluation/`, `docs/migration/`, `docs/engineering/`, `docs/ops/` | 30 | Claim-scan; ADR numbering inspected; eval corpora checked by repo gate |
 | `protocol/` | 14 | Full verification of execution-v1 + risk-v1 (see above) |

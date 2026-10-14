@@ -22,9 +22,9 @@ pub struct BillingConfig {
     pub metering_flush_interval_ms: u64,
     /// Service-to-service auth token.
     pub service_auth_token: String,
-    /// Stripe webhook signing secret.
+    /// Adyen webhook signing secret.
     #[serde(default)]
-    pub stripe_webhook_secret: String,
+    pub adyen_hmac_key: String,
     /// Internal API base URL used for dedicated IP provisioning.
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
@@ -94,7 +94,7 @@ impl Default for BillingConfig {
             metering_batch_size: default_metering_batch_size(),
             metering_flush_interval_ms: default_metering_flush_interval_ms(),
             service_auth_token: String::new(),
-            stripe_webhook_secret: String::new(),
+            adyen_hmac_key: String::new(),
             api_base_url: default_api_base_url(),
             overage_rate_per_email_millicents: default_overage_rate_millicents(),
             max_proration_charge_cents: default_max_proration_charge_cents(),

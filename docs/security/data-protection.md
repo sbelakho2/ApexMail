@@ -251,7 +251,7 @@ Sub-processor details are available on request and in our Data Processing Agreem
 
 - Each sub-processor has a Data Processing Agreement (DPA) in place.
 - Sub-processor changes are communicated to customers with 30-day advance notice.
-- Stripe processes payment data under PCI DSS compliance; ApexMail does not store raw credit card numbers.
+- Adyen processes payment data under PCI DSS compliance; ApexMail does not store raw credit card numbers.
 
 ---
 

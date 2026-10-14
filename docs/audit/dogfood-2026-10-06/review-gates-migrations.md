@@ -653,7 +653,7 @@ Ledger totals: 41 `[x]`, 14 `[p]`, 161 `[s]` = 216 files.
 - [p] 071_fix_live_sim_schema.sql — ADD COLUMN guarded by to_regclass + DROP COLUMN IF EXISTS (verified clean)
 - [s] 072_seed_system_tenant_domain.sql
 - [s] 073_fix_messages_table_schema.sql
-- [s] 074_stripe_billing_schema_fixes.sql
+- [s] 074_adyen_billing_schema_fixes.sql
 - [s] 075_create_missing_tables.sql
 - [s] 076_fix_column_mismatches.sql
 - [s] 077_add_hipaa_event_signature.sql
@@ -713,11 +713,11 @@ Ledger totals: 41 `[x]`, 14 `[p]`, 161 `[s]` = 216 files.
 - [s] 132_billing_addresses_state_email.sql
 - [s] 133_abuse_reports_status.sql
 - [s] 134_credit_notes.sql
-- [x] 135_stripe_subscriptions_plan_backfill.sql
+- [x] 135_adyen_subscriptions_plan_backfill.sql
 - [s] 136_invoices_unique_overage_period.sql
 - [s] 137_billing_periods.sql
 - [x] 138_invoice_collection_outbox.sql — dedup key UNIQUE(invoice_id, operation) present
-- [s] 139_invoices_stripe_item_id.sql
+- [s] 139_invoices_adyen_item_id.sql
 - [s] 140_invoice_payment_allocations.sql
 - [s] 150_contacts_tags_canonical.sql
 - [x] 153_idempotency_ledger_queue_metadata_repair.sql — durable idempotency ledger + webhook claim token; scoped UPDATE
@@ -742,7 +742,7 @@ Ledger totals: 41 `[x]`, 14 `[p]`, 161 `[s]` = 216 files.
 - [s] 181_tenant_restrictions.sql
 - [s] 182_abuse_reports_legacy_reconciliation.sql
 - [s] 183_credit_notes_disposition.sql
-- [s] 184_stripe_subscription_event_watermark.sql
+- [s] 184_adyen_subscription_event_watermark.sql
 - [s] 185_invoices_billing_registry_code.sql
 - [p] 186_recipient_delivery_state.sql
 - [p] 187_message_category.sql

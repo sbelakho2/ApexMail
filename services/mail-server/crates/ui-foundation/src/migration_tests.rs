@@ -16,7 +16,7 @@ use crate::ssr;
 
 const UI_RUST_MIGRATION_PLAN_JSON: &str =
     include_str!("../../../../../docs/development/ui-rust-migration-plan.json");
-const STRIPE_TOOL_CONTRACT_MD: &str = include_str!("../../../../../docs/tool-contracts/stripe.md");
+const ADYEN_TOOL_CONTRACT_MD: &str = include_str!("../../../../../docs/tool-contracts/adyen.md");
 
 fn rendered_routes() -> Vec<ssr::SsrRoute> {
     ssr::ssr_routes()
@@ -51,20 +51,20 @@ fn assert_no_unmigrated_markers(label: &str, html: &str) {
     }
 }
 
-fn assert_no_stripe_browser_embed(label: &str, html: &str) {
+fn assert_no_adyen_browser_embed(label: &str, html: &str) {
     let forbidden = [
-        "https://js.stripe.com",
-        "js.stripe.com",
-        "checkout.stripe.com",
+        "https://js.adyen.com",
+        "js.adyen.com",
+        "checkout.adyen.com",
         "/api/billing/checkout",
         "/api/checkout/create",
-        "/webhooks/stripe",
+        "/webhooks/adyen",
     ];
 
     for marker in forbidden {
         assert!(
             !html.contains(marker),
-            "{} should not embed Stripe browser integration marker {:?}",
+            "{} should not embed Adyen browser integration marker {:?}",
             label,
             marker
         );
@@ -226,7 +226,7 @@ fn migration_all_93_routes_have_view_functions() {
 }
 
 #[test]
-fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
+fn migration_docs_define_rust_ui_and_current_adyen_boundary() {
     assert!(
         UI_RUST_MIGRATION_PLAN_JSON.contains("\"next\": \"axum-plus-leptos-router\""),
         "migration plan no longer requires axum + Leptos router replacement"
@@ -240,18 +240,18 @@ fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
         "migration plan no longer requires Rust-native primitive replacement"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("ApexMail creates a Stripe Checkout Session in subscription mode"),
-        "Stripe tool contract no longer documents the current server-side Stripe integration boundary"
+        ADYEN_TOOL_CONTRACT_MD.contains("ApexMail creates a Adyen Checkout Session in subscription mode"),
+        "Adyen tool contract no longer documents the current server-side Adyen integration boundary"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD
-            .contains("**Verification:** Stripe signature HMAC plus timestamp tolerance"),
-        "Stripe tool contract no longer documents manual webhook verification ownership"
+        ADYEN_TOOL_CONTRACT_MD
+            .contains("**Verification:** Adyen signature HMAC plus timestamp tolerance"),
+        "Adyen tool contract no longer documents manual webhook verification ownership"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD
-            .contains("Stripe redirects the customer to the approved return URL"),
-        "Stripe tool contract no longer documents hosted Stripe checkout"
+        ADYEN_TOOL_CONTRACT_MD
+            .contains("Adyen redirects the customer to the approved return URL"),
+        "Adyen tool contract no longer documents hosted Adyen checkout"
     );
 }
 
@@ -452,11 +452,11 @@ fn migration_all_rendered_routes_are_free_of_unmigrated_runtime_markers() {
 }
 
 #[test]
-fn migration_ui_routes_do_not_embed_stripe_browser_flow() {
+fn migration_ui_routes_do_not_embed_adyen_browser_flow() {
     for route in rendered_routes() {
         let label = format!("[{}] {}", route.surface, route.pattern);
         let html = render_or_panic(&route);
-        assert_no_stripe_browser_embed(&label, &html);
+        assert_no_adyen_browser_embed(&label, &html);
     }
 }
 
@@ -549,7 +549,7 @@ fn migration_unknown_routes_are_rejected_for_every_surface() {
     let unknown = [
         "/definitely-missing",
         "/billing/checkout",
-        "/webhooks/stripe",
+        "/webhooks/adyen",
         "/_next/static/app.js",
     ];
     let surfaces = ["web", "control-plane", "marketing", "marketing-zola"];

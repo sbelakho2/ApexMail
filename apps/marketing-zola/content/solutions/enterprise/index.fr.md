@@ -47,9 +47,9 @@ L'équipe commerciale confirmera le modèle de déploiement disponible, les cond
 
 ## Cycle de vie de la facturation et des droits
 
-L'accès Enterprise est créé via le processus contractuel approuvé. Pour les forfaits en libre-service, un forfait sélectionné n'est activé qu'après que Stripe a confirmé la facturation et qu'ApexMail a traité le webhook d'abonnement vérifié. Une simple page de fin de Checkout n'accorde pas de droit.
+L'accès Enterprise est créé via le processus contractuel approuvé. Pour les forfaits en libre-service, un forfait sélectionné n'est activé qu'après que Adyen a confirmé la facturation et qu'ApexMail a traité le webhook d'abonnement vérifié. Une simple page de fin de Checkout n'accorde pas de droit.
 
-Les modifications et résiliations d'abonnements existants passent par le portail de facturation Stripe. Les modifications, renouvellements et résiliations Enterprise suivent le contrat signé.
+Les modifications et résiliations d'abonnements existants passent par le portail de facturation Adyen. Les modifications, renouvellements et résiliations Enterprise suivent le contrat signé.
 
 ## Matériel d'achat
 

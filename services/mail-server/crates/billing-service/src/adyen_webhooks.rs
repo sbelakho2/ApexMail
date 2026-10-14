@@ -24,14 +24,14 @@ use crate::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const DEADLETTER_EVENT_PREFIX: &str = "stripe:deadletter:event:";
-const DEADLETTER_INDEX_KEY: &str = "stripe:deadletter:index";
+const DEADLETTER_EVENT_PREFIX: &str = "adyen:deadletter:event:";
+const DEADLETTER_INDEX_KEY: &str = "adyen:deadletter:index";
 const DEADLETTER_RETENTION_SECONDS: usize = 35 * 24 * 60 * 60;
 const DEADLETTER_RETENTION_MS: i64 = (DEADLETTER_RETENTION_SECONDS as i64) * 1000;
-const DEADLETTER_RETRY_INDEX_KEY: &str = "stripe:deadletter:retry:index";
+const DEADLETTER_RETRY_INDEX_KEY: &str = "adyen:deadletter:retry:index";
 const DEADLETTER_MAX_RETRIES: u32 = 5;
 /// Maximum stored webhook body size (4 KiB). Larger bodies are truncated
-/// before the Redis SET so a single oversized Stripe payload cannot bloat
+/// before the Redis SET so a single oversized Adyen payload cannot bloat
 /// every deadletter entry. Truncated bodies are kept for debugging but are
 /// never replayed — the retry scheduler skips entries whose body was cut.
 const DEADLETTER_MAX_BODY_BYTES: usize = 4 * 1024;
@@ -41,27 +41,27 @@ const DEADLETTER_RETRY_POLL_INTERVAL_SECS: u64 = 60;
 const DEADLETTER_RETRY_BACKOFF_SECONDS: [i64; 5] = [300, 900, 1800, 3600, 7200];
 /// Maximum number of deadletter entries to retry per batch.
 const DEADLETTER_RETRY_BATCH_SIZE: usize = 10;
-const STRIPE_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
+const ADYEN_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
 const DUNNING_STATUS_CACHE_TTL_SECONDS: u64 = 300;
 
 static DUNNING_CONFIG_TABLE_ENSURED: OnceLock<()> = OnceLock::new();
 
-/// The Stripe webhook ingest route. Mounted by the billing-service binary
+/// The Adyen webhook ingest route. Mounted by the billing-service binary
 /// AND by api-server (which nests it on the public rate-limited stack when
-/// `STRIPE_WEBHOOK_SECRET` is configured) — the billing-service binary has
+/// `ADYEN_HMAC_KEY` is configured) — the billing-service binary has
 /// no container in any deployed topology, so api-server is the live ingest
 /// surface (dogfood finding A, 2026-10-05).
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/webhooks/stripe", post(handle_stripe_webhook))
+    Router::new().route("/webhooks/adyen", post(handle_adyen_webhook))
 }
 
-async fn handle_stripe_webhook(
+async fn handle_adyen_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let signature = headers
-        .get("stripe-signature")
+        .get("adyen-hmac-signature")
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -82,7 +82,7 @@ async fn handle_stripe_webhook(
         )
         .await;
 
-        return json_error(StatusCode::BAD_REQUEST, "Missing stripe-signature header");
+        return json_error(StatusCode::BAD_REQUEST, "Missing adyen-hmac-signature header");
     };
 
     let event_id = match extract_event_id(&body) {
@@ -150,7 +150,7 @@ async fn handle_stripe_webhook(
                 .await;
             }
 
-            error!(event_id = %event_id, error = %error_message, "stripe webhook processing failed");
+            error!(event_id = %event_id, error = %error_message, "adyen webhook processing failed");
             json_error(error.http_status(), "Webhook processing failed")
         }
     }
@@ -184,7 +184,7 @@ async fn record_deadletter(
     let prepared = prepare_deadletter(entry, body, signature, Utc::now());
 
     if let Err(error) = write_prepared_deadletter_to_redis(state, &prepared).await {
-        error!(error = %error, "failed to write stripe dead letter");
+        error!(error = %error, "failed to write adyen dead letter");
     }
 }
 
@@ -266,7 +266,7 @@ async fn write_prepared_deadletter_to_redis(
     prepared: &PreparedDeadletter,
 ) -> Result<(), String> {
     let mut conn = state.redis.get().await.map_err(|error| {
-        format!("failed to acquire redis connection for stripe dead letter: {error}")
+        format!("failed to acquire redis connection for adyen dead letter: {error}")
     })?;
 
     let mut pipe = redis::pipe();
@@ -305,7 +305,7 @@ async fn write_prepared_deadletter_to_redis(
 
     pipe.query_async::<()>(&mut conn)
         .await
-        .map_err(|error| format!("failed to write stripe dead letter: {error}"))
+        .map_err(|error| format!("failed to write adyen dead letter: {error}"))
 }
 
 async fn remove_prepared_deadletter_from_redis(state: &AppState, event_key: &str) {
@@ -328,7 +328,7 @@ async fn remove_prepared_deadletter_from_redis(state: &AppState, event_key: &str
             .query_async::<()>(&mut conn)
             .await
         {
-            error!(error = %error, event_key, "failed to compensate stripe dead letter after DB commit failure");
+            error!(error = %error, event_key, "failed to compensate adyen dead letter after DB commit failure");
         }
     }
 }
@@ -357,12 +357,12 @@ async fn process_webhook(
 ) -> Result<ProcessWebhookResult, ProcessWebhookError> {
     // A deployment without a configured secret cannot verify anything; that
     // is SERVER misconfiguration, not a bad delivery. Classify it as
-    // retryable (503) so Stripe keeps replaying — a 400 would make Stripe
+    // retryable (503) so Adyen keeps replaying — a 400 would make Adyen
     // treat the event as permanently rejected and drop every billing event
     // that arrived while the operator was fixing the config.
     let event = match verify_and_parse_event(state, payload, signature) {
         Ok(event) => event,
-        Err(error) if error == "Stripe webhook secret is not configured" => {
+        Err(error) if error == "Adyen webhook secret is not configured" => {
             return Err(ProcessWebhookError::RetryLater(error));
         }
         Err(error) => return Err(ProcessWebhookError::RecordDeadletter(error)),
@@ -371,7 +371,7 @@ async fn process_webhook(
     match claim_webhook_event(state, &event.id, &event.event_type).await? {
         WebhookEventClaim::Claimed => {}
         WebhookEventClaim::AlreadyProcessed => {
-            info!(event_id = %event.id, event_type = %event.event_type, "duplicate stripe webhook already processed");
+            info!(event_id = %event.id, event_type = %event.event_type, "duplicate adyen webhook already processed");
             return Ok(ProcessWebhookResult {
                 event_type: event.event_type,
                 processed: false,
@@ -379,11 +379,11 @@ async fn process_webhook(
         }
         WebhookEventClaim::AlreadyPending => {
             // Fix G — acknowledging a concurrently-pending event with a 200
-            // makes Stripe stop retrying; if the worker that claimed it then
+            // makes Adyen stop retrying; if the worker that claimed it then
             // crashes, the row is stuck in `pending` forever. Return a
-            // retryable status instead so Stripe keeps retrying (and the
+            // retryable status instead so Adyen keeps retrying (and the
             // stale-pending reclaimer below eventually resets the row).
-            info!(event_id = %event.id, event_type = %event.event_type, "stripe webhook is already being processed by another worker; asking Stripe to retry");
+            info!(event_id = %event.id, event_type = %event.event_type, "adyen webhook is already being processed by another worker; asking Adyen to retry");
             return Err(ProcessWebhookError::RetryLater(format!(
                 "event {} is pending on another worker",
                 event.id
@@ -394,19 +394,19 @@ async fn process_webhook(
     let event_id = event.id.clone();
     let event_type = event.event_type.clone();
 
-    match handle_stripe_event(state, &event).await {
+    match handle_adyen_notification(state, &event).await {
         Ok(()) => {
             sqlx::query(
                 r#"
-                UPDATE stripe_webhook_events
+                UPDATE adyen_webhook_events
                 SET status = 'processed', processed_at = NOW(), updated_at = NOW()
-                WHERE stripe_event_id = $1
+                WHERE adyen_notification_id = $1
                 "#,
             )
             .bind(&event_id)
             .execute(&state.db)
             .await
-            .map_err(|error| format!("Failed to mark Stripe webhook as processed: {error}"))?;
+            .map_err(|error| format!("Failed to mark Adyen webhook as processed: {error}"))?;
 
             Ok(ProcessWebhookResult {
                 event_type,
@@ -426,7 +426,7 @@ async fn process_webhook(
                 error!(
                     event_id = %event_id,
                     error = %deadletter_error,
-                    "failed to persist stripe webhook failure/deadletter atomically"
+                    "failed to persist adyen webhook failure/deadletter atomically"
                 );
             }
 
@@ -458,34 +458,34 @@ async fn record_failed_webhook_deadletter_atomic(
 
     let mut tx =
         state.db.begin().await.map_err(|error| {
-            format!("Failed to begin Stripe webhook failure transaction: {error}")
+            format!("Failed to begin Adyen webhook failure transaction: {error}")
         })?;
 
     let update_result = sqlx::query(
         r#"
-        UPDATE stripe_webhook_events
+        UPDATE adyen_webhook_events
         SET status = 'failed', error = $2, updated_at = NOW()
-        WHERE stripe_event_id = $1
+        WHERE adyen_notification_id = $1
         "#,
     )
     .bind(event_id)
     .bind(error_message)
     .execute(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to mark Stripe webhook as failed: {error}"))?;
+    .map_err(|error| format!("Failed to mark Adyen webhook as failed: {error}"))?;
 
     if update_result.rows_affected() == 0 {
         tx.rollback().await.map_err(|error| {
-            format!("Failed to roll back empty Stripe webhook failure transaction: {error}")
+            format!("Failed to roll back empty Adyen webhook failure transaction: {error}")
         })?;
         return Err(format!(
-            "Failed to mark Stripe webhook {event_id} as failed: event row was not found"
+            "Failed to mark Adyen webhook {event_id} as failed: event row was not found"
         ));
     }
 
     if let Err(error) = write_prepared_deadletter_to_redis(state, &prepared).await {
         if let Err(rollback_error) = tx.rollback().await {
-            error!(event_id, error = %rollback_error, "failed to roll back Stripe webhook failure transaction after Redis deadletter error");
+            error!(event_id, error = %rollback_error, "failed to roll back Adyen webhook failure transaction after Redis deadletter error");
         }
         return Err(error);
     }
@@ -493,7 +493,7 @@ async fn record_failed_webhook_deadletter_atomic(
     if let Err(error) = tx.commit().await {
         remove_prepared_deadletter_from_redis(state, &prepared.event_key).await;
         return Err(format!(
-            "Failed to commit Stripe webhook failure transaction after Redis deadletter write: {error}"
+            "Failed to commit Adyen webhook failure transaction after Redis deadletter write: {error}"
         ));
     }
 
@@ -508,22 +508,22 @@ async fn claim_webhook_event(
     let row = sqlx::query_as::<_, WebhookEventClaimRow>(
         r#"
         WITH claimed AS (
-            INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, created_at, updated_at)
+            INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, created_at, updated_at)
             VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
-            ON CONFLICT (stripe_event_id) DO UPDATE
+            ON CONFLICT (adyen_notification_id) DO UPDATE
             SET event_type = EXCLUDED.event_type,
                 status = 'pending',
                 error = NULL,
                 updated_at = NOW()
-            WHERE stripe_webhook_events.status <> 'processed'
-              AND stripe_webhook_events.status <> 'pending'
+            WHERE adyen_webhook_events.status <> 'processed'
+              AND adyen_webhook_events.status <> 'pending'
             RETURNING true AS claimed, status
         )
         SELECT claimed, status FROM claimed
         UNION ALL
         SELECT false AS claimed, status
-        FROM stripe_webhook_events
-        WHERE stripe_event_id = $1
+        FROM adyen_webhook_events
+        WHERE adyen_notification_id = $1
           AND NOT EXISTS (SELECT 1 FROM claimed)
         LIMIT 1
         "#,
@@ -532,7 +532,7 @@ async fn claim_webhook_event(
     .bind(event_type)
     .fetch_optional(&state.db)
     .await
-    .map_err(|error| format!("Failed to claim Stripe webhook event: {error}"))?;
+    .map_err(|error| format!("Failed to claim Adyen webhook event: {error}"))?;
 
     Ok(classify_webhook_claim(row))
 }
@@ -558,7 +558,7 @@ fn stale_pending_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
 
 /// Reclaim webhook events stuck in `pending` for longer than
 /// [`STALE_PENDING_RECLAIM_SECS`]. Rows are reset to `received` (with the
-/// reason recorded in `error`) so either a Stripe retry or a deadletter
+/// reason recorded in `error`) so either a Adyen retry or a deadletter
 /// replay can claim them again. Returns the reclaimed event ids.
 ///
 /// Wired into the maintenance worker loop (runs on startup and hourly).
@@ -566,13 +566,13 @@ pub async fn reclaim_stale_pending_webhooks(state: &AppState) -> Result<Vec<Stri
     let cutoff = stale_pending_cutoff(Utc::now());
     let reclaimed: Vec<String> = sqlx::query_scalar(
         r#"
-        UPDATE stripe_webhook_events
+        UPDATE adyen_webhook_events
         SET status = 'received',
             error = 'reclaimed: pending exceeded stale threshold',
             updated_at = NOW()
         WHERE status = 'pending'
           AND updated_at < $1
-        RETURNING stripe_event_id
+        RETURNING adyen_notification_id
         "#,
     )
     .bind(cutoff)
@@ -583,14 +583,14 @@ pub async fn reclaim_stale_pending_webhooks(state: &AppState) -> Result<Vec<Stri
     if !reclaimed.is_empty() {
         warn!(
             count = reclaimed.len(),
-            "reclaimed stale pending stripe webhook events"
+            "reclaimed stale pending adyen webhook events"
         );
     }
 
     Ok(reclaimed)
 }
 
-/// Map Stripe invoice money fields (all integer minor units / cents) onto
+/// Map Adyen invoice money fields (all integer minor units / cents) onto
 /// the local invoice columns, deriving whichever of subtotal/VAT/total is
 /// missing. Negative or absent amounts degrade to zero (Fix A). Returns
 /// `None` when the payload's arithmetic cannot be represented in integer
@@ -602,11 +602,11 @@ fn derive_invoice_totals(
     total: Option<i64>,
     amount_due: i64,
 ) -> Option<(i64, i64, i64)> {
-    // Explicit Stripe figures are authoritative INCLUDING their sign: credit
+    // Explicit Adyen figures are authoritative INCLUDING their sign: credit
     // invoices (customer credit / matrix proration exceeding the charge) are
     // legitimately negative, and a 100%-discounted invoice legitimately has
     // subtotal 0. Absence is already encoded by Option — Some(0) is a real
-    // Stripe-reported zero and must not be treated as missing data. The
+    // Adyen-reported zero and must not be treated as missing data. The
     // pre-fix `> 0` filters recorded both as zeros, overstating period
     // revenue/VAT and hiding the applied credit from the local ledger.
     let amount_due = amount_due.max(0);
@@ -654,9 +654,9 @@ fn derive_invoice_vat_rate(subtotal: i64, vat_amount: i64) -> f64 {
     tenths as f64 / 10.0
 }
 
-/// Normalize a Stripe currency code for the local `invoices.currency`
+/// Normalize a Adyen currency code for the local `invoices.currency`
 /// column (lowercase, like invoices.rs). Defaults to `eur`.
-fn normalize_stripe_currency(currency: Option<&str>) -> String {
+fn normalize_adyen_currency(currency: Option<&str>) -> String {
     currency
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -693,21 +693,21 @@ fn verify_and_parse_event(
     state: &AppState,
     payload: &[u8],
     signature: &str,
-) -> Result<StripeEventPayload, String> {
-    let secret = state.config.stripe_webhook_secret.trim();
+) -> Result<AdyenEventPayload, String> {
+    let secret = state.config.adyen_hmac_key.trim();
     if secret.is_empty() {
-        return Err("Stripe webhook secret is not configured".into());
+        return Err("Adyen webhook secret is not configured".into());
     }
 
     let (timestamp, _) = parse_signature_header(signature)?;
-    if (Utc::now().timestamp() - timestamp).abs() > STRIPE_WEBHOOK_TOLERANCE_SECONDS {
+    if (Utc::now().timestamp() - timestamp).abs() > ADYEN_WEBHOOK_TOLERANCE_SECONDS {
         return Err("Invalid webhook signature".into());
     }
 
     verify_signature_hmac(secret, payload, signature)?;
 
     serde_json::from_slice(payload)
-        .map_err(|error| format!("Failed to decode Stripe event payload: {error}"))
+        .map_err(|error| format!("Failed to decode Adyen event payload: {error}"))
 }
 
 fn parse_signature_header(signature: &str) -> Result<(i64, Vec<&str>), String> {
@@ -740,7 +740,7 @@ fn parse_signature_header(signature: &str) -> Result<(i64, Vec<&str>), String> {
     }
 }
 
-async fn handle_stripe_event(state: &AppState, event: &StripeEventPayload) -> Result<(), String> {
+async fn handle_adyen_notification(state: &AppState, event: &AdyenEventPayload) -> Result<(), String> {
     match event.event_type.as_str() {
         "checkout.session.completed" => {
             let session: CheckoutSession = serde_json::from_value(event.data.object.clone())
@@ -775,7 +775,7 @@ async fn handle_stripe_event(state: &AppState, event: &StripeEventPayload) -> Re
             handle_trial_ending(state, subscription).await
         }
         _ => {
-            warn!(event_type = %event.event_type, "unhandled stripe webhook event — consider adding a handler or ignoring intentionally");
+            warn!(event_type = %event.event_type, "unhandled adyen webhook event — consider adding a handler or ignoring intentionally");
             Ok(())
         }
     }
@@ -786,7 +786,7 @@ async fn handle_checkout_completed(
     session: CheckoutSession,
 ) -> Result<(), String> {
     let Some(tenant_id) = tenant_id_from_metadata(session.metadata.as_ref()) else {
-        warn!(session_id = %session.id, "stripe checkout session missing tenant_id metadata");
+        warn!(session_id = %session.id, "adyen checkout session missing tenant_id metadata");
         return Ok(());
     };
 
@@ -794,7 +794,7 @@ async fn handle_checkout_completed(
     // still be incomplete or unpaid. Only the corresponding verified
     // `customer.subscription.*` webhook below changes plan access. In
     // particular, this must not reactivate a tenant suspended for abuse.
-    info!(tenant_id = %tenant_id, session_id = %session.id, "stripe checkout completed; awaiting subscription state webhook");
+    info!(tenant_id = %tenant_id, session_id = %session.id, "adyen checkout completed; awaiting subscription state webhook");
     Ok(())
 }
 
@@ -803,7 +803,7 @@ async fn handle_subscription_change(
     subscription: SubscriptionEvent,
 ) -> Result<(), String> {
     let Some(tenant_id) = tenant_id_from_metadata(subscription.metadata.as_ref()) else {
-        warn!(subscription_id = %subscription.id, "stripe subscription missing tenant_id metadata");
+        warn!(subscription_id = %subscription.id, "adyen subscription missing tenant_id metadata");
         return Ok(());
     };
 
@@ -841,8 +841,8 @@ async fn handle_subscription_change(
         FROM plans
         WHERE is_active = true
           AND (
-              (stripe_price_id_monthly = $1 AND $2 = 'monthly')
-              OR (stripe_price_id_yearly = $1 AND $2 = 'yearly')
+              (adyen_plan_code_monthly = $1 AND $2 = 'monthly')
+              OR (adyen_plan_code_yearly = $1 AND $2 = 'yearly')
           )
         LIMIT 1
         "#,
@@ -851,8 +851,8 @@ async fn handle_subscription_change(
     .bind(interval.as_db_value())
     .fetch_optional(&state.db)
     .await
-    .map_err(|error| format!("Failed to resolve plan for Stripe price {price_id}: {error}"))?
-    .ok_or_else(|| format!("Unknown Stripe price ID: {price_id}"))?;
+    .map_err(|error| format!("Failed to resolve plan for Adyen price {price_id}: {error}"))?
+    .ok_or_else(|| format!("Unknown Adyen price ID: {price_id}"))?;
     let entitlement_plan = subscription.status.entitlement_plan_name(&plan_name);
 
     let incoming_period_start =
@@ -873,7 +873,7 @@ async fn handle_subscription_change(
         .map_err(|error| format!("Failed to begin subscription upsert transaction: {error}"))?;
 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("stripe_entitlement:{tenant_id}"))
+        .bind(format!("adyen_entitlement:{tenant_id}"))
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
@@ -899,22 +899,22 @@ async fn handle_subscription_change(
         r#"
         SELECT tenant_id, status::text, billing_cycle_start, billing_cycle_end, plan,
                event_watermark
-        FROM stripe_subscriptions
-        WHERE stripe_subscription_id = $1
+        FROM adyen_subscriptions
+        WHERE adyen_subscription_id = $1
         FOR UPDATE
         "#,
     )
     .bind(&subscription.id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to load current Stripe subscription: {error}"))?;
+    .map_err(|error| format!("Failed to load current Adyen subscription: {error}"))?;
 
     if let Some((current_tenant_id, current_status, .., current_watermark)) =
         current_subscription.as_ref()
     {
         if current_tenant_id.as_str() != tenant_id {
             return Err(format!(
-                "Stripe subscription {} is already bound to a different tenant",
+                "Adyen subscription {} is already bound to a different tenant",
                 subscription.id
             ));
         }
@@ -936,7 +936,7 @@ async fn handle_subscription_change(
                 subscription_id = %subscription.id,
                 incoming_cycle = ?incoming_period_start,
                 applied_watermark = ?current_watermark,
-                "stale stripe subscription update ignored — event predates the applied cycle watermark"
+                "stale adyen subscription update ignored — event predates the applied cycle watermark"
             );
             let _ = tx.rollback().await;
             return Ok(());
@@ -956,10 +956,10 @@ async fn handle_subscription_change(
     if let Some(incoming_start) = incoming_period_start {
         let newer_replacement: Option<String> = sqlx::query_scalar(
             r#"
-            SELECT stripe_subscription_id
-            FROM stripe_subscriptions
+            SELECT adyen_subscription_id
+            FROM adyen_subscriptions
             WHERE tenant_id = $1
-              AND stripe_subscription_id <> $2
+              AND adyen_subscription_id <> $2
               AND status = 'active'
               AND event_watermark IS NOT NULL
               AND event_watermark > $3
@@ -977,7 +977,7 @@ async fn handle_subscription_change(
                 tenant_id = %tenant_id,
                 subscription_id = %subscription.id,
                 newer_subscription = %newer,
-                "stale stripe subscription update ignored — a newer active replacement exists"
+                "stale adyen subscription update ignored — a newer active replacement exists"
             );
             let _ = tx.rollback().await;
             return Ok(());
@@ -1010,12 +1010,12 @@ async fn handle_subscription_change(
 
     let superseded: Vec<SupersededCycleRow> = sqlx::query_as(
         r#"
-        UPDATE stripe_subscriptions
+        UPDATE adyen_subscriptions
         SET status = 'canceled', updated_at = NOW()
         WHERE tenant_id = $1
           AND status = 'active'
-          AND stripe_subscription_id <> $2
-        RETURNING stripe_subscription_id, billing_cycle_start, billing_cycle_end, plan
+          AND adyen_subscription_id <> $2
+        RETURNING adyen_subscription_id, billing_cycle_start, billing_cycle_end, plan
         "#,
     )
     .bind(tenant_id)
@@ -1032,7 +1032,7 @@ async fn handle_subscription_change(
             snapshot_billing_period(
                 &mut tx,
                 tenant_id,
-                &cycle.stripe_subscription_id,
+                &cycle.adyen_subscription_id,
                 "active",
                 cycle.plan.as_deref(),
                 start,
@@ -1042,7 +1042,7 @@ async fn handle_subscription_change(
         }
     }
 
-    // Audit F27: the upsert persists BOTH the resolved plan and the Stripe
+    // Audit F27: the upsert persists BOTH the resolved plan and the Adyen
     // price — the old DO UPDATE preserved a stale price (and never wrote
     // `plan` at all), so consumers keying on ss.plan mis-resolved after
     // upgrades/downgrades. The event watermark (audit F36) records the
@@ -1051,8 +1051,8 @@ async fn handle_subscription_change(
     sqlx::query(
         r#"
         WITH upsert_subscription AS (
-            INSERT INTO stripe_subscriptions (
-                id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+            INSERT INTO adyen_subscriptions (
+                id, tenant_id, adyen_subscription_id, adyen_shopper_reference, adyen_plan_code,
                 plan, status, billing_interval, billing_cycle_start, billing_cycle_end,
                 cancel_at_period_end, canceled_at, trial_end, event_watermark,
                 created_at, updated_at
@@ -1063,8 +1063,8 @@ async fn handle_subscription_change(
                 COALESCE(to_timestamp($8), NOW()),
                 NOW(), NOW()
             )
-            ON CONFLICT (stripe_subscription_id) DO UPDATE SET
-                stripe_price_id = $4,
+            ON CONFLICT (adyen_subscription_id) DO UPDATE SET
+                adyen_plan_code = $4,
                 plan = $5,
                 status = $6,
                 billing_interval = $7,
@@ -1073,7 +1073,7 @@ async fn handle_subscription_change(
                 cancel_at_period_end = $10,
                 canceled_at = to_timestamp($11),
                 trial_end = to_timestamp($12),
-                event_watermark = COALESCE(to_timestamp($8), stripe_subscriptions.event_watermark),
+                event_watermark = COALESCE(to_timestamp($8), adyen_subscriptions.event_watermark),
                 updated_at = NOW()
             RETURNING tenant_id
         ),
@@ -1101,7 +1101,7 @@ async fn handle_subscription_change(
     .bind(entitlement_plan)
     .execute(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to upsert Stripe subscription: {error}"))?;
+    .map_err(|error| format!("Failed to upsert Adyen subscription: {error}"))?;
 
     // Audit F30/F32: the incoming cycle gets its period record now, with
     // the resolved plan AND the complete effective pricing snapshotted.
@@ -1120,14 +1120,14 @@ async fn handle_subscription_change(
 
     tx.commit()
         .await
-        .map_err(|error| format!("Failed to commit Stripe subscription upsert: {error}"))?;
+        .map_err(|error| format!("Failed to commit Adyen subscription upsert: {error}"))?;
 
     info!(
         tenant_id = %tenant_id,
         subscription_id = %subscription.id,
         status = %subscription.status.as_str(),
         entitlement_plan,
-        "stripe subscription updated"
+        "adyen subscription updated"
     );
 
     if matches!(subscription.status, SubscriptionStatus::Active) {
@@ -1180,7 +1180,7 @@ async fn auto_provision_dedicated_ips_background(
     let included_count = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) AS included_count
-        FROM stripe_subscriptions s
+        FROM adyen_subscriptions s
         JOIN plans p ON p.name = (
             SELECT plan FROM tenants WHERE id = s.tenant_id
         )
@@ -1357,7 +1357,7 @@ async fn auto_provision_dedicated_ips_background(
 async fn snapshot_billing_period(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
-    stripe_subscription_id: &str,
+    adyen_subscription_id: &str,
     status: &str,
     subscription_plan: Option<&str>,
     period_start: DateTime<Utc>,
@@ -1428,7 +1428,7 @@ async fn snapshot_billing_period(
     sqlx::query(
         r#"
         INSERT INTO billing_periods (
-            tenant_id, stripe_subscription_id, usage_kind,
+            tenant_id, adyen_subscription_id, usage_kind,
             period_start, period_end, currency, plan_name, email_allowance,
             overage_rate_millicents, pricing_snapshot, pricing_resolved_at
         )
@@ -1437,7 +1437,7 @@ async fn snapshot_billing_period(
         "#,
     )
     .bind(tenant_id)
-    .bind(stripe_subscription_id)
+    .bind(adyen_subscription_id)
     .bind(period_start)
     .bind(period_end)
     .bind(&currency)
@@ -1513,7 +1513,7 @@ async fn handle_subscription_deleted(
         .map_err(|error| format!("Failed to begin subscription delete transaction: {error}"))?;
 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("stripe_entitlement:{tenant_id}"))
+        .bind(format!("adyen_entitlement:{tenant_id}"))
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
@@ -1523,9 +1523,9 @@ async fn handle_subscription_deleted(
     // replaced) matches no row and is a no-op.
     let canceled: Option<String> = sqlx::query_scalar(
         r#"
-        UPDATE stripe_subscriptions
+        UPDATE adyen_subscriptions
         SET status = 'canceled', updated_at = NOW()
-        WHERE stripe_subscription_id = $1
+        WHERE adyen_subscription_id = $1
           AND tenant_id = $2
         RETURNING tenant_id
         "#,
@@ -1534,7 +1534,7 @@ async fn handle_subscription_deleted(
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to cancel Stripe subscription: {error}"))?;
+    .map_err(|error| format!("Failed to cancel Adyen subscription: {error}"))?;
 
     let Some(canceled_tenant) = canceled else {
         // Stale event (or the row belongs to another tenant): reject its
@@ -1545,7 +1545,7 @@ async fn handle_subscription_deleted(
         info!(
             tenant_id = %tenant_id,
             subscription_id = %subscription.id,
-            "stripe subscription.deleted ignored — no matching row for this tenant (stale event)"
+            "adyen subscription.deleted ignored — no matching row for this tenant (stale event)"
         );
         return Ok(());
     };
@@ -1556,8 +1556,8 @@ async fn handle_subscription_deleted(
     let final_cycle: Option<SubscriptionCycleRow> = sqlx::query_as(
         r#"
         SELECT billing_cycle_start, billing_cycle_end, plan
-        FROM stripe_subscriptions
-        WHERE stripe_subscription_id = $1 AND tenant_id = $2
+        FROM adyen_subscriptions
+        WHERE adyen_subscription_id = $1 AND tenant_id = $2
         "#,
     )
     .bind(&subscription.id)
@@ -1591,9 +1591,9 @@ async fn handle_subscription_deleted(
     let remaining: Option<(Option<String>, String)> = sqlx::query_as(
         r#"
         SELECT plan, status::text
-        FROM stripe_subscriptions
+        FROM adyen_subscriptions
         WHERE tenant_id = $1
-          AND stripe_subscription_id <> $2
+          AND adyen_subscription_id <> $2
           AND status IN ('active', 'trialing')
         ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
         LIMIT 1
@@ -1626,25 +1626,25 @@ async fn handle_subscription_deleted(
         tenant_id = %tenant_id,
         subscription_id = %subscription.id,
         reconciled_plan = %reconciled_plan,
-        "stripe subscription canceled — entitlement reconciled from current subscription state"
+        "adyen subscription canceled — entitlement reconciled from current subscription state"
     );
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Tax truth (P0): immutable Stripe tax snapshot + independent validation
+// Tax truth (P0): immutable Adyen tax snapshot + independent validation
 // ---------------------------------------------------------------------------
 //
-// Stripe and ApexMail must not be two tax deciders. Stripe Tax is the
+// Adyen and ApexMail must not be two tax deciders. Adyen Tax is the
 // charging authority (`automatic_tax` is enabled at checkout session
 // creation in api-server and is requested on usage invoices); ApexMail
-// persists what Stripe actually decided — amounts, jurisdiction, tax-ID
-// status, invoice id and a payload hash — into `stripe_tax_snapshots`
+// persists what Adyen actually decided — amounts, jurisdiction, tax-ID
+// status, invoice id and a payload hash — into `adyen_tax_snapshots`
 // (immutable, migration 218), recomputes the total independently and
 // compares. A mismatch BLOCKS local invoice finalization and raises a
 // `finance_incidents` row instead of quietly recording inconsistent books.
 
-/// ApexMail's independently computed total for a Stripe invoice.
+/// ApexMail's independently computed total for a Adyen invoice.
 #[derive(Debug, Clone, PartialEq)]
 struct ExpectedTax {
     subtotal_cents: i64,
@@ -1657,7 +1657,7 @@ struct ExpectedTax {
     evidence_id: Option<Uuid>,
 }
 
-/// A charged-total mismatch between Stripe and ApexMail.
+/// A charged-total mismatch between Adyen and ApexMail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TaxTotalDiscrepancy {
     observed_subtotal_cents: i64,
@@ -1683,7 +1683,7 @@ impl TaxTotalDiscrepancy {
     }
 }
 
-/// Compare the charged (Stripe) money fields against ApexMail's independent
+/// Compare the charged (Adyen) money fields against ApexMail's independent
 /// computation. Pure and unit-tested: the required P0 behaviour is that a
 /// mismatch is an error (the caller blocks finalization and raises a
 /// finance incident), never a warning.
@@ -1710,7 +1710,7 @@ fn check_charged_total(
     })
 }
 
-/// Customer tax-ID summary persisted on the snapshot. Stripe verification
+/// Customer tax-ID summary persisted on the snapshot. Adyen verification
 /// states (`verified`, `pending`, `unverified`) are preserved verbatim.
 fn summarize_tax_ids(invoice: &InvoiceEvent) -> (String, serde_json::Value) {
     let entries = invoice.customer_tax_ids.as_deref().unwrap_or_default();
@@ -1743,7 +1743,7 @@ fn summarize_tax_ids(invoice: &InvoiceEvent) -> (String, serde_json::Value) {
     (status.to_string(), serde_json::Value::Array(rows))
 }
 
-/// The jurisdiction Stripe attributed the tax to, from whichever tax
+/// The jurisdiction Adyen attributed the tax to, from whichever tax
 /// breakdown shape the API version supplies.
 fn tax_jurisdiction(invoice: &InvoiceEvent) -> Option<String> {
     let entries = invoice
@@ -1765,7 +1765,7 @@ fn tax_jurisdiction(invoice: &InvoiceEvent) -> Option<String> {
     None
 }
 
-/// Normalized tax breakdown persisted on the snapshot (raw Stripe objects
+/// Normalized tax breakdown persisted on the snapshot (raw Adyen objects
 /// are not retained verbatim; the hash covers this normalized payload).
 fn tax_breakdown_json(invoice: &InvoiceEvent) -> serde_json::Value {
     let Some(entries) = invoice
@@ -1790,7 +1790,7 @@ fn tax_breakdown_json(invoice: &InvoiceEvent) -> serde_json::Value {
     )
 }
 
-/// The `automatic_tax` status Stripe reported, or `not_enabled`.
+/// The `automatic_tax` status Adyen reported, or `not_enabled`.
 fn automatic_tax_status(invoice: &InvoiceEvent) -> String {
     invoice
         .automatic_tax
@@ -1818,20 +1818,20 @@ fn snapshot_payload_hash(payload: &serde_json::Value) -> String {
     hex::encode(Sha256::digest(&canonical))
 }
 
-/// Row of `stripe_tax_snapshots` already persisted for this Stripe invoice.
+/// Row of `adyen_tax_snapshots` already persisted for this Adyen invoice.
 async fn load_existing_tax_snapshot(
     db: &sqlx::PgPool,
-    stripe_invoice_id: &str,
+    adyen_psp_reference: &str,
 ) -> Result<Option<(String, i64, i64)>, String> {
     sqlx::query_as(
         r#"
         SELECT validation_status, total_cents,
                COALESCE(apexmail_expected_total_cents, total_cents)::bigint
-        FROM stripe_tax_snapshots
-        WHERE stripe_invoice_id = $1
+        FROM adyen_tax_snapshots
+        WHERE adyen_psp_reference = $1
         "#,
     )
-    .bind(stripe_invoice_id)
+    .bind(adyen_psp_reference)
     .fetch_optional(db)
     .await
     .map_err(|error| format!("failed to load existing tax snapshot: {error}"))
@@ -1857,8 +1857,8 @@ async fn persist_tax_snapshot(
     let breakdown = tax_breakdown_json(invoice);
     let jurisdiction = tax_jurisdiction(invoice).or_else(|| expected.country.clone());
     let observed_payload = serde_json::json!({
-        "stripe_invoice_id": invoice.id,
-        "stripe_invoice_number": invoice.number,
+        "adyen_psp_reference": invoice.id,
+        "adyen_payment_number": invoice.number,
         "currency": currency,
         "subtotal_cents": observed.0,
         "tax_cents": observed.1,
@@ -1883,8 +1883,8 @@ async fn persist_tax_snapshot(
 
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         r#"
-        INSERT INTO stripe_tax_snapshots (
-            stripe_invoice_id, stripe_invoice_number, tenant_id, local_invoice_id,
+        INSERT INTO adyen_tax_snapshots (
+            adyen_psp_reference, adyen_payment_number, tenant_id, local_invoice_id,
             currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents,
             automatic_tax_status, authority, jurisdiction, tax_id_status,
             tax_ids, tax_breakdown,
@@ -1895,7 +1895,7 @@ async fn persist_tax_snapshot(
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
             $16, $17, $18, $19, $20, $21, $22
         )
-        ON CONFLICT (stripe_invoice_id) DO NOTHING
+        ON CONFLICT (adyen_psp_reference) DO NOTHING
         RETURNING id
         "#,
     )
@@ -1923,19 +1923,19 @@ async fn persist_tax_snapshot(
     .bind(&observed_payload)
     .fetch_optional(db)
     .await
-    .map_err(|error| format!("failed to persist stripe tax snapshot: {error}"))?;
+    .map_err(|error| format!("failed to persist adyen tax snapshot: {error}"))?;
 
     if let Some((id,)) = inserted {
         return Ok(id);
     }
     // Already persisted (replay): immutability means first write wins.
     sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM stripe_tax_snapshots WHERE stripe_invoice_id = $1",
+        "SELECT id FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
     )
     .bind(&invoice.id)
     .fetch_one(db)
     .await
-    .map_err(|error| format!("failed to reload stripe tax snapshot: {error}"))
+    .map_err(|error| format!("failed to reload adyen tax snapshot: {error}"))
 }
 
 /// Raise a durable finance incident. Idempotent per open incident: webhook
@@ -1947,7 +1947,7 @@ async fn raise_finance_incident(
     severity: &str,
     tenant_id: &str,
     local_invoice_id: Option<Uuid>,
-    stripe_invoice_id: &str,
+    adyen_psp_reference: &str,
     currency: &str,
     expected_total_cents: Option<i64>,
     observed_total_cents: Option<i64>,
@@ -1957,14 +1957,14 @@ async fn raise_finance_incident(
         r#"
         INSERT INTO finance_incidents (
             kind, severity, status, tenant_id, local_invoice_id,
-            stripe_invoice_id, currency, expected_total_cents,
+            adyen_psp_reference, currency, expected_total_cents,
             observed_total_cents, delta_cents, detail
         )
         SELECT $1, $2, 'open', $3, $4, $5, $6, $7, $8,
                COALESCE($7, 0) - COALESCE($8, 0), $9
         WHERE NOT EXISTS (
             SELECT 1 FROM finance_incidents
-            WHERE kind = $1 AND stripe_invoice_id = $5 AND status = 'open'
+            WHERE kind = $1 AND adyen_psp_reference = $5 AND status = 'open'
         )
         "#,
     )
@@ -1972,7 +1972,7 @@ async fn raise_finance_incident(
     .bind(severity)
     .bind(tenant_id)
     .bind(local_invoice_id)
-    .bind(stripe_invoice_id)
+    .bind(adyen_psp_reference)
     .bind(currency)
     .bind(expected_total_cents)
     .bind(observed_total_cents)
@@ -1983,10 +1983,10 @@ async fn raise_finance_incident(
     Ok(())
 }
 
-/// Load local invoices bound to a Stripe invoice for validation.
+/// Load local invoices bound to a Adyen invoice for validation.
 async fn load_local_invoice_tax_rows(
     db: &sqlx::PgPool,
-    stripe_invoice_id: &str,
+    adyen_psp_reference: &str,
     tenant_id: &str,
 ) -> Result<Vec<(Uuid, i64, i64, i64, Option<String>, Option<f64>)>, String> {
     sqlx::query_as(
@@ -1998,12 +1998,12 @@ async fn load_local_invoice_tax_rows(
                billing_country,
                vat_rate
         FROM invoices
-        WHERE stripe_invoice_id = $1
+        WHERE adyen_psp_reference = $1
           AND (tenant_id = $2 OR tenant_id IS NULL)
         ORDER BY created_at
         "#,
     )
-    .bind(stripe_invoice_id)
+    .bind(adyen_psp_reference)
     .bind(tenant_id)
     .fetch_all(db)
     .await
@@ -2011,10 +2011,10 @@ async fn load_local_invoice_tax_rows(
 }
 
 /// The tax-truth gate. Persists an immutable snapshot of the finalized
-/// Stripe invoice and validates the charged total against ApexMail's own
+/// Adyen invoice and validates the charged total against ApexMail's own
 /// computation. Returns `Err` (blocking invoice finalization) when the
 /// charged total disagrees, after raising a durable finance incident.
-async fn validate_and_snapshot_stripe_tax(
+async fn validate_and_snapshot_adyen_tax(
     state: &AppState,
     invoice: &InvoiceEvent,
     tenant_id: &str,
@@ -2033,7 +2033,7 @@ async fn validate_and_snapshot_stripe_tax(
                 tenant_id,
                 None,
                 &invoice.id,
-                &normalize_stripe_currency(invoice.currency.as_deref()),
+                &normalize_adyen_currency(invoice.currency.as_deref()),
                 Some(expected_total),
                 Some(observed_total),
                 &serde_json::json!({
@@ -2042,14 +2042,14 @@ async fn validate_and_snapshot_stripe_tax(
             )
             .await?;
             return Err(format!(
-                "invoice.paid for {} blocked: an open finance incident records a Stripe/ApexMail \
-                 tax discrepancy (Stripe total {observed_total}, ApexMail expected {expected_total})",
+                "invoice.paid for {} blocked: an open finance incident records a Adyen/ApexMail \
+                 tax discrepancy (Adyen total {observed_total}, ApexMail expected {expected_total})",
                 invoice.id
             ));
         }
         return Ok(Some(
             sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM stripe_tax_snapshots WHERE stripe_invoice_id = $1",
+                "SELECT id FROM adyen_tax_snapshots WHERE adyen_psp_reference = $1",
             )
             .bind(&invoice.id)
             .fetch_one(&state.db)
@@ -2071,11 +2071,11 @@ async fn validate_and_snapshot_stripe_tax(
             invoice.id
         )
     })?;
-    let currency = normalize_stripe_currency(invoice.currency.as_deref());
+    let currency = normalize_adyen_currency(invoice.currency.as_deref());
 
-    // Expected side 1: the local invoice row(s) already bound to this Stripe
+    // Expected side 1: the local invoice row(s) already bound to this Adyen
     // invoice (the overage collection path writes them before finalizing
-    // Stripe-side). Their stored totals ARE ApexMail's computation.
+    // Adyen-side). Their stored totals ARE ApexMail's computation.
     let local_rows = load_local_invoice_tax_rows(&state.db, &invoice.id, tenant_id).await?;
     let expected = if let Some((_, subtotal, vat, total, country, rate)) = local_rows.first() {
         ExpectedTax {
@@ -2134,7 +2134,7 @@ async fn validate_and_snapshot_stripe_tax(
             }
             None => ExpectedTax {
                 // No expectation: ApexMail could not recompute. Explicitly
-                // zero/`unavailable` rather than echoing Stripe's numbers,
+                // zero/`unavailable` rather than echoing Adyen's numbers,
                 // which would read as an independent match.
                 subtotal_cents: 0,
                 vat_cents: 0,
@@ -2148,21 +2148,21 @@ async fn validate_and_snapshot_stripe_tax(
     };
 
     let (tax_id_status, tax_ids) = summarize_tax_ids(invoice);
-    let stripe_tax_complete = automatic_tax_complete(invoice);
-    let authority = if stripe_tax_complete {
-        "stripe_tax"
+    let adyen_tax_complete = automatic_tax_complete(invoice);
+    let authority = if adyen_tax_complete {
+        "adyen_tax"
     } else {
         "apexmail_local"
     };
 
-    // Cannot independently recompute (no billing address) and Stripe Tax did
+    // Cannot independently recompute (no billing address) and Adyen Tax did
     // not authoritatively compute either: fail closed. Zero-value invoices
     // (100% discounts/credits) are exempt — there is no tax decision to
     // validate and nothing was charged.
     let zero_value = observed_total <= 0 && observed_vat <= 0;
-    if expected.source == "unavailable" && !stripe_tax_complete && !zero_value {
+    if expected.source == "unavailable" && !adyen_tax_complete && !zero_value {
         let detail = serde_json::json!({
-            "reason": "no billing address and Stripe Tax is not complete — cannot validate the charged tax",
+            "reason": "no billing address and Adyen Tax is not complete — cannot validate the charged tax",
             "automatic_tax_status": automatic_tax_status(invoice),
         });
         persist_tax_snapshot(
@@ -2195,14 +2195,14 @@ async fn validate_and_snapshot_stripe_tax(
         .await?;
         return Err(format!(
             "invoice.paid for {} blocked: cannot validate charged tax (no billing address, \
-             Stripe Tax status {})",
+             Adyen Tax status {})",
             invoice.id,
             automatic_tax_status(invoice)
         ));
     }
 
     let validation = if expected.source == "unavailable" {
-        // Stripe Tax is the authoritative charging authority and ApexMail
+        // Adyen Tax is the authoritative charging authority and ApexMail
         // has no address to recompute from: accept the external authority,
         // explicitly flagged.
         Ok(())
@@ -2212,7 +2212,7 @@ async fn validate_and_snapshot_stripe_tax(
 
     let (validation_status, discrepancy_cents) = match &validation {
         Ok(()) if expected.source == "unavailable" => ("unverified_external", 0),
-        Ok(()) if stripe_tax_complete => ("validated", 0),
+        Ok(()) if adyen_tax_complete => ("validated", 0),
         Ok(()) => ("fallback_unavailable", 0),
         Err(discrepancy) => ("discrepancy", discrepancy.delta_cents),
     };
@@ -2258,12 +2258,12 @@ async fn validate_and_snapshot_stripe_tax(
         )
         .await?;
         error!(
-            stripe_invoice_id = %invoice.id,
+            adyen_psp_reference = %invoice.id,
             tenant_id = %tenant_id,
             observed_total_cents = observed_total,
             expected_total_cents = expected.total_cents,
             delta_cents = discrepancy.delta_cents,
-            "BLOCKED invoice finalization: Stripe charged a total that disagrees with ApexMail's \
+            "BLOCKED invoice finalization: Adyen charged a total that disagrees with ApexMail's \
              computation — finance incident raised"
         );
         return Err(format!(
@@ -2274,20 +2274,20 @@ async fn validate_and_snapshot_stripe_tax(
     }
 
     info!(
-        stripe_invoice_id = %invoice.id,
+        adyen_psp_reference = %invoice.id,
         tenant_id = %tenant_id,
         authority,
         validation_status,
         observed_total_cents = observed_total,
         expected_total_cents = expected.total_cents,
-        "stripe tax snapshot persisted and charged total validated"
+        "adyen tax snapshot persisted and charged total validated"
     );
 
     Ok(Some(snapshot_id))
 }
 
 async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
-    // Prefer tenant_id from event metadata (immutable snapshot from Stripe),
+    // Prefer tenant_id from event metadata (immutable snapshot from Adyen),
     // then fall back to resolving the invoice's subscription locally.
     let metadata_tenant_id = tenant_id_from_metadata(
         invoice
@@ -2305,8 +2305,8 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         (None, Some(sub_id)) => sqlx::query_scalar::<_, String>(
             r#"
                 SELECT tenant_id
-                FROM stripe_subscriptions
-                WHERE stripe_subscription_id = $1
+                FROM adyen_subscriptions
+                WHERE adyen_subscription_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
@@ -2329,14 +2329,14 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     };
 
     // TAX-TRUTH GATE (P0): persist an immutable snapshot of the finalized
-    // Stripe invoice's tax decision and validate the charged total against
+    // Adyen invoice's tax decision and validate the charged total against
     // ApexMail's own computation BEFORE finalizing any local invoice. A
     // mismatch returns Err here — no local invoice is marked paid, no
     // revenue-recognising insert runs — and a durable finance incident is
     // raised for operators.
-    let tax_snapshot_id = validate_and_snapshot_stripe_tax(state, &invoice, &tenant_id).await?;
+    let tax_snapshot_id = validate_and_snapshot_adyen_tax(state, &invoice, &tenant_id).await?;
 
-    // Settle the local invoice(s) bound to this Stripe invoice (audits
+    // Settle the local invoice(s) bound to this Adyen invoice (audits
     // F72/F73). The old modifying CTE ended in `SELECT 1` and relied on
     // rows_affected — but PostgreSQL's CommandComplete for `SELECT 1`
     // reports one retrieved row even when the marked/allocation CTEs
@@ -2354,7 +2354,7 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     let event_currency = invoice
         .currency
         .as_deref()
-        .map(|raw| normalize_stripe_currency(Some(raw)));
+        .map(|raw| normalize_adyen_currency(Some(raw)));
 
     let mut tx = state
         .db
@@ -2366,7 +2366,7 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         r#"
         SELECT id, tenant_id, currency
         FROM invoices
-        WHERE stripe_invoice_id = $1
+        WHERE adyen_psp_reference = $1
           AND (tenant_id = $2 OR tenant_id IS NULL)
         ORDER BY created_at
         FOR UPDATE
@@ -2376,7 +2376,7 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     .bind(&tenant_id)
     .fetch_all(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to lock invoices for Stripe {}: {error}", invoice.id))?;
+    .map_err(|error| format!("Failed to lock invoices for Adyen {}: {error}", invoice.id))?;
 
     for (invoice_row_id, row_tenant, invoice_currency) in &marked {
         if let Some(event_currency) = event_currency.as_deref() {
@@ -2402,10 +2402,10 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         if payment_cents > outstanding {
             warn!(
                 invoice_id = %invoice_row_id,
-                stripe_invoice_id = %invoice.id,
+                adyen_psp_reference = %invoice.id,
                 payment_cents,
                 outstanding,
-                "stripe payment exceeds the remaining obligation — allocating only the \
+                "adyen payment exceeds the remaining obligation — allocating only the \
                  authoritative remainder (over-allocation rejected)"
             );
         }
@@ -2431,35 +2431,35 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
                     id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
                 )
                 VALUES (
-                    gen_random_uuid(), $1, $2, $3, 'stripe', $4, $5
+                    gen_random_uuid(), $1, $2, $3, 'adyen', $4, $5
                 )
                 ON CONFLICT (operation_id) DO NOTHING
                 "#,
             )
             .bind(row_tenant)
             .bind(invoice_row_id)
-            .bind(format!("stripe:{}", invoice.id))
+            .bind(format!("adyen:{}", invoice.id))
             .bind(allocation)
             .bind(invoice_currency.trim().to_uppercase())
             .execute(&mut *tx)
             .await
-            .map_err(|error| format!("Failed to record Stripe payment allocation: {error}"))?;
+            .map_err(|error| format!("Failed to record Adyen payment allocation: {error}"))?;
 
             // Statutory ledger: post the settlement (Dr processor clearing,
             // Cr AR) in the same transaction. Idempotent on the allocation's
             // unique operation id, so a replayed webhook posts once.
             crate::accounting_postings::post_payment_allocation_in(
                 &mut tx,
-                &format!("stripe:{}", invoice.id),
+                &format!("adyen:{}", invoice.id),
             )
             .await;
         } else {
             info!(
                 invoice_id = %invoice_row_id,
-                stripe_invoice_id = %invoice.id,
+                adyen_psp_reference = %invoice.id,
                 payment_cents,
                 outstanding,
-                "stripe invoice settled without a positive allocation (zero-value/already covered)"
+                "adyen invoice settled without a positive allocation (zero-value/already covered)"
             );
         }
     }
@@ -2481,17 +2481,17 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     // actually settled THE tenant's invoice. `marked` contains the REAL
     // returned invoice identities (never a constant SELECT result), so a
     // missing local invoice falls through to the external-invoice
-    // reconciliation/import path keyed on the unique Stripe invoice id.
+    // reconciliation/import path keyed on the unique Adyen invoice id.
     let invoice_persisted = !marked.is_empty();
     if !invoice_persisted {
         // Fix A — no local row matched, meaning the invoice was created
-        // on Stripe's side (e.g. subscription billing, Meter usage, or a
+        // on Adyen's side (e.g. subscription billing, Meter usage, or a
         // finalized usage-collection invoice whose local draft was never
         // linked) without a local row. Insert the paid invoice so revenue
         // is recorded. ON CONFLICT makes replays idempotent. Rows == 0
         // means the tenant guard rejected the upsert (the local row is
         // bound to a DIFFERENT tenant) — not this tenant's invoice.
-        let inserted = insert_paid_invoice_from_stripe(state, &invoice, &tenant_id).await?;
+        let inserted = insert_paid_invoice_from_adyen(state, &invoice, &tenant_id).await?;
         if inserted == 0 {
             warn!(
                 invoice_id = %invoice.id,
@@ -2500,9 +2500,9 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
             );
         } else {
             // Statutory ledger: post the imported invoice's revenue/AR entry.
-            // The local id is resolved by the unique Stripe invoice id.
+            // The local id is resolved by the unique Adyen invoice id.
             let local_id: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM invoices WHERE stripe_invoice_id = $1")
+                sqlx::query_scalar("SELECT id FROM invoices WHERE adyen_psp_reference = $1")
                     .bind(&invoice.id)
                     .fetch_optional(&state.db)
                     .await
@@ -2539,7 +2539,7 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     let bound_invoices: Vec<(Uuid,)> = match sqlx::query_as(
         r#"
         SELECT id FROM invoices
-        WHERE stripe_invoice_id = $1
+        WHERE adyen_psp_reference = $1
           AND (tenant_id = $2 OR tenant_id IS NULL)
         "#,
     )
@@ -2551,10 +2551,10 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         Ok(rows) => rows,
         Err(error) => {
             error!(
-                stripe_invoice_id = %invoice.id,
+                adyen_psp_reference = %invoice.id,
                 tenant_id = %tenant_id,
                 error = %error,
-                "could not load invoices bound to this Stripe settlement — \
+                "could not load invoices bound to this Adyen settlement — \
                  VAT recognition materialization SKIPPED for it (Fix #10 sweep)"
             );
             Vec::new()
@@ -2570,23 +2570,23 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         {
             warn!(
                 invoice_id = %invoice_row_id,
-                stripe_invoice_id = %invoice.id,
+                adyen_psp_reference = %invoice.id,
                 error = %error,
-                "failed to materialize VAT recognition after Stripe settlement"
+                "failed to materialize VAT recognition after Adyen settlement"
             );
         }
     }
 
     // Link the immutable tax snapshot onto every local invoice bound to this
-    // Stripe invoice (rows settled above plus the row inserted from the
-    // Stripe payload when there was none).
+    // Adyen invoice (rows settled above plus the row inserted from the
+    // Adyen payload when there was none).
     if let Some(snapshot_id) = tax_snapshot_id {
         if let Err(error) = sqlx::query(
             r#"
             UPDATE invoices
-            SET stripe_tax_snapshot_id = $2,
+            SET adyen_tax_snapshot_id = $2,
                 updated_at = NOW()
-            WHERE stripe_invoice_id = $1
+            WHERE adyen_psp_reference = $1
               AND (tenant_id = $3 OR tenant_id IS NULL)
             "#,
         )
@@ -2597,10 +2597,10 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         .await
         {
             warn!(
-                stripe_invoice_id = %invoice.id,
+                adyen_psp_reference = %invoice.id,
                 snapshot_id = %snapshot_id,
                 error = %error,
-                "failed to link stripe tax snapshot onto local invoice(s) — snapshot remains authoritative"
+                "failed to link adyen tax snapshot onto local invoice(s) — snapshot remains authoritative"
             );
         }
     }
@@ -2611,13 +2611,13 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         settled_invoices = marked.len(),
         payment_cents,
         dunning_recovery = invoice_persisted,
-        "stripe invoice marked as paid"
+        "adyen invoice marked as paid"
     );
     Ok(())
 }
 
 /// The VERIFIED payment amount for an `invoice.paid` event (audit F73):
-/// Stripe's own `amount_paid` when present; otherwise the canonical
+/// Adyen's own `amount_paid` when present; otherwise the canonical
 /// derived total (never `invoices.total`, which may already be partially
 /// covered by wallet allocations). Clamped at zero.
 fn verified_payment_cents(invoice: &InvoiceEvent) -> i64 {
@@ -2637,18 +2637,18 @@ fn verified_payment_cents(invoice: &InvoiceEvent) -> i64 {
     }
 }
 
-/// Insert a paid invoice from a Stripe `invoice.paid` event when no local
+/// Insert a paid invoice from a Adyen `invoice.paid` event when no local
 /// row exists (Fix A). Money stays integer cents; the currency, subtotal,
-/// VAT and total come from the Stripe payload; sequential numbering uses the
-/// existing `invoice_number_seq` unless Stripe assigned a number.
-/// Idempotent via ON CONFLICT (stripe_invoice_id) (unique index, migration 101).
+/// VAT and total come from the Adyen payload; sequential numbering uses the
+/// existing `invoice_number_seq` unless Adyen assigned a number.
+/// Idempotent via ON CONFLICT (adyen_psp_reference) (unique index, migration 101).
 /// Returns the number of rows affected: 0 when the tenant guard in the ON
 /// CONFLICT clause rejected the update (the local row is bound to a
 /// different tenant) — callers use that to decide whether payment recovery
 /// is legitimate (Fix F4).
-/// Parse a Stripe decimal-string amount ("65.00", "0.40") into integer
+/// Parse a Adyen decimal-string amount ("65.00", "0.40") into integer
 /// cents without floating point. Returns None on malformed input.
-fn stripe_decimal_to_cents(value: &str) -> Option<i64> {
+fn adyen_decimal_to_cents(value: &str) -> Option<i64> {
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -2679,19 +2679,19 @@ fn stripe_decimal_to_cents(value: &str) -> Option<i64> {
         .and_then(|cents| cents.checked_add(frac_parsed))
 }
 
-/// What the paid-invoice importer must do when the Stripe event names its
+/// What the paid-invoice importer must do when the Adyen event names its
 /// local obligation via `apexmailInvoiceId` metadata (pure — audit SM7 F3,
 /// pinned by unit tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DuplicateCollectionDecision {
-    /// The event's Stripe invoice id IS the obligation's binding: the normal
+    /// The event's Adyen invoice id IS the obligation's binding: the normal
     /// conflict-target upsert updates that one row — nothing doubled.
     SameInvoice,
-    /// The obligation is already bound to a DIFFERENT Stripe invoice: this
+    /// The obligation is already bound to a DIFFERENT Adyen invoice: this
     /// event is a second external invoice for one obligation. REFUSED (and
     /// flagged for review) — importing it would double-record revenue and AR.
     RefuseDuplicate,
-    /// The obligation exists but carries no Stripe binding yet: the first
+    /// The obligation exists but carries no Adyen binding yet: the first
     /// collection attempt died between finalize and the mapping write.
     /// Binding the event's id repairs the mapping (the same conditional
     /// update the collection ladder uses); inserting a second row would
@@ -2702,30 +2702,30 @@ enum DuplicateCollectionDecision {
     NoLocalObligation,
 }
 
-/// Decide the importer's course from the obligation's current Stripe binding
+/// Decide the importer's course from the obligation's current Adyen binding
 /// (pure). `bound` is `None` when no local row exists for the obligation id,
-/// `Some(binding)` with the row's current `stripe_invoice_id` (`None` =
+/// `Some(binding)` with the row's current `adyen_psp_reference` (`None` =
 /// unbound).
 fn duplicate_collection_decision(
     bound: Option<Option<&str>>,
-    event_stripe_invoice_id: &str,
+    event_adyen_psp_reference: &str,
 ) -> DuplicateCollectionDecision {
     match bound {
         None => DuplicateCollectionDecision::NoLocalObligation,
         Some(None) => DuplicateCollectionDecision::BindObligation,
-        Some(Some(existing)) if existing == event_stripe_invoice_id => {
+        Some(Some(existing)) if existing == event_adyen_psp_reference => {
             DuplicateCollectionDecision::SameInvoice
         }
         Some(Some(_)) => DuplicateCollectionDecision::RefuseDuplicate,
     }
 }
 
-/// The local Stripe binding of an obligation named by event metadata.
-async fn obligation_stripe_binding(
+/// The local Adyen binding of an obligation named by event metadata.
+async fn obligation_adyen_binding(
     db: &sqlx::PgPool,
     obligation_id: Uuid,
 ) -> Result<Option<Option<String>>, String> {
-    sqlx::query_scalar("SELECT stripe_invoice_id FROM invoices WHERE id = $1")
+    sqlx::query_scalar("SELECT adyen_psp_reference FROM invoices WHERE id = $1")
         .bind(obligation_id)
         .fetch_optional(db)
         .await
@@ -2741,26 +2741,26 @@ async fn flag_duplicate_collection_for_review(
     bound_invoice_id: &str,
     event_invoice_id: &str,
 ) {
-    metrics::counter!("stripe_duplicate_collection_refused_total").increment(1);
+    metrics::counter!("adyen_duplicate_collection_refused_total").increment(1);
     tracing::error!(
         tenant_id = %tenant_id,
         obligation_invoice_id = %obligation_id,
-        bound_stripe_invoice = %bound_invoice_id,
-        refused_stripe_invoice = %event_invoice_id,
-        "DUPLICATE Stripe collection refused — the obligation already carries a bound Stripe \
+        bound_adyen_payment = %bound_invoice_id,
+        refused_adyen_payment = %event_invoice_id,
+        "DUPLICATE Adyen collection refused — the obligation already carries a bound Adyen \
          invoice; the refused event was NOT imported (audit SM7 F3). Reconcile manually."
     );
     if let Err(error) = sqlx::query(
         r#"
         INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-        VALUES (gen_random_uuid(), $1, 'duplicate_stripe_collection_refused', $2, 'pending', NOW())
+        VALUES (gen_random_uuid(), $1, 'duplicate_adyen_collection_refused', $2, 'pending', NOW())
         "#,
     )
     .bind(tenant_id)
     .bind(serde_json::json!({
         "obligationInvoiceId": obligation_id.to_string(),
-        "boundStripeInvoice": bound_invoice_id,
-        "refusedStripeInvoice": event_invoice_id,
+        "boundAdyenPayment": bound_invoice_id,
+        "refusedAdyenPayment": event_invoice_id,
         "audit": "SM7 F3",
     }))
     .execute(&state.db)
@@ -2776,7 +2776,7 @@ async fn flag_duplicate_collection_for_review(
 }
 
 /// Repair a lost local ↔ external mapping: the obligation is unbound because
-/// the first collection attempt died between the Stripe finalize and the
+/// the first collection attempt died between the Adyen finalize and the
 /// mapping write; the webhook that proves the mapping IS this event.
 async fn bind_unbound_obligation(
     state: &AppState,
@@ -2784,8 +2784,8 @@ async fn bind_unbound_obligation(
     event_invoice_id: &str,
 ) -> Result<u64, String> {
     let bound = sqlx::query(
-        "UPDATE invoices SET stripe_invoice_id = $2, updated_at = NOW() \
-         WHERE id = $1 AND stripe_invoice_id IS NULL",
+        "UPDATE invoices SET adyen_psp_reference = $2, updated_at = NOW() \
+         WHERE id = $1 AND adyen_psp_reference IS NULL",
     )
     .bind(obligation_id)
     .bind(event_invoice_id)
@@ -2796,14 +2796,14 @@ async fn bind_unbound_obligation(
     if rows > 0 {
         info!(
             obligation_invoice_id = %obligation_id,
-            stripe_invoice_id = %event_invoice_id,
-            "repaired the lost local↔Stripe mapping from the invoice.paid event (audit SM7 F3)"
+            adyen_psp_reference = %event_invoice_id,
+            "repaired the lost local↔Adyen mapping from the invoice.paid event (audit SM7 F3)"
         );
     }
     Ok(rows)
 }
 
-async fn insert_paid_invoice_from_stripe(
+async fn insert_paid_invoice_from_adyen(
     state: &AppState,
     invoice: &InvoiceEvent,
     tenant_id: &str,
@@ -2822,7 +2822,7 @@ async fn insert_paid_invoice_from_stripe(
         )
     })?;
     // Audit SM7 F3: when the event names its LOCAL obligation, a second
-    // Stripe invoice for an already-bound obligation is refused (and flagged
+    // Adyen invoice for an already-bound obligation is refused (and flagged
     // for review), an unbound obligation is bound — and only a genuinely
     // unclaimed event reaches the import below. One obligation can never
     // become two local paid invoices with two ledger entries.
@@ -2832,7 +2832,7 @@ async fn insert_paid_invoice_from_stripe(
         .and_then(|metadata| metadata.get("apexmailInvoiceId"))
         .and_then(|value| Uuid::parse_str(value).ok())
     {
-        let bound = obligation_stripe_binding(&state.db, obligation).await?;
+        let bound = obligation_adyen_binding(&state.db, obligation).await?;
         let decision = duplicate_collection_decision(
             bound.as_ref().map(|binding| binding.as_deref()),
             &invoice.id,
@@ -2858,9 +2858,9 @@ async fn insert_paid_invoice_from_stripe(
         }
     }
     let vat_rate = derive_invoice_vat_rate(subtotal, vat_total);
-    let currency = normalize_stripe_currency(invoice.currency.as_deref());
+    let currency = normalize_adyen_currency(invoice.currency.as_deref());
 
-    // Mandatory invoice content: when Stripe's event carries line items,
+    // Mandatory invoice content: when Adyen's event carries line items,
     // store them. Fall back to a single summary line so the stored invoice
     // (and its PDF) never renders an empty items table.
     let line_items_json = match &invoice.lines {
@@ -2875,12 +2875,12 @@ async fn insert_paid_invoice_from_stripe(
                         if vat_rate > 0.0 { vat_rate } else { 0.0 },
                     );
                     let quantity = line.quantity.unwrap_or(1).max(1);
-                    // Prefer Stripe's VAT-exclusive unit amount when present;
+                    // Prefer Adyen's VAT-exclusive unit amount when present;
                     // fall back to deriving net from amount − VAT.
                     let net = line
                         .unit_amount_excluding_tax
                         .as_deref()
-                        .and_then(stripe_decimal_to_cents)
+                        .and_then(adyen_decimal_to_cents)
                         .map(|unit_cents| unit_cents * quantity)
                         .unwrap_or(amount - vat_amount);
                     serde_json::json!({
@@ -2923,8 +2923,8 @@ async fn insert_paid_invoice_from_stripe(
         .unwrap_or(issued_at);
 
     // Best-effort capture of the billing country for KMD bucketing (I4):
-    // invoices created directly from Stripe carry no local VAT derivation,
-    // so store the current address; the VAT rate is derived from the Stripe
+    // invoices created directly from Adyen carry no local VAT derivation,
+    // so store the current address; the VAT rate is derived from the Adyen
     // amounts themselves. Audit F08: the FULL address is snapshotted
     // immutably onto the invoice in the SAME versioned contract the
     // billing-service and api-server writers use (snapshotVersion +
@@ -2977,7 +2977,7 @@ async fn insert_paid_invoice_from_stripe(
     let result = sqlx::query(
         r#"
         INSERT INTO invoices (
-            id, tenant_id, stripe_invoice_id, invoice_number, status,
+            id, tenant_id, adyen_psp_reference, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, paid_at, period_start, period_end,
             billing_country, vat_rate, billing_address, billing_registry_code,
@@ -2990,12 +2990,12 @@ async fn insert_paid_invoice_from_stripe(
             $11, $12, $14, $15,
             NOW(), NOW()
         )
-        -- migration 101 created stripe_invoice_id as a PARTIAL unique index
-        -- (WHERE stripe_invoice_id IS NOT NULL); conflict inference must
+        -- migration 101 created adyen_psp_reference as a PARTIAL unique index
+        -- (WHERE adyen_psp_reference IS NOT NULL); conflict inference must
         -- repeat that predicate or PostgreSQL raises 42P10 ("no unique or
         -- exclusion constraint matching the ON CONFLICT specification") and
-        -- every Stripe-originated paid invoice fails to persist.
-        ON CONFLICT (stripe_invoice_id) WHERE stripe_invoice_id IS NOT NULL DO UPDATE SET
+        -- every Adyen-originated paid invoice fails to persist.
+        ON CONFLICT (adyen_psp_reference) WHERE adyen_psp_reference IS NOT NULL DO UPDATE SET
             status = 'paid',
             paid_at = COALESCE(invoices.paid_at, NOW()),
             updated_at = NOW()
@@ -3025,7 +3025,7 @@ async fn insert_paid_invoice_from_stripe(
     .bind(billing_registry_code)
     .execute(&state.db)
     .await
-    .map_err(|error| format!("Failed to insert paid Stripe invoice {}: {error}", invoice.id))?;
+    .map_err(|error| format!("Failed to insert paid Adyen invoice {}: {error}", invoice.id))?;
 
     let rows_affected = result.rows_affected();
 
@@ -3037,7 +3037,7 @@ async fn insert_paid_invoice_from_stripe(
         total,
         currency = %currency,
         rows_affected,
-        "inserted missing local invoice from Stripe invoice.paid event"
+        "inserted missing local invoice from Adyen invoice.paid event"
     );
 
     Ok(rows_affected)
@@ -3045,7 +3045,7 @@ async fn insert_paid_invoice_from_stripe(
 
 async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
     // Fix H — resolve the tenant from event metadata first, then fall back
-    // to the same stripe_subscriptions lookup handle_invoice_paid uses.
+    // to the same adyen_subscriptions lookup handle_invoice_paid uses.
     // Unresolvable events are deadlettered (via the returned error) instead
     // of being silently dropped.
     let metadata_tenant_id = tenant_id_from_metadata(
@@ -3069,8 +3069,8 @@ async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Resul
             sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT tenant_id
-                FROM stripe_subscriptions
-                WHERE stripe_subscription_id = $1
+                FROM adyen_subscriptions
+                WHERE adyen_subscription_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
@@ -3103,7 +3103,7 @@ async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Resul
         // The invoice's own currency travels with the amount: the
         // notification drainer renders money with this code and never
         // assumes one (the drain labels an absent code explicitly).
-        "currency": normalize_stripe_currency(invoice.currency.as_deref()),
+        "currency": normalize_adyen_currency(invoice.currency.as_deref()),
         "attemptCount": invoice.attempt_count.unwrap_or_default(),
         "dunningStatus": dunning.status,
         "nextRetryAt": dunning.next_retry_at.map(|value| value.to_rfc3339()),
@@ -3112,7 +3112,7 @@ async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Resul
     .await
     .map_err(|error| format!("Failed to enqueue payment_failed notification: {error}"))?;
 
-    warn!(tenant_id = %tenant_id, invoice_id = %invoice.id, "stripe invoice payment failed");
+    warn!(tenant_id = %tenant_id, invoice_id = %invoice.id, "adyen invoice payment failed");
     Ok(())
 }
 
@@ -3139,7 +3139,7 @@ async fn handle_trial_ending(
     .await
     .map_err(|error| format!("Failed to enqueue trial_ending notification: {error}"))?;
 
-    info!(tenant_id = %tenant_id, subscription_id = %subscription.id, "stripe trial ending notification queued");
+    info!(tenant_id = %tenant_id, subscription_id = %subscription.id, "adyen trial ending notification queued");
     Ok(())
 }
 
@@ -3614,10 +3614,10 @@ struct DeadletterEntry {
     /// Maximum retry attempts before giving up.
     #[serde(default = "default_max_retries")]
     max_retries: u32,
-    /// Raw Stripe webhook body (JSON), for replay on retry.
+    /// Raw Adyen webhook body (JSON), for replay on retry.
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
-    /// Original `Stripe-Signature` header value, for replay on retry.
+    /// Original `Adyen-Signature` header value, for replay on retry.
     #[serde(skip_serializing_if = "Option::is_none")]
     signature: Option<String>,
 }
@@ -3669,7 +3669,7 @@ struct ProcessWebhookResult {
 enum ProcessWebhookError {
     RecordDeadletter(String),
     DeadletterFlowHandled(String),
-    /// Transient condition (e.g. another worker holds the event): Stripe
+    /// Transient condition (e.g. another worker holds the event): Adyen
     /// must retry. Maps to 5xx and never deadletters (Fix G).
     RetryLater(String),
 }
@@ -3687,7 +3687,7 @@ impl ProcessWebhookError {
         matches!(self, Self::RecordDeadletter(_))
     }
 
-    /// HTTP status Stripe sees. Retryable errors use 503 (Stripe retries on
+    /// HTTP status Adyen sees. Retryable errors use 503 (Adyen retries on
     /// any non-2xx; 5xx signals server-side transience); business failures
     /// keep the legacy 400.
     fn http_status(&self) -> StatusCode {
@@ -3723,7 +3723,7 @@ struct SubscriptionCycleRow {
 /// deactivating UPDATE (audit F30).
 #[derive(Debug, sqlx::FromRow)]
 struct SupersededCycleRow {
-    stripe_subscription_id: String,
+    adyen_subscription_id: String,
     billing_cycle_start: Option<DateTime<Utc>>,
     billing_cycle_end: Option<DateTime<Utc>>,
     plan: Option<String>,
@@ -3736,15 +3736,15 @@ struct WebhookEventClaimRow {
 }
 
 #[derive(Debug, Deserialize)]
-struct StripeEventPayload {
+struct AdyenEventPayload {
     id: String,
     #[serde(rename = "type")]
     event_type: String,
-    data: StripeEventData,
+    data: AdyenNotificationData,
 }
 
 #[derive(Debug, Deserialize)]
-struct StripeEventData {
+struct AdyenNotificationData {
     object: serde_json::Value,
 }
 
@@ -3786,7 +3786,7 @@ struct SubscriptionPrice {
 
 #[derive(Debug, Deserialize)]
 struct SubscriptionRecurring {
-    interval: Option<StripeBillingInterval>,
+    interval: Option<AdyenBillingInterval>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3820,10 +3820,10 @@ impl SubscriptionStatus {
         matches!(self, Self::Incomplete | Self::Trialing | Self::Active)
     }
 
-    /// A verified Stripe subscription is the only source of paid-plan
+    /// A verified Adyen subscription is the only source of paid-plan
     /// entitlement. Incomplete, delinquent, paused, unpaid, and canceled
     /// subscriptions remain recorded locally for reconciliation but resolve
-    /// to Free access until Stripe reports an entitled state again.
+    /// to Free access until Adyen reports an entitled state again.
     fn entitlement_plan_name<'a>(&self, paid_plan_name: &'a str) -> &'a str {
         match self {
             Self::Active | Self::Trialing => paid_plan_name,
@@ -3862,14 +3862,14 @@ impl SubscriptionStatus {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-enum StripeBillingInterval {
+enum AdyenBillingInterval {
     #[serde(rename = "month")]
     Month,
     #[serde(rename = "year")]
     Year,
 }
 
-impl StripeBillingInterval {
+impl AdyenBillingInterval {
     fn as_db_value(self) -> &'static str {
         match self {
             Self::Month => "monthly",
@@ -3884,7 +3884,7 @@ struct InvoiceEvent {
     amount_due: i64,
     /// The amount ACTUALLY paid in this settlement (audit F73) — the
     /// verified payment amount, in the invoice currency's minor unit.
-    /// Falls back to the canonical derived total when Stripe omits it.
+    /// Falls back to the canonical derived total when Adyen omits it.
     #[serde(default)]
     amount_paid: Option<i64>,
     #[serde(default)]
@@ -3898,7 +3898,7 @@ struct InvoiceEvent {
     /// Grand total including VAT, in cents.
     #[serde(default)]
     total: Option<i64>,
-    /// Human-readable invoice number assigned by Stripe (e.g. "2026-000042").
+    /// Human-readable invoice number assigned by Adyen (e.g. "2026-000042").
     #[serde(default)]
     number: Option<String>,
     #[serde(default)]
@@ -3917,33 +3917,33 @@ struct InvoiceEvent {
     /// used so locally stored invoices (and their PDFs) carry mandatory
     /// line-level detail instead of an empty items table.
     #[serde(default)]
-    lines: Option<StripeInvoiceLines>,
-    /// Stripe Tax decision state (`enabled`, `status`, `disabled_reason`).
+    lines: Option<AdyenPaymentLines>,
+    /// Adyen Tax decision state (`enabled`, `status`, `disabled_reason`).
     /// Present when automatic tax was requested at checkout / invoice
     /// creation; `status = "complete"` is the only authoritative state.
     #[serde(default)]
-    automatic_tax: Option<StripeAutomaticTax>,
+    automatic_tax: Option<AdyenAutomaticTax>,
     /// Tax IDs collected for the customer (checkout `tax_id_collection`).
     #[serde(default)]
-    customer_tax_ids: Option<Vec<StripeCustomerTaxId>>,
+    customer_tax_ids: Option<Vec<AdyenShopperTaxId>>,
     /// Per-jurisdiction tax breakdown on newer API versions.
     #[serde(default)]
-    total_taxes: Option<Vec<StripeTotalTax>>,
+    total_taxes: Option<Vec<AdyenTotalTax>>,
     /// Per-jurisdiction tax breakdown on older API versions.
     #[serde(default)]
-    total_tax_amounts: Option<Vec<StripeTotalTax>>,
+    total_tax_amounts: Option<Vec<AdyenTotalTax>>,
     /// Invoice-level metadata. The usage-collection path stamps
-    /// `apexmailInvoiceId` (the LOCAL obligation) onto every Stripe invoice
+    /// `apexmailInvoiceId` (the LOCAL obligation) onto every Adyen invoice
     /// it creates; a `invoice.paid` event carrying that metadata names its
-    /// obligation, so a SECOND Stripe invoice for an already-bound obligation
+    /// obligation, so a SECOND Adyen invoice for an already-bound obligation
     /// can be refused instead of minted twice locally (audit SM7 F3).
     #[serde(default)]
     metadata: Option<HashMap<String, String>>,
 }
 
-/// Stripe `automatic_tax` object (subset).
+/// Adyen `automatic_tax` object (subset).
 #[derive(Debug, Deserialize)]
-struct StripeAutomaticTax {
+struct AdyenAutomaticTax {
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -3952,9 +3952,9 @@ struct StripeAutomaticTax {
     disabled_reason: Option<String>,
 }
 
-/// Stripe `customer_tax_ids[]` entry (subset).
+/// Adyen `customer_tax_ids[]` entry (subset).
 #[derive(Debug, Deserialize)]
-struct StripeCustomerTaxId {
+struct AdyenShopperTaxId {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     #[serde(default)]
@@ -3963,11 +3963,11 @@ struct StripeCustomerTaxId {
     verification: Option<serde_json::Value>,
 }
 
-/// Stripe `total_taxes[]` / `total_tax_amounts[]` entry (subset). The
+/// Adyen `total_taxes[]` / `total_tax_amounts[]` entry (subset). The
 /// jurisdiction is read from whichever nested rate object the API version
 /// supplies.
 #[derive(Debug, Deserialize)]
-struct StripeTotalTax {
+struct AdyenTotalTax {
     #[serde(default)]
     amount: Option<i64>,
     #[serde(default)]
@@ -3981,13 +3981,13 @@ struct StripeTotalTax {
 }
 
 #[derive(Debug, Deserialize)]
-struct StripeInvoiceLines {
+struct AdyenPaymentLines {
     #[serde(default)]
-    data: Vec<StripeInvoiceLine>,
+    data: Vec<AdyenPaymentLine>,
 }
 
 #[derive(Debug, Deserialize)]
-struct StripeInvoiceLine {
+struct AdyenPaymentLine {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -4056,7 +4056,7 @@ struct DunningResult {
 
 /// Replay a deadletter entry by re-verifying the stored signature, parsing the
 /// stored body, claiming the event in the database (idempotent via
-/// `ON CONFLICT`), and calling `handle_stripe_event`.
+/// `ON CONFLICT`), and calling `handle_adyen_notification`.
 async fn replay_deadletter(state: &AppState, entry: &DeadletterEntry) -> Result<(), String> {
     let body = entry
         .body
@@ -4074,13 +4074,13 @@ async fn replay_deadletter(state: &AppState, entry: &DeadletterEntry) -> Result<
     // the original 5-minute freshness window is deliberately NOT re-enforced —
     // the entry already passed it on first receipt and retries run on a
     // minutes-to-hours backoff schedule.
-    let secret = state.config.stripe_webhook_secret.trim();
+    let secret = state.config.adyen_hmac_key.trim();
     if secret.is_empty() {
-        return Err("Stripe webhook secret is not configured".into());
+        return Err("Adyen webhook secret is not configured".into());
     }
     verify_signature_hmac(secret, body.as_bytes(), signature)?;
 
-    let event: StripeEventPayload = serde_json::from_str(body)
+    let event: AdyenEventPayload = serde_json::from_str(body)
         .map_err(|e| format!("Failed to parse stored webhook body: {e}"))?;
 
     match claim_webhook_event(state, &event.id, &event.event_type).await? {
@@ -4098,14 +4098,14 @@ async fn replay_deadletter(state: &AppState, entry: &DeadletterEntry) -> Result<
     }
 
     // Process the event business logic.
-    handle_stripe_event(state, &event).await?;
+    handle_adyen_notification(state, &event).await?;
 
     // Mark as processed in the database.
     sqlx::query(
         r#"
-        UPDATE stripe_webhook_events
+        UPDATE adyen_webhook_events
         SET status = 'processed', processed_at = NOW(), updated_at = NOW()
-        WHERE stripe_event_id = $1
+        WHERE adyen_notification_id = $1
         "#,
     )
     .bind(&event.id)
@@ -4347,13 +4347,13 @@ mod tests {
         };
         const EVENT: &str = "in_event_second";
 
-        // Bound to the SAME Stripe invoice: the conflict-target upsert
+        // Bound to the SAME Adyen invoice: the conflict-target upsert
         // updates that one row.
         assert_eq!(
             duplicate_collection_decision(Some(Some("in_event_second")), EVENT),
             SameInvoice
         );
-        // Bound to a DIFFERENT Stripe invoice: REFUSED — this is the
+        // Bound to a DIFFERENT Adyen invoice: REFUSED — this is the
         // double-record.
         assert_eq!(
             duplicate_collection_decision(Some(Some("in_first_attempt")), EVENT),
@@ -4374,7 +4374,7 @@ mod tests {
 
     #[test]
     fn invoice_events_parse_apexmail_obligation_metadata() {
-        // The usage-collection path stamps apexmailInvoiceId on the Stripe
+        // The usage-collection path stamps apexmailInvoiceId on the Adyen
         // invoices it creates; the webhook must carry it through.
         let payload = serde_json::json!({
             "id": "in_test",
@@ -4471,7 +4471,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Tax truth (P0) — a Stripe/ApexMail charged-total discrepancy blocks
+    // Tax truth (P0) — a Adyen/ApexMail charged-total discrepancy blocks
     // finalization; a match passes.
     // ------------------------------------------------------------------
 
@@ -4489,7 +4489,7 @@ mod tests {
 
     #[test]
     fn tax_total_mismatch_is_an_error_not_a_warning() {
-        // Stripe charged X (e.g. 10.00 + 0 tax); ApexMail's statutory
+        // Adyen charged X (e.g. 10.00 + 0 tax); ApexMail's statutory
         // invoice says X + VAT (10.00 + 2.40). This MUST block.
         let discrepancy = check_charged_total(&expected(1_000, 240), 1_000, 0, 1_000)
             .expect_err("mismatch must be an error");
@@ -4522,7 +4522,7 @@ mod tests {
     #[test]
     fn automatic_tax_status_is_read_verbatim() {
         let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
-        invoice.automatic_tax = Some(StripeAutomaticTax {
+        invoice.automatic_tax = Some(AdyenAutomaticTax {
             enabled: Some(true),
             status: Some("complete".into()),
             disabled_reason: None,
@@ -4530,7 +4530,7 @@ mod tests {
         assert_eq!(automatic_tax_status(&invoice), "complete");
         assert!(automatic_tax_complete(&invoice));
 
-        invoice.automatic_tax = Some(StripeAutomaticTax {
+        invoice.automatic_tax = Some(AdyenAutomaticTax {
             enabled: Some(true),
             status: Some("requires_location_inputs".into()),
             disabled_reason: None,
@@ -4547,7 +4547,7 @@ mod tests {
         let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
         assert_eq!(summarize_tax_ids(&invoice).0, "not_provided");
 
-        invoice.customer_tax_ids = Some(vec![StripeCustomerTaxId {
+        invoice.customer_tax_ids = Some(vec![AdyenShopperTaxId {
             kind: Some("eu_vat".into()),
             value: Some("DE123456789".into()),
             verification: Some(serde_json::json!({"status": "unverified"})),
@@ -4556,7 +4556,7 @@ mod tests {
         assert_eq!(status, "provided_unverified");
         assert_eq!(ids[0]["value"], "DE123456789");
 
-        invoice.customer_tax_ids = Some(vec![StripeCustomerTaxId {
+        invoice.customer_tax_ids = Some(vec![AdyenShopperTaxId {
             kind: Some("eu_vat".into()),
             value: Some("DE123456789".into()),
             verification: Some(serde_json::json!({"status": "verified"})),
@@ -4570,7 +4570,7 @@ mod tests {
         let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
         assert_eq!(tax_jurisdiction(&invoice), None);
 
-        invoice.total_taxes = Some(vec![StripeTotalTax {
+        invoice.total_taxes = Some(vec![AdyenTotalTax {
             amount: Some(240),
             inclusive: Some(false),
             taxability_reason: Some("standard_rated".into()),
@@ -4582,7 +4582,7 @@ mod tests {
         assert_eq!(tax_jurisdiction(&invoice).as_deref(), Some("EE"));
 
         invoice.total_taxes = None;
-        invoice.total_tax_amounts = Some(vec![StripeTotalTax {
+        invoice.total_tax_amounts = Some(vec![AdyenTotalTax {
             amount: Some(240),
             inclusive: Some(false),
             taxability_reason: None,
@@ -4605,13 +4605,13 @@ mod tests {
     #[test]
     fn snapshot_persist_sql_binds_expected_and_observed_sides() {
         // Guard the write shape: the snapshot must carry both the observed
-        // Stripe figures and ApexMail's independent expectation plus hash.
-        let source = include_str!("stripe_webhooks.rs");
+        // Adyen figures and ApexMail's independent expectation plus hash.
+        let source = include_str!("adyen_webhooks.rs");
         for needle in [
             "apexmail_expected_total_cents",
             "raw_payload_hash",
             "validation_status",
-            "ON CONFLICT (stripe_invoice_id) DO NOTHING",
+            "ON CONFLICT (adyen_psp_reference) DO NOTHING",
         ] {
             assert!(
                 source.contains(needle),
@@ -4632,7 +4632,7 @@ mod tests {
 
     #[test]
     fn verified_payment_falls_back_to_the_canonical_derived_total() {
-        // No amount_paid: the canonical derivation prefers Stripe's own
+        // No amount_paid: the canonical derivation prefers Adyen's own
         // explicit total...
         let mut event = invoice_event_with(None, Some(10_000), 10_000);
         event.subtotal = Some(8_000);
@@ -4713,7 +4713,7 @@ mod tests {
 
     #[test]
     fn reactivation_transitions_from_terminal_states_are_allowed() {
-        // Stripe genuinely emits customer.subscription.updated with
+        // Adyen genuinely emits customer.subscription.updated with
         // status=active for an un-cancelled (cancel_at_period_end removed) or
         // support-side reactivated subscription whose last observed status was
         // canceled/incomplete_expired. Refusing the transition deadletters
@@ -4728,7 +4728,7 @@ mod tests {
     }
 
     #[test]
-    fn only_entitled_stripe_statuses_grant_the_paid_plan() {
+    fn only_entitled_adyen_statuses_grant_the_paid_plan() {
         assert_eq!(
             SubscriptionStatus::Active.entitlement_plan_name("scale"),
             "scale"
@@ -4988,7 +4988,7 @@ mod tests {
 
     #[test]
     fn derive_invoice_totals_preserves_signed_credit_invoices() {
-        // Stripe emits NEGATIVE invoices when customer credit / matrix
+        // Adyen emits NEGATIVE invoices when customer credit / matrix
         // proration exceeds the charge. Recording them as 0/0/0 overstates
         // period revenue and hides the applied credit from the local ledger.
         let (subtotal, vat, total) =
@@ -5006,13 +5006,13 @@ mod tests {
         let (subtotal, vat, total) = derive_invoice_totals(Some(0), Some(0), Some(0), 0);
         assert_eq!((subtotal, vat, total), (0, 0, 0));
         // The charge-relevant amount_due stays clamped at zero — nothing was
-        // due — but the explicit Stripe figures are preserved verbatim.
+        // due — but the explicit Adyen figures are preserved verbatim.
         let (subtotal, _vat, total) = derive_invoice_totals(Some(0), None, Some(0), 5_000);
         assert_eq!((subtotal, total), (0, 0));
     }
 
     #[test]
-    fn derive_invoice_totals_prefers_explicit_stripe_amounts() {
+    fn derive_invoice_totals_prefers_explicit_adyen_amounts() {
         let (subtotal, vat, total) =
             derive_invoice_totals(Some(10_000), Some(2_400), Some(12_400), 12_400);
         assert_eq!((subtotal, vat, total), (10_000, 2_400, 12_400));
@@ -5020,7 +5020,7 @@ mod tests {
 
     #[test]
     fn derive_invoice_totals_derives_vat_from_total_minus_subtotal() {
-        // Older Stripe payloads may omit `tax`; derive it from total-subtotal.
+        // Older Adyen payloads may omit `tax`; derive it from total-subtotal.
         let (subtotal, vat, total) =
             derive_invoice_totals(Some(10_000), None, Some(12_400), 12_400);
         assert_eq!((subtotal, vat, total), (10_000, 2_400, 12_400));
@@ -5037,7 +5037,7 @@ mod tests {
     fn derive_invoice_totals_handles_empty_and_negative_inputs() {
         assert_eq!(derive_invoice_totals(None, None, None, 0), (0, 0, 0));
         assert_eq!(derive_invoice_totals(None, None, None, -5), (0, 0, 0));
-        // Inconsistent Stripe data never yields a negative VAT.
+        // Inconsistent Adyen data never yields a negative VAT.
         assert_eq!(
             derive_invoice_totals(Some(2_000), None, Some(1_000), 1_000),
             (2_000, 0, 1_000)
@@ -5053,15 +5053,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_stripe_currency_defaults_to_eur_and_lowercases() {
-        assert_eq!(normalize_stripe_currency(Some("EUR")), "eur");
-        assert_eq!(normalize_stripe_currency(Some("usd")), "usd");
-        assert_eq!(normalize_stripe_currency(Some("  ")), "eur");
-        assert_eq!(normalize_stripe_currency(None), "eur");
+    fn normalize_adyen_currency_defaults_to_eur_and_lowercases() {
+        assert_eq!(normalize_adyen_currency(Some("EUR")), "eur");
+        assert_eq!(normalize_adyen_currency(Some("usd")), "usd");
+        assert_eq!(normalize_adyen_currency(Some("  ")), "eur");
+        assert_eq!(normalize_adyen_currency(None), "eur");
     }
 
     #[test]
-    fn invoice_event_decodes_full_stripe_amount_payload() {
+    fn invoice_event_decodes_full_adyen_amount_payload() {
         let payload = serde_json::json!({
             "id": "in_123",
             "amount_due": 12_400,
@@ -5293,12 +5293,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Fix 7.4 — Stripe webhook processing integration tests
+    // Fix 7.4 — Adyen webhook processing integration tests
     // -----------------------------------------------------------------------
 
     #[test]
     fn parse_signature_header_parses_valid_input() {
-        // Simulate a real Stripe signature header with timestamp and v1 signatures.
+        // Simulate a real Adyen signature header with timestamp and v1 signatures.
         let header = "t=1711234567,v1=abcdef1234567890abcdef1234567890abcdef12,v1=deadbeef";
         let result = parse_signature_header(header);
 
@@ -5327,13 +5327,13 @@ mod tests {
     }
 
     #[test]
-    fn handle_stripe_event_unknown_type_returns_ok() {
-        // The catch-all arm in handle_stripe_event returns Ok(()) for unknown event types.
+    fn handle_adyen_notification_unknown_type_returns_ok() {
+        // The catch-all arm in handle_adyen_notification returns Ok(()) for unknown event types.
         // This tests the event-type routing logic (serde deserialization + match).
-        let event = StripeEventPayload {
+        let event = AdyenEventPayload {
             id: "evt_test_unknown".into(),
             event_type: "unknown.event.type".into(),
-            data: StripeEventData {
+            data: AdyenNotificationData {
                 object: serde_json::json!({}),
             },
         };
@@ -5413,7 +5413,7 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Adversarial coverage tests (DB + Redis backed) for the Stripe webhook
+// Adversarial coverage tests (DB + Redis backed) for the Adyen webhook
 // pipeline, dunning escalation, deadletter replay, and the tax-truth gate.
 //
 // These call the PRIVATE handlers directly: the public route wrapper is
@@ -5594,7 +5594,7 @@ mod coverage_adversarial {
             database_url,
             redis_url: "redis://127.0.0.1:6379".to_string(),
             service_auth_token: "coverage".to_string(),
-            stripe_webhook_secret: "whsec_coverage".to_string(),
+            adyen_hmac_key: "whsec_coverage".to_string(),
             api_base_url: "http://127.0.0.1:9".to_string(),
             ..BillingConfig::default()
         };
@@ -5654,9 +5654,9 @@ mod coverage_adversarial {
     async fn seed_plan(env: &Env, name: &str, price_id: &str) {
         sqlx::query(
             "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit,
-                                stripe_price_id_monthly, is_active)
+                                adyen_plan_code_monthly, is_active)
              VALUES ($1, $2, $2, 4900, 100000, 100000, $3, true)
-             ON CONFLICT (name) DO UPDATE SET stripe_price_id_monthly = EXCLUDED.stripe_price_id_monthly,
+             ON CONFLICT (name) DO UPDATE SET adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
                  is_active = true",
         )
         .bind(format!("plan_{name}"))
@@ -5729,7 +5729,7 @@ mod coverage_adversarial {
             .await
             .expect_err("forged signature must be refused");
         assert!(error.contains("Invalid webhook signature"), "{error}");
-        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_webhook_events")
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
             .fetch_one(&env.pool)
             .await
             .expect("events");
@@ -5785,7 +5785,7 @@ mod coverage_adversarial {
         .expect("dunning count");
         assert_eq!(count, 1, "replay never re-applies the failure");
         let processed: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_sw_replay'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_sw_replay'",
         )
         .fetch_one(&env.pool)
         .await
@@ -5813,7 +5813,7 @@ mod coverage_adversarial {
             signature: Some("t=1,v1=deadbeef".into()),
             ..Default::default()
         };
-        let the_key = "stripe:deadletter:event:evt_sw_backoff";
+        let the_key = "adyen:deadletter:event:evt_sw_backoff";
         let entry_json = serde_json::to_string(&entry).expect("entry json");
         let mut conn = redis_conn(env).await;
         // Isolate the shared retry index for this test.
@@ -5926,29 +5926,29 @@ mod coverage_adversarial {
     });
 
     #[test]
-    fn stripe_decimal_to_cents_is_exact_and_rejects_malformed() {
-        assert_eq!(stripe_decimal_to_cents("65.00"), Some(6500));
-        assert_eq!(stripe_decimal_to_cents("0.40"), Some(40));
-        assert_eq!(stripe_decimal_to_cents("0.4"), Some(40));
-        assert_eq!(stripe_decimal_to_cents("0"), Some(0));
-        assert_eq!(stripe_decimal_to_cents(" 12.34 "), Some(1234));
-        assert_eq!(stripe_decimal_to_cents("100"), Some(10_000));
-        assert_eq!(stripe_decimal_to_cents(""), None);
-        assert_eq!(stripe_decimal_to_cents("abc"), None);
-        assert_eq!(stripe_decimal_to_cents("1.234"), None);
-        assert_eq!(stripe_decimal_to_cents("-5.00"), None);
-        assert_eq!(stripe_decimal_to_cents("1."), Some(100));
-        assert_eq!(stripe_decimal_to_cents(".5"), None);
-        assert_eq!(stripe_decimal_to_cents("99999999999999999999"), None);
+    fn adyen_decimal_to_cents_is_exact_and_rejects_malformed() {
+        assert_eq!(adyen_decimal_to_cents("65.00"), Some(6500));
+        assert_eq!(adyen_decimal_to_cents("0.40"), Some(40));
+        assert_eq!(adyen_decimal_to_cents("0.4"), Some(40));
+        assert_eq!(adyen_decimal_to_cents("0"), Some(0));
+        assert_eq!(adyen_decimal_to_cents(" 12.34 "), Some(1234));
+        assert_eq!(adyen_decimal_to_cents("100"), Some(10_000));
+        assert_eq!(adyen_decimal_to_cents(""), None);
+        assert_eq!(adyen_decimal_to_cents("abc"), None);
+        assert_eq!(adyen_decimal_to_cents("1.234"), None);
+        assert_eq!(adyen_decimal_to_cents("-5.00"), None);
+        assert_eq!(adyen_decimal_to_cents("1."), Some(100));
+        assert_eq!(adyen_decimal_to_cents(".5"), None);
+        assert_eq!(adyen_decimal_to_cents("99999999999999999999"), None);
         // Audit SM7 F7 — the checked_mul/checked_add edge: the whole part
         // PARSES as i64 but the cent arithmetic lands exactly on (and one
         // cent past) i64::MAX. The pre-fix `whole * 100 + frac` wrapped in
         // release; the fixed helper is exact at the bound and `None` past it.
         assert_eq!(
-            stripe_decimal_to_cents("92233720368547758.07"),
+            adyen_decimal_to_cents("92233720368547758.07"),
             Some(i64::MAX)
         );
-        assert_eq!(stripe_decimal_to_cents("92233720368547758.08"), None);
+        assert_eq!(adyen_decimal_to_cents("92233720368547758.08"), None);
     }
 
     #[test]
@@ -5958,7 +5958,7 @@ mod coverage_adversarial {
             derive_invoice_totals(Some(1_000), None, Some(-500), -500),
             (1_000, -1_500, -500)
         );
-        // Explicit Stripe tax wins only when it reconciles with the total.
+        // Explicit Adyen tax wins only when it reconciles with the total.
         assert_eq!(
             derive_invoice_totals(Some(1_000), Some(210), Some(1_210), 1_210),
             (1_000, 210, 1_210)
@@ -5966,7 +5966,7 @@ mod coverage_adversarial {
         assert_eq!(
             derive_invoice_totals(Some(1_000), Some(9_999), Some(1_210), 1_210),
             (1_000, 210, 1_210),
-            "inconsistent Stripe tax is replaced by the derived VAT"
+            "inconsistent Adyen tax is replaced by the derived VAT"
         );
         // Missing fields degrade without inventing a VAT figure.
         assert_eq!(
@@ -5988,9 +5988,9 @@ mod coverage_adversarial {
         assert_eq!(derive_invoice_vat_rate(1_000, 2_000), 200.0);
         assert_eq!(derive_invoice_vat_rate(0, 100), 0.0);
         assert_eq!(derive_invoice_vat_rate(100, -1), 0.0);
-        assert_eq!(normalize_stripe_currency(None), "eur");
-        assert_eq!(normalize_stripe_currency(Some("  EUR ")), "eur");
-        assert_eq!(normalize_stripe_currency(Some("")), "eur");
+        assert_eq!(normalize_adyen_currency(None), "eur");
+        assert_eq!(normalize_adyen_currency(Some("  EUR ")), "eur");
+        assert_eq!(normalize_adyen_currency(Some("")), "eur");
     }
 
     // ---------------- dunning escalation ----------------
@@ -6186,9 +6186,9 @@ mod coverage_adversarial {
             let tenant = "swcov_orphan_ref";
             seed_tenant(env, tenant, "growth", "active").await;
             sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, 'sub_sw_orphan', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_sw')",
         )
         .bind(tenant)
@@ -6220,7 +6220,7 @@ mod coverage_adversarial {
         seed_tenant(env, tenant, "growth", "active").await;
         seed_billing_address(env, tenant, "US").await;
 
-        // Stripe charged 1000 cents of tax on a US (0%) supply: mismatch.
+        // Adyen charged 1000 cents of tax on a US (0%) supply: mismatch.
         let mismatch = invoice_event(serde_json::json!({
             "id": "in_sw_tax_bad",
             "amount_due": 5900,
@@ -6231,13 +6231,13 @@ mod coverage_adversarial {
             "total": 5900,
             "automatic_tax": { "enabled": true, "status": "complete" }
         }));
-        let error = validate_and_snapshot_stripe_tax(&env.state, &mismatch, tenant)
+        let error = validate_and_snapshot_adyen_tax(&env.state, &mismatch, tenant)
             .await
             .expect_err("charged total must not be accepted on trust");
         assert!(error.contains("blocked"), "{error}");
         let incidents: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM finance_incidents
-             WHERE kind = 'tax_total_mismatch' AND stripe_invoice_id = 'in_sw_tax_bad'
+             WHERE kind = 'tax_total_mismatch' AND adyen_psp_reference = 'in_sw_tax_bad'
                AND status = 'open'",
         )
         .fetch_one(&env.pool)
@@ -6245,8 +6245,8 @@ mod coverage_adversarial {
         .expect("incidents");
         assert_eq!(incidents, 1, "a durable finance incident is raised");
         let (validation, delta): (String, i64) = sqlx::query_as(
-            "SELECT validation_status, discrepancy_cents FROM stripe_tax_snapshots
-             WHERE stripe_invoice_id = 'in_sw_tax_bad'",
+            "SELECT validation_status, discrepancy_cents FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = 'in_sw_tax_bad'",
         )
         .fetch_one(&env.pool)
         .await
@@ -6254,7 +6254,7 @@ mod coverage_adversarial {
         assert_eq!(validation, "discrepancy");
         assert_eq!(delta, 1000, "the delta is the over-charged VAT");
 
-        // A replay (new event id, same Stripe invoice) stays blocked and
+        // A replay (new event id, same Adyen invoice) stays blocked and
         // never duplicates the incident.
         let replay = invoice_event(serde_json::json!({
             "id": "in_sw_tax_bad",
@@ -6266,12 +6266,12 @@ mod coverage_adversarial {
             "total": 5900,
             "automatic_tax": { "enabled": true, "status": "complete" }
         }));
-        validate_and_snapshot_stripe_tax(&env.state, &replay, tenant)
+        validate_and_snapshot_adyen_tax(&env.state, &replay, tenant)
             .await
             .expect_err("an open discrepancy keeps blocking");
         let incidents: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM finance_incidents
-             WHERE kind = 'tax_total_mismatch' AND stripe_invoice_id = 'in_sw_tax_bad'",
+             WHERE kind = 'tax_total_mismatch' AND adyen_psp_reference = 'in_sw_tax_bad'",
         )
         .fetch_one(&env.pool)
         .await
@@ -6289,26 +6289,26 @@ mod coverage_adversarial {
             "total": 4900,
             "automatic_tax": { "enabled": true, "status": "complete" }
         }));
-        let snapshot = validate_and_snapshot_stripe_tax(&env.state, &good, tenant)
+        let snapshot = validate_and_snapshot_adyen_tax(&env.state, &good, tenant)
             .await
             .expect("matching invoice validates")
             .expect("snapshot id");
         assert!(!snapshot.is_nil());
         let (validation, authority): (String, String) = sqlx::query_as(
-            "SELECT validation_status, authority FROM stripe_tax_snapshots
-             WHERE stripe_invoice_id = 'in_sw_tax_ok'",
+            "SELECT validation_status, authority FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = 'in_sw_tax_ok'",
         )
         .fetch_one(&env.pool)
         .await
         .expect("snapshot");
         assert_eq!(validation, "validated");
-        assert_eq!(authority, "stripe_tax");
+        assert_eq!(authority, "adyen_tax");
     });
 
     env_test!(tax_gate_fails_closed_without_any_expectation, |env| {
         let tenant = "swcov_tax_unavail";
         seed_tenant(env, tenant, "growth", "active").await;
-        // No billing address and Stripe Tax not complete: cannot validate.
+        // No billing address and Adyen Tax not complete: cannot validate.
         let unknown = invoice_event(serde_json::json!({
             "id": "in_sw_tax_unknown",
             "amount_due": 1000,
@@ -6316,16 +6316,16 @@ mod coverage_adversarial {
             "subtotal": 1000,
             "total": 1000
         }));
-        let error = validate_and_snapshot_stripe_tax(&env.state, &unknown, tenant)
+        let error = validate_and_snapshot_adyen_tax(&env.state, &unknown, tenant)
             .await
             .expect_err("fail closed");
         assert!(error.contains("cannot validate"), "{error}");
         let (incidents, validation): (i64, String) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM finance_incidents
                      WHERE kind = 'tax_validation_unavailable'
-                       AND stripe_invoice_id = 'in_sw_tax_unknown'),
+                       AND adyen_psp_reference = 'in_sw_tax_unknown'),
                     validation_status
-             FROM stripe_tax_snapshots WHERE stripe_invoice_id = 'in_sw_tax_unknown'",
+             FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_sw_tax_unknown'",
         )
         .fetch_one(&env.pool)
         .await
@@ -6342,12 +6342,12 @@ mod coverage_adversarial {
             "subtotal": 0,
             "total": 0
         }));
-        validate_and_snapshot_stripe_tax(&env.state, &zero, tenant)
+        validate_and_snapshot_adyen_tax(&env.state, &zero, tenant)
             .await
             .expect("zero-value invoices are exempt");
         let validation: String = sqlx::query_scalar(
-            "SELECT validation_status FROM stripe_tax_snapshots
-             WHERE stripe_invoice_id = 'in_sw_tax_zero'",
+            "SELECT validation_status FROM adyen_tax_snapshots
+             WHERE adyen_psp_reference = 'in_sw_tax_zero'",
         )
         .fetch_one(&env.pool)
         .await
@@ -6364,7 +6364,7 @@ mod coverage_adversarial {
         seed_tenant(env, other, "growth", "active").await;
         let local_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
                                    amount, currency, subtotal, vat_total, total,
                                    due_at, period_start, period_end, created_at, updated_at)
              VALUES ($1, $2, 'in_sw_rebind', 'SWCOV-REBIND', 'pending',
@@ -6390,9 +6390,9 @@ mod coverage_adversarial {
             ] }
         }));
 
-        // The same Stripe invoice resolved to a DIFFERENT tenant must not
+        // The same Adyen invoice resolved to a DIFFERENT tenant must not
         // flip the existing local row to paid.
-        let affected = insert_paid_invoice_from_stripe(&env.state, &event, other)
+        let affected = insert_paid_invoice_from_adyen(&env.state, &event, other)
             .await
             .expect("insert attempt");
         assert_eq!(affected, 0, "tenant mismatch is rejected by the guard");
@@ -6405,7 +6405,7 @@ mod coverage_adversarial {
         assert_eq!(status, "pending", "rejected write changes nothing");
         assert_eq!(bound, owner);
         let duplicates: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoices WHERE stripe_invoice_id = 'in_sw_rebind'",
+            "SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_sw_rebind'",
         )
         .fetch_one(&env.pool)
         .await
@@ -6413,7 +6413,7 @@ mod coverage_adversarial {
         assert_eq!(duplicates, 1);
 
         // The rightful tenant's event settles it in place.
-        let affected = insert_paid_invoice_from_stripe(&env.state, &event, owner)
+        let affected = insert_paid_invoice_from_adyen(&env.state, &event, owner)
             .await
             .expect("settle");
         assert_eq!(affected, 1);
@@ -6431,7 +6431,7 @@ mod coverage_adversarial {
             "settling an existing row never rewrites its line items"
         );
 
-        // A brand-new Stripe invoice is inserted WITH its line items.
+        // A brand-new Adyen invoice is inserted WITH its line items.
         let fresh = invoice_event(serde_json::json!({
             "id": "in_sw_rebind_new",
             "amount_due": 1000,
@@ -6445,12 +6445,12 @@ mod coverage_adversarial {
                   "unit_amount_excluding_tax": "10.00" }
             ] }
         }));
-        let affected = insert_paid_invoice_from_stripe(&env.state, &fresh, owner)
+        let affected = insert_paid_invoice_from_adyen(&env.state, &fresh, owner)
             .await
             .expect("fresh insert");
         assert_eq!(affected, 1);
         let (status, line_items): (String, serde_json::Value) = sqlx::query_as(
-            "SELECT status, line_items FROM invoices WHERE stripe_invoice_id = 'in_sw_rebind_new'",
+            "SELECT status, line_items FROM invoices WHERE adyen_psp_reference = 'in_sw_rebind_new'",
         )
         .fetch_one(&env.pool)
         .await
@@ -6511,7 +6511,7 @@ mod coverage_adversarial {
         let error = handle_subscription_change(&env.state, unknown_price)
             .await
             .expect_err("unknown price");
-        assert!(error.contains("Unknown Stripe price"), "{error}");
+        assert!(error.contains("Unknown Adyen price"), "{error}");
 
         // A price with no recurring interval cannot be mapped to a plan.
         let mut bad_interval =
@@ -6538,7 +6538,7 @@ mod coverage_adversarial {
             error.contains("Invalid initial subscription state"),
             "{error}"
         );
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
             .fetch_one(&env.pool)
             .await
             .expect("subscriptions");
@@ -6563,7 +6563,7 @@ mod coverage_adversarial {
             .await
             .expect("valid activation");
         let (plan, status): (String, String) =
-            sqlx::query_as("SELECT plan, status FROM stripe_subscriptions WHERE tenant_id = $1")
+            sqlx::query_as("SELECT plan, status FROM adyen_subscriptions WHERE tenant_id = $1")
                 .bind(tenant)
                 .fetch_one(&env.pool)
                 .await
@@ -6591,9 +6591,9 @@ mod coverage_adversarial {
         seed_tenant(env, tenant, "swcov_growth", "active").await;
         seed_plan(env, "swcov_growth", "price_sw_growth").await;
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, 'sub_sw_del', 'swcov_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_del')",
         )
         .bind(tenant)
@@ -6616,7 +6616,7 @@ mod coverage_adversarial {
             .await
             .expect("delete");
         let (status, plan): (String, String) =
-            sqlx::query_as("SELECT status, plan FROM stripe_subscriptions WHERE tenant_id = $1")
+            sqlx::query_as("SELECT status, plan FROM adyen_subscriptions WHERE tenant_id = $1")
                 .bind(tenant)
                 .fetch_one(&env.pool)
                 .await
@@ -6681,7 +6681,7 @@ mod coverage_adversarial {
             .await
             .expect("tenant");
         assert_eq!(status, "suspended", "checkout never bypasses a suspension");
-        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
             .fetch_one(&env.pool)
             .await
             .expect("subscriptions");
@@ -6702,8 +6702,8 @@ mod coverage_adversarial {
             (received, "received", 20),
         ] {
             sqlx::query(
-                "INSERT INTO stripe_webhook_events
-                     (id, stripe_event_id, event_type, status, created_at, updated_at)
+                "INSERT INTO adyen_webhook_events
+                     (id, adyen_notification_id, event_type, status, created_at, updated_at)
                  VALUES (gen_random_uuid(), $1, 'invoice.paid', $2,
                          NOW() - make_interval(mins => $3::int),
                          NOW() - make_interval(mins => $3::int))",
@@ -6723,9 +6723,9 @@ mod coverage_adversarial {
         let (fresh_status, done_status, received_status): (String, String, String) =
             sqlx::query_as(
                 "SELECT
-                (SELECT status FROM stripe_webhook_events WHERE stripe_event_id = $1),
-                (SELECT status FROM stripe_webhook_events WHERE stripe_event_id = $2),
-                (SELECT status FROM stripe_webhook_events WHERE stripe_event_id = $3)",
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1),
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $2),
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $3)",
             )
             .bind(fresh)
             .bind(processed)
@@ -6737,7 +6737,7 @@ mod coverage_adversarial {
         assert_eq!(done_status, "processed", "completed work is never rewound");
         assert_eq!(received_status, "received");
         let reclaimed_status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = $1",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
         )
         .bind(stale)
         .fetch_one(&env.pool)
@@ -6759,7 +6759,7 @@ mod coverage_adversarial {
         assert!(matches!(second, WebhookEventClaim::AlreadyPending));
         // A failed attempt may be reclaimed; a processed one never is.
         sqlx::query(
-            "UPDATE stripe_webhook_events SET status = 'failed' WHERE stripe_event_id = $1",
+            "UPDATE adyen_webhook_events SET status = 'failed' WHERE adyen_notification_id = $1",
         )
         .bind(event_id)
         .execute(&env.pool)
@@ -6770,7 +6770,7 @@ mod coverage_adversarial {
             .expect("claim");
         assert!(matches!(reclaimed, WebhookEventClaim::Claimed));
         sqlx::query(
-            "UPDATE stripe_webhook_events SET status = 'processed' WHERE stripe_event_id = $1",
+            "UPDATE adyen_webhook_events SET status = 'processed' WHERE adyen_notification_id = $1",
         )
         .bind(event_id)
         .execute(&env.pool)
@@ -6877,7 +6877,7 @@ mod coverage_adversarial {
 
     use crate::test_support::{
         ensure_trace_subscriber, seed_plan as shared_seed_plan, seed_tenant as shared_seed_tenant,
-        sign_stripe, state_with_broken_db, state_with_dead_redis, state_with_empty_stripe_secret,
+        sign_adyen, state_with_broken_db, state_with_dead_redis, state_with_empty_adyen_secret,
         TestEnv,
     };
     use tower::ServiceExt;
@@ -6889,15 +6889,15 @@ mod coverage_adversarial {
             .expect("TEST_DATABASE_URL provisioning")
     }
 
-    fn stripe_request(
+    fn adyen_request(
         body: &[u8],
         signature: Option<&str>,
     ) -> axum::http::Request<axum::body::Body> {
         let mut builder = axum::http::Request::builder()
             .method("POST")
-            .uri("/webhooks/stripe");
+            .uri("/webhooks/adyen");
         if let Some(signature) = signature {
-            builder = builder.header("stripe-signature", signature);
+            builder = builder.header("adyen-hmac-signature", signature);
         }
         builder.body(axum::body::Body::from(body.to_vec())).unwrap()
     }
@@ -6909,7 +6909,7 @@ mod coverage_adversarial {
     ) -> axum::response::Response {
         router()
             .with_state(state.clone())
-            .oneshot(stripe_request(body, signature))
+            .oneshot(adyen_request(body, signature))
             .await
             .expect("oneshot")
     }
@@ -6936,7 +6936,7 @@ mod coverage_adversarial {
     async fn clear_all_deadletters(env: &Env) {
         let mut conn = redis_conn(env).await;
         let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("stripe:deadletter:*")
+            .arg("adyen:deadletter:*")
             .query_async(&mut conn)
             .await
             .expect("keys");
@@ -6993,7 +6993,7 @@ mod coverage_adversarial {
     }
 
     async fn event_rows(pool: &sqlx::PgPool) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM stripe_webhook_events")
+        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
             .fetch_one(pool)
             .await
             .expect("event rows")
@@ -7009,8 +7009,8 @@ mod coverage_adversarial {
         let response = post_webhook(&env.state, body, None).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
-        assert_eq!(json["error"], "Missing stripe-signature header");
-        let entries = deadletter_entries(env, "stripe:deadletter:event:unknown*").await;
+        assert_eq!(json["error"], "Missing adyen-hmac-signature header");
+        let entries = deadletter_entries(env, "adyen:deadletter:event:unknown*").await;
         assert_eq!(entries.len(), 1, "missing signature is deadlettered");
         let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
         assert_eq!(entry.reason, "missing_signature");
@@ -7031,7 +7031,7 @@ mod coverage_adversarial {
         let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
         clear_all_deadletters(env).await;
         let timestamp = Utc::now().timestamp();
-        let signature = sign_stripe("whsec_coverage", b"not json", timestamp);
+        let signature = sign_adyen("whsec_coverage", b"not json", timestamp);
         let response = post_webhook(&env.state, b"not json", Some(&signature)).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
@@ -7041,7 +7041,7 @@ mod coverage_adversarial {
             0,
             "malformed JSON writes nothing"
         );
-        let entries = deadletter_entries(env, "stripe:deadletter:event:unknown*").await;
+        let entries = deadletter_entries(env, "adyen:deadletter:event:unknown*").await;
         assert_eq!(entries.len(), 1);
         let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
         assert_eq!(entry.reason, "invalid_json_payload");
@@ -7057,7 +7057,7 @@ mod coverage_adversarial {
             br#"{"id": null}"#.to_vec(),
             br#"{"id": "   "}"#.to_vec(),
         ] {
-            let signature = sign_stripe("whsec_coverage", &body, timestamp);
+            let signature = sign_adyen("whsec_coverage", &body, timestamp);
             let response = post_webhook(&env.state, &body, Some(&signature)).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let json = response_json(response).await;
@@ -7076,7 +7076,7 @@ mod coverage_adversarial {
             serde_json::json!({"id":"in_t","amount_due":1}),
         );
         let timestamp = Utc::now().timestamp();
-        let wrong_secret = sign_stripe("whsec_NOT_the_secret", &body, timestamp);
+        let wrong_secret = sign_adyen("whsec_NOT_the_secret", &body, timestamp);
         let response = post_webhook(&env.state, &body, Some(&wrong_secret)).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
@@ -7085,7 +7085,7 @@ mod coverage_adversarial {
             "forged signature writes nothing"
         );
 
-        let right_secret = sign_stripe("whsec_coverage", &body, timestamp);
+        let right_secret = sign_adyen("whsec_coverage", &body, timestamp);
         let mut segments = right_secret.split(',');
         let ts = segments.next().unwrap();
         let v1 = segments.next().unwrap();
@@ -7115,7 +7115,7 @@ mod coverage_adversarial {
             serde_json::json!({"id":"in_s","amount_due":1}),
         );
         for delta in [301_i64, -301] {
-            let signature = sign_stripe("whsec_coverage", &body, Utc::now().timestamp() + delta);
+            let signature = sign_adyen("whsec_coverage", &body, Utc::now().timestamp() + delta);
             let response = post_webhook(&env.state, &body, Some(&signature)).await;
             assert_eq!(
                 response.status(),
@@ -7126,7 +7126,7 @@ mod coverage_adversarial {
         }
         // Inside the window the signature verifies and the event is CLAIMED
         // (it may then fail on its own business content — never on the MAC).
-        let signature = sign_stripe("whsec_coverage", &body, Utc::now().timestamp() - 299);
+        let signature = sign_adyen("whsec_coverage", &body, Utc::now().timestamp() - 299);
         let _response = post_webhook(&env.state, &body, Some(&signature)).await;
         assert_eq!(
             event_rows(&env.pool).await,
@@ -7177,11 +7177,11 @@ mod coverage_adversarial {
                 serde_json::json!({"id":"in_n","amount_due":1}),
             );
             let timestamp = Utc::now().timestamp();
-            let signature = sign_stripe("whsec_coverage", &body, timestamp);
-            let broken = state_with_empty_stripe_secret(&env.pool, &env.redis, &env.state.config);
+            let signature = sign_adyen("whsec_coverage", &body, timestamp);
+            let broken = state_with_empty_adyen_secret(&env.pool, &env.redis, &env.state.config);
             let error = verify_and_parse_event(&broken, &body, &signature)
                 .expect_err("empty secret refused");
-            assert_eq!(error, "Stripe webhook secret is not configured");
+            assert_eq!(error, "Adyen webhook secret is not configured");
 
             let error = replay_deadletter(
                 &broken,
@@ -7195,7 +7195,7 @@ mod coverage_adversarial {
             )
             .await
             .expect_err("replay refuses an unconfigured secret");
-            assert_eq!(error, "Stripe webhook secret is not configured");
+            assert_eq!(error, "Adyen webhook secret is not configured");
             assert_eq!(event_rows(&env.pool).await, 0);
         }
     );
@@ -7219,7 +7219,7 @@ mod coverage_adversarial {
         });
         let body = signed_event("evt_swadv_replay", "customer.subscription.created", object);
         let timestamp = Utc::now().timestamp();
-        let signature = sign_stripe("whsec_coverage", &body, timestamp);
+        let signature = sign_adyen("whsec_coverage", &body, timestamp);
 
         let first = post_webhook(&env.state, &body, Some(&signature)).await;
         assert_eq!(first.status(), StatusCode::OK);
@@ -7227,12 +7227,12 @@ mod coverage_adversarial {
         assert_eq!(
             second.status(),
             StatusCode::OK,
-            "Stripe expects 2xx on replay"
+            "Adyen expects 2xx on replay"
         );
 
         let (plan, subs): (String, i64) = sqlx::query_as(
             "SELECT (SELECT plan FROM tenants WHERE id = 'swadv_replay'),
-                    (SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = 'swadv_replay')",
+                    (SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = 'swadv_replay')",
         )
         .fetch_one(&env.pool)
         .await
@@ -7257,7 +7257,7 @@ mod coverage_adversarial {
             clear_all_deadletters(env).await;
             shared_seed_tenant(&env.pool, "swadv_pending", "free").await;
             sqlx::query(
-                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status)
+                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
              VALUES (gen_random_uuid(), 'evt_swadv_pending', 'invoice.paid', 'pending')",
             )
             .execute(&env.pool)
@@ -7269,13 +7269,13 @@ mod coverage_adversarial {
                 serde_json::json!({"id": "in_p", "amount_due": 1}),
             );
             let timestamp = Utc::now().timestamp();
-            let signature = sign_stripe("whsec_coverage", &body, timestamp);
+            let signature = sign_adyen("whsec_coverage", &body, timestamp);
             let response = post_webhook(&env.state, &body, Some(&signature)).await;
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-            let entries = deadletter_entries(env, "stripe:deadletter:event:*").await;
+            let entries = deadletter_entries(env, "adyen:deadletter:event:*").await;
             assert_eq!(entries.len(), 0, "a pending event is never deadlettered");
             let status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_swadv_pending'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_swadv_pending'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7293,13 +7293,13 @@ mod coverage_adversarial {
             serde_json::json!({"id": "cus_x"}),
         );
         let timestamp = Utc::now().timestamp();
-        let signature = sign_stripe("whsec_coverage", &body, timestamp);
+        let signature = sign_adyen("whsec_coverage", &body, timestamp);
         let response = post_webhook(&env.state, &body, Some(&signature)).await;
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         assert_eq!(json["received"], true);
         let status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_swadv_unknown'",
+            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_swadv_unknown'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7310,7 +7310,7 @@ mod coverage_adversarial {
         );
     });
 
-    env_test!(handle_stripe_event_decode_failures_fail_closed, |env| {
+    env_test!(handle_adyen_notification_decode_failures_fail_closed, |env| {
         // Every handled event type with a malformed object must be an error
         // (deadlettered by the caller), never a silent drop.
         let cases = [
@@ -7341,13 +7341,13 @@ mod coverage_adversarial {
             ),
         ];
         for (event_type, object) in cases {
-            let event: StripeEventPayload = serde_json::from_value(serde_json::json!({
+            let event: AdyenEventPayload = serde_json::from_value(serde_json::json!({
                 "id": "evt_decode",
                 "type": event_type,
                 "data": { "object": object }
             }))
             .expect("envelope");
-            let error = handle_stripe_event(&env.state, &event)
+            let error = handle_adyen_notification(&env.state, &event)
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("decode failure must be an error"));
@@ -7360,16 +7360,16 @@ mod coverage_adversarial {
     });
 
     env_test!(handle_checkout_completed_without_metadata_is_noop, |env| {
-        let event: StripeEventPayload = serde_json::from_value(serde_json::json!({
+        let event: AdyenEventPayload = serde_json::from_value(serde_json::json!({
             "id": "evt_checkout_orphan",
             "type": "checkout.session.completed",
             "data": { "object": { "id": "cs_orphan" } }
         }))
         .expect("envelope");
-        handle_stripe_event(&env.state, &event)
+        handle_adyen_notification(&env.state, &event)
             .await
             .expect("unattributable checkout is acknowledged");
-        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
             .fetch_one(&env.pool)
             .await
             .expect("subs");
@@ -7449,7 +7449,7 @@ mod coverage_adversarial {
             .await
             .expect_err("missing price id refused");
         assert!(error.contains("no valid line-item price"));
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
             .fetch_one(&env.pool)
             .await
             .expect("rows");
@@ -7462,16 +7462,16 @@ mod coverage_adversarial {
         shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
         let now = Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ('swadv_owner', 'sub_swadv', 'swadv_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_owner')",
         )
         .execute(&env.pool)
         .await
         .expect("owner row");
 
-        // The same Stripe subscription id, attributed to a DIFFERENT tenant.
+        // The same Adyen subscription id, attributed to a DIFFERENT tenant.
         let event = sub_event(
             Some("swadv_attacker"),
             "active",
@@ -7485,7 +7485,7 @@ mod coverage_adversarial {
             .expect_err("cross-tenant rebind refused");
         assert!(error.contains("already bound to a different tenant"));
         let owner: String = sqlx::query_scalar(
-            "SELECT tenant_id FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv'",
+            "SELECT tenant_id FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7498,9 +7498,9 @@ mod coverage_adversarial {
         shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
         let now = Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ('swadv_trans', 'sub_swadv', 'swadv_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_t')",
         )
         .execute(&env.pool)
@@ -7521,7 +7521,7 @@ mod coverage_adversarial {
             .expect_err("illegal transition refused");
         assert!(error.contains("Invalid subscription status transition"));
         let status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv'",
+            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7550,9 +7550,9 @@ mod coverage_adversarial {
             let now = Utc::now().timestamp();
             // The stored row already applied a NEWER cycle watermark.
             sqlx::query(
-                "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id, event_watermark)
+                "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference, event_watermark)
              VALUES ('swadv_stale', 'sub_swadv', 'swadv_growth', 'active',
                      to_timestamp($1), to_timestamp($2), 'cus_s', to_timestamp($1))",
             )
@@ -7575,7 +7575,7 @@ mod coverage_adversarial {
                 .await
                 .expect("stale events are acknowledged");
             let (status, watermark): (String, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT status, event_watermark FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv'",
+            "SELECT status, event_watermark FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7591,16 +7591,16 @@ mod coverage_adversarial {
             // active replacement on the same tenant: the old row is demoted
             // (no watermark) and the replacement is ACTIVE with a newer one.
             sqlx::query(
-                "UPDATE stripe_subscriptions SET status = 'canceled', event_watermark = NULL
-                 WHERE stripe_subscription_id = 'sub_swadv'",
+                "UPDATE adyen_subscriptions SET status = 'canceled', event_watermark = NULL
+                 WHERE adyen_subscription_id = 'sub_swadv'",
             )
             .execute(&env.pool)
             .await
             .expect("demote the old row");
             sqlx::query(
-                "INSERT INTO stripe_subscriptions
-                     (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, stripe_customer_id, event_watermark)
+                "INSERT INTO adyen_subscriptions
+                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, adyen_shopper_reference, event_watermark)
                  VALUES ('swadv_stale', 'sub_swadv_old', 'swadv_growth', 'active',
                          to_timestamp($1), to_timestamp($2), 'cus_s', to_timestamp($1))",
             )
@@ -7622,7 +7622,7 @@ mod coverage_adversarial {
                 .await
                 .expect("stale replacement events are acknowledged");
             let newer_status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv_old'",
+            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv_old'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7642,9 +7642,9 @@ mod coverage_adversarial {
             // ACTIVE row per tenant is possible) plus an ACTIVE superseded one.
             for (sub_id, status) in [("sub_swadv", "trialing"), ("sub_swadv_other", "active")] {
                 sqlx::query(
-                    "INSERT INTO stripe_subscriptions
-                     (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                      billing_cycle_end, stripe_customer_id, event_watermark)
+                    "INSERT INTO adyen_subscriptions
+                     (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, adyen_shopper_reference, event_watermark)
                  VALUES ('swadv_renew', $3, 'swadv_growth', $4,
                          to_timestamp($1), to_timestamp($2), 'cus_r', to_timestamp($1))",
                 )
@@ -7685,8 +7685,8 @@ mod coverage_adversarial {
                 .await
                 .expect("renewal applies");
             let periods: Vec<(String,)> = sqlx::query_as(
-                "SELECT stripe_subscription_id FROM billing_periods
-             WHERE tenant_id = 'swadv_renew' ORDER BY stripe_subscription_id, period_start",
+                "SELECT adyen_subscription_id FROM billing_periods
+             WHERE tenant_id = 'swadv_renew' ORDER BY adyen_subscription_id, period_start",
             )
             .fetch_all(&env.pool)
             .await
@@ -7696,7 +7696,7 @@ mod coverage_adversarial {
                 "closing + superseded + incoming cycles snapshotted"
             );
             let superseded_status: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv_other'",
+            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_swadv_other'",
         )
         .fetch_one(&env.pool)
         .await
@@ -7832,7 +7832,7 @@ mod coverage_adversarial {
             let isolated = crate::test_support::spawn_isolated_redis();
             let state = state_with_isolated_redis(env, &isolated);
             sqlx::query(
-                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status)
+                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
                  VALUES (gen_random_uuid(), 'evt_rollback', 'invoice.paid', 'pending')",
             )
             .execute(&env.pool)
@@ -7858,11 +7858,11 @@ mod coverage_adversarial {
             .await
             .expect_err("redis failure surfaces");
             assert!(
-                error.contains("stripe dead letter"),
+                error.contains("adyen dead letter"),
                 "honest failure: {error}"
             );
             let status: String = sqlx::query_scalar(
-                "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_rollback'",
+                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_rollback'",
             )
             .fetch_one(&env.pool)
             .await
@@ -7877,7 +7877,7 @@ mod coverage_adversarial {
             let isolated = crate::test_support::spawn_isolated_redis();
             let state = state_with_isolated_redis(env, &isolated);
             sqlx::query(
-                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status)
+                "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status)
                  VALUES (gen_random_uuid(), 'evt_commitfail', 'invoice.paid', 'pending')",
             )
             .execute(&env.pool)
@@ -7890,7 +7890,7 @@ mod coverage_adversarial {
             for statement in [
                 "CREATE TABLE cov_status_guard (status text PRIMARY KEY)",
                 "INSERT INTO cov_status_guard VALUES ('pending'), ('received')",
-                "ALTER TABLE stripe_webhook_events ADD CONSTRAINT cov_status_fk FOREIGN KEY (status)                  REFERENCES cov_status_guard(status) DEFERRABLE INITIALLY DEFERRED",
+                "ALTER TABLE adyen_webhook_events ADD CONSTRAINT cov_status_fk FOREIGN KEY (status)                  REFERENCES cov_status_guard(status) DEFERRABLE INITIALLY DEFERRED",
             ] {
                 sqlx::query(statement)
                     .execute(&env.pool)
@@ -7912,7 +7912,7 @@ mod coverage_adversarial {
                 "honest failure: {error}"
             );
             let status: String = sqlx::query_scalar(
-                "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_commitfail'",
+                "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_commitfail'",
             )
             .fetch_one(&env.pool)
             .await
@@ -7924,7 +7924,7 @@ mod coverage_adversarial {
             // The already-written deadletter entry is compensated away.
             let mut conn = pool_conn(&isolated.pool).await;
             let entries =
-                deadletter_entries_on(&mut conn, "stripe:deadletter:event:evt_commitfail*").await;
+                deadletter_entries_on(&mut conn, "adyen:deadletter:event:evt_commitfail*").await;
             assert_eq!(
                 entries.len(),
                 0,
@@ -7940,7 +7940,7 @@ mod coverage_adversarial {
         let isolated = crate::test_support::spawn_isolated_redis();
         let state = state_with_isolated_redis(env, &isolated);
         let mut conn = pool_conn(&isolated.pool).await;
-        let the_key = "stripe:deadletter:event:evt_comp_direct";
+        let the_key = "adyen:deadletter:event:evt_comp_direct";
         let _: () = redis::cmd("SETEX")
             .arg(the_key)
             .arg(60)
@@ -8009,13 +8009,13 @@ mod coverage_adversarial {
             let _: () = redis::cmd("ZADD")
                 .arg(DEADLETTER_RETRY_INDEX_KEY)
                 .arg(1)
-                .arg("stripe:deadletter:event:evicted")
+                .arg("adyen:deadletter:event:evicted")
                 .query_async(&mut conn)
                 .await
                 .expect("schedule evicted");
             // 2) corrupt entry: stored body is not JSON.
             let _: () = redis::cmd("SET")
-                .arg("stripe:deadletter:event:corrupt")
+                .arg("adyen:deadletter:event:corrupt")
                 .arg("this is not json")
                 .query_async(&mut conn)
                 .await
@@ -8023,7 +8023,7 @@ mod coverage_adversarial {
             let _: () = redis::cmd("ZADD")
                 .arg(DEADLETTER_RETRY_INDEX_KEY)
                 .arg(1)
-                .arg("stripe:deadletter:event:corrupt")
+                .arg("adyen:deadletter:event:corrupt")
                 .query_async(&mut conn)
                 .await
                 .expect("schedule corrupt");
@@ -8033,7 +8033,7 @@ mod coverage_adversarial {
                 ..Default::default()
             };
             let _: () = redis::cmd("SET")
-                .arg("stripe:deadletter:event:foreign")
+                .arg("adyen:deadletter:event:foreign")
                 .arg(serde_json::to_string(&foreign).unwrap())
                 .query_async(&mut conn)
                 .await
@@ -8041,7 +8041,7 @@ mod coverage_adversarial {
             let _: () = redis::cmd("ZADD")
                 .arg(DEADLETTER_RETRY_INDEX_KEY)
                 .arg(1)
-                .arg("stripe:deadletter:event:foreign")
+                .arg("adyen:deadletter:event:foreign")
                 .query_async(&mut conn)
                 .await
                 .expect("schedule foreign");
@@ -8058,8 +8058,8 @@ mod coverage_adversarial {
                 .expect("card");
             assert_eq!(remaining, 0, "all three arms drop their index members");
             let _: () = redis::cmd("DEL")
-                .arg("stripe:deadletter:event:corrupt")
-                .arg("stripe:deadletter:event:foreign")
+                .arg("adyen:deadletter:event:corrupt")
+                .arg("adyen:deadletter:event:foreign")
                 .query_async(&mut conn)
                 .await
                 .expect("cleanup");
@@ -8081,7 +8081,7 @@ mod coverage_adversarial {
         let payload = payment_failed_payload("evt_retry_ok", "in_retry_ok", "swadv_retry_ok");
         let body = serde_json::to_string(&payload).unwrap();
         let timestamp = Utc::now().timestamp();
-        let signature = sign_stripe("whsec_coverage", body.as_bytes(), timestamp);
+        let signature = sign_adyen("whsec_coverage", body.as_bytes(), timestamp);
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
             event_id: Some("evt_retry_ok".into()),
@@ -8089,7 +8089,7 @@ mod coverage_adversarial {
             signature: Some(signature),
             ..Default::default()
         };
-        let the_key = "stripe:deadletter:event:evt_retry_ok";
+        let the_key = "adyen:deadletter:event:evt_retry_ok";
         let mut conn = pool_conn(&isolated.pool).await;
         let _: () = redis::cmd("ZREMRANGEBYSCORE")
             .arg(DEADLETTER_RETRY_INDEX_KEY)
@@ -8193,7 +8193,7 @@ mod coverage_adversarial {
         shared_seed_tenant(&env.pool, tenant, "growth").await;
         let invoice_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
                                    amount, currency, subtotal, vat_total, total,
                                    due_at, period_start, period_end)
              VALUES ($1, $2, 'in_swadv_settle', 'SWADV-1', 'pending', 12400, 'eur', 10000, 2400,
@@ -8278,7 +8278,7 @@ mod coverage_adversarial {
         shared_seed_tenant(&env.pool, tenant, "growth").await;
         let invoice_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+            "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
                                    amount, currency, subtotal, vat_total, total,
                                    due_at, period_start, period_end)
              VALUES ($1, $2, 'in_ccy', 'SWADV-2', 'pending', 1000, 'eur', 1000, 0, 1000,
@@ -8331,7 +8331,7 @@ mod coverage_adversarial {
             .await
             .expect("zero-value invoices settle");
         let invoice: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM invoices WHERE stripe_invoice_id = 'in_swadv_zero'")
+            sqlx::query_as("SELECT status FROM invoices WHERE adyen_psp_reference = 'in_swadv_zero'")
                 .fetch_optional(&env.pool)
                 .await
                 .expect("invoice");
@@ -8341,7 +8341,7 @@ mod coverage_adversarial {
             "Fix A imports the paid row"
         );
         let allocations: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE operation_id = 'stripe:in_swadv_zero'",
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE operation_id = 'adyen:in_swadv_zero'",
         )
         .fetch_one(&env.pool)
         .await
@@ -8360,7 +8360,7 @@ mod coverage_adversarial {
             shared_seed_tenant(&env.pool, owner, "growth").await;
             shared_seed_tenant(&env.pool, other, "growth").await;
             sqlx::query(
-                "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+                "INSERT INTO invoices (id, tenant_id, adyen_psp_reference, invoice_number, status,
                                    amount, currency, subtotal, vat_total, total,
                                    due_at, period_start, period_end)
              VALUES (gen_random_uuid(), $1, 'in_import', 'SWADV-3', 'pending',
@@ -8405,7 +8405,7 @@ mod coverage_adversarial {
                 "Fix F4: no blanket recovery"
             );
             let status: String = sqlx::query_scalar(
-                "SELECT status FROM invoices WHERE stripe_invoice_id = 'in_import'",
+                "SELECT status FROM invoices WHERE adyen_psp_reference = 'in_import'",
             )
             .fetch_one(&env.pool)
             .await
@@ -8445,7 +8445,7 @@ mod coverage_adversarial {
             let (validation, source): (String, String) = sqlx::query_as(
                 "SELECT validation_status,
                     raw_payload->'apexmail'->>'source'
-             FROM stripe_tax_snapshots WHERE stripe_invoice_id = 'in_recompute_ok'",
+             FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_recompute_ok'",
             )
             .fetch_one(&env.pool)
             .await
@@ -8511,7 +8511,7 @@ mod coverage_adversarial {
                 .await
                 .expect("null country recomputes 0% VAT and matches");
             let validation: String = sqlx::query_scalar(
-            "SELECT validation_status FROM stripe_tax_snapshots WHERE stripe_invoice_id = 'in_nullcountry'",
+            "SELECT validation_status FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_nullcountry'",
         )
         .fetch_one(&env.pool)
         .await
@@ -8678,7 +8678,7 @@ mod coverage_adversarial {
 
     env_test!(reclaim_reports_reclaimed_events_loudly, |env| {
         sqlx::query(
-            "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, updated_at)
+            "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, updated_at)
              VALUES (gen_random_uuid(), 'evt_swadv_reclaim', 'invoice.paid', 'pending',
                      NOW() - INTERVAL '20 minutes')",
         )
@@ -8733,9 +8733,9 @@ mod coverage_adversarial {
 
     async fn seed_active_subscription(env: &Env, tenant: &str, plan: &str, sub_id: &str) {
         sqlx::query(
-            "INSERT INTO stripe_subscriptions
-                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
-                  billing_cycle_end, stripe_customer_id)
+            "INSERT INTO adyen_subscriptions
+                 (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, adyen_shopper_reference)
              VALUES ($1, $2, $3, 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_ip')",
         )
         .bind(tenant)
@@ -8879,12 +8879,12 @@ mod coverage_adversarial {
                 .await;
 
             // The allowance query itself failing is surfaced too.
-            env.break_table("stripe_subscriptions").await;
+            env.break_table("adyen_subscriptions").await;
             let error = auto_provision_dedicated_ips_background(&env.state, tenant)
                 .await
                 .expect_err("broken allowance query");
             assert!(error.contains("Failed to load dedicated IP allowance"));
-            env.restore_table("stripe_subscriptions").await;
+            env.restore_table("adyen_subscriptions").await;
 
             env.break_table("dedicated_ips").await;
             let error = auto_provision_dedicated_ips_background(&env.state, tenant)
@@ -8968,7 +8968,7 @@ mod coverage_adversarial {
     env_test!(replay_deadletter_malformed_body_refused, |env| {
         let timestamp = Utc::now().timestamp();
         let body = r#"{"id":"evt_badbody","type":"invoice.paid"#;
-        let signature = sign_stripe("whsec_coverage", body.as_bytes(), timestamp);
+        let signature = sign_adyen("whsec_coverage", body.as_bytes(), timestamp);
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
             event_id: Some("evt_badbody".into()),
@@ -8991,7 +8991,7 @@ mod coverage_adversarial {
         let payload = payment_failed_payload("evt_pendreplay", "in_pendreplay", "swadv_pendreplay");
         let body = serde_json::to_string(&payload).unwrap();
         let timestamp = Utc::now().timestamp();
-        let signature = sign_stripe("whsec_coverage", body.as_bytes(), timestamp);
+        let signature = sign_adyen("whsec_coverage", body.as_bytes(), timestamp);
         let entry = DeadletterEntry {
             reason: "processing_failed".into(),
             event_id: Some("evt_pendreplay".into()),
@@ -9004,8 +9004,8 @@ mod coverage_adversarial {
             .expect("first replay claims");
         // Simulate a concurrent worker holding the claim.
         sqlx::query(
-            "UPDATE stripe_webhook_events SET status = 'pending', processed_at = NULL
-             WHERE stripe_event_id = 'evt_pendreplay'",
+            "UPDATE adyen_webhook_events SET status = 'pending', processed_at = NULL
+             WHERE adyen_notification_id = 'evt_pendreplay'",
         )
         .execute(&env.pool)
         .await
@@ -9056,7 +9056,7 @@ mod coverage_adversarial {
             };
             for (event_id, count) in [("evt_backoff_1", 0u32), ("evt_give_up", 4u32)] {
                 let entry = make_entry(event_id, count);
-                let key = format!("stripe:deadletter:event:{event_id}");
+                let key = format!("adyen:deadletter:event:{event_id}");
                 let _: () = redis::cmd("SET")
                     .arg(&key)
                     .arg(serde_json::to_string(&entry).unwrap())
@@ -9081,13 +9081,13 @@ mod coverage_adversarial {
             let mut conn = pool_conn(&isolated.pool).await;
             let score: Option<f64> = redis::cmd("ZSCORE")
                 .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg("stripe:deadletter:event:evt_backoff_1")
+                .arg("adyen:deadletter:event:evt_backoff_1")
                 .query_async(&mut conn)
                 .await
                 .expect("score");
             assert!(score.is_some(), "a first failure stays scheduled");
             let rescheduled: String = redis::cmd("GET")
-                .arg("stripe:deadletter:event:evt_backoff_1")
+                .arg("adyen:deadletter:event:evt_backoff_1")
                 .query_async(&mut conn)
                 .await
                 .expect("entry");
@@ -9099,14 +9099,14 @@ mod coverage_adversarial {
             // and a 7-day review TTL.
             let gone: i64 = redis::cmd("ZSCORE")
                 .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg("stripe:deadletter:event:evt_give_up")
+                .arg("adyen:deadletter:event:evt_give_up")
                 .query_async(&mut conn)
                 .await
                 .map(|v: Option<f64>| v.map(|_| 1).unwrap_or(0))
                 .expect("zscore");
             assert_eq!(gone, 0, "an exhausted entry leaves the retry index");
             let final_json: String = redis::cmd("GET")
-                .arg("stripe:deadletter:event:evt_give_up")
+                .arg("adyen:deadletter:event:evt_give_up")
                 .query_async(&mut conn)
                 .await
                 .expect("final entry");
@@ -9116,7 +9116,7 @@ mod coverage_adversarial {
                 "the final count is recorded for review"
             );
             let ttl: i64 = redis::cmd("TTL")
-                .arg("stripe:deadletter:event:evt_give_up")
+                .arg("adyen:deadletter:event:evt_give_up")
                 .query_async(&mut conn)
                 .await
                 .expect("ttl");
@@ -9152,7 +9152,7 @@ mod coverage_adversarial {
             // An event already marked processed: the replay skips the
             // business logic entirely and reports success.
             sqlx::query(
-                "INSERT INTO stripe_webhook_events (stripe_event_id, event_type, status, created_at, updated_at)
+                "INSERT INTO adyen_webhook_events (adyen_notification_id, event_type, status, created_at, updated_at)
                  VALUES ('evt_already_done', 'invoice.payment_failed', 'processed', NOW(), NOW())",
             )
             .execute(&env.pool)
@@ -9166,7 +9166,7 @@ mod coverage_adversarial {
             // An event currently pending on another worker: refused, and the
             // refusal feeds the retry scheduling instead of losing the event.
             sqlx::query(
-                "INSERT INTO stripe_webhook_events (stripe_event_id, event_type, status, created_at, updated_at)
+                "INSERT INTO adyen_webhook_events (adyen_notification_id, event_type, status, created_at, updated_at)
                  VALUES ('evt_now_pending', 'invoice.payment_failed', 'pending', NOW(), NOW())",
             )
             .execute(&env.pool)
@@ -9237,7 +9237,7 @@ mod coverage_adversarial {
             // SQL leg matches one row; the Redis leg then fails on the dead
             // pool and the whole transaction must roll back.
             sqlx::query(
-                "INSERT INTO stripe_webhook_events (stripe_event_id, event_type, status, created_at, updated_at)
+                "INSERT INTO adyen_webhook_events (adyen_notification_id, event_type, status, created_at, updated_at)
                  VALUES ('evt_redis_dead_cov', 'invoice.payment_failed', 'pending', NOW(), NOW())",
             )
             .execute(&env.pool)
@@ -9253,11 +9253,11 @@ mod coverage_adversarial {
             )
             .await
             .expect_err("dead redis must fail the atomic deadletter");
-            assert!(error.contains("stripe dead letter"), "unexpected: {error}");
+            assert!(error.contains("adyen dead letter"), "unexpected: {error}");
 
             // The SQL leg was rolled back: the row is still 'pending'.
             let status: String =
-                sqlx::query_scalar("SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_redis_dead_cov'")
+                sqlx::query_scalar("SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_redis_dead_cov'")
                     .fetch_one(&env.pool)
                     .await
                     .expect("row");

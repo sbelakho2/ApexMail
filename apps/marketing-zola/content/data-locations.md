@@ -20,7 +20,7 @@ This matrix describes the deployed EU/EEA configuration. Core service data (rows
 | 5 | Attachments | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | 6 | Events and logs (delivery, open, click, bounce) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | 7 | Authentication (OAuth tokens, MFA secrets) | EU data centre — Germany; Google LLC / GitHub, Inc. (OAuth) | Provider-managed | EEA (core); US for OAuth providers | SCCs (OAuth providers) |
-| 8 | Billing (invoices, transactions, payment tokens) | EU data centre — Germany; Stripe, Inc. (US) | Provider-managed (India for Stripe support) | EEA (ApexMail); US/India (Stripe) | SCCs (Stripe) |
+| 8 | Billing (invoices, transactions, payment tokens) | EU data centre — Germany; Adyen N.V. (US) | Provider-managed (India for Adyen support) | EEA (ApexMail); US/India (Adyen) | SCCs (Adyen) |
 | 9 | Support tickets | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | 10 | Analytics (aggregate delivery metrics, engagement) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | 11 | Security logs (audit trails, access logs) | EU data centre — Germany | EU data centre — Finland | EEA (no third-country transfer) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
@@ -33,7 +33,7 @@ This matrix describes the deployed EU/EEA configuration. Core service data (rows
 | Hetzner Online GmbH | Core infrastructure (compute, storage, networking) | Germany and Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
 | Amazon Web Services, Inc. (AWS S3) | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`, EU) | EU SCCs when the configured region is outside the EEA |
 | Amazon Web Services, Inc. (AWS SES) | Email-delivery transport when enabled | Configured SES region (EU default) | EU SCCs when the configured region is outside the EEA |
-| Stripe, Inc. | Payment processing | US (primary), India (support) | EU Standard Contractual Clauses |
+| Adyen N.V. | Payment processing | US (primary), India (support) | EU Standard Contractual Clauses |
 | Google LLC | Optional OAuth authentication | US | EU Standard Contractual Clauses |
 | GitHub, Inc. | Optional OAuth authentication | US | EU Standard Contractual Clauses |
 
