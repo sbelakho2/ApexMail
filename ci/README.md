@@ -631,10 +631,12 @@ These are **product defects found by this pipeline**, not pipeline bugs:
   distinct_labels` fails deterministically**: "distinct labels must stay
   bounded, got 501" (expected ≤ 500) — 6/6 runs under nextest process
   isolation. A real bounding bug (or off-by-one expectation) committed on
-  main; rust-check.yml's nextest lane fails identically. Until fixed, the
-  test is EXCLUDED from the run via `CI_NEXTEST_EXCLUDE` in
-  `ci/pipeline.conf` — loudly (a warning per exclusion, every run). Remove
-  the entry when the bound is fixed.
+  main; rust-check.yml's nextest lane fails identically. **FIXED** (the
+  label-bound expectation was off by one) and `CI_NEXTEST_EXCLUDE` is empty
+  again as of 2026-10-14 — including the two 2026-10-12 load-flake entries,
+  which were fixed at the source (ses webhook dedup now keys on the provider
+  timestamp instead of the processing clock; the billing startup-sweep test
+  polls the reclaim arm like it already polled the archive arm).
 
 ## 10. Owner actions to finish the cutover
 

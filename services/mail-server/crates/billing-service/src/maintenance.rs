@@ -6797,12 +6797,23 @@ mod coverage_adversarial {
             archived, 1,
             "startup archival archived the old paid invoice"
         );
-        let reclaimed: String = sqlx::query_scalar(
-            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_mtcov_stale'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .expect("reclaimed");
+        // The sweep arms run sequentially inside the startup task (archive →
+        // reclaim → …): observing the archive row does not yet mean the
+        // reclaim arm has run. Poll it to a bounded deadline like the archive
+        // above instead of racing the next arm with a single query.
+        let reclaim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let reclaimed: String = loop {
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_mtcov_stale'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("reclaimed");
+            if status == "received" || std::time::Instant::now() > reclaim_deadline {
+                break status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
         assert_eq!(
             reclaimed, "received",
             "startup reclaim reset the stale claim"

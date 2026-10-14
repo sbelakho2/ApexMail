@@ -1579,14 +1579,34 @@ async fn queue_webhook_event(
     let timestamp = chrono::Utc::now().to_rfc3339();
     // Second granularity in the dedup key: an SNS redelivery of the SAME
     // feedback shares the provider timestamp; genuinely distinct events a
-    // second apart stay distinct.
+    // second apart stay distinct. The key MUST be the provider timestamp
+    // (payload `timestamp`, set by every caller from the SES record) — the
+    // previous local `Utc::now()` made an SNS replay retried across a
+    // second boundary insert a SECOND queue row (caught as the 2026-10-12
+    // full-suite flake "2 queue rows under load": under fsync latency the
+    // test's replay calls straddled a second boundary). A payload with no
+    // provider timestamp cannot be replay-identified, so it keeps
+    // call-unique stamps (over-delivering beats collapsing distinct
+    // events) and says so loudly.
+    let provider_timestamp = payload
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let dedup_stamp = if provider_timestamp.is_empty() {
+        warn!(
+            event_type,
+            "SES webhook event carries no provider timestamp — dedup key falls back to a call-unique stamp"
+        );
+        format!(
+            "local:{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        )
+    } else {
+        provider_timestamp.to_string()
+    };
     let identity = format!(
         "{}:{}:{}:{}:{}",
-        tenant_id,
-        event_type,
-        message_id,
-        recipient,
-        chrono::Utc::now().timestamp()
+        tenant_id, event_type, message_id, recipient, dedup_stamp
     );
 
     for (webhook_id,) in subscribed {
@@ -3064,6 +3084,71 @@ mod adversarial_handler_tests {
             .await
             .unwrap();
         assert_eq!(events, 1, "SNS replay is idempotent for bounces");
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn ses_replay_across_a_second_boundary_never_duplicates_the_webhook() {
+        // Regression for the 2026-10-12 full-suite flake "2 queue rows under
+        // load". The dedup key used the PROCESSING clock (Utc::now, second
+        // granularity), so a replay processed more than a second after the
+        // first delivery — retries and load-latency make that the normal
+        // case — derived a different queue id and inserted a SECOND customer
+        // webhook row. The key now uses the provider timestamp from the
+        // payload; this test replays the SAME SNS event across a real second
+        // boundary and requires the row count to collapse to one. Against
+        // the old key it fails deterministically (count 2, not 1).
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_replay_boundary").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let Some(_redis_probe) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("boundary")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+        // Subscribe BEFORE the first delivery so both calls attempt the
+        // enqueue (the enqueue is what the dedup key governs).
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled) \
+             VALUES ($1, $2, 'https://hooks.example.test/ses', 'whsec_test', \
+                     '\"message.bounced\"'::jsonb, true)",
+        )
+        .bind(format!(
+            "swh{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        ))
+        .bind(&fixture.tenant)
+        .execute(&pool)
+        .await
+        .expect("seed subscribed webhook");
+
+        let event = bounce_event(&fixture, "Permanent", json!([]));
+        let sns_id = unique("sns-bounce-boundary");
+        process_bounce(&state, &event, &sns_id).await.unwrap();
+        // Cross a real second boundary between the delivery and its replay.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        process_bounce(&state, &event, &sns_id).await.unwrap();
+
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_queue \
+             WHERE tenant_id = $1 AND event_type = 'message.bounced'",
+        )
+        .bind(&fixture.tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("bounce webhook queue count");
+        assert_eq!(
+            queued, 1,
+            "a replay across a second boundary must collapse onto the same queue row"
+        );
 
         cleanup_delivery(&pool, &fixture).await;
     }
