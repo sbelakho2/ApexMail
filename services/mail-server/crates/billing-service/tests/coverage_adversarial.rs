@@ -221,7 +221,10 @@ async fn provision(test_name: &str) -> Option<Harness> {
         database_url: format!("{server_part}/{db_name}"),
         redis_url: "redis://127.0.0.1:6379".to_string(),
         service_auth_token: "coverage-service-token".to_string(),
-        adyen_hmac_key: "whsec_coverage_secret".to_string(),
+        // Hex-encoded key material, exactly like the deployment's
+        // `ADYEN_HMAC_KEY`, so the handler's strict hex-decoding path is
+        // exercised (the raw-bytes fallback is only for non-hex local values).
+        adyen_hmac_key: ADYEN_HMAC_KEY_HEX.to_string(),
         api_base_url: "http://127.0.0.1:9".to_string(),
         ..BillingConfig::default()
     };
@@ -3541,114 +3544,357 @@ db_test!(overage_sweep_applies_wallet_before_dunning, |h| {
 });
 
 // ---------------------------------------------------------------------------
-// adyen_webhooks.rs — signature, replay, ordering, unknown events
+// adyen_webhooks.rs — the frozen Adyen wire: in-body HMAC, replay, ordering,
+// unknown events, recurring settlement and token binding
 // ---------------------------------------------------------------------------
+//
+// Request: `POST /webhooks/adyen` with
+// `{"live":"false","notificationItems":[{"NotificationRequestItem":{…}}]}`.
+// The HMAC lives INSIDE the body at `additionalData.hmacSignature`: SHA-256
+// over the colon-joined escaped signing string (key = `ADYEN_HMAC_KEY`
+// hex-decoded, missing fields = empty), digest base64, compared timing-safe.
+// Success is `200` with the bare `[accepted]` body.
 
-fn sign_payload(secret: &str, payload: &[u8], timestamp: i64) -> String {
+/// 64 hex characters (32 bytes of key material) — the same shape the
+/// deployment's `ADYEN_HMAC_KEY` has, so the handler's strict hex-decoding
+/// path is exercised (its raw-bytes fallback is for non-hex local values).
+const ADYEN_HMAC_KEY_HEX: &str = "9f2b7c4d1e8a3f6b0c5d9e2a7b4f1c8d3e6a9b2c5d8e1f4a7b0c3d6e9f2a5b8c";
+/// A different valid hex key for the forgery attack.
+const ADYEN_HMAC_WRONG_KEY_HEX: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+/// The bare acknowledgement the handler returns for an accepted delivery.
+const ADYEN_ACCEPTED: &str = "[accepted]";
+
+/// Adyen's signing-string escaping: backslashes first, then colons (the
+/// handler's `escape_signing_value`).
+fn escape_adyen_signing_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace(':', "\\:")
+}
+
+/// One signed field as the wire renders it: strings verbatim, numbers as
+/// their decimal text, missing/null = empty.
+fn adyen_signed_field(item: &serde_json::Value, pointer: &str) -> String {
+    match item.pointer(pointer) {
+        Some(serde_json::Value::String(value)) => value.clone(),
+        Some(value) if !value.is_null() => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The exact signing string over the eight signed fields (missing = empty).
+fn adyen_signing_string(item: &serde_json::Value) -> String {
+    [
+        adyen_signed_field(item, "/pspReference"),
+        adyen_signed_field(item, "/originalReference"),
+        adyen_signed_field(item, "/merchantAccountCode"),
+        adyen_signed_field(item, "/merchantReference"),
+        adyen_signed_field(item, "/amount/value"),
+        adyen_signed_field(item, "/amount/currency"),
+        adyen_signed_field(item, "/eventCode"),
+        adyen_signed_field(item, "/success"),
+    ]
+    .into_iter()
+    .map(|value| escape_adyen_signing_value(&value))
+    .collect::<Vec<_>>()
+    .join(":")
+}
+
+/// Standard padded base64 (RFC 4648) — the same encoding the handler's
+/// `wire_test_helpers` produces (production verifies, tests sign).
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(triple >> 6) as usize & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[triple as usize & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Sign an item exactly like the handler's `wire_test_helpers::sign_item`:
+/// base64(HMAC-SHA256(hex-decoded key, signing string)) written into
+/// `additionalData.hmacSignature`.
+fn sign_adyen_item(item: &mut serde_json::Value, key_hex: &str) {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC key");
-    mac.update(timestamp.to_string().as_bytes());
-    mac.update(b".");
-    mac.update(payload);
+    let key = hex::decode(key_hex.trim()).expect("the test key is valid hex");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
+    mac.update(adyen_signing_string(item).as_bytes());
+    let signature = base64_encode(&mac.finalize().into_bytes());
+    if let Some(data) = item
+        .get_mut("additionalData")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "hmacSignature".to_string(),
+            serde_json::Value::String(signature),
+        );
+    } else if let Some(object) = item.as_object_mut() {
+        object.insert(
+            "additionalData".to_string(),
+            serde_json::json!({ "hmacSignature": signature }),
+        );
+    } else {
+        panic!("a notification item must be a JSON object");
+    }
+}
+
+/// The handler's deterministic dedupe id (`adn_<sha256 hex>` over the five
+/// retried fields joined with the unit separator).
+fn adyen_notification_id_for(item: &serde_json::Value) -> String {
+    use sha2::Digest;
+    let basis = [
+        adyen_signed_field(item, "/eventCode"),
+        adyen_signed_field(item, "/pspReference"),
+        adyen_signed_field(item, "/success"),
+        adyen_signed_field(item, "/eventDate"),
+        adyen_signed_field(item, "/merchantReference"),
+    ]
+    .join("\u{1f}");
     format!(
-        "t={timestamp},v1={}",
-        hex::encode(mac.finalize().into_bytes())
+        "adn_{}",
+        hex::encode(sha2::Sha256::digest(basis.as_bytes()))
     )
 }
 
-const WEBHOOK_SECRET: &str = "whsec_coverage_secret";
-
-async fn post_signed_webhook(
-    app: &axum::Router,
-    payload: &serde_json::Value,
-    timestamp: i64,
-) -> (StatusCode, serde_json::Value) {
-    let body = serde_json::to_vec(payload).expect("serialize payload");
-    let signature = sign_payload(WEBHOOK_SECRET, &body, timestamp);
-    call(
-        app,
-        Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen")
-            .header("content-type", "application/json")
-            .header("adyen-hmac-signature", signature)
-            .body(Body::from(body))
-            .expect("request"),
-    )
-    .await
+/// The frozen Adyen envelope around one item.
+fn adyen_envelope(item: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "live": "false",
+        "notificationItems": [{ "NotificationRequestItem": item }]
+    }))
+    .expect("envelope serializes")
 }
 
-/// Post a signed webhook that MUST be accepted; on refusal, surface the
-/// recorded processing error so failures are diagnosable.
-async fn expect_webhook_ok(
-    h: &Harness,
-    app: &axum::Router,
-    payload: &serde_json::Value,
-    event_id: &str,
-) {
-    let (status, body) = post_signed_webhook(app, payload, Utc::now().timestamp()).await;
+/// Sign `item` and wrap it in the envelope.
+fn signed_adyen_envelope(mut item: serde_json::Value, key_hex: &str) -> Vec<u8> {
+    sign_adyen_item(&mut item, key_hex);
+    adyen_envelope(&item)
+}
+
+/// POST a raw body to `/webhooks/adyen` and return `(status, body-text)`.
+async fn post_adyen(app: &axum::Router, body: Vec<u8>) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/adyen")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("router is infallible");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// The `error` field of a JSON refusal body.
+fn json_error(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value["error"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("expected a JSON error body, got {text:?}"))
+}
+
+/// Post a signed delivery that MUST be accepted (`200` + the bare
+/// `[accepted]`); on refusal surface the recorded processing error.
+async fn expect_adyen_ok(h: &Harness, app: &axum::Router, body: Vec<u8>, notification_id: &str) {
+    let (status, text) = post_adyen(app, body).await;
     if status != StatusCode::OK {
         let error: Option<String> = sqlx::query_scalar(
             "SELECT error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
         )
-        .bind(event_id)
+        .bind(notification_id)
         .fetch_optional(&h.pool)
         .await
         .expect("failed event lookup")
         .flatten();
-        panic!("webhook {event_id} rejected: {status} body={body} error={error:?}");
+        panic!("webhook {notification_id} rejected: {status} body={text} error={error:?}");
+    }
+    assert_eq!(
+        text, ADYEN_ACCEPTED,
+        "the acknowledgement is the bare [accepted] body"
+    );
+}
+
+/// The `(status, error)` of the `adyen_webhook_events` claim row.
+async fn webhook_event_row(h: &Harness, notification_id: &str) -> (String, Option<String>) {
+    sqlx::query_as(
+        "SELECT status, error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+    )
+    .bind(notification_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("webhook event row")
+}
+
+/// The deadletter entries for one event id (`adyen:deadletter:event:<id>:<ms>`).
+async fn adyen_deadletter_entries(h: &Harness, event_id: &str) -> Vec<serde_json::Value> {
+    let mut conn = h.redis.get().await.expect("redis connection");
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("adyen:deadletter:event:{event_id}:*"))
+        .query_async(&mut conn)
+        .await
+        .expect("deadletter keys");
+    let mut entries = Vec::new();
+    for key in keys {
+        let value: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .expect("deadletter entry");
+        if let Some(value) = value {
+            entries.push(serde_json::from_str(&value).expect("deadletter entry is JSON"));
+        }
+    }
+    entries
+}
+
+/// Delete the deadletter entries for these event ids: Redis is SHARED across
+/// runs (unlike the freshly cloned DB), so stale entries would otherwise
+/// break exact counts.
+async fn clear_adyen_deadletters(h: &Harness, event_ids: &[&str]) {
+    let mut conn = h.redis.get().await.expect("redis connection");
+    let mut keys: Vec<String> = Vec::new();
+    for event_id in event_ids {
+        let found: Vec<String> = redis::cmd("KEYS")
+            .arg(format!("adyen:deadletter:event:{event_id}:*"))
+            .query_async(&mut conn)
+            .await
+            .expect("deadletter keys");
+        keys.extend(found);
+    }
+    if !keys.is_empty() {
+        let _: () = redis::cmd("DEL")
+            .arg(&keys)
+            .query_async(&mut conn)
+            .await
+            .expect("delete deadletters");
     }
 }
 
-async fn seed_adyen_plan(h: &Harness, name: &str, price_id: &str) {
-    // Fix #10: the features column must carry a valid PlanFeatures document —
-    // the '{}' column default now (correctly) fails plan lookups closed.
-    let features = serde_json::to_value(billing_service::types::PlanFeatures::default())
-        .expect("PlanFeatures serializes");
+/// A local `pending` invoice in the shape the recurring-charge contract
+/// produces (the wire names it by `invoice:{id}`).
+async fn seed_cov_local_invoice(
+    h: &Harness,
+    tenant: &str,
+    invoice_id: Uuid,
+    subtotal: i64,
+    vat: i64,
+    total: i64,
+    currency: &str,
+) {
     sqlx::query(
-        "INSERT INTO plans (id, name, display_name, price_cents, price_monthly,
-                            email_limit, api_call_limit, adyen_plan_code_monthly, is_active, features)
-         VALUES ($1, $2, $2, 4900, 4900, 100000, 100000, $3, true, $4)
-         ON CONFLICT (name) DO UPDATE SET adyen_plan_code_monthly = EXCLUDED.adyen_plan_code_monthly,
-             is_active = true, price_monthly = 4900",
+        "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency,
+                               subtotal, vat_total, total, due_at, period_start, period_end,
+                               created_at, updated_at)
+         VALUES ($1, $2, $3, 'pending', $6, $7, $4, $5, $6, NOW(), NOW(),
+                 NOW() + INTERVAL '30 days', NOW(), NOW())",
     )
-    .bind(format!("plan_{name}"))
-    .bind(name)
-    .bind(price_id)
-    .bind(&features)
+    .bind(invoice_id)
+    .bind(tenant)
+    .bind(format!("COV-WH-{}", &invoice_id.to_string()[..8]))
+    .bind(subtotal)
+    .bind(vat)
+    .bind(total)
+    .bind(currency)
     .execute(&h.pool)
     .await
-    .expect("seed adyen plan");
+    .expect("seed local invoice");
 }
 
-fn adyen_notification(id: &str, event_type: &str, object: serde_json::Value) -> serde_json::Value {
+/// The tenant's `adyen_subscriptions` row (shopper reference = tenant id),
+/// optionally already tokenized.
+async fn seed_cov_subscription(
+    h: &Harness,
+    tenant: &str,
+    subscription_id: &str,
+    token: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO adyen_subscriptions
+             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
+              billing_cycle_end, adyen_shopper_reference, adyen_plan_code,
+              adyen_recurring_detail_reference)
+         VALUES ($1, $2, 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', $1,
+                 'apexmail_growth_monthly', $3)",
+    )
+    .bind(tenant)
+    .bind(subscription_id)
+    .bind(token)
+    .execute(&h.pool)
+    .await
+    .expect("seed adyen subscription");
+}
+
+/// A recurring AUTHORISATION item — `invoice:{id}` in `merchantReference`,
+/// MINOR-UNIT amount, in-data processing model + shopper (the tenant id).
+fn cov_authorisation_item(
+    psp_reference: &str,
+    invoice_id: Uuid,
+    value: i64,
+    shopper: Option<&str>,
+) -> serde_json::Value {
+    let mut additional = serde_json::json!({ "recurringProcessingModel": "Subscription" });
+    if let Some(shopper) = shopper {
+        additional["shopperReference"] = serde_json::json!(shopper);
+        additional["metadata"] = serde_json::json!({ "tenant_id": shopper });
+    }
     serde_json::json!({
-        "id": id,
-        "type": event_type,
-        "data": { "object": object }
+        "pspReference": psp_reference,
+        "originalReference": "psp_cov_original",
+        "merchantAccountCode": "ApexMailECOM",
+        "merchantReference": format!("invoice:{invoice_id}"),
+        "amount": { "currency": "EUR", "value": value },
+        "eventCode": "AUTHORISATION",
+        "eventDate": "2026-10-14T10:00:00+00:00",
+        "success": "true",
+        "paymentMethod": "visa",
+        "additionalData": additional
     })
 }
 
-fn subscription_object(
+/// A `RECURRING_CONTRACT` token delivery; `original_reference` ties it to the
+/// payment's AUTHORISATION.
+fn cov_token_item(
+    psp_reference: &str,
+    original_reference: &str,
     tenant: &str,
-    subscription_id: &str,
-    status: &str,
-    price_id: &str,
-    period_start: i64,
-    period_end: i64,
+    token: &str,
 ) -> serde_json::Value {
     serde_json::json!({
-        "id": subscription_id,
-        "customer": "cus_cov_wh",
-        "status": status,
-        "metadata": { "tenant_id": tenant },
-        "current_period_start": period_start,
-        "current_period_end": period_end,
-        "cancel_at_period_end": false,
-        "canceled_at": null,
-        "trial_end": null,
-        "items": { "data": [ { "price": { "id": price_id, "recurring": { "interval": "month" } } } ] }
+        "pspReference": psp_reference,
+        "originalReference": original_reference,
+        "merchantAccountCode": "ApexMailECOM",
+        "merchantReference": "cov-token-ref",
+        "amount": { "currency": "EUR", "value": 0 },
+        "eventCode": "RECURRING_CONTRACT",
+        "eventDate": "2026-10-14T10:00:05+00:00",
+        "success": "true",
+        "additionalData": {
+            "shopperReference": tenant,
+            "recurringDetailReference": token,
+            "recurringProcessingModel": "Subscription"
+        }
     })
 }
 
@@ -3657,167 +3903,232 @@ db_test!(adyen_webhook_signature_attacks_write_nothing, |h| {
     let tenant = "cov_wh_sig";
     seed_tenant(&h, tenant, "free").await;
 
-    let payload = adyen_notification(
-        "evt_cov_sig_valid",
-        "customer.subscription.created",
-        subscription_object(
-            tenant,
-            "sub_sig",
-            "active",
-            "price_cov",
-            1_760_000_000,
-            1_762_592_000,
-        ),
-    );
+    let psps = [
+        "cov_wh_sig_missing".to_string(),
+        "cov_wh_sig_wrong_key".to_string(),
+        "cov_wh_sig_tampered".to_string(),
+        "cov_wh_sig_garbage_0".to_string(),
+        "cov_wh_sig_garbage_1".to_string(),
+        "cov_wh_sig_garbage_2".to_string(),
+        "cov_wh_sig_header_only".to_string(),
+    ];
+    let psp_refs: Vec<&str> = psps.iter().map(String::as_str).collect();
+    clear_adyen_deadletters(&h, &psp_refs).await;
+    clear_adyen_deadletters(&h, &["unknown"]).await;
 
-    // Missing header.
-    let (status, _) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
-            .expect("request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let invoice_id = Uuid::new_v4();
+    let item_for = |psp: &str| cov_authorisation_item(psp, invoice_id, 1_000, Some(tenant));
 
-    // Wrong secret (valid HMAC, wrong key).
-    let body = serde_json::to_vec(&payload).unwrap();
-    let forged = sign_payload("whsec_wrong_secret", &body, Utc::now().timestamp());
-    let (status, _) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen")
-            .header("adyen-hmac-signature", forged)
-            .body(Body::from(body.clone()))
-            .expect("request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // Tampered body: signature minted for the original payload.
-    let signature = sign_payload(WEBHOOK_SECRET, &body, Utc::now().timestamp());
-    let mut tampered = payload.clone();
-    tampered["data"]["object"]["status"] = serde_json::json!("active");
-    tampered["data"]["object"]["current_period_end"] = serde_json::json!(1_999_999_999_i64);
-    let (status, _) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen")
-            .header("adyen-hmac-signature", signature)
-            .body(Body::from(serde_json::to_vec(&tampered).unwrap()))
-            .expect("request"),
-    )
-    .await;
+    // Missing in-body signature: the wire's only verifiable signature lives
+    // at additionalData.hmacSignature.
+    let mut missing = item_for(&psps[0]);
+    missing
+        .as_object_mut()
+        .expect("item object")
+        .remove("additionalData");
+    let (status, text) = post_adyen(&app, adyen_envelope(&missing)).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "tampered body must not verify"
+        "a missing in-body HMAC must be refused"
     );
+    assert_eq!(json_error(&text), "Missing HMAC signature");
+    let entries = adyen_deadletter_entries(&h, &psps[0]).await;
+    assert_eq!(entries.len(), 1, "the refused delivery is deadlettered");
+    assert_eq!(entries[0]["reason"], "missing_signature");
 
-    // Expired timestamp (outside the 300s tolerance).
-    let expired = sign_payload(WEBHOOK_SECRET, &body, Utc::now().timestamp() - 400);
-    let (status, _) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen")
-            .header("adyen-hmac-signature", expired)
-            .body(Body::from(body.clone()))
-            .expect("request"),
-    )
-    .await;
+    // Wrong key: a valid HMAC-SHA256 minted from different key material.
+    let mut wrong_key = item_for(&psps[1]);
+    sign_adyen_item(&mut wrong_key, ADYEN_HMAC_WRONG_KEY_HEX);
+    let (status, text) = post_adyen(&app, adyen_envelope(&wrong_key)).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "expired signature must be refused"
+        "a signature from the wrong key must be refused"
     );
+    assert_eq!(json_error(&text), "Invalid webhook signature");
+    let entries = adyen_deadletter_entries(&h, &psps[1]).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["reason"], "invalid_signature");
 
-    // Malformed signature headers.
-    for header in [
-        "",
-        "v1=deadbeef",
-        "t=abc,v1=deadbeef",
-        "t=123",
-        "t=123,v1=zzzz",
-    ] {
-        let (status, _) = call(
-            &app,
+    // Tampered field: the digest is minted for the ORIGINAL item, then a
+    // SIGNED field (amount.value) changes on the wire.
+    let mut tampered = item_for(&psps[2]);
+    sign_adyen_item(&mut tampered, ADYEN_HMAC_KEY_HEX);
+    tampered["amount"]["value"] = serde_json::json!(999_999);
+    let (status, _) = post_adyen(&app, adyen_envelope(&tampered)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a post-signature field mutation must not verify"
+    );
+    assert_eq!(adyen_deadletter_entries(&h, &psps[2]).await.len(), 1);
+
+    // Malformed signature material: never a crash, never an accept.
+    for (index, signature) in ["!!!not-base64!!!", "deadbeef", "===="]
+        .into_iter()
+        .enumerate()
+    {
+        let mut item = item_for(&psps[3 + index]);
+        item["additionalData"]["hmacSignature"] = serde_json::json!(signature);
+        let (status, text) = post_adyen(&app, adyen_envelope(&item)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "malformed signature {signature:?} must be refused"
+        );
+        assert_eq!(json_error(&text), "Invalid webhook signature");
+        assert_eq!(
+            adyen_deadletter_entries(&h, &psps[3 + index]).await.len(),
+            1
+        );
+    }
+
+    // FAIL-BEFORE PROOF that the pre-Adyen header scheme is dead: the old
+    // wire authenticated deliveries with an `adyen-hmac-signature: t=…,v1=…`
+    // HEADER. The Adyen contract moved the HMAC INTO the body, so a delivery
+    // carrying ONLY the legacy header has no verifiable in-body signature.
+    fn legacy_header_signature(secret: &str, payload: &[u8], timestamp: i64) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC key");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        format!(
+            "t={timestamp},v1={}",
+            hex::encode(mac.finalize().into_bytes())
+        )
+    }
+    let mut header_only = item_for(&psps[6]);
+    header_only
+        .as_object_mut()
+        .expect("item object")
+        .remove("additionalData");
+    let body = adyen_envelope(&header_only);
+    let legacy_header =
+        legacy_header_signature("cov_wh_legacy_secret", &body, Utc::now().timestamp());
+    let response = app
+        .clone()
+        .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/webhooks/adyen")
-                .header("adyen-hmac-signature", header)
-                .body(Body::from(body.clone()))
+                .header("content-type", "application/json")
+                .header("adyen-hmac-signature", legacy_header)
+                .body(Body::from(body))
                 .expect("request"),
         )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "header {header:?}");
-    }
+        .await
+        .expect("router is infallible");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "the legacy header authorises nothing"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    assert_eq!(
+        json_error(&String::from_utf8_lossy(&bytes)),
+        "Missing HMAC signature"
+    );
+    assert_eq!(
+        adyen_deadletter_entries(&h, &psps[6]).await.len(),
+        1,
+        "a legacy-header-only delivery is deadlettered"
+    );
 
-    // Correct signature but non-JSON body.
-    let garbage = b"not-json{{{".to_vec();
-    let signature = sign_payload(WEBHOOK_SECRET, &garbage, Utc::now().timestamp());
-    let (status, _) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/webhooks/adyen")
-            .header("adyen-hmac-signature", signature)
-            .body(Body::from(garbage))
-            .expect("request"),
-    )
-    .await;
+    // A malformed wire body is refused before any parse of items.
+    let (status, text) = post_adyen(&app, b"not-json{{{".to_vec()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // Correct signature but no event id.
-    let no_id =
-        serde_json::json!({"type": "customer.subscription.created", "data": {"object": {}}});
-    let (status, _) = post_signed_webhook(&app, &no_id, Utc::now().timestamp()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_error(&text), "Invalid JSON payload");
+    assert_eq!(
+        adyen_deadletter_entries(&h, "unknown").await.len(),
+        1,
+        "an unparseable body is deadlettered"
+    );
 
     // Every refusal above must have written NO webhook claim row and no
-    // subscription state.
+    // business state.
     let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_webhook_events")
         .fetch_one(&h.pool)
         .await
         .expect("count events");
     assert_eq!(events, 0, "failed verification must write nothing");
+    let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
+        .fetch_one(&h.pool)
+        .await
+        .expect("count invoices");
+    assert_eq!(invoices, 0);
+    let allocations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_payment_allocations")
+        .fetch_one(&h.pool)
+        .await
+        .expect("count allocations");
+    assert_eq!(allocations, 0);
     let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions")
         .fetch_one(&h.pool)
         .await
         .expect("count subscriptions");
     assert_eq!(subs, 0);
+    let snapshots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adyen_tax_snapshots")
+        .fetch_one(&h.pool)
+        .await
+        .expect("count tax snapshots");
+    assert_eq!(snapshots, 0);
+    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .expect("tenant plan");
+    assert_eq!(plan, "free", "no attack changes business state");
 });
 
 db_test!(
     adyen_webhook_unknown_event_type_is_acknowledged_not_500,
     |h| {
         let app = billing_service::routes::router(h.state.clone());
-        let payload = adyen_notification(
-            "evt_cov_unknown",
-            "pizza.delivered",
-            serde_json::json!({"id": "x"}),
-        );
-
-        let (status, json) = post_signed_webhook(&app, &payload, Utc::now().timestamp()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["received"], true);
-
-        let (event_type, status_text): (String, String) = sqlx::query_as(
-            "SELECT event_type, status FROM adyen_webhook_events WHERE adyen_notification_id = $1",
+        let item = serde_json::json!({
+            "pspReference": "psp_cov_unknown",
+            "originalReference": "psp_cov_original",
+            "merchantAccountCode": "ApexMailECOM",
+            "merchantReference": "cov-unknown-ref",
+            "amount": { "currency": "EUR", "value": 0 },
+            "eventCode": "ORDER_OPENED",
+            "eventDate": "2026-10-14T10:00:00+00:00",
+            "success": "true",
+            "paymentMethod": "visa"
+        });
+        let notification_id = adyen_notification_id_for(&item);
+        expect_adyen_ok(
+            &h,
+            &app,
+            signed_adyen_envelope(item, ADYEN_HMAC_KEY_HEX),
+            &notification_id,
         )
-        .bind("evt_cov_unknown")
+        .await;
+
+        let (event_type, status_text, psp): (String, String, Option<String>) = sqlx::query_as(
+            "SELECT event_type, status, adyen_psp_reference FROM adyen_webhook_events
+             WHERE adyen_notification_id = $1",
+        )
+        .bind(&notification_id)
         .fetch_one(&h.pool)
         .await
         .expect("webhook row");
-        assert_eq!(event_type, "pizza.delivered");
+        assert_eq!(event_type, "ORDER_OPENED");
         assert_eq!(
             status_text, "processed",
             "unknown events are terminally acknowledged"
+        );
+        assert_eq!(psp.as_deref(), Some("psp_cov_unknown"));
+        let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
+            .fetch_one(&h.pool)
+            .await
+            .expect("count invoices");
+        assert_eq!(
+            invoices, 0,
+            "an unknown event is acknowledged without effect"
         );
     }
 );
@@ -3826,230 +4137,212 @@ db_test!(adyen_webhook_replay_is_idempotent_and_reclaims_stale, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_replay";
     seed_tenant(&h, tenant, "free").await;
-    seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
 
-    let now = Utc::now().timestamp();
-    let payload = adyen_notification(
-        "evt_cov_replay",
-        "customer.subscription.created",
-        subscription_object(
-            tenant,
-            "sub_cov_replay",
-            "active",
-            "price_cov_monthly",
-            now,
-            now + 2_592_000,
-        ),
-    );
+    // A byte-identical redelivery is the SAME notification: acknowledged,
+    // never re-applied.
+    let replay_invoice = Uuid::new_v4();
+    seed_cov_local_invoice(&h, tenant, replay_invoice, 1_000, 0, 1_000, "eur").await;
+    let replay_item = cov_authorisation_item("psp_cov_replay", replay_invoice, 1_000, Some(tenant));
+    let replay_id = adyen_notification_id_for(&replay_item);
+    let replay_body = signed_adyen_envelope(replay_item, ADYEN_HMAC_KEY_HEX);
+    expect_adyen_ok(&h, &app, replay_body.clone(), &replay_id).await;
+    expect_adyen_ok(&h, &app, replay_body, &replay_id).await;
 
-    expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
-
-    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(&h.pool)
-        .await
-        .expect("tenant plan");
-    assert_eq!(
-        plan, "growth",
-        "verified subscription webhook grants the plan"
-    );
-    let watermark_after_first: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT event_watermark FROM adyen_subscriptions WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_one(&h.pool)
-            .await
-            .expect("watermark");
-    assert!(watermark_after_first.is_some(), "watermark recorded");
-
-    // Replay: 200, no re-application, no duplicate rows.
-    expect_webhook_ok(&h, &app, &payload, "evt_cov_replay").await;
-    let events: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_replay'",
+    let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT status FROM invoices WHERE id = $1),
+                (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
+                (SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = $2)",
     )
+    .bind(replay_invoice)
+    .bind(&replay_id)
     .fetch_one(&h.pool)
     .await
-    .expect("count replay rows");
-    assert_eq!(events, 1, "one claim row per event id");
-    let subs: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_one(&h.pool)
-            .await
-            .expect("count subscriptions");
-    assert_eq!(subs, 1);
+    .expect("replay state");
+    assert_eq!(status_text, "paid");
+    assert_eq!(allocations, 1, "replay never double-allocates");
+    assert_eq!(claims, 1, "one claim row per notification id");
 
     // Stale-pending reclaim: an 11-minute-old pending row is reclaimed, a
-    // fresh one is left alone.
+    // fresh one is left alone; the redelivered notification then settles
+    // exactly once.
+    let stale_invoice = Uuid::new_v4();
+    seed_cov_local_invoice(&h, tenant, stale_invoice, 2_500, 0, 2_500, "eur").await;
+    let stale_item =
+        cov_authorisation_item("psp_cov_replay_stale", stale_invoice, 2_500, Some(tenant));
+    let stale_id = adyen_notification_id_for(&stale_item);
+    let stale_body = signed_adyen_envelope(stale_item, ADYEN_HMAC_KEY_HEX);
+    let fresh_id = "adn_cov_replay_fresh_not_stolen";
     sqlx::query(
-        "INSERT INTO adyen_webhook_events (id, adyen_notification_id, event_type, status, created_at, updated_at)
-         VALUES (gen_random_uuid(), 'evt_cov_stale', 'customer.subscription.updated', 'pending',
+        "INSERT INTO adyen_webhook_events
+             (id, adyen_notification_id, event_type, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, 'AUTHORISATION', 'pending',
                  NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '11 minutes'),
-                (gen_random_uuid(), 'evt_cov_fresh', 'customer.subscription.updated', 'pending',
-                 NOW(), NOW())",
+                (gen_random_uuid(), $2, 'AUTHORISATION', 'pending', NOW(), NOW())",
     )
+    .bind(&stale_id)
+    .bind(fresh_id)
     .execute(&h.pool)
     .await
     .expect("seed pending rows");
 
     let reclaimed = billing_service::adyen_webhooks::reclaim_stale_pending_webhooks(&h.state)
         .await
-        .expect("reclaim");
-    assert_eq!(reclaimed, vec!["evt_cov_stale".to_string()]);
-    let stale_status: String = sqlx::query_scalar(
-        "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_stale'",
+        .expect("reclaim stale pending webhooks");
+    assert_eq!(reclaimed, vec![stale_id.clone()]);
+    let (stale_status, fresh_status): (String, String) = sqlx::query_as(
+        "SELECT (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $1),
+                (SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = $2)",
     )
+    .bind(&stale_id)
+    .bind(fresh_id)
     .fetch_one(&h.pool)
     .await
-    .expect("stale row");
-    assert_eq!(stale_status, "received");
-    let fresh_status: String = sqlx::query_scalar(
-        "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_fresh'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("fresh row");
+    .expect("pending rows");
+    assert_eq!(stale_status, "received", "the abandoned claim is reclaimed");
     assert_eq!(fresh_status, "pending", "fresh pending work is not stolen");
+
+    expect_adyen_ok(&h, &app, stale_body, &stale_id).await;
+    let (status_text, allocations, claims): (String, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT status FROM invoices WHERE id = $1),
+                (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
+                (SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = $2)",
+    )
+    .bind(stale_invoice)
+    .bind(&stale_id)
+    .fetch_one(&h.pool)
+    .await
+    .expect("stale state");
+    assert_eq!(
+        status_text, "paid",
+        "the reclaimed delivery settles exactly once"
+    );
+    assert_eq!(allocations, 1);
+    assert_eq!(claims, 1);
 });
 
 db_test!(adyen_webhook_out_of_order_events_never_rewind_state, |h| {
     let app = billing_service::routes::router(h.state.clone());
     let tenant = "cov_wh_order";
     seed_tenant(&h, tenant, "free").await;
-    seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
+    clear_adyen_deadletters(&h, &["psp_cov_order_second"]).await;
+    let invoice_id = Uuid::new_v4();
+    seed_cov_local_invoice(&h, tenant, invoice_id, 1_200, 0, 1_200, "eur").await;
 
-    let now = Utc::now().timestamp();
-
-    // 1. A deleted event for an unknown subscription is a no-op: it must
-    // NOT downgrade a tenant that never had this subscription.
-    let deleted = adyen_notification(
-        "evt_cov_del_first",
-        "customer.subscription.deleted",
-        subscription_object(
-            tenant,
-            "sub_cov_order",
-            "canceled",
-            "price_cov_monthly",
-            now,
-            now + 2_592_000,
-        ),
-    );
-    expect_webhook_ok(&h, &app, &deleted, "evt_cov_del_first").await;
-    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(&h.pool)
-        .await
-        .expect("plan");
-    assert_eq!(plan, "free", "stale delete must not touch the tenant");
-
-    // 2. Created with cycle T2 applies.
-    let cycle_t2 = now;
-    let created = adyen_notification(
-        "evt_cov_create",
-        "customer.subscription.created",
-        subscription_object(
-            tenant,
-            "sub_cov_order",
-            "active",
-            "price_cov_monthly",
-            cycle_t2,
-            cycle_t2 + 2_592_000,
-        ),
-    );
-    expect_webhook_ok(&h, &app, &created, "evt_cov_create").await;
-
-    // 3. An older active update (cycle T1 < T2) is stale: ignored.
-    let cycle_t1 = now - 86_400;
-    let stale = adyen_notification(
-        "evt_cov_stale_update",
-        "customer.subscription.updated",
-        subscription_object(
-            tenant,
-            "sub_cov_order",
-            "active",
-            "price_cov_monthly",
-            cycle_t1,
-            cycle_t1 + 2_592_000,
-        ),
-    );
-    expect_webhook_ok(&h, &app, &stale, "evt_cov_stale_update").await;
-
-    let stored_start: DateTime<Utc> = sqlx::query_scalar(
-        "SELECT billing_cycle_start FROM adyen_subscriptions WHERE tenant_id = $1",
+    let first = cov_authorisation_item("psp_cov_order_first", invoice_id, 1_200, Some(tenant));
+    let first_id = adyen_notification_id_for(&first);
+    expect_adyen_ok(
+        &h,
+        &app,
+        signed_adyen_envelope(first, ADYEN_HMAC_KEY_HEX),
+        &first_id,
     )
-    .bind(tenant)
+    .await;
+
+    let (paid_at_after_first, psp_after_first): (DateTime<Utc>, Option<String>) =
+        sqlx::query_as("SELECT paid_at, adyen_psp_reference FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_one(&h.pool)
+            .await
+            .expect("invoice after settlement");
+    assert_eq!(psp_after_first.as_deref(), Some("psp_cov_order_first"));
+
+    // A LATER eventDate + NEW pspReference for the same already-paid invoice
+    // is a NEW notification: the handler idempotently ACKS it (asserted at
+    // the end) — it must not double-settle and must not rewind the recorded
+    // state.
+    let mut second =
+        cov_authorisation_item("psp_cov_order_second", invoice_id, 1_200, Some(tenant));
+    second["eventDate"] = serde_json::json!("2026-10-15T10:00:00+00:00");
+    let second_id = adyen_notification_id_for(&second);
+    assert_ne!(
+        second_id, first_id,
+        "a fresh eventDate is a new notification id"
+    );
+    expect_adyen_ok(
+        &h,
+        &app,
+        signed_adyen_envelope(second, ADYEN_HMAC_KEY_HEX),
+        &second_id,
+    )
+    .await;
+
+    let (status_text, allocations, psp, paid_at_after_second): (
+        String,
+        i64,
+        Option<String>,
+        DateTime<Utc>,
+    ) = sqlx::query_as(
+        "SELECT status,
+                (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1),
+                adyen_psp_reference,
+                paid_at
+         FROM invoices WHERE id = $1",
+    )
+    .bind(invoice_id)
     .fetch_one(&h.pool)
     .await
-    .expect("stored cycle");
+    .expect("invoice after the later delivery");
     assert_eq!(
-        stored_start.timestamp(),
-        cycle_t2,
-        "an older event must not rewind the billing cycle"
+        status_text, "paid",
+        "the settled invoice is never rewound to pending"
     );
-
-    // 4. A deleted event for the known row cancels it and downgrades.
-    let deleted = adyen_notification(
-        "evt_cov_del_known",
-        "customer.subscription.deleted",
-        subscription_object(
-            tenant,
-            "sub_cov_order",
-            "canceled",
-            "price_cov_monthly",
-            cycle_t2,
-            cycle_t2 + 2_592_000,
-        ),
+    assert_eq!(
+        allocations, 1,
+        "a second AUTHORISATION never double-settles"
     );
-    expect_webhook_ok(&h, &app, &deleted, "evt_cov_del_known").await;
-    let (sub_status, plan): (String, String) = sqlx::query_as(
-        "SELECT s.status::text, t.plan FROM adyen_subscriptions s
-         JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
+    assert_eq!(
+        psp, psp_after_first,
+        "the recorded psp binding is never overwritten"
+    );
+    assert_eq!(
+        paid_at_after_second, paid_at_after_first,
+        "paid_at is never re-stamped"
+    );
+    let processed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM adyen_webhook_events
+         WHERE adyen_notification_id IN ($1, $2) AND status = 'processed'",
     )
-    .bind(tenant)
+    .bind(&first_id)
+    .bind(&second_id)
     .fetch_one(&h.pool)
     .await
-    .expect("canceled state");
-    assert_eq!(sub_status, "canceled");
-    assert_eq!(plan, "free");
+    .expect("claim rows");
+    assert_eq!(
+        processed, 2,
+        "both deliveries are claimed; the later one acks idempotently"
+    );
+    assert!(
+        adyen_deadletter_entries(&h, "psp_cov_order_second")
+            .await
+            .is_empty(),
+        "an idempotent later delivery is acked, not deadlettered"
+    );
 });
 
-db_test!(adyen_webhook_unresolvable_invoice_paid_deadletters, |h| {
+db_test!(adyen_webhook_unresolvable_authorisation_deadletters, |h| {
     let app = billing_service::routes::router(h.state.clone());
-    let now = Utc::now().timestamp();
-    let payload = adyen_notification(
-        "evt_cov_unresolved",
-        "invoice.paid",
-        serde_json::json!({
-            "id": "in_cov_unresolved",
-            "amount_due": 1000,
-            "amount_paid": 1000,
-            "currency": "eur",
-            "subtotal": 1000,
-            "tax": 0,
-            "total": 1000,
-            "subscription": "sub_does_not_exist",
-        }),
-    );
-    let (status, _) = post_signed_webhook(&app, &payload, now).await;
+    let unresolvable = Uuid::new_v4();
+    let item = cov_authorisation_item("psp_cov_unresolved", unresolvable, 700, None);
+    let notification_id = adyen_notification_id_for(&item);
+    // The processing-failure path keys its deadletter entry by the dedupe
+    // notification id (not the psp); clear it so the count is exact.
+    clear_adyen_deadletters(&h, &[&notification_id]).await;
+    let (status, _) = post_adyen(&app, signed_adyen_envelope(item, ADYEN_HMAC_KEY_HEX)).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
         "unresolvable revenue must be refused for replay, not silently dropped"
     );
 
-    let (status_text, error): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, error FROM adyen_webhook_events WHERE adyen_notification_id = $1",
-    )
-    .bind("evt_cov_unresolved")
-    .fetch_one(&h.pool)
-    .await
-    .expect("failed event row");
+    let (status_text, error) = webhook_event_row(&h, &notification_id).await;
     assert_eq!(status_text, "failed");
+    let error = error.unwrap_or_default();
     assert!(
-        error
-            .unwrap_or_default()
-            .contains("could not be resolved to a tenant"),
-        "failure reason is recorded"
+        error.contains(&unresolvable.to_string()),
+        "the deadletter names the unresolvable reference: {error}"
     );
+    let entries = adyen_deadletter_entries(&h, &notification_id).await;
+    assert_eq!(entries.len(), 1, "the refusal is deadlettered for replay");
 
     // No local invoice was invented.
     let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices")
@@ -4059,80 +4352,79 @@ db_test!(adyen_webhook_unresolvable_invoice_paid_deadletters, |h| {
     assert_eq!(invoices, 0);
 });
 
-db_test!(adyen_webhook_invoice_paid_persists_verified_payment, |h| {
-    let app = billing_service::routes::router(h.state.clone());
-    let tenant = "cov_wh_paid";
-    seed_tenant(&h, tenant, "growth").await;
-    // Non-EU billing country → 0% VAT, so Adyen's tax=0 is the truth.
-    seed_billing_address(&h, tenant, "US").await;
-    let now = Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO adyen_subscriptions
-             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, adyen_shopper_reference)
-         VALUES ($1, 'sub_cov_paid', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')",
-    )
-    .bind(tenant)
-    .bind((now - 86_400) as f64)
-    .bind((now + 2_592_000) as f64)
-    .execute(&h.pool)
-    .await
-    .expect("seed subscription");
+db_test!(
+    adyen_webhook_recurring_authorisation_settles_the_local_invoice,
+    |h| {
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant = "cov_wh_settle";
+        seed_tenant(&h, tenant, "growth").await;
+        let invoice_id = Uuid::new_v4();
+        seed_cov_local_invoice(&h, tenant, invoice_id, 10_000, 2_400, 12_400, "eur").await;
+        // A cutover-tokenized subscription: the tenant's recurring identity
+        // is in place when the recurring charge arrives.
+        seed_cov_subscription(&h, tenant, "sub_cov_settle", Some("tok_cov_settle")).await;
 
-    let payload = adyen_notification(
-        "evt_cov_paid",
-        "invoice.paid",
-        serde_json::json!({
-            "id": "in_cov_paid",
-            "amount_due": 4900,
-            "amount_paid": 4900,
-            "currency": "eur",
-            "subtotal": 4900,
-            "tax": 0,
-            "total": 4900,
-            "number": "2026-000099",
-            "subscription_details": { "metadata": { "tenant_id": tenant } },
-            "subscription": "sub_cov_paid",
-        }),
-    );
-    expect_webhook_ok(&h, &app, &payload, "evt_cov_paid").await;
-
-    let (total, status_text, adyen_id, currency): (i64, String, Option<String>, String) =
-        sqlx::query_as(
-            "SELECT COALESCE(total, amount), status, adyen_psp_reference, currency
-             FROM invoices WHERE tenant_id = $1",
+        let item = cov_authorisation_item("psp_cov_settle", invoice_id, 12_400, Some(tenant));
+        let notification_id = adyen_notification_id_for(&item);
+        expect_adyen_ok(
+            &h,
+            &app,
+            signed_adyen_envelope(item, ADYEN_HMAC_KEY_HEX),
+            &notification_id,
         )
-        .bind(tenant)
+        .await;
+
+        let (status_text, paid, psp, snapshot_id): (String, bool, Option<String>, Option<Uuid>) =
+            sqlx::query_as(
+                "SELECT status, paid_at IS NOT NULL, adyen_psp_reference, adyen_tax_snapshot_id
+                 FROM invoices WHERE id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&h.pool)
+            .await
+            .expect("local invoice");
+        assert_eq!(status_text, "paid");
+        assert!(paid, "paid_at is stamped");
+        assert_eq!(
+            psp.as_deref(),
+            Some("psp_cov_settle"),
+            "the settlement binds the psp reference"
+        );
+
+        let (amount, currency, source, operation): (i64, String, String, String) = sqlx::query_as(
+            "SELECT amount_cents, currency, source, operation_id
+             FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
         .fetch_one(&h.pool)
         .await
-        .expect("local invoice");
-    assert_eq!(total, 4900, "the verified payment is stored in cents");
-    assert_eq!(status_text, "paid");
-    assert_eq!(adyen_id.as_deref(), Some("in_cov_paid"));
-    assert_eq!(currency.to_uppercase(), "EUR");
+        .expect("allocation");
+        assert_eq!(
+            amount, 12_400,
+            "the wire amount (minor units) is allocated exactly once"
+        );
+        assert_eq!(currency, "EUR");
+        assert_eq!(source, "adyen");
+        assert_eq!(operation, "adyen:psp_cov_settle");
 
-    // Replay of the same Adyen invoice id must not duplicate the row.
-    let mut replay = payload.clone();
-    replay["id"] = serde_json::json!("evt_cov_paid_replay");
-    let (status, _) = post_signed_webhook(&app, &replay, now).await;
-    assert_eq!(status, StatusCode::OK);
-    let invoices: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_cov_paid'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("count invoices");
-    assert_eq!(invoices, 1, "replay is idempotent on the Adyen invoice id");
+        let snapshot_id = snapshot_id.expect("the tax snapshot is linked onto the invoice");
+        let (authority, validation): (String, String) = sqlx::query_as(
+            "SELECT authority, validation_status FROM adyen_tax_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("tax snapshot");
+        assert_eq!(
+            authority, "apexmail_local",
+            "the charging authority is ApexMail's own local computation"
+        );
+        assert_eq!(validation, "validated");
 
-    // The tax snapshot is immutable and reconciled.
-    let snapshots: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM adyen_tax_snapshots WHERE adyen_psp_reference = 'in_cov_paid'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("count snapshots");
-    assert_eq!(snapshots, 1);
-});
+        let (event_status, _) = webhook_event_row(&h, &notification_id).await;
+        assert_eq!(event_status, "processed");
+    }
+);
 
 // ---------------------------------------------------------------------------
 // hetzner_ip_provider.rs — REMOVED: one provisioning implementation
@@ -5756,156 +6048,130 @@ db_test!(
     adyen_webhook_cross_tenant_binding_and_bad_states_refuse,
     |h| {
         let app = billing_service::routes::router(h.state.clone());
-        let tenant_a = "cov_wh_bind_a";
-        let tenant_b = "cov_wh_bind_b";
-        seed_tenant(&h, tenant_a, "free").await;
-        seed_tenant(&h, tenant_b, "free").await;
-        seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
-        let now = Utc::now().timestamp();
+        let owner = "cov_wh_bind_a";
+        let other = "cov_wh_bind_b";
+        seed_tenant(&h, owner, "free").await;
+        seed_tenant(&h, other, "free").await;
+        seed_cov_subscription(&h, owner, "sub_cov_bound", None).await;
+        let invoice_id = Uuid::new_v4();
+        seed_cov_local_invoice(&h, owner, invoice_id, 4_900, 0, 4_900, "eur").await;
 
-        // Bind the subscription to tenant A.
-        expect_webhook_ok(
+        // The token delivery binds the OWNER's subscription (positive control).
+        let owner_token = cov_token_item(
+            "psp_cov_bind_owner",
+            "psp_cov_original",
+            owner,
+            "tok_cov_owner",
+        );
+        let owner_token_id = adyen_notification_id_for(&owner_token);
+        expect_adyen_ok(
             &h,
             &app,
-            &adyen_notification(
-                "evt_cov_bind_a",
-                "customer.subscription.created",
-                subscription_object(
-                    tenant_a,
-                    "sub_cov_bound",
-                    "active",
-                    "price_cov_monthly",
-                    now,
-                    now + 2_592_000,
-                ),
-            ),
-            "evt_cov_bind_a",
+            signed_adyen_envelope(owner_token, ADYEN_HMAC_KEY_HEX),
+            &owner_token_id,
         )
         .await;
-        let plan_a: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant_a)
-            .fetch_one(&h.pool)
-            .await
-            .unwrap();
-        assert_eq!(plan_a, "growth");
-
-        // The SAME Adyen subscription id claimed by another tenant is refused:
-        // a webhook can never move a subscription (or paid entitlement) across
-        // tenants.
-        let (status, _) = post_signed_webhook(
-            &app,
-            &adyen_notification(
-                "evt_cov_bind_b",
-                "customer.subscription.updated",
-                subscription_object(
-                    tenant_b,
-                    "sub_cov_bound",
-                    "active",
-                    "price_cov_monthly",
-                    now,
-                    now + 2_592_000,
-                ),
-            ),
-            now,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let (error,): (Option<String>,) = sqlx::query_as(
-            "SELECT error FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_bind_b'",
+        let bound: Option<String> = sqlx::query_scalar(
+            "SELECT adyen_recurring_detail_reference FROM adyen_subscriptions
+             WHERE adyen_subscription_id = 'sub_cov_bound'",
         )
         .fetch_one(&h.pool)
         .await
-        .unwrap();
+        .expect("owner subscription");
+        assert_eq!(bound.as_deref(), Some("tok_cov_owner"));
+
+        // The invoice belongs to `owner` but the notification attributes the
+        // payment to `other`: cross-tenant settlement is refused and the
+        // invoice stays untouched.
+        let cross = cov_authorisation_item("psp_cov_cross", invoice_id, 4_900, Some(other));
+        let cross_id = adyen_notification_id_for(&cross);
+        let (status, _) = post_adyen(&app, signed_adyen_envelope(cross, ADYEN_HMAC_KEY_HEX)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a cross-tenant settlement is refused"
+        );
+        let (event_status, error) = webhook_event_row(&h, &cross_id).await;
+        assert_eq!(event_status, "failed");
+        assert!(
+            error.unwrap_or_default().contains("cross-tenant"),
+            "the refusal names the condition"
+        );
+        let (invoice_status, psp, allocations): (String, Option<String>, i64) = sqlx::query_as(
+            "SELECT status, adyen_psp_reference,
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
+             FROM invoices WHERE id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("invoice");
+        assert_eq!(
+            invoice_status, "pending",
+            "the foreign shopper cannot settle it"
+        );
+        assert_eq!(psp, None);
+        assert_eq!(allocations, 0);
+
+        // A `RECURRING_CONTRACT` for a tenant with no subscription row has
+        // nothing to bind: refused and deadlettered, never silently dropped.
+        let orphan = cov_token_item(
+            "psp_cov_bind_orphan",
+            "psp_cov_original",
+            other,
+            "tok_cov_orphan",
+        );
+        let orphan_id = adyen_notification_id_for(&orphan);
+        let (status, _) = post_adyen(&app, signed_adyen_envelope(orphan, ADYEN_HMAC_KEY_HEX)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (event_status, error) = webhook_event_row(&h, &orphan_id).await;
+        assert_eq!(event_status, "failed");
+        assert!(
+            error.unwrap_or_default().contains("no subscription row"),
+            "the refusal names the missing binding target"
+        );
+        let other_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
+                .bind(other)
+                .fetch_one(&h.pool)
+                .await
+                .expect("other subscriptions");
+        assert_eq!(other_rows, 0, "the refused delivery invents no row");
+        let owner_token_after: Option<String> = sqlx::query_scalar(
+            "SELECT adyen_recurring_detail_reference FROM adyen_subscriptions
+             WHERE adyen_subscription_id = 'sub_cov_bound'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("owner subscription");
+        assert_eq!(
+            owner_token_after.as_deref(),
+            Some("tok_cov_owner"),
+            "another tenant's refusal never rewrites the owner's binding"
+        );
+
+        // A token delivery without a token binds nothing either.
+        let mut no_token = cov_token_item(
+            "psp_cov_bind_missing",
+            "psp_cov_original",
+            owner,
+            "tok_cov_unused",
+        );
+        no_token["additionalData"]
+            .as_object_mut()
+            .expect("additionalData object")
+            .remove("recurringDetailReference");
+        let no_token_id = adyen_notification_id_for(&no_token);
+        let (status, _) =
+            post_adyen(&app, signed_adyen_envelope(no_token, ADYEN_HMAC_KEY_HEX)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, error) = webhook_event_row(&h, &no_token_id).await;
         assert!(
             error
                 .unwrap_or_default()
-                .contains("already bound to a different tenant"),
-            "cross-tenant binding must be recorded as a refusal"
+                .contains("recurringDetailReference"),
+            "the refusal names the missing token"
         );
-        let plan_b: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant_b)
-            .fetch_one(&h.pool)
-            .await
-            .unwrap();
-        assert_eq!(plan_b, "free", "tenant B gains nothing");
-
-        // An impossible status transition is refused (active -> incomplete).
-        let (status, _) = post_signed_webhook(
-            &app,
-            &adyen_notification(
-                "evt_cov_bad_transition",
-                "customer.subscription.updated",
-                subscription_object(
-                    tenant_a,
-                    "sub_cov_bound",
-                    "incomplete",
-                    "price_cov_monthly",
-                    now,
-                    now + 2_592_000,
-                ),
-            ),
-            now,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let status_text: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_subscriptions WHERE adyen_subscription_id = 'sub_cov_bound'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .unwrap();
-        assert_eq!(status_text, "active", "refused event never rewinds state");
-
-        // A subscription with no line-item price cannot grant anything.
-        let mut no_price = subscription_object(
-            tenant_b,
-            "sub_cov_noprice",
-            "active",
-            "price_cov_monthly",
-            now,
-            now + 2_592_000,
-        );
-        no_price["items"]["data"] = serde_json::json!([]);
-        let (status, _) = post_signed_webhook(
-            &app,
-            &adyen_notification("evt_cov_noprice", "customer.subscription.created", no_price),
-            now,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // An unknown Adyen price id cannot grant anything either.
-        let (status, _) = post_signed_webhook(
-            &app,
-            &adyen_notification(
-                "evt_cov_unknownprice",
-                "customer.subscription.created",
-                subscription_object(
-                    tenant_b,
-                    "sub_cov_unknownprice",
-                    "active",
-                    "price_that_does_not_exist",
-                    now,
-                    now + 2_592_000,
-                ),
-            ),
-            now,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let plan_b: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-            .bind(tenant_b)
-            .fetch_one(&h.pool)
-            .await
-            .unwrap();
-        assert_eq!(plan_b, "free", "no unverified price may grant a plan");
-        let subs_b: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
-                .bind(tenant_b)
-                .fetch_one(&h.pool)
-                .await
-                .unwrap();
-        assert_eq!(subs_b, 0, "refused events write no subscription rows");
     }
 );
 
@@ -6288,168 +6554,184 @@ fn overage_math_is_exact_and_quotes_only_catalog_rates() {
     assert_eq!(calculate_overage_cost_with_rate(101, 100, 80), 1);
 }
 
-// Adyen-unverified ≠ paid: a subscription event whose price id is not
-// bound to a plan must never grant a paid plan (fail closed to free).
-db_test!(unverified_adyen_plan_code_never_grants_a_paid_plan, |h| {
-    let app = billing_service::routes::router(h.state.clone());
-    let tenant = "cov_unverified_price";
-    seed_tenant(&h, tenant, "free").await;
-    // A plans row exists but its adyen price id is NOT the one in the event.
-    seed_adyen_plan(&h, "growth", "price_official_monthly").await;
+// Adyen-unverified ≠ paid: no provider delivery may mint entitlement. The
+// token-binding path needs OUR `adyen_subscriptions` row, and an unbound
+// provider contract is refused (deadlettered for replay) instead of being
+// silently mapped to a paid plan.
+db_test!(
+    unverified_adyen_contract_binding_never_grants_a_paid_plan,
+    |h| {
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant = "cov_unverified_price";
+        seed_tenant(&h, tenant, "free").await;
 
-    let now = Utc::now().timestamp();
-    let payload = adyen_notification(
-        "evt_cov_unverified",
-        "customer.subscription.updated",
-        subscription_object(
+        // Correctly signed, but no subscription row exists to bind: refused.
+        let orphan = cov_token_item(
+            "psp_cov_unverified",
+            "psp_cov_original",
             tenant,
-            "sub_cov_unverified",
-            "active",
-            "price_forged_or_unmapped",
-            now,
-            now + 2_592_000,
-        ),
-    );
-    let (status, _) = post_signed_webhook(&app, &payload, now).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "an unbound Adyen price must be refused, not silently mapped"
-    );
+            "tok_cov_unverified",
+        );
+        let orphan_id = adyen_notification_id_for(&orphan);
+        let (status, _) = post_adyen(&app, signed_adyen_envelope(orphan, ADYEN_HMAC_KEY_HEX)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "an unbound provider contract must be refused, not silently mapped"
+        );
+        let (event_status, error) = webhook_event_row(&h, &orphan_id).await;
+        assert_eq!(event_status, "failed");
+        assert!(error.unwrap_or_default().contains("no subscription row"));
 
-    let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(&h.pool)
-        .await
-        .expect("tenant plan");
-    assert_eq!(plan, "free", "Adyen-unverified must never equal paid");
-    let subs: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
             .bind(tenant)
             .fetch_one(&h.pool)
             .await
-            .expect("count subscriptions");
-    assert_eq!(subs, 0, "refused events write no subscription rows");
-});
+            .expect("tenant plan");
+        assert_eq!(plan, "free", "Adyen-unverified must never equal paid");
+        let subs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&h.pool)
+                .await
+                .expect("count subscriptions");
+        assert_eq!(subs, 0, "refused events write no subscription rows");
 
-// Double-webhook (same event id) is idempotent for BOTH `invoice.paid` and
-// `customer.subscription.updated`: exactly one state transition, one row.
+        // A checkout AUTHORISATION (success WITHOUT the recurring processing
+        // model) is informational: acknowledged, and the plan still never moves.
+        let checkout = serde_json::json!({
+            "pspReference": "psp_cov_checkout",
+            "merchantAccountCode": "ApexMailECOM",
+            "merchantReference": "cov-checkout-ref",
+            "amount": { "currency": "EUR", "value": 2_900 },
+            "eventCode": "AUTHORISATION",
+            "eventDate": "2026-10-14T10:00:00+00:00",
+            "success": "true",
+            "paymentMethod": "visa",
+            "additionalData": { "shopperReference": tenant }
+        });
+        let checkout_id = adyen_notification_id_for(&checkout);
+        expect_adyen_ok(
+            &h,
+            &app,
+            signed_adyen_envelope(checkout, ADYEN_HMAC_KEY_HEX),
+            &checkout_id,
+        )
+        .await;
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(
+            plan, "free",
+            "a checkout authorisation is never an entitlement"
+        );
+        let subs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_subscriptions WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&h.pool)
+                .await
+                .expect("count subscriptions");
+        assert_eq!(subs, 0, "checkout writes no subscription rows");
+    }
+);
+
+// The Adyen "double webhook": a recurring AUTHORISATION and the
+// RECURRING_CONTRACT token delivery for the SAME payment (tied by
+// `originalReference`) are two deliveries of ONE logical transition —
+// exactly one settlement/allocation, the token bound, and no second
+// transition (no second allocation, no second subscription row, no plan
+// move).
 db_test!(
-    double_webhook_invoice_paid_and_subscription_updated_is_one_transition,
+    double_webhook_recurring_charge_and_token_binding_is_one_transition,
     |h| {
         let app = billing_service::routes::router(h.state.clone());
         let tenant = "cov_wh_double";
         seed_tenant(&h, tenant, "free").await;
-        seed_adyen_plan(&h, "growth", "price_cov_monthly").await;
-        seed_billing_address(&h, tenant, "US").await;
+        let invoice_id = Uuid::new_v4();
+        seed_cov_local_invoice(&h, tenant, invoice_id, 2_900, 0, 2_900, "eur").await;
+        seed_cov_subscription(&h, tenant, "sub_cov_double", None).await;
 
-        let now = Utc::now().timestamp();
+        let charge = cov_authorisation_item("psp_cov_double", invoice_id, 2_900, Some(tenant));
+        let charge_id = adyen_notification_id_for(&charge);
+        expect_adyen_ok(
+            &h,
+            &app,
+            signed_adyen_envelope(charge, ADYEN_HMAC_KEY_HEX),
+            &charge_id,
+        )
+        .await;
 
-        // ── customer.subscription.updated, delivered twice ────────────────
-        let sub_payload = adyen_notification(
-            "evt_cov_double_sub",
-            "customer.subscription.updated",
-            subscription_object(
-                tenant,
-                "sub_cov_double",
-                "active",
-                "price_cov_monthly",
-                now,
-                now + 2_592_000,
-            ),
+        let token = cov_token_item(
+            "psp_cov_double_token",
+            "psp_cov_double",
+            tenant,
+            "tok_cov_double",
         );
-        expect_webhook_ok(&h, &app, &sub_payload, "evt_cov_double_sub").await;
-        expect_webhook_ok(&h, &app, &sub_payload, "evt_cov_double_sub").await;
+        let token_id = adyen_notification_id_for(&token);
+        assert_ne!(token_id, charge_id, "the two deliveries have distinct ids");
+        expect_adyen_ok(
+            &h,
+            &app,
+            signed_adyen_envelope(token, ADYEN_HMAC_KEY_HEX),
+            &token_id,
+        )
+        .await;
 
-        let (sub_rows, plan): (i64, String) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint, MIN(t.plan) FROM adyen_subscriptions s
-         JOIN tenants t ON t.id = s.tenant_id WHERE s.tenant_id = $1",
+        let (invoice_status, allocations): (String, i64) = sqlx::query_as(
+            "SELECT status,
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)
+             FROM invoices WHERE id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("invoice");
+        assert_eq!(invoice_status, "paid");
+        assert_eq!(allocations, 1, "the two deliveries settle exactly once");
+
+        let (token_bound, sub_status, sub_rows): (Option<String>, String, i64) = sqlx::query_as(
+            "SELECT MIN(adyen_recurring_detail_reference), MIN(status), COUNT(*)
+             FROM adyen_subscriptions WHERE tenant_id = $1",
         )
         .bind(tenant)
         .fetch_one(&h.pool)
         .await
-        .expect("subscription state");
+        .expect("subscription");
         assert_eq!(
-            sub_rows, 1,
-            "duplicate subscription.updated must not insert twice"
+            token_bound.as_deref(),
+            Some("tok_cov_double"),
+            "the token delivery binds the token"
         );
-        assert_eq!(plan, "growth", "one plan transition to growth");
-        let watermark: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT event_watermark FROM adyen_subscriptions WHERE tenant_id = $1",
+        assert_eq!(
+            sub_status, "active",
+            "the token delivery is not a subscription state transition"
+        );
+        assert_eq!(sub_rows, 1, "no second subscription row is invented");
+
+        let plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("tenant plan");
+        assert_eq!(
+            plan, "free",
+            "provider deliveries never mint the tenant's plan"
+        );
+
+        let processed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM adyen_webhook_events
+             WHERE adyen_notification_id IN ($1, $2) AND status = 'processed'",
         )
-        .bind(tenant)
+        .bind(&charge_id)
+        .bind(&token_id)
         .fetch_one(&h.pool)
         .await
-        .expect("watermark");
-        assert!(watermark.is_some(), "watermark recorded exactly once");
-        let claims: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_double_sub'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("webhook claim rows");
-        assert_eq!(claims, 1, "one claim row per Adyen event id");
-
-        // ── invoice.paid, delivered twice ─────────────────────────────────
-        sqlx::query(
-        "INSERT INTO adyen_subscriptions
-             (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
-              billing_cycle_end, adyen_shopper_reference)
-         VALUES ($1, 'sub_cov_double', 'growth', 'active', to_timestamp($2), to_timestamp($3), 'cus_cov_wh')
-         ON CONFLICT (adyen_subscription_id) DO NOTHING",
-    )
-    .bind(tenant)
-    .bind((now - 86_400) as f64)
-    .bind((now + 2_592_000) as f64)
-    .execute(&h.pool)
-    .await
-    .expect("ensure subscription row for invoice resolution");
-
-        let invoice_payload = adyen_notification(
-            "evt_cov_double_inv",
-            "invoice.paid",
-            serde_json::json!({
-                "id": "in_cov_double",
-                "amount_due": 4900,
-                "amount_paid": 4900,
-                "currency": "eur",
-                "subtotal": 4900,
-                "tax": 0,
-                "total": 4900,
-                "number": "2026-000077",
-                "subscription_details": { "metadata": { "tenant_id": tenant } },
-                "subscription": "sub_cov_double",
-            }),
-        );
-        expect_webhook_ok(&h, &app, &invoice_payload, "evt_cov_double_inv").await;
-        expect_webhook_ok(&h, &app, &invoice_payload, "evt_cov_double_inv").await;
-
-        let invoices: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoices WHERE adyen_psp_reference = 'in_cov_double'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("count local invoices");
+        .expect("claim rows");
         assert_eq!(
-            invoices, 1,
-            "duplicate invoice.paid must settle exactly one local invoice"
-        );
-        let inv_claims: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_double_inv'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("invoice webhook claim rows");
-        assert_eq!(inv_claims, 1, "one claim row for the invoice event id");
-        let processed: String = sqlx::query_scalar(
-            "SELECT status FROM adyen_webhook_events WHERE adyen_notification_id = 'evt_cov_double_inv'",
-        )
-        .fetch_one(&h.pool)
-        .await
-        .expect("invoice webhook status");
-        assert_eq!(
-            processed, "processed",
-            "the single transition lands in processed"
+            processed, 2,
+            "each delivery has its own claim row; both are processed"
         );
     }
 );

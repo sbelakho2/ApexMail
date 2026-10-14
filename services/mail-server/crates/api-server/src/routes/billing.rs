@@ -7645,9 +7645,7 @@ mod adversarial_tests {
 
     #[derive(Default)]
     struct MockAdyenState {
-        customer_calls: usize,
         checkout_calls: usize,
-        portal_calls: usize,
         observed: Vec<serde_json::Value>,
         checkout_without_url: bool,
         fail_checkout: bool,
@@ -7655,34 +7653,28 @@ mod adversarial_tests {
 
     type MockAdyen = Arc<std::sync::Mutex<MockAdyenState>>;
 
-    fn record_call(state: &MockAdyen, kind: &str, headers: &HeaderMap) {
-        let observed = json!({
+    fn record_call(state: &MockAdyen, kind: &str, headers: &HeaderMap, body: &[u8]) {
+        let mut observed = json!({
             "kind": kind,
-            "authorization": headers.get("authorization").and_then(|v| v.to_str().ok()),
+            "apiKey": headers.get("x-api-key").and_then(|v| v.to_str().ok()),
             "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
-            "adyenVersion": headers.get("adyen-version").and_then(|v| v.to_str().ok()),
+            "body": serde_json::from_slice::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null),
         });
+        // Adyen has no version header — the version lives in the URL path.
+        // Recorded only when actually sent so its absence is assertable.
+        if let Some(version) = headers.get("adyen-version").and_then(|v| v.to_str().ok()) {
+            observed["adyenVersion"] = json!(version);
+        }
         state.lock().unwrap().observed.push(observed);
-    }
-
-    async fn mock_create_customer(
-        State(state): State<MockAdyen>,
-        headers: HeaderMap,
-    ) -> axum::Json<serde_json::Value> {
-        record_call(&state, "customers", &headers);
-        let mut guard = state.lock().unwrap();
-        guard.customer_calls += 1;
-        let id = format!("cus_mock_{}", guard.customer_calls);
-        drop(guard);
-        axum::Json(json!({ "id": id }))
     }
 
     async fn mock_checkout_session(
         State(state): State<MockAdyen>,
         headers: HeaderMap,
+        body: axum::body::Bytes,
     ) -> axum::response::Response {
         use axum::response::IntoResponse;
-        record_call(&state, "checkout", &headers);
+        record_call(&state, "checkout", &headers, &body);
         let mut guard = state.lock().unwrap();
         guard.checkout_calls += 1;
         let fail = guard.fail_checkout;
@@ -7696,28 +7688,20 @@ mod adversarial_tests {
         }
         axum::Json(json!({
             "id": "cs_mock_1",
+            "sessionData": "session_data_mock",
             "url": "https://checkout.adyen.com/pay/cs_mock_1",
         }))
         .into_response()
-    }
-
-    async fn mock_portal_session(
-        State(state): State<MockAdyen>,
-        headers: HeaderMap,
-    ) -> axum::Json<serde_json::Value> {
-        record_call(&state, "portal", &headers);
-        state.lock().unwrap().portal_calls += 1;
-        axum::Json(json!({ "url": "https://billing.adyen.com/p/session_mock" }))
     }
 
     async fn start_mock_adyen() -> (String, MockAdyen) {
         let state: MockAdyen = Arc::new(std::sync::Mutex::new(MockAdyenState::default()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        // Adyen Checkout API: sessions only. There is no customer-create call
+        // (shopperReference is the tenant id) and no hosted billing portal.
         let mock = Router::new()
-            .route("/v1/customers", post(mock_create_customer))
-            .route("/v1/checkout/sessions", post(mock_checkout_session))
-            .route("/v1/billing_portal/sessions", post(mock_portal_session))
+            .route("/sessions", post(mock_checkout_session))
             .with_state(state.clone());
         tokio::spawn(async move {
             let _ = axum::serve(listener, mock).await;
@@ -7927,6 +7911,7 @@ mod adversarial_tests {
         let _key = EnvRestore::set("ADYEN_API_KEY", Some("sk_test_mock"));
         let _allow = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", Some("true"));
         let _base = EnvRestore::set("ADYEN_API_BASE_URL", Some(&base_url));
+        let _merchant = EnvRestore::set("ADYEN_MERCHANT_ACCOUNT", Some("ApexMailMockECOM"));
 
         seed_checkout_plan(&pool, "pro").await;
         let (tenant, write_key) = tenant_with_key(&pool, "pro", &["billing:write"]).await;
@@ -7937,7 +7922,8 @@ mod adversarial_tests {
             json!({"priceId": "price_ck_m", "successUrl": valid_url, "cancelUrl": valid_url})
                 .to_string();
 
-        // First checkout: creates the customer then the session.
+        // First checkout: the shopper row (reference = tenant id) is our own
+        // onboarding record, and the provider sees exactly one session call.
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(
             status,
@@ -7950,40 +7936,22 @@ mod adversarial_tests {
             body_resp["data"]["url"],
             "https://checkout.adyen.com/pay/cs_mock_1"
         );
-        let (customer_id, name, email): (String, String, String) = sqlx::query_as(
+        let (shopper_reference, name, email): (String, String, String) = sqlx::query_as(
             "SELECT adyen_shopper_reference, name, email FROM adyen_shoppers WHERE tenant_id = $1",
         )
         .bind(&tenant)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(customer_id, "cus_mock_1");
+        assert_eq!(
+            shopper_reference, tenant,
+            "the Adyen shopperReference is the tenant id we choose"
+        );
         assert_eq!(name, "adversarial billing");
         assert_eq!(email, "billing@acme.test");
         {
             let state = mock.lock().unwrap();
-            assert_eq!(state.customer_calls, 1);
             assert_eq!(state.checkout_calls, 1);
-            let create = state
-                .observed
-                .iter()
-                .find(|call| call["kind"] == "customers")
-                .unwrap();
-            assert_eq!(
-                create["idempotencyKey"],
-                format!("customer_create_{tenant}")
-            );
-            assert!(
-                create["authorization"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .starts_with("Bearer "),
-                "Adyen call must be authenticated: {create}"
-            );
-            assert!(
-                create.get("adyenVersion").is_none(),
-                "Adyen has no version header — the version lives in the URL path"
-            );
             let checkout = state
                 .observed
                 .iter()
@@ -7994,12 +7962,44 @@ mod adversarial_tests {
                 format!("checkout_{tenant}_pro_price_ck_m"),
                 "deterministic dedupe key"
             );
+            assert_eq!(
+                checkout["apiKey"], "sk_test_mock",
+                "Adyen authenticates with X-API-Key"
+            );
+            assert!(
+                checkout.get("adyenVersion").is_none(),
+                "Adyen has no version header — the version lives in the URL path"
+            );
+            let sent = &checkout["body"];
+            let plan = platform_catalog::plan_by_name("pro").expect("catalog plan");
+            assert_eq!(sent["amount"]["currency"], "EUR");
+            assert_eq!(sent["amount"]["value"], plan.price_monthly_cents);
+            assert_eq!(sent["merchantAccount"], "ApexMailMockECOM");
+            assert_eq!(sent["reference"], "checkout:pro:monthly");
+            assert_eq!(sent["shopperReference"], tenant);
+            assert_eq!(sent["metadata"]["plan_name"], "pro");
+            assert_eq!(sent["metadata"]["interval"], "monthly");
+            assert_eq!(sent["recurringProcessingModel"], "Subscription");
+            assert_eq!(sent["storePaymentMethod"], true);
+            assert_eq!(
+                sent["lineItems"][0]["amountIncludingTax"],
+                plan.price_monthly_cents
+            );
         }
 
-        // Retry: the SAME customer is reused, never recreated.
+        // Retry: one shopper row, never duplicated; one session per call.
         let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
         assert_eq!(status, StatusCode::OK, "{body_resp}");
-        assert_eq!(mock.lock().unwrap().customer_calls, 1);
+        let shopper_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM adyen_shoppers WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            shopper_rows, 1,
+            "a retried checkout never duplicates the shopper"
+        );
         assert_eq!(mock.lock().unwrap().checkout_calls, 2);
 
         // Adyen session without a URL: fail closed, no fake redirect.
@@ -8014,18 +8014,38 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
         mock.lock().unwrap().fail_checkout = false;
 
-        // A test-mode key without the explicit opt-in must not drive
-        // checkout (the scope restores the opt-in on exit).
+        // Missing merchant account: fail closed before any provider call.
         {
-            let _opt_out = EnvRestore::set("ADYEN_ALLOW_TEST_KEY", None);
+            let _no_merchant = EnvRestore::set("ADYEN_MERCHANT_ACCOUNT", None);
+            let calls_before = mock.lock().unwrap().checkout_calls;
             let (status, _) = post_json(&env, "/v1/billing/checkout", &body).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                mock.lock().unwrap().checkout_calls,
+                calls_before,
+                "a misconfigured deployment never reaches Adyen"
+            );
         }
 
-        // Portal: an existing Adyen customer is required.
+        // Portal: our own console page (Adyen has no hosted portal) — the
+        // shopper must exist, and no provider call is made.
+        let portal_body = json!({"returnUrl": valid_url}).to_string();
+        let checkout_calls_before_portal = mock.lock().unwrap().checkout_calls;
+        let (status, body_resp) = post_json(&env, "/v1/billing/portal", &portal_body).await;
+        assert_eq!(status, StatusCode::OK, "{body_resp}");
+        assert_eq!(
+            body_resp["data"]["url"],
+            "https://app.apexmail.ee/web/billing/portal"
+        );
+        assert_eq!(
+            mock.lock().unwrap().checkout_calls,
+            checkout_calls_before_portal,
+            "the portal never calls the provider"
+        );
+
+        // Portal without a shopper row: fail closed, never a fabricated URL.
         let (portal_tenant, portal_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
         let portal = env_for(pool.clone(), portal_key).await;
-        let portal_body = json!({"returnUrl": valid_url}).to_string();
         let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
 
@@ -8041,27 +8061,29 @@ mod adversarial_tests {
         // With a customer row the portal session is created.
         sqlx::query(
             "INSERT INTO adyen_shoppers (id, tenant_id, adyen_shopper_reference, created_at)
-             VALUES (gen_random_uuid(), $1, 'cus_portal', NOW())",
+             VALUES (gen_random_uuid(), $1, $1, NOW())",
         )
         .bind(&portal_tenant)
         .execute(&pool)
         .await
         .unwrap();
+        let checkout_calls_before = mock.lock().unwrap().checkout_calls;
         let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
         assert_eq!(
             status,
             StatusCode::OK,
-            "{body_resp} observed={:?} adyen_key={:?} allow={:?} base={:?}",
+            "{body_resp} observed={:?}",
             mock.lock().unwrap().observed,
-            std::env::var("ADYEN_API_KEY").ok(),
-            std::env::var("ADYEN_ALLOW_TEST_KEY").ok(),
-            std::env::var("ADYEN_API_BASE_URL").ok(),
         );
         assert_eq!(
-            body_resp["data"]["url"],
-            "https://billing.adyen.com/p/session_mock"
+            body_resp["data"]["url"], "https://app.apexmail.ee/web/billing/portal",
+            "the portal is our own console page — Adyen has no hosted portal"
         );
-        assert_eq!(mock.lock().unwrap().portal_calls, 1);
+        assert_eq!(
+            mock.lock().unwrap().checkout_calls,
+            checkout_calls_before,
+            "the portal never calls the provider"
+        );
     }
 
     // ── proration preview ───────────────────────────────────────
@@ -10284,7 +10306,7 @@ mod adversarial_tests {
     /// and an unusable Adyen credential, both return the honest generic
     /// 500 instead of leaking provider detail.
     #[tokio::test]
-    async fn portal_fails_closed_without_a_customer_or_credentials() {
+    async fn portal_needs_a_shopper_and_never_provider_credentials() {
         let Some(pool) = pool_for("portal_failures").await else {
             return;
         };
@@ -10303,17 +10325,19 @@ mod adversarial_tests {
         .expect("portal response");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        // With a customer row but NO Adyen credential → client init fails.
+        // With a shopper row the portal resolves to our own console page and
+        // needs NO provider credential (Adyen has no hosted portal; there is
+        // no provider call to authenticate).
         let _guard = lock_adyen_env().await;
         let _key = EnvRestore::set("ADYEN_API_KEY", None);
         sqlx::query(
             "INSERT INTO adyen_shoppers (id, tenant_id, adyen_shopper_reference, created_at)
-             VALUES (gen_random_uuid(), $1, 'cus_portal_fail', NOW())",
+             VALUES (gen_random_uuid(), $1, $1, NOW())",
         )
         .bind(auth.tenant_id.as_str())
         .execute(&state.db)
         .await
-        .expect("seed adyen customer");
+        .expect("seed adyen shopper");
         let response = create_portal_session(
             State(state),
             auth,
@@ -10323,7 +10347,7 @@ mod adversarial_tests {
         )
         .await
         .expect("portal response");
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// The subscription read survives a missing table (42P01 maps to "no

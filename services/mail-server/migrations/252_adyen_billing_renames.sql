@@ -485,3 +485,16 @@ BEGIN
     ALTER TABLE processor_clearing_accounts ADD CONSTRAINT processor_clearing_accounts_processor_check
         CHECK (processor IN ('stripe', 'adyen', 'paypal', 'bank'));
 END $$;
+
+-- 8d. The rename in section 1 carried the original NOT NULL constraint onto
+-- legacy_stripe_customer_id. That column is PROVENANCE for pre-cutover rows —
+-- post-cutover shoppers have no legacy id at all, so the constraint must go
+-- (caught by the workspace battery: every new shopper insert failed 23502).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'adyen_shoppers'
+                 AND column_name = 'legacy_stripe_customer_id' AND is_nullable = 'NO') THEN
+        ALTER TABLE adyen_shoppers ALTER COLUMN legacy_stripe_customer_id DROP NOT NULL;
+    END IF;
+END $$;
