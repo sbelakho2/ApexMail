@@ -17673,29 +17673,24 @@ mod residual_arms_db_tests {
         let fixture = seed(&pool, "fetch-outage").await;
         let transport = ResidualTransport::new(ResidualMode::Success);
         let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
-        let role: String = sqlx::query_scalar("SELECT current_user")
-            .fetch_one(&pool)
-            .await
-            .expect("role");
-
-        sqlx::query(&format!("REVOKE SELECT ON email_queue FROM {role}"))
-            .execute(&pool)
-            .await
-            .expect("revoke");
+        // Role-independent outage (the SM10 lesson the suppression arm above
+        // records): REVOKE is a no-op when the canonical TEST_DATABASE_URL
+        // role owns the table or is the cluster superuser, so the fetch
+        // outage is injected with the module's own BEFORE-UPDATE fault
+        // trigger on email_queue — the claim fails for EVERY role.
+        install_fault(&pool, "res_fetch_outage", "email_queue", "UPDATE").await;
+        set_fault(&pool, "res_fetch_outage", true).await;
 
         processor.is_running.store(true, Ordering::SeqCst);
         let loop_handle = tokio::spawn({
             let processor = Arc::clone(&processor);
             async move { processor.poll_loop().await }
         });
-        // Several failed polls happen while the privilege is gone.
+        // Several failed polls happen while the fault is armed.
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(transport.calls(), 0, "nothing is claimed during the outage");
 
-        sqlx::query(&format!("GRANT SELECT ON email_queue TO {role}"))
-            .execute(&pool)
-            .await
-            .expect("restore");
+        set_fault(&pool, "res_fetch_outage", false).await;
         assert!(
             wait_for_row(
                 &pool,
