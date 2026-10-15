@@ -89,6 +89,28 @@ const RESERVED_METADATA_KEYS: [&str; 4] = [
     "requeue_reason",
 ];
 
+/// Metadata keys owned by the sales-autopilot dispatcher's provenance.
+///
+/// The delivery worker classifies a queue row as a SALES send from exactly
+/// this provenance (the `metadata.source` marker below plus these keys, and
+/// the typed `email_queue.sales_step_execution_id` column that only the
+/// dispatcher writes; see `worker-processors`' `email::sales`). Sales sending
+/// is isolated from customer mail by that classification, so a caller-forged
+/// marker would push customer mail onto (or hold it behind) the sales
+/// transport — the markers are server-owned.
+const RESERVED_SALES_PROVENANCE_KEYS: [&str; 5] = [
+    "sales_tenant_id",
+    "sales_sender_identity_id",
+    "sales_sender_pool",
+    "sales_sender_source_ip",
+    "sales_decision_id",
+];
+
+/// The `metadata.source` VALUE the sales dispatcher writes. The key itself
+/// (`source`) is ordinary customer metadata, so only this exact value is
+/// rejected — mirroring `worker-processors`' `SALES_METADATA_SOURCE`.
+const RESERVED_SALES_SOURCE_VALUE: &str = "sales-autopilot";
+
 /// Header names the caller cannot set through the free-form `headers`
 /// field. They are either derived from validated fields (From/To/Cc/Subject/
 /// Message-ID), filtered by the worker, or owned by the platform. Mirrors
@@ -808,6 +830,20 @@ fn sanitize_customer_metadata(
                 "metadata field '{key}' is reserved for queue state and cannot be set by clients"
             ));
         }
+    }
+    for key in RESERVED_SALES_PROVENANCE_KEYS {
+        if map.contains_key(key) {
+            errors.push(format!(
+                "metadata field '{key}' is reserved for sales-autopilot provenance and cannot \
+                 be set by clients (sales sending is isolated from customer mail)"
+            ));
+        }
+    }
+    if map.get("source").and_then(|value| value.as_str()) == Some(RESERVED_SALES_SOURCE_VALUE) {
+        errors.push(format!(
+            "metadata source '{RESERVED_SALES_SOURCE_VALUE}' is reserved for the \
+             sales-autopilot dispatcher and cannot be set by clients"
+        ));
     }
     let serialized = serde_json::to_vec(value).unwrap_or_default();
     if serialized.len() > MAX_METADATA_BYTES {
@@ -4215,6 +4251,45 @@ Bcc: victim@example.com"@example.com"#
                 "reserved key {key} must be rejected: {errors:?}"
             );
         }
+    }
+
+    /// The sales-autopilot provenance markers are server-owned: a customer
+    /// send must not be able to forge the classification the delivery worker
+    /// uses to isolate sales sending (both the key set and the exact
+    /// `metadata.source` value). Ordinary `source` values stay allowed.
+    #[test]
+    fn metadata_sales_provenance_keys_are_rejected() {
+        for key in RESERVED_SALES_PROVENANCE_KEYS {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), serde_json::json!("forged"));
+            let errors = sanitize_customer_metadata(&meta_value(serde_json::Value::Object(map)))
+                .unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains(key) && e.contains("reserved")),
+                "sales provenance key {key} must be rejected: {errors:?}"
+            );
+        }
+
+        // The exact dispatcher marker value is rejected...
+        let errors = sanitize_customer_metadata(&meta_value(serde_json::json!({
+            "source": "sales-autopilot"
+        })))
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("sales-autopilot") && e.contains("reserved")),
+            "the sales-autopilot source value must be rejected: {errors:?}"
+        );
+
+        // ...while ordinary `source` metadata remains customer content.
+        let ordinary = serde_json::json!({"source": "api", "note": "hello"});
+        assert_eq!(
+            sanitize_customer_metadata(&meta_value(ordinary.clone())).unwrap(),
+            Some(ordinary)
+        );
     }
 
     #[test]

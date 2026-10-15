@@ -26,6 +26,15 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::dlp::{EngineDlpScanner, PreSendDlpScanner, PreSendVerdict};
+// SALES SENDING ISOLATION (`email::sales`): the classification of a sales
+// queue row, the PURE route planner with its named holds, and the
+// single-slot sales transport. The customer `HybridTransport` below is
+// never reachable from a sales send.
+use super::sales::{
+    create_sales_transport, plan_sales_route, sales_route_guard_violation, sales_sender_domain,
+    PlannedSalesRoute, SalesSend, SalesTransport, SALES_HOLD_DKIM_DISABLED,
+    SALES_HOLD_DOMAIN_NOT_ALLOWED, SALES_HOLD_REASONS, SALES_HOLD_TRANSPORT_UNAVAILABLE,
+};
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
 use super::transport::{
     create_transport_from_config_with_db_and_redis, EmailTransport, HybridTransport,
@@ -898,6 +907,60 @@ const EU_ONLY_HOLD_ROUTE_GUARD: &str = "eu_only_route_guard_violation";
 /// EU-only invariant cannot be violated by an unreadable setting.
 const ROUTING_MODE_LOOKUP_FAILED: &str = "routing_mode_unavailable";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SALES ISOLATION — the fail-closed hold (`email::sales` owns the decision)
+//
+// The invariant: "Sales sending is isolated. It never shares a transport
+// account, IP, sending domain or suppression list with customer mail."
+// `sales-autopilot`'s dispatcher enqueues sales mail into the SAME
+// `email_queue` the worker drains, so the transport boundary has to be
+// enforced HERE, at the send path: a queue row carrying the dispatcher's
+// provenance (`metadata.source = "sales-autopilot"` / the typed
+// `sales_step_execution_id` column) may travel on the SALES transport slot
+// (`SALES_TRANSPORT=relay|ses_account`) and nowhere else. The customer
+// hybrid transport — SES account, relay, dedicated IPs, warmup pools — is
+// structurally unreachable for it.
+//
+// Hold mechanism: EXACTLY the DLP-quarantine/EU-only shape (the same
+// `deferred` + named reason + `metadata` annotation + one-transaction audit
+// evidence), so an operator resolves a sales hold like any other hold and
+// the row is never silently retried onto a forbidden transport. Chosen over
+// a retryable deferral deliberately: every reason this hold exists for (no
+// sales transport, no recorded source IP, a customer domain on a sales
+// send) is a policy or configuration fault that a retry cannot fix, and a
+// retry that could later resolve differently is precisely the fallback the
+// invariant forbids.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Sales hold write, fenced on the lease token exactly like
+/// [`EU_ONLY_HOLD_UPDATE_SQL`] / [`DLP_HOLD_UPDATE_SQL`]. `$2` is the
+/// `metadata.sales_transport_hold` annotation; the hold applies to the whole
+/// MESSAGE (every per-recipient copy shares the held content), so
+/// `pending_recipients` is untouched.
+const SALES_HOLD_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+            '{sales_transport_hold}', $2::jsonb
+        ),
+        status = 'deferred',
+        error_message = $1,
+        updated_at = NOW()
+    WHERE id = $3::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// The dispatch outcome of the sales pre-flight.
+enum SalesSendOutcome {
+    /// Not a sales send: the customer path runs unchanged.
+    NotSales,
+    /// A sales send planned onto this route — the only route it may travel.
+    Route(DeliveryRoute),
+    /// The message was HELD (named reason, annotation, audit evidence) and
+    /// dispatch must exit without consulting any other path.
+    Held,
+}
+
 /// W4A: the tenant routing-mode read (`tenants.settings.routingMode`), on the
 /// same authoritative row the F18 policy gate reads. `->` (not `->>`) keeps
 /// the raw JSON value so the typed reader can tell "absent" from "corrupt":
@@ -1261,6 +1324,17 @@ fn send_admission_keys(job: &EmailJob, kind: TransportKind) -> Vec<String> {
     vec![
         format!("rl:send:{}:tenant:{}", kind, job.tenant_id),
         format!("rl:send:{}:domain:{}", kind, job.domain_id),
+    ]
+}
+
+/// The SALES send's admission buckets: the same tenant/domain shape under a
+/// `sales` prefix, so the sales transport's capacity is its own — a sales
+/// burst cannot drain the customer buckets (and customer traffic cannot
+/// starve the sales relay).
+fn sales_send_admission_keys(job: &EmailJob, kind: TransportKind) -> Vec<String> {
+    vec![
+        format!("rl:send:sales:{}:tenant:{}", kind, job.tenant_id),
+        format!("rl:send:sales:{}:domain:{}", kind, job.domain_id),
     ]
 }
 
@@ -1800,8 +1874,15 @@ pub struct EmailProcessor {
     config: EmailConfig,
     /// Route-aware dispatcher: `SesShared` → SES, `Dedicated` → relay SMTP.
     /// A missing backend for a requested route fails closed (never crosses the
-    /// shared/dedicated boundary).
+    /// shared/dedicated boundary). SALES sends never reach this value — they
+    /// travel on [`Self::sales_transport`] only (see `email::sales`).
     transport: HybridTransport,
+    /// The dedicated SALES transport slot. Holds at most the backend the
+    /// deployment configured for sales (`SALES_TRANSPORT=relay|ses_account`)
+    /// and is UNCONFIGURED by default: a sales send then HOLDS with a named
+    /// reason instead of riding the customer transport (the isolation
+    /// invariant — see `email::sales`).
+    sales_transport: SalesTransport,
     /// WORKER PRE-SEND DLP scanner (the `email::dlp` seam, mirroring the
     /// transport seam). Engaged only when `config.dlp.enabled`; production
     /// wires [`EngineDlpScanner`], tests inject doubles.
@@ -1879,13 +1960,19 @@ impl EmailProcessor {
         let transport =
             create_transport_from_config_with_db_and_redis(&config, Some(&db), Some(&redis))
                 .await?;
-        Self::with_transport(db, redis, config, transport).await
+        // The SALES slot is built from its own configuration and NEVER from
+        // the customer transport's: a deployment that has not configured
+        // `SALES_TRANSPORT` gets an unconfigured (fail-closed) slot whose
+        // hold keeps sales mail off the customer transport entirely.
+        let sales_transport =
+            create_sales_transport(&config.sales, Some(&db), Some(&redis)).await?;
+        Self::with_transports_and_signer(db, redis, config, transport, sales_transport, None).await
     }
 
     /// Create an email processor around an explicitly constructed hybrid
     /// transport. Used by the binary (which knows whether the relay was
     /// actually configured) and by adversarial tests that inject recording
-    /// doubles.
+    /// doubles. The SALES slot is built from `config.sales`.
     pub async fn with_transport(
         db: PgPool,
         redis: RedisPool,
@@ -1896,6 +1983,28 @@ impl EmailProcessor {
         Self::with_transport_and_signer(db, redis, config, transport, receipt_signer).await
     }
 
+    /// [`Self::with_transport`] with an explicitly constructed SALES slot —
+    /// the seam adversarial tests use to inject a recording sales double
+    /// (production construction goes through [`Self::new`]/[`Self::with_transport`]).
+    pub async fn with_transport_and_sales(
+        db: PgPool,
+        redis: RedisPool,
+        config: EmailConfig,
+        transport: HybridTransport,
+        sales_transport: SalesTransport,
+    ) -> ProcessorResult<Self> {
+        let receipt_signer = resolve_receipt_signer()?;
+        Self::with_transports_and_signer(
+            db,
+            redis,
+            config,
+            transport,
+            sales_transport,
+            receipt_signer,
+        )
+        .await
+    }
+
     /// [`Self::with_transport`] with an explicit receipt signer — the test
     /// seam that pins the fail-closed behaviour (`None` refuses to record an
     /// accepted row) without mutating process env.
@@ -1904,6 +2013,28 @@ impl EmailProcessor {
         redis: RedisPool,
         config: EmailConfig,
         transport: HybridTransport,
+        receipt_signer: Option<Arc<RoutingReceiptSigner>>,
+    ) -> ProcessorResult<Self> {
+        let sales_transport = create_sales_transport(&config.sales, Some(&db), None).await?;
+        Self::with_transports_and_signer(
+            db,
+            redis,
+            config,
+            transport,
+            sales_transport,
+            receipt_signer,
+        )
+        .await
+    }
+
+    /// The single constructor both seams funnel into: customer hybrid
+    /// transport + SALES slot + optional receipt signer.
+    pub(crate) async fn with_transports_and_signer(
+        db: PgPool,
+        redis: RedisPool,
+        config: EmailConfig,
+        transport: HybridTransport,
+        sales_transport: SalesTransport,
         receipt_signer: Option<Arc<RoutingReceiptSigner>>,
     ) -> ProcessorResult<Self> {
         let smtp_circuit_breaker = CircuitBreaker::new(CircuitBreakerConfig {
@@ -1924,6 +2055,7 @@ impl EmailProcessor {
             redis,
             config,
             transport,
+            sales_transport,
             dlp_scanner: Arc::new(EngineDlpScanner::new()),
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
@@ -2085,6 +2217,30 @@ impl EmailProcessor {
         self.transport.verify().await?;
         info!("Email transport verified");
 
+        // Verify the SALES slot separately and WITHOUT failing the worker: a
+        // configured-but-unreachable sales relay must degrade sales only
+        // (sales sends fail loudly on their own path and retry), never hold
+        // customer mail hostage to sales infrastructure.
+        match self.sales_transport.verify().await {
+            Ok(()) => {
+                if self.sales_transport.is_configured() {
+                    info!(
+                        backend = self.sales_transport.backend_name(),
+                        "dedicated sales transport verified"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    backend = self.sales_transport.backend_name(),
+                    error = %error,
+                    "the configured sales transport failed verification — sales sends \
+                     will fail on their own send path until it recovers (customer mail \
+                     is unaffected; sales NEVER falls back to the customer transport)"
+                );
+            }
+        }
+
         if self.config.transport_type == TransportType::Smtp && !self.config.dkim.enabled {
             return Err(ProcessorError::Config(
                 "DKIM_ENABLED must be true when EMAIL_TRANSPORT_TYPE=smtp; verified domains must not be sent unsigned"
@@ -2118,6 +2274,9 @@ impl EmailProcessor {
 
         // Close transport
         self.transport.close().await?;
+        // The sales slot closes with the worker too (a no-op when
+        // unconfigured).
+        self.sales_transport.close().await?;
 
         info!("Email processor stopped");
         Ok(())
@@ -2770,11 +2929,44 @@ impl EmailProcessor {
         // enough.
         let domain = self.get_domain(job).await?;
 
+        // ── SALES SENDING ISOLATION: classify + pre-flight (pre-route) ────
+        // A sales queue row (the dispatcher's own provenance — see
+        // `email::sales`) is decided BEFORE any customer route planning, and
+        // every failure HOLDS the message: nothing below can produce a
+        // customer route for it. The suppression/consent gate above already
+        // ran for this row too — sales sends CONSULT the platform
+        // suppressions like any other send (the invariant's read direction).
+        let sales_outcome = match SalesSend::classify(job) {
+            Some(sales) => {
+                debug!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    sender_pool = ?sales.sender_pool,
+                    source_ip = ?sales.source_ip,
+                    "sales send recognised — the dedicated sales transport is the only \
+                     permitted route"
+                );
+                self.prepare_sales_send(job, &domain, &sales).await?
+            }
+            None => SalesSendOutcome::NotSales,
+        };
+        let sales_route = match sales_outcome {
+            SalesSendOutcome::Held => return Ok(()),
+            SalesSendOutcome::Route(route) => Some(route),
+            SalesSendOutcome::NotSales => None,
+        };
+
         // ── SELECT (pure): build the dedicated-IP candidate pool ──────────
         // Warming AND active identities are candidates; only warming ones
         // carry a quota. Selection never touches Redis, so it cannot consume
-        // capacity for a send that is refused later.
-        let pool = select_delivery_ip(Utc::now(), &domain.dedicated_ips)?;
+        // capacity for a send that is refused later. A SALES send never
+        // consults this pool: its identity/IP provenance lives in the queue
+        // row's sales metadata, not in the customer `dedicated_ips` table.
+        let pool = if sales_route.is_some() {
+            Vec::new()
+        } else {
+            select_delivery_ip(Utc::now(), &domain.dedicated_ips)?
+        };
 
         // ── Route capability gate: PRE-DATA, pre-quota, pre-ledger ────────
         // A dedicated route whose transport is missing or cannot verifiably
@@ -2787,36 +2979,50 @@ impl EmailProcessor {
         // no dedicated-IP candidate there is NO own-MTA route, and the shared
         // transport is forbidden, so the message is HELD (named reason,
         // inspectable, releasable) instead of being planned onto SES.
-        let planned_route = match plan_delivery_route(routing_mode, pool.first()) {
-            PlannedDeliveryRoute::Route(route) => route,
-            PlannedDeliveryRoute::EuOnlyHold { reason, detail } => {
-                warn!(
-                    job_id = %job.id,
-                    tenant_id = %job.tenant_id,
-                    domain_id = %job.domain_id,
-                    reason,
-                    "EU-only routing: no own-MTA route for this send — HOLDING the message \
-                     (the shared third-party transport is forbidden)"
-                );
-                self.handle_eu_only_hold(job, reason, &detail).await?;
-                return Ok(());
-            }
+        let planned_route = match &sales_route {
+            // A sales send's route is decided by the sales plan and by
+            // NOTHING else — the customer candidate pool above is empty for
+            // it, and `plan_delivery_route` is never consulted.
+            Some(route) => route.clone(),
+            None => match plan_delivery_route(routing_mode, pool.first()) {
+                PlannedDeliveryRoute::Route(route) => route,
+                PlannedDeliveryRoute::EuOnlyHold { reason, detail } => {
+                    warn!(
+                        job_id = %job.id,
+                        tenant_id = %job.tenant_id,
+                        domain_id = %job.domain_id,
+                        reason,
+                        "EU-only routing: no own-MTA route for this send — HOLDING the message \
+                         (the shared third-party transport is forbidden)"
+                    );
+                    self.handle_eu_only_hold(job, reason, &detail).await?;
+                    return Ok(());
+                }
+            },
         };
         let shared_route_is_ses = self
             .transport
             .shared_backend_name()
             .is_none_or(|name| name != "smtp");
-        if let Some(reason) = domain_route_readiness(&planned_route, &domain, shared_route_is_ses) {
-            info!(
-                job_id = %job.id,
-                tenant_id = %job.tenant_id,
-                domain_id = %job.domain_id,
-                route = %planned_route,
-                reason,
-                "domain is not ready for the planned delivery route — deferring"
-            );
-            self.requeue_job(job, reason).await?;
-            return Ok(());
+        // The `ses_verified` readiness check is a fact about the PLATFORM SES
+        // account; a sales route's readiness is the sales transport's own
+        // (gated in `prepare_sales_send`), so it deliberately does not
+        // consult the customer account's flag.
+        if sales_route.is_none() {
+            if let Some(reason) =
+                domain_route_readiness(&planned_route, &domain, shared_route_is_ses)
+            {
+                info!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    domain_id = %job.domain_id,
+                    route = %planned_route,
+                    reason,
+                    "domain is not ready for the planned delivery route — deferring"
+                );
+                self.requeue_job(job, reason).await?;
+                return Ok(());
+            }
         }
         // A dedicated relay send must be DKIM-signed (verified domains must
         // not leave unsigned). Defer — retryable — instead of letting
@@ -2824,7 +3030,10 @@ impl EmailProcessor {
         // leases. W4A: under `eu_only` the own-MTA route is the ONLY route,
         // so an unavailable signature is a route outage: HOLD, never defer
         // into a mode where a later retry could pick a different route.
-        if planned_route.is_dedicated() && !self.config.dkim.enabled {
+        // SALES sends never reach this arm: `prepare_sales_send` already
+        // applied (and named) the same requirement as a sales hold, and the
+        // customer deferral/EU-only reasons must not apply to them.
+        if sales_route.is_none() && planned_route.is_dedicated() && !self.config.dkim.enabled {
             if routing_mode.is_eu_only() {
                 warn!(
                     job_id = %job.id,
@@ -2851,56 +3060,66 @@ impl EmailProcessor {
             self.requeue_job(job, "dedicated_dkim_disabled").await?;
             return Ok(());
         }
-        if let Err(error) = self.transport.ensure_route_dispatchable(&planned_route) {
-            let reason = if planned_route.is_dedicated() {
-                if self.transport.has_dedicated_smtp() {
-                    "dedicated_route_unverifiable"
+        // A customer route only: the sales slot's own pre-DATA gate ran in
+        // `prepare_sales_send`, so a sales send never consults the customer
+        // hybrid's dispatchability (which would misname the missing backend).
+        if sales_route.is_none() {
+            if let Err(error) = self.transport.ensure_route_dispatchable(&planned_route) {
+                let reason = if planned_route.is_dedicated() {
+                    if self.transport.has_dedicated_smtp() {
+                        "dedicated_route_unverifiable"
+                    } else {
+                        "dedicated_transport_unconfigured"
+                    }
                 } else {
-                    "dedicated_transport_unconfigured"
-                }
-            } else {
-                "ses_transport_unconfigured"
-            };
-            // W4A: under `eu_only` the dedicated transport IS the route, so
-            // its absence/unverifiability is a route outage — HOLD (never
-            // defer onto a retry that could later cross the boundary).
-            if routing_mode.is_eu_only() {
-                warn!(
-                    job_id = %job.id,
-                    tenant_id = %job.tenant_id,
-                    route = %planned_route,
-                    reason = EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
-                    dispatch_reason = reason,
-                    error = %error,
-                    "EU-only routing: the own-MTA route is not dispatchable on this worker — \
-                     HOLDING the message BEFORE DATA"
-                );
-                self.handle_eu_only_hold(
-                    job,
-                    EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
-                    &format!(
+                    "ses_transport_unconfigured"
+                };
+                // W4A: under `eu_only` the dedicated transport IS the route, so
+                // its absence/unverifiability is a route outage — HOLD (never
+                // defer onto a retry that could later cross the boundary).
+                if routing_mode.is_eu_only() {
+                    warn!(
+                        job_id = %job.id,
+                        tenant_id = %job.tenant_id,
+                        route = %planned_route,
+                        reason = EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
+                        dispatch_reason = reason,
+                        error = %error,
+                        "EU-only routing: the own-MTA route is not dispatchable on this worker — \
+                         HOLDING the message BEFORE DATA"
+                    );
+                    self.handle_eu_only_hold(
+                        job,
+                        EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
+                        &format!(
                         "the own-MTA delivery route {planned_route} is not dispatchable on this \
                          worker ({reason}: {error}); the EU-only mode forbids the shared \
                          third-party transport"
                     ),
-                )
-                .await?;
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    route = %planned_route,
+                    reason,
+                    error = %error,
+                    "delivery route is not dispatchable on this worker — deferring BEFORE DATA"
+                );
+                self.requeue_job(job, reason).await?;
                 return Ok(());
             }
-            warn!(
-                job_id = %job.id,
-                tenant_id = %job.tenant_id,
-                route = %planned_route,
-                reason,
-                error = %error,
-                "delivery route is not dispatchable on this worker — deferring BEFORE DATA"
-            );
-            self.requeue_job(job, reason).await?;
-            return Ok(());
         }
 
         // ── RESERVE: consume warmup capacity from the candidate SET ───────
-        let reserved: Option<ReservedDeliveryIp> = if pool.is_empty() {
+        // SALES sends take no part in the customer warmup reservation: the
+        // sales identity's own daily capacity (`sales_sender_identities.
+        // daily_limit`, reserved by sales-autopilot) is the sales throttle,
+        // and the sales source IP comes from the recorded metadata rather
+        // than this pool.
+        let reserved: Option<ReservedDeliveryIp> = if sales_route.is_some() || pool.is_empty() {
             None
         } else if !self.config.warmup.enabled {
             // Throttling disabled globally: the send stays on the dedicated
@@ -2984,16 +3203,54 @@ impl EmailProcessor {
         // The route is built from the SAME candidate the selection bound,
         // so the chosen path and the network path cannot disagree. Warmup
         // CONSUMPTION happens later, at the relay's SMTP-effect boundary.
-        let route = match &reserved {
-            Some(reserved) => reserved.route(),
-            None => DeliveryRoute::SesShared,
+        // A SALES send's route is the sales plan's route, verbatim: the
+        // customer reservation path above cannot have replaced it (the
+        // reservation is skipped for sales sends).
+        let route = match (&sales_route, &reserved) {
+            (Some(route), _) => route.clone(),
+            (None, Some(reserved)) => reserved.route(),
+            (None, None) => DeliveryRoute::SesShared,
         };
+        // SALES route guard (the structural last line of defence, mirroring
+        // the EU-only guard): the route resolved for a sales send MUST be
+        // the route the sales plan produced. A violation HOLDS the message
+        // instead of letting it cross the transport boundary the isolation
+        // invariant exists to keep.
+        if let Some(reason) =
+            sales_route_guard_violation(sales_route.is_some(), sales_route.as_ref(), &route)
+        {
+            error!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                route = %route,
+                reason,
+                "sales route guard: the resolved route is not the sales plan's route — \
+                 HOLDING the message instead of submitting it"
+            );
+            self.handle_sales_hold(
+                job,
+                reason,
+                &format!(
+                    "the resolved route {route} is not the route the sales plan produced \
+                     ({}); a route that contradicts the sales isolation policy is held, \
+                     never submitted",
+                    sales_route
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "no planned sales route".to_string())
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
         // W4A route guard: under `eu_only` the submitted route MUST be the
         // own-MTA dedicated route. `plan_delivery_route` already holds when
         // no candidate exists, so this is structurally unreachable — but it
         // is the last line of defence, and a violation HOLDS the message
         // rather than letting it cross the transport boundary the mode
-        // exists to forbid (and rather than silently sending it).
+        // exists to forbid (and rather than silently sending it). A sales
+        // send composes with it: an `eu_only` sales send on a non-dedicated
+        // sales route is held here too.
         if let Some(reason) = eu_only_route_guard_violation(routing_mode, &route) {
             error!(
                 job_id = %job.id,
@@ -3029,7 +3286,15 @@ impl EmailProcessor {
         // `max_send_rate` for shared, the relay's `rate_limit_per_second` for
         // dedicated) BEFORE the transport. On exhaustion the row is deferred;
         // the attempt is untouched, so the next claim re-evaluates admission.
-        if !self.check_send_admission(job, &route).await? {
+        // A sales send reserves from the SALES buckets at the
+        // `SALES_SEND_RATE_PER_SECOND` ceiling: separate capacity, separate
+        // keys — the same isolation principle.
+        let admitted = if sales_route.is_some() {
+            self.check_sales_send_admission(job, &route).await?
+        } else {
+            self.check_send_admission(job, &route).await?
+        };
+        if !admitted {
             debug!(
                 job_id = %job.id,
                 tenant_id = %job.tenant_id,
@@ -3160,8 +3425,15 @@ impl EmailProcessor {
         }
 
         // ── Submit, then RECORD on the same ledger row ────────────────────
-        let send_result: ProcessorResult<DeliveryReceipt> =
-            self.transport.send(&email, &route).await;
+        // THE invariant at the effect boundary: a sales send travels on the
+        // SALES transport and nowhere else; every other send travels on the
+        // customer hybrid exactly as before. The two values are distinct
+        // fields with distinct construction paths, so no input can swap them.
+        let send_result: ProcessorResult<DeliveryReceipt> = if sales_route.is_some() {
+            self.sales_transport.send(&email, &route).await
+        } else {
+            self.transport.send(&email, &route).await
+        };
 
         match &send_result {
             Ok(receipt) => {
@@ -3471,8 +3743,35 @@ impl EmailProcessor {
         job: &EmailJob,
         route: &DeliveryRoute,
     ) -> ProcessorResult<bool> {
+        self.check_send_admission_with(job, route, false).await
+    }
+
+    /// [`Self::check_send_admission`] for a SALES send: the sales transport
+    /// is a separate account with its own ceiling
+    /// (`SALES_SEND_RATE_PER_SECOND`) and separate buckets (the `sales`
+    /// prefix), so a sales burst neither drains nor is throttled by the
+    /// customer ceilings — the same isolation principle, applied to the
+    /// admission state.
+    async fn check_sales_send_admission(
+        &self,
+        job: &EmailJob,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<bool> {
+        self.check_send_admission_with(job, route, true).await
+    }
+
+    async fn check_send_admission_with(
+        &self,
+        job: &EmailJob,
+        route: &DeliveryRoute,
+        sales: bool,
+    ) -> ProcessorResult<bool> {
         let kind = transport_kind_for(route);
-        let rate = route_send_rate_per_second(&self.config, kind);
+        let rate = if sales {
+            self.config.sales.send_rate_per_second
+        } else {
+            route_send_rate_per_second(&self.config, kind)
+        };
         if rate == 0 {
             return Ok(true);
         }
@@ -3480,9 +3779,12 @@ impl EmailProcessor {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        match reserve_send_admission(&self.redis, &send_admission_keys(job, kind), rate, now_ms)
-            .await
-        {
+        let keys = if sales {
+            sales_send_admission_keys(job, kind)
+        } else {
+            send_admission_keys(job, kind)
+        };
+        match reserve_send_admission(&self.redis, &keys, rate, now_ms).await {
             Ok(admitted) => Ok(admitted),
             Err(e) => {
                 warn!(
@@ -4363,6 +4665,232 @@ impl EmailProcessor {
         self.reconcile_parent_progress(job).await;
 
         Ok(())
+    }
+
+    /// SALES ISOLATION HOLD — the fail-closed half of the sales transport
+    /// slot (see the SALES block above [`SALES_HOLD_UPDATE_SQL`] and
+    /// `email::sales`).
+    ///
+    /// Called from every dispatch point where a sales send has no permitted
+    /// route: the sales transport is unconfigured/unavailable, the recorded
+    /// source IP is missing on an own-MTA send, the sender domain is not on
+    /// `SALES_SENDING_DOMAINS`, the local DKIM signature cannot be produced,
+    /// or the resolved route contradicts the sales plan. The message MUST NOT
+    /// be sent through the customer transport and MUST NOT be dead-lettered:
+    /// it moves to `deferred` with the NAMED reason in `error_message` and a
+    /// `metadata.sales_transport_hold` annotation, releasable exactly like a
+    /// DLP/EU-only hold. The row write and the hash-chained `audit_logs`
+    /// evidence commit in ONE transaction.
+    async fn handle_sales_hold(
+        &self,
+        job: &EmailJob,
+        reason: &'static str,
+        detail: &str,
+    ) -> ProcessorResult<()> {
+        // Only the NAMED vocabulary may hold a sales send: an unnamed reason
+        // would be a silent deferral wearing a hold's clothes.
+        debug_assert!(
+            SALES_HOLD_REASONS.contains(&reason),
+            "sales holds must carry a named reason from SALES_HOLD_REASONS: {reason}"
+        );
+        metrics::counter!("apexmail_sales_transport_holds").increment(1);
+        let copy = format!(
+            "Message held by the sales sending isolation policy: {detail}. Reason: {reason}. \
+             Held in queue pending review; not delivered, and never routed through the \
+             customer transport."
+        );
+        let annotation = serde_json::json!({
+            "disposition": "held",
+            "policy": "sales_sending_isolation",
+            "mode": self.config.sales.mode_label(),
+            "reason": reason,
+            "detail": detail,
+            "gate": "worker_dispatch",
+            "recipient": job.to,
+            "message_id": job.message_id,
+            "send_unit": send_unit_of(job),
+        });
+        let mut tx = self.db.begin().await?;
+        let updated = sqlx::query(SALES_HOLD_UPDATE_SQL)
+            .bind(&copy)
+            .bind(&annotation)
+            .bind(&job.id)
+            .bind(lease_token_of(job))
+            .execute(&mut *tx)
+            .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_sales_hold fenced out — lease lost, hold write skipped"
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = record_sales_hold_audit(&mut tx, job, reason, detail).await {
+            error!(
+                job_id = %job.id,
+                error = %error,
+                "sales hold audit write failed — rolling the hold back so it can be \
+                 re-recorded WITH its evidence (never a silent hold)"
+            );
+            return Err(ProcessorError::Database(error));
+        }
+        tx.commit().await?;
+
+        warn!(
+            job_id = %job.id,
+            tenant_id = %job.tenant_id,
+            recipient = %job.to,
+            reason,
+            "SALES ISOLATION: message HELD in queue (deferred, named reason, audit evidence) \
+             — the customer transport is never a fallback for sales mail"
+        );
+
+        // F25: the hold is a durable recipient transition (non-terminal) —
+        // reconcile the parent aggregate so it does not lag the queue row.
+        self.reconcile_parent_progress(job).await;
+
+        Ok(())
+    }
+
+    /// The sales pre-flight: every gate between "this queue row is a sales
+    /// send" and "submit it on the sales transport". Each failure records the
+    /// SALES hold and returns [`SalesSendOutcome::Held`], so the caller exits
+    /// dispatch — none of these arms can fall through into the customer path.
+    ///
+    /// Order (each step also has a fail-closed arm further down the send
+    /// path as defense in depth):
+    /// 1. sender-domain allowlist (`SALES_SENDING_DOMAINS`) — refuse BY NAME;
+    /// 2. the PURE [`plan_sales_route`] — mode → route, else a named hold;
+    /// 3. DKIM for own-MTA routes (the relay route must carry the local
+    ///    signature; an unavailable signature is a route outage, not a
+    ///    reason to fall back);
+    /// 4. the transport gate — the sales slot must be configured and able to
+    ///    carry the planned route (a non-binding backend is refused here,
+    ///    BEFORE any reservation or submission).
+    async fn prepare_sales_send(
+        &self,
+        job: &EmailJob,
+        domain: &Domain,
+        sales: &SalesSend,
+    ) -> ProcessorResult<SalesSendOutcome> {
+        // (1) The exact allowlist gate on the ENVELOPE sender domain — the
+        // value that will actually be sent from (`get_domain` already proved
+        // it matches the authorized `domains` row). An unparsable envelope
+        // is unreachable through `get_domain`; it fails closed here anyway.
+        let sender_domain = match sales_sender_domain(job) {
+            Some(domain) => domain,
+            None => {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    reason = SALES_HOLD_DOMAIN_NOT_ALLOWED,
+                    "sales isolation: the queued sender address carries no domain — HOLDING"
+                );
+                self.handle_sales_hold(
+                    job,
+                    SALES_HOLD_DOMAIN_NOT_ALLOWED,
+                    "the queued sender address carries no domain, so it cannot be matched \
+                     against SALES_SENDING_DOMAINS — refusing to send from an unvetted domain",
+                )
+                .await?;
+                return Ok(SalesSendOutcome::Held);
+            }
+        };
+        if !self.config.sales.domain_allowed(&sender_domain) {
+            let detail = format!(
+                "sender domain '{}' is not on SALES_SENDING_DOMAINS ({}); a sender outside \
+                 the sales allowlist is refused by name — sales mail never sends from a \
+                 customer sending domain",
+                sender_domain,
+                if self.config.sales.sending_domains.is_empty() {
+                    "the allowlist is empty".to_string()
+                } else {
+                    self.config.sales.sending_domains.join(",")
+                }
+            );
+            warn!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                domain = %sender_domain,
+                authorized_domain = %domain.domain,
+                reason = SALES_HOLD_DOMAIN_NOT_ALLOWED,
+                "sales isolation: sender domain outside the sales allowlist — HOLDING"
+            );
+            self.handle_sales_hold(job, SALES_HOLD_DOMAIN_NOT_ALLOWED, &detail)
+                .await?;
+            return Ok(SalesSendOutcome::Held);
+        }
+
+        // (2) The pure decision point.
+        let route = match plan_sales_route(self.config.sales.mode, sales, job) {
+            PlannedSalesRoute::Send(route) => route,
+            PlannedSalesRoute::Hold { reason, detail } => {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    reason,
+                    "sales isolation: no permitted sales route — HOLDING the message \
+                     (the customer transport is forbidden for sales mail)"
+                );
+                self.handle_sales_hold(job, reason, &detail).await?;
+                return Ok(SalesSendOutcome::Held);
+            }
+        };
+
+        // (3) Own-MTA sales sends are DKIM-signed LOCALLY from the sender
+        // domain's key (the relay delivers the bytes verbatim). A disabled
+        // signature cannot be produced, and the fallback (the customer
+        // transport) is forbidden — HOLD.
+        if route.is_dedicated() && !self.config.dkim.enabled {
+            warn!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                route = %route,
+                reason = SALES_HOLD_DKIM_DISABLED,
+                "sales isolation: DKIM signing is disabled on this worker — HOLDING the \
+                 own-MTA sales send"
+            );
+            self.handle_sales_hold(
+                job,
+                SALES_HOLD_DKIM_DISABLED,
+                "DKIM signing is disabled on this worker; an own-MTA sales send must carry \
+                 the local signature and the customer transport is forbidden",
+            )
+            .await?;
+            return Ok(SalesSendOutcome::Held);
+        }
+
+        // (4) Pre-DATA transport gate for the SALES slot (never the customer
+        // hybrid): a missing backend or a backend that cannot bind the
+        // requested IP is a route outage — HOLD before any reservation.
+        if let Err(error) = self.sales_transport.ensure_dispatchable(&route) {
+            warn!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                route = %route,
+                reason = SALES_HOLD_TRANSPORT_UNAVAILABLE,
+                backend = self.sales_transport.backend_name(),
+                error = %error,
+                "sales isolation: the sales transport cannot carry the planned route — \
+                 HOLDING the message BEFORE DATA"
+            );
+            self.handle_sales_hold(
+                job,
+                SALES_HOLD_TRANSPORT_UNAVAILABLE,
+                &format!(
+                    "the sales transport ('{}') cannot carry the planned route {route} \
+                     ({error}); the customer transport is never a fallback",
+                    self.sales_transport.backend_name()
+                ),
+            )
+            .await?;
+            return Ok(SalesSendOutcome::Held);
+        }
+
+        Ok(SalesSendOutcome::Route(route))
     }
 
     /// WORKER PRE-SEND DLP gate — HIGH severity (engine `Block`) refusal.
@@ -5442,6 +5970,40 @@ async fn record_dlp_audit(
             resource_id: Some(&job.id),
             details,
             outcome,
+        },
+    )
+    .await
+}
+
+/// SALES ISOLATION: the hash-chained audit evidence for one sales hold
+/// (`sales.transport_hold`, outcome `held`). Mirrors
+/// [`record_eu_only_hold_audit`]: the caller commits it in the SAME
+/// transaction as the queue-row hold, so a hold and its evidence are atomic.
+async fn record_sales_hold_audit(
+    conn: &mut sqlx::PgConnection,
+    job: &EmailJob,
+    reason: &str,
+    detail: &str,
+) -> Result<(), sqlx::Error> {
+    let details = serde_json::json!({
+        "disposition": "held",
+        "policy": "sales_sending_isolation",
+        "reason": reason,
+        "detail": detail,
+        "recipient": job.to,
+        "message_id": job.message_id,
+        "send_unit": send_unit_of(job),
+        "gate": "worker_dispatch",
+    });
+    crate::common::audit::append_audit_log(
+        conn,
+        crate::common::audit::AuditEntry {
+            tenant_id: Some(&job.tenant_id),
+            action: "sales.transport_hold",
+            resource: "email_queue",
+            resource_id: Some(&job.id),
+            details,
+            outcome: "held",
         },
     )
     .await
@@ -10311,18 +10873,18 @@ mod sales_feedback_db_tests {
         crate::test_support::canonical_pool(test_name, test_name).await
     }
 
-    struct FeedbackFixture {
-        tenant_id: String,
-        queue_row_id: String,
-        step_execution_id: Uuid,
-        sender_id: Uuid,
+    pub(super) struct FeedbackFixture {
+        pub(super) tenant_id: String,
+        pub(super) queue_row_id: String,
+        pub(super) step_execution_id: Uuid,
+        pub(super) sender_id: Uuid,
     }
 
     /// Seed the canonical chain the dispatcher writes for sales mail:
     /// tenant, account/contact, sequence/version/step, sender identity,
     /// enrollment, step execution, and the `email_queue` row carrying the
     /// typed sales provenance (migration 202 lines 34-38).
-    async fn seed_feedback_fixture(pool: &PgPool, label: &str) -> FeedbackFixture {
+    pub(super) async fn seed_feedback_fixture(pool: &PgPool, label: &str) -> FeedbackFixture {
         let suffix = &Uuid::new_v4().simple().to_string()[..12];
         let tenant_id = format!("fb-{suffix}");
         sqlx::query(
@@ -18883,5 +19445,1165 @@ mod residual_arms_db_tests {
         let headless = inject_json_ld_into_head("<p>fragment</p>", script);
         assert!(headless.starts_with(script));
         assert!(headless.ends_with("<p>fragment</p>"));
+    }
+}
+
+#[cfg(test)]
+mod sales_isolation_db_tests {
+    //! THE sales sending isolation invariant on the real send path:
+    //! "Sales sending is isolated. It never shares a transport account, IP,
+    //! sending domain or suppression list with customer mail."
+    //!
+    //! These tests drive `fetch_jobs` → `process_job` with the dispatcher's
+    //! own provenance (`metadata.source = "sales-autopilot"` + the typed
+    //! `email_queue.sales_step_execution_id`), a REAL customer SES spy and a
+    //! REAL sales-transport spy, against the canonical provisioned schema:
+    //!
+    //! * configured sales transport → only the sales spy is called (the
+    //!   customer SES spy records zero — the fail-before arm: the fallback is
+    //!   configured, armed and working, and is still never taken);
+    //! * unconfigured sales transport → the row is HELD with the named
+    //!   reason, zero transports called, releasable like the eu_only/DLP
+    //!   holds;
+    //! * a customer send is unaffected by the sales configuration;
+    //! * a missing recorded source IP / a customer sender domain on a sales
+    //!   send are refused by name;
+    //! * sales mail CONSULTS the platform suppressions (never bypasses);
+    //! * a sales hard bounce writes the SALES tenant's suppression set only
+    //!   (never a customer tenant's rows) and lands the sales feedback ledger.
+    //!
+    //! The pool follows this crate's live-test convention
+    //! (`migrator::test_support::fresh_canonical_pool`): `TEST_DATABASE_URL`
+    //! must be set EXPLICITLY; when unset the tests soft-skip, and a
+    //! configured-but-broken URL FAILS.
+
+    use super::*;
+    use crate::common::{SalesTransportConfig, SalesTransportMode};
+    use crate::email::sales::{SalesTransport, SALES_HOLD_SOURCE_IP_MISSING};
+    use crate::test_support::DkimKeyEnv;
+    use sqlx::PgPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use uuid::Uuid;
+
+    async fn isolation_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
+        crate::test_support::canonical_pool(test_name, test_name).await
+    }
+
+    fn sales_redis() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    /// A transport spy that records every call and can be scripted to accept
+    /// or hard-bounce. `binding` declares whether it can bind and REPORT a
+    /// source IP (the own-MTA relay capability).
+    struct IsolationSpy {
+        name: &'static str,
+        binding: bool,
+        bounce: bool,
+        calls: AtomicUsize,
+        routes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl IsolationSpy {
+        fn new(name: &'static str, binding: bool, bounce: bool) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                binding,
+                bounce,
+                calls: AtomicUsize::new(0),
+                routes: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        /// The routes this spy was asked to carry, in call order.
+        fn routes(&self) -> Vec<String> {
+            self.routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for IsolationSpy {
+        fn transport_name(&self) -> &str {
+            self.name
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            self.binding
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(route.to_string());
+            if self.bounce {
+                return Err(ProcessorError::Smtp {
+                    code: 550,
+                    enhanced: Some("5.1.1".into()),
+                    message: "user unknown".into(),
+                });
+            }
+            Ok(DeliveryReceipt {
+                transport: match route {
+                    DeliveryRoute::SesShared => TransportType::Ses,
+                    DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
+                },
+                transport_message_id: Some(format!("{}-1", self.name)),
+                // The relay's whole contract: report the bound source IP.
+                actual_source_ip: route.dedicated_source_ip(),
+                recipient_provider: None,
+                provider_source: None,
+            })
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    /// One sales queue row, seeded through the SAME canonical chain the
+    /// dispatcher writes (typed provenance columns + metadata markers),
+    /// extended with a verified sending domain so `get_domain` resolves.
+    struct SalesRow {
+        tenant_id: String,
+        domain_id: Uuid,
+        domain_name: String,
+        queue_id: Uuid,
+        step_execution_id: Uuid,
+        sender_identity_id: Uuid,
+        recipient: String,
+    }
+
+    const SALES_SOURCE_IP: &str = "198.51.100.42";
+
+    /// Seed a sales queue row. `metadata_extra` is merged over the
+    /// dispatcher-shaped sales metadata (to model a missing/odd source IP).
+    async fn seed_sales_row(
+        pool: &PgPool,
+        label: &str,
+        metadata_extra: serde_json::Value,
+    ) -> SalesRow {
+        let fixture = super::sales_feedback_db_tests::seed_feedback_fixture(pool, label).await;
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let domain_id = Uuid::new_v4();
+        let domain_name = format!("sales-{suffix}.example");
+        sqlx::query(
+            "INSERT INTO domains \
+                 (id, tenant_id, name, status, verified, dkim_enabled, ses_verified, \
+                  dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'sel', 'pub', 'dkim:v1:test')",
+        )
+        .bind(domain_id)
+        .bind(&fixture.tenant_id)
+        .bind(&domain_name)
+        .execute(pool)
+        .await
+        .expect("insert sales sending domain");
+
+        let mut metadata = serde_json::json!({
+            "source": "sales-autopilot",
+            "sales_tenant_id": fixture.tenant_id,
+            "sales_sender_identity_id": fixture.sender_id.to_string(),
+            "sales_sender_pool": "sales_outbound",
+            "sales_sender_source_ip": SALES_SOURCE_IP,
+        });
+        if let (Some(base), Some(extra)) = (metadata.as_object_mut(), metadata_extra.as_object()) {
+            for (key, value) in extra {
+                if value.is_null() {
+                    base.remove(key);
+                } else {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        let sender = format!("sales@{domain_name}");
+        sqlx::query(
+            "UPDATE email_queue \
+             SET domain_id = $1, from_address = $2, \"from\" = $2, text = 'body', \
+                 metadata = $3::jsonb, message_category = 'marketing', \
+                 campaign_id = NULL, attempt = 0 \
+             WHERE id = $4::uuid",
+        )
+        .bind(domain_id)
+        .bind(&sender)
+        .bind(&metadata)
+        .bind(&fixture.queue_row_id)
+        .execute(pool)
+        .await
+        .expect("stamp the sales row's provenance");
+
+        SalesRow {
+            tenant_id: fixture.tenant_id,
+            domain_id,
+            domain_name,
+            queue_id: Uuid::parse_str(&fixture.queue_row_id).expect("queue id"),
+            step_execution_id: fixture.step_execution_id,
+            sender_identity_id: fixture.sender_id,
+            recipient: "prospect@example.com".to_string(),
+        }
+    }
+
+    /// A customer (non-sales) queue row on its own tenant + verified domain —
+    /// the "unaffected" control arm.
+    async fn seed_customer_row(pool: &PgPool, label: &str) -> (String, Uuid, Uuid) {
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let tenant_id = format!("cust-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("Customer {label} {suffix}"))
+        .bind(format!("cust-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert customer tenant");
+
+        let domain_id = Uuid::new_v4();
+        let domain_name = format!("customer-{suffix}.example");
+        sqlx::query(
+            "INSERT INTO domains \
+                 (id, tenant_id, name, status, verified, dkim_enabled, ses_verified, \
+                  dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'sel', 'pub', 'dkim:v1:test')",
+        )
+        .bind(domain_id)
+        .bind(&tenant_id)
+        .bind(&domain_name)
+        .execute(pool)
+        .await
+        .expect("insert customer domain");
+
+        let queue_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category) \
+             VALUES ($1, $2, ARRAY['buyer@example.com'], $3, 'pending', $4, $5, $6, \
+                     'buyer@example.com', 'body', '{\"source\": \"api\"}'::jsonb, 0, 'marketing')",
+        )
+        .bind(queue_id)
+        .bind(format!("billing@{domain_name}"))
+        .bind(format!("Customer {label}"))
+        .bind(&tenant_id)
+        .bind(Uuid::new_v4())
+        .bind(domain_id)
+        .execute(pool)
+        .await
+        .expect("insert customer queue row");
+
+        (tenant_id, domain_id, queue_id)
+    }
+
+    /// The sales configuration under test: mode + allowlist, admission
+    /// disabled for determinism (its own focused tests cover the buckets).
+    fn sales_config(mode: SalesTransportMode, domains: &[&str]) -> SalesTransportConfig {
+        SalesTransportConfig {
+            mode,
+            sending_domains: domains.iter().map(|d| d.to_string()).collect(),
+            relay: None,
+            ses_account: None,
+            send_rate_per_second: 0,
+        }
+    }
+
+    fn base_config(sales: SalesTransportConfig) -> EmailConfig {
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig::default(),
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.dkim.enabled = true;
+        config.sales = sales;
+        config
+    }
+
+    /// Provision real DKIM key material on the sales domain (a relay send is
+    /// signed LOCALLY from the domain's encrypted key).
+    async fn provision_dkim(pool: &PgPool, row: &SalesRow) {
+        // RSA prime search can fail transiently (this crate's own test
+        // suites hit it under parallel load); retry a bounded number of
+        // times so the isolation assertions never flake on key generation.
+        let keypair = {
+            let mut last_error = None;
+            let mut keypair = None;
+            for _ in 0..5 {
+                match apexmail_lib::dkim::generate_dkim_keypair() {
+                    Ok(generated) => {
+                        keypair = Some(generated);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            keypair.unwrap_or_else(|| {
+                panic!("dkim keypair generation failed after 5 attempts: {last_error:?}")
+            })
+        };
+        let aad =
+            apexmail_lib::dkim::dkim_private_key_aad(&row.tenant_id, &row.domain_id.to_string());
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(keypair.private_key_pem.as_str(), &aad)
+                .expect("encrypt dkim key");
+        sqlx::query("UPDATE domains SET dkim_public_key = $2, dkim_private_key = $3 WHERE id = $1")
+            .bind(row.domain_id)
+            .bind(&keypair.public_key)
+            .bind(&encrypted)
+            .execute(pool)
+            .await
+            .expect("provision sales domain key");
+    }
+
+    async fn queue_state(pool: &PgPool, queue_id: Uuid) -> (String, Option<String>) {
+        sqlx::query_as("SELECT status, error_message FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue state")
+    }
+
+    async fn metadata_of(pool: &PgPool, queue_id: Uuid) -> serde_json::Value {
+        sqlx::query_scalar("SELECT metadata FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue metadata")
+    }
+
+    async fn count_suppressions(pool: &PgPool, tenant_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM suppressions WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_one(pool)
+            .await
+            .expect("suppression count")
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // The exact classification signal, pinned across the crate boundary
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// The classification marker is not invented here: it is the literal the
+    /// dispatcher writes. This test reads the dispatcher source so a rename
+    /// in `sales-autopilot` breaks the worker suite immediately.
+    #[test]
+    fn the_classification_markers_are_the_dispatchers_own_literals() {
+        let dispatcher = include_str!("../../../sales-autopilot/src/dispatcher.rs");
+        assert!(
+            dispatcher.contains(r#""source": "sales-autopilot""#),
+            "the dispatcher must keep writing the metadata.source marker the worker \
+             classifies on"
+        );
+        for key in [
+            "\"sales_tenant_id\"",
+            "\"sales_sender_identity_id\"",
+            "\"sales_sender_pool\"",
+            "\"sales_sender_source_ip\"",
+        ] {
+            assert!(
+                dispatcher.contains(key),
+                "the dispatcher must keep writing {key} into queue-row metadata"
+            );
+        }
+        assert!(
+            dispatcher.contains("sales_step_execution_id")
+                && dispatcher.contains("SEQUENCE_EMAIL_QUEUE_INSERT_SQL"),
+            "the typed sales_step_execution_id column must remain the sequenced-send marker"
+        );
+        // And the worker's constant matches the literal.
+        assert_eq!(
+            crate::email::sales::SALES_METADATA_SOURCE,
+            "sales-autopilot"
+        );
+    }
+
+    /// The suppression WRITE path stays tenant-scoped: the hard-bounce
+    /// suppression insert binds the queue row's own tenant, so a sales send
+    /// can only ever feed the sales tenant's set.
+    #[test]
+    fn the_hard_bounce_suppression_write_is_tenant_scoped() {
+        let source = include_str!("processor.rs");
+        let insert = source
+            .find("INSERT INTO suppressions (id, tenant_id, email, reason, created_at)")
+            .expect("the hard-bounce suppression insert must exist");
+        let window = &source[insert..insert + 700];
+        assert!(
+            window.contains(".bind(&job.tenant_id)"),
+            "the suppression insert must be scoped to the queue row's tenant: {window}"
+        );
+        assert!(
+            !window.contains("sales_sender_identity") && !window.contains("customer"),
+            "the suppression insert must not derive a tenant from sales/customer provenance"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // The invariant: configured → sales transport only
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// A sales send with the sales transport configured goes through the
+    /// SALES spy — never the customer SES spy — and the relay route binds the
+    /// RECORDED source IP end to end (the acceptance ledger proves it).
+    #[tokio::test]
+    async fn a_sales_send_rides_the_sales_transport_and_never_the_customer_ses(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_positive").await else { return Ok(()) };
+        let _dkim_key = {
+            let _env_lock = crate::test_support::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            DkimKeyEnv::set()
+        };
+        let row = seed_sales_row(&pool, "sales-positive", serde_json::json!({})).await;
+        provision_dkim(&pool, &row).await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_relay = IsolationSpy::new("sales-relay", true, false);
+        let config = base_config(sales_config(SalesTransportMode::Relay, &[&row.domain_name]));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let sales_transport = SalesTransport::new(
+            sales_relay.clone() as Arc<dyn EmailTransport>,
+            "sales-relay",
+        );
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            sales_transport,
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        processor.process_job(job).await.expect("dispatch");
+
+        assert_eq!(
+            sales_relay.calls(),
+            1,
+            "the sales transport must carry the sales send"
+        );
+        assert_eq!(
+            sales_relay.routes(),
+            vec![format!(
+                "dedicated({} @ {SALES_SOURCE_IP})",
+                row.sender_identity_id
+            )],
+            "the route must key on the recorded sales identity and bind its recorded IP"
+        );
+        assert_eq!(
+            customer_ses.calls(),
+            0,
+            "THE invariant: the customer transport must never carry a sales send"
+        );
+        let (status, _) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(status, "sent");
+
+        // The route the sales transport actually executed bound the RECORDED
+        // source IP, and the acceptance ledger recorded the sales route.
+        let (transport, requested_ip): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT transport, host(requested_source_ip) FROM sales_delivery_acceptances \
+             WHERE queue_id = $1",
+        )
+        .bind(row.queue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("acceptance route probe");
+        assert_eq!(transport.as_deref(), Some("dedicated"));
+        assert_eq!(requested_ip.as_deref(), Some(SALES_SOURCE_IP));
+        let recorded_unit: Option<String> = sqlx::query_scalar(
+            "SELECT send_unit FROM sales_delivery_acceptances WHERE queue_id = $1",
+        )
+        .bind(row.queue_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("send unit probe");
+        assert_eq!(
+            recorded_unit.as_deref(),
+            Some(format!("sa-send:{}", row.step_execution_id).as_str()),
+            "the ledger must key on the dispatcher's step-execution identity"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The same invariant in `ses_account` mode: the sales ACCOUNT's transport
+    /// carries the send on its own shared route; the customer SES client is
+    /// never touched.
+    #[tokio::test]
+    async fn a_ses_account_sales_send_uses_the_sales_account_only(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_ses_account").await else { return Ok(()) };
+        let row = seed_sales_row(&pool, "sales-ses-account", serde_json::json!({})).await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_ses = IsolationSpy::new("sales-ses-account", false, false);
+        let config = base_config(sales_config(
+            SalesTransportMode::SesAccount,
+            &[&row.domain_name],
+        ));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            SalesTransport::new(
+                sales_ses.clone() as Arc<dyn EmailTransport>,
+                "sales-ses-account",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        processor.process_job(job).await.expect("dispatch");
+
+        assert_eq!(sales_ses.calls(), 1, "the sales account carries the send");
+        assert_eq!(
+            customer_ses.calls(),
+            0,
+            "the customer SES client must never be reached for a sales send"
+        );
+        let (status, _) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(status, "sent");
+        pool.close().await;
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // THE hold: unconfigured sales transport never falls back
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// THE headline invariant, end to end: with NO sales transport
+    /// configured, a sales send is HELD with the named reason — and the
+    /// customer SES transport, which IS configured, armed and working, is
+    /// never called (the fail-before proof: this is the fallback that the old
+    /// code path would have taken).
+    #[tokio::test]
+    async fn an_unconfigured_sales_transport_holds_and_never_falls_back(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_hold").await else { return Ok(()) };
+        let row = seed_sales_row(&pool, "sales-hold", serde_json::json!({})).await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_relay = IsolationSpy::new("sales-relay", true, false);
+        // `SALES_TRANSPORT` unset: the shipped default.
+        let config = base_config(sales_config(SalesTransportMode::None, &[&row.domain_name]));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            // Even an AVAILABLE sales backend is not used: the mode is what
+            // decides, so the hold cannot be an artifact of a missing double.
+            SalesTransport::new(
+                sales_relay.clone() as Arc<dyn EmailTransport>,
+                "sales-relay",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        processor
+            .process_job(job)
+            .await
+            .expect("a hold is a clean outcome, not an error");
+
+        assert_eq!(
+            customer_ses.calls(),
+            0,
+            "the customer SES transport must NEVER carry a sales send (fail closed)"
+        );
+        assert_eq!(
+            sales_relay.calls(),
+            0,
+            "an unconfigured mode submits nothing at all"
+        );
+
+        let (status, error_message) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(
+            status, "deferred",
+            "a held row is deferred: visible, unsent, never dead-lettered"
+        );
+        let message = error_message.unwrap_or_default();
+        assert!(
+            message.contains("sales_transport_unconfigured"),
+            "the hold must carry its named reason: {message}"
+        );
+        assert!(
+            message.contains("never routed through the customer transport"),
+            "the hold copy must state the transport guarantee: {message}"
+        );
+
+        let metadata = metadata_of(&pool, row.queue_id).await;
+        let annotation = &metadata["sales_transport_hold"];
+        assert_eq!(annotation["disposition"], "held");
+        assert_eq!(annotation["policy"], "sales_sending_isolation");
+        assert_eq!(annotation["mode"], "none");
+        assert_eq!(annotation["reason"], "sales_transport_unconfigured");
+
+        // Releasable exactly like a DLP/EU-only hold: the poller never
+        // re-claims a deferred row, and an operator returning it to
+        // `pending` makes it claimable again.
+        let drained = processor.fetch_jobs(1).await.expect("drain claim");
+        assert!(drained.is_empty(), "a held row must not be re-claimed");
+        sqlx::query("UPDATE email_queue SET status = 'pending' WHERE id = $1")
+            .bind(row.queue_id)
+            .execute(&pool)
+            .await
+            .expect("operator release");
+        let released = processor.fetch_jobs(1).await.expect("release claim");
+        assert_eq!(
+            released.len(),
+            1,
+            "an operator must be able to release a sales hold"
+        );
+
+        // Audit evidence committed in the same transaction as the hold.
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'sales.transport_hold' AND outcome = 'held'",
+        )
+        .bind(&row.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit probe");
+        assert_eq!(audits, 1, "the hold must commit its hash-chained evidence");
+
+        let dlq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1")
+                .bind(row.queue_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("dlq probe");
+        assert_eq!(dlq, 0, "a hold is not a dead-letter");
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM events WHERE tenant_id = $1 AND event_type = 'sent'",
+        )
+        .bind(&row.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("event probe");
+        assert_eq!(events, 0, "no acceptance event is fabricated for a hold");
+        pool.close().await;
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Refusals by name: missing source IP, customer domain on a sales send
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// An own-MTA sales send without the recorded source IP HOLDS: the relay
+    /// contract cannot be expressed, and the customer transport is not an
+    /// alternative.
+    #[tokio::test]
+    async fn an_own_mta_sales_send_without_a_recorded_source_ip_holds(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_no_ip").await else { return Ok(()) };
+        let row = seed_sales_row(
+            &pool,
+            "sales-no-ip",
+            serde_json::json!({ "sales_sender_source_ip": null }),
+        )
+        .await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_relay = IsolationSpy::new("sales-relay", true, false);
+        let config = base_config(sales_config(SalesTransportMode::Relay, &[&row.domain_name]));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            SalesTransport::new(
+                sales_relay.clone() as Arc<dyn EmailTransport>,
+                "sales-relay",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        processor.process_job(job).await.expect("hold");
+
+        assert_eq!(sales_relay.calls(), 0, "nothing may be submitted");
+        assert_eq!(customer_ses.calls(), 0, "never the customer transport");
+        let (status, error_message) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(status, "deferred");
+        assert!(
+            error_message
+                .unwrap_or_default()
+                .contains(SALES_HOLD_SOURCE_IP_MISSING),
+            "the hold must name the missing recorded IP"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A sender domain OUTSIDE `SALES_SENDING_DOMAINS` is refused BY NAME —
+    /// the "customer domain on a sales send" case.
+    #[tokio::test]
+    async fn a_customer_domain_on_a_sales_send_is_refused_by_name(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_domain").await else { return Ok(()) };
+        let row = seed_sales_row(&pool, "sales-domain", serde_json::json!({})).await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_relay = IsolationSpy::new("sales-relay", true, false);
+        // The allowlist deliberately names a DIFFERENT domain.
+        let config = base_config(sales_config(
+            SalesTransportMode::Relay,
+            &["approved-sales.example"],
+        ));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            SalesTransport::new(
+                sales_relay.clone() as Arc<dyn EmailTransport>,
+                "sales-relay",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        processor.process_job(job).await.expect("hold");
+
+        assert_eq!(sales_relay.calls(), 0);
+        assert_eq!(customer_ses.calls(), 0);
+        let (status, error_message) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(status, "deferred");
+        let message = error_message.unwrap_or_default();
+        assert!(
+            message.contains(SALES_HOLD_DOMAIN_NOT_ALLOWED),
+            "the refusal must be by name: {message}"
+        );
+        assert!(
+            message.contains(&row.domain_name),
+            "the refusal must name the offending domain: {message}"
+        );
+        let metadata = metadata_of(&pool, row.queue_id).await;
+        assert_eq!(
+            metadata["sales_transport_hold"]["reason"],
+            SALES_HOLD_DOMAIN_NOT_ALLOWED
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // The control arm: a customer send is unaffected
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// A customer send runs the customer path unchanged even with the sales
+    /// transport fully configured — the sales slot is additive.
+    #[tokio::test]
+    async fn a_customer_send_is_unaffected_by_the_sales_configuration(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_customer").await else { return Ok(()) };
+        let (tenant_id, _domain_id, queue_id) = seed_customer_row(&pool, "control").await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_relay = IsolationSpy::new("sales-relay", true, false);
+        let config = base_config(sales_config(
+            SalesTransportMode::Relay,
+            &["approved-sales.example"],
+        ));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            SalesTransport::new(
+                sales_relay.clone() as Arc<dyn EmailTransport>,
+                "sales-relay",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the customer row");
+        processor.process_job(job).await.expect("dispatch");
+
+        assert_eq!(customer_ses.calls(), 1, "the customer send is unchanged");
+        assert_eq!(
+            sales_relay.calls(),
+            0,
+            "the sales transport must never carry customer mail either"
+        );
+        let (status, _) = queue_state(&pool, queue_id).await;
+        assert_eq!(status, "sent");
+        assert!(
+            count_suppressions(&pool, &tenant_id).await == 0,
+            "a successful customer send writes no suppression"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Suppression separation: consult, and write to the sales set only
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Sales sends CONSULT the platform suppressions: a suppressed recipient
+    /// is terminalized at dispatch with ZERO transport calls (never bypassed).
+    #[tokio::test]
+    async fn a_suppressed_recipient_stops_a_sales_send_before_any_transport(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_suppressed").await else { return Ok(()) };
+        let row = seed_sales_row(&pool, "sales-suppressed", serde_json::json!({})).await;
+        // The platform suppression row lives on the SALES tenant, exactly
+        // where a sales unsubscribe/complaint lands.
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, created_at) \
+             VALUES ($1, $2, $3, 'unsubscribe', NOW())",
+        )
+        .bind(format!(
+            "sup_{}",
+            &Uuid::new_v4().simple().to_string()[..18]
+        ))
+        .bind(&row.tenant_id)
+        .bind(&row.recipient)
+        .execute(&pool)
+        .await
+        .expect("seed suppression");
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        let sales_relay = IsolationSpy::new("sales-relay", true, false);
+        let config = base_config(sales_config(SalesTransportMode::Relay, &[&row.domain_name]));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            SalesTransport::new(
+                sales_relay.clone() as Arc<dyn EmailTransport>,
+                "sales-relay",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        processor.process_job(job).await.expect("suppression");
+
+        assert_eq!(
+            sales_relay.calls(),
+            0,
+            "a suppressed recipient must never reach the sales transport"
+        );
+        assert_eq!(customer_ses.calls(), 0);
+        let (status, _) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(
+            status, "suppressed",
+            "the suppression decision terminalizes the row"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A sales hard bounce writes the SALES suppression set only: one row on
+    /// the sales tenant, NONE on any customer tenant, plus the sales
+    /// feedback ledger row — the write direction of the invariant.
+    #[tokio::test]
+    async fn a_sales_bounce_feeds_the_sales_suppression_set_only(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_bounce_sep").await else { return Ok(()) };
+        let row = seed_sales_row(&pool, "sales-bounce", serde_json::json!({})).await;
+        let (customer_tenant, _customer_domain, _customer_queue) =
+            seed_customer_row(&pool, "bounce-control").await;
+
+        let customer_ses = IsolationSpy::new("ses", false, false);
+        // The sales ACCOUNT's backend hard-bounces: its shared route needs no
+        // local signature, so this test stays free of the process-global DKIM
+        // master key while still exercising the bounce write path.
+        let sales_relay = IsolationSpy::new("sales-ses-account", false, true);
+        let config = base_config(sales_config(
+            SalesTransportMode::SesAccount,
+            &[&row.domain_name],
+        ));
+        let hybrid =
+            HybridTransport::new(Some(customer_ses.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            hybrid,
+            SalesTransport::new(
+                sales_relay.clone() as Arc<dyn EmailTransport>,
+                "sales-ses-account",
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        // A 550 is returned to the caller (the bounce is still fully handled).
+        let error = processor
+            .process_job(job)
+            .await
+            .expect_err("a 550 is returned to the caller");
+        assert!(matches!(error, ProcessorError::Smtp { code: 550, .. }));
+
+        assert_eq!(sales_relay.calls(), 1, "the sales transport saw the send");
+        assert_eq!(customer_ses.calls(), 0);
+
+        // (i) The bounced address is suppressed FOR THE SALES TENANT.
+        let sales_suppressed: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT tenant_id, email, reason FROM suppressions WHERE tenant_id = $1",
+        )
+        .bind(&row.tenant_id)
+        .fetch_all(&pool)
+        .await
+        .expect("sales suppressions");
+        assert_eq!(
+            sales_suppressed,
+            vec![(
+                row.tenant_id.clone(),
+                row.recipient.clone(),
+                "hard_bounce".to_string()
+            )],
+            "the bounce must feed exactly the sales tenant's suppression set"
+        );
+
+        // (ii) NO customer tenant's suppression rows are touched.
+        assert_eq!(
+            count_suppressions(&pool, &customer_tenant).await,
+            0,
+            "a sales bounce must never write a customer tenant's suppression rows"
+        );
+        let foreign: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM suppressions WHERE tenant_id <> $1")
+                .bind(&row.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("foreign suppressions");
+        assert_eq!(
+            foreign, 0,
+            "the write must be tenant-scoped to the sales tenant, full stop"
+        );
+
+        // (iii) The sales feedback ledger carries the hard_bounce fact the
+        // sales suppression/health loops read (the sales SET, not a customer
+        // surface).
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_events \
+             WHERE tenant_id = $1 AND event_type = 'hard_bounce'",
+        )
+        .bind(&row.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("sales sender events");
+        assert_eq!(ledger, 1, "the sales bounce fact lands in the sales ledger");
+
+        let (status, _) = queue_state(&pool, row.queue_id).await;
+        assert_eq!(status, "bounced");
+        pool.close().await;
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Admission state isolation + the structural call-site pins
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// The sales admission gate is its own bucket family at its own rate:
+    /// the sales ceiling is `SALES_SEND_RATE_PER_SECOND`, the keys carry the
+    /// `sales` prefix, and a zero sales rate disables only the sales gate.
+    #[tokio::test]
+    async fn the_sales_admission_gate_uses_sales_buckets_and_the_sales_rate(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::common::ensure_aws_test_env();
+        #[rustfmt::skip]
+        let Some(pool) = isolation_pool("sai_admission").await else { return Ok(()) };
+        let row = seed_sales_row(&pool, "sales-admission", serde_json::json!({})).await;
+
+        let mut config = base_config(sales_config(SalesTransportMode::Relay, &[&row.domain_name]));
+        // The customer dedicated ceiling is OFF and the sales ceiling is 2:
+        // the two gates must not share either the rate or the buckets.
+        config.smtp.rate_limit_per_second = 0;
+        config.sales.send_rate_per_second = 2;
+        let processor = EmailProcessor::with_transport_and_sales(
+            pool.clone(),
+            sales_redis(),
+            config,
+            HybridTransport::new(None, None),
+            SalesTransport::unconfigured(),
+        )
+        .await
+        .expect("processor");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the seeded sales row");
+        let route = DeliveryRoute::Dedicated {
+            dedicated_ip_id: row.sender_identity_id.to_string(),
+            source_ip: SALES_SOURCE_IP.parse().expect("ip"),
+        };
+
+        // The customer gate is disabled (rate 0) and admits without Redis.
+        assert!(processor.check_send_admission(&job, &route).await?);
+        // The sales gate enforces its own ceiling: two sends, then refusal.
+        let mut admitted = Vec::new();
+        for _ in 0..3 {
+            admitted.push(processor.check_sales_send_admission(&job, &route).await?);
+        }
+        assert!(
+            admitted[0] && admitted[1] && !admitted[2],
+            "the sales gate must admit its rate and then defer: {admitted:?}"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The dispatch source pins: exactly one submission call site per path,
+    /// selected by the sales flag — no third path can reach a transport.
+    #[test]
+    fn dispatch_submits_through_exactly_one_call_per_path() {
+        let source = include_str!("processor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half");
+        assert_eq!(
+            production.matches("self.sales_transport.send(").count(),
+            1,
+            "the sales transport must have exactly one submission call site"
+        );
+        assert_eq!(
+            production.matches("self.transport.send(").count(),
+            1,
+            "the customer transport must have exactly one submission call site"
+        );
+        let branch = production
+            .find("let send_result: ProcessorResult<DeliveryReceipt> = if sales_route.is_some() {")
+            .expect("the submission branch must select on the sales flag");
+        let sales_call = production
+            .find("self.sales_transport.send(")
+            .expect("sales call site");
+        let customer_call = production
+            .find("self.transport.send(")
+            .expect("customer call site");
+        assert!(
+            branch < sales_call && sales_call < customer_call,
+            "the sales transport call must be the branch's first arm, the customer call its \
+             fallback"
+        );
+        // The pre-data gates are selected the same way: the customer hybrid's
+        // dispatchability is never consulted for a sales send.
+        assert!(
+            production.contains("if sales_route.is_none() {")
+                && production
+                    .matches("self.transport.ensure_route_dispatchable(")
+                    .count()
+                    == 1,
+            "the customer route gate must sit behind the sales flag and stay single"
+        );
+        assert!(
+            production
+                .matches("self.sales_transport.ensure_dispatchable(")
+                .count()
+                == 1,
+            "the sales route gate must be single-sited"
+        );
     }
 }

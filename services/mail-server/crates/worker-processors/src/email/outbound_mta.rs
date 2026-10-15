@@ -120,11 +120,25 @@ impl OutboundMtaTransport {
     /// daemon retry alike — is admitted at the effect boundary by the relay,
     /// so a durable retry can never bypass the IP's daily cap.
     pub fn from_pool(pool: &PgPool, redis: Option<&deadpool_redis::Pool>) -> ProcessorResult<Self> {
+        Self::from_pool_with_config(pool, redis, RelayConfig::default())
+    }
+
+    /// [`Self::from_pool`] with an explicit relay identity.
+    ///
+    /// The SALES slot uses this so the deployment's declared sales relay
+    /// endpoint (`SALES_RELAY_URL`'s host) becomes the relay's own identity
+    /// (HELO name / `Reporting-MTA`) instead of silently inheriting the
+    /// customer relay's default. The backend contract is unchanged: the same
+    /// verifiable source-IP binding, the same idempotent acceptance.
+    pub fn from_pool_with_config(
+        pool: &PgPool,
+        redis: Option<&deadpool_redis::Pool>,
+        config: RelayConfig,
+    ) -> ProcessorResult<Self> {
         let ledger: Arc<dyn RelayLedger> = Arc::new(PgLedger::new(pool.clone()));
         let resolver = DnsMxResolver::new().map_err(|error| {
             ProcessorError::Config(format!("outbound MTA MX resolver unavailable: {error}"))
         })?;
-        let config = RelayConfig::default();
         let relay = match redis {
             Some(redis) => {
                 let gate = outbound_mta::warmup::WarmupGate::new(std::sync::Arc::new(
@@ -135,6 +149,38 @@ impl OutboundMtaTransport {
             None => Relay::new(ledger, Arc::new(resolver), config),
         };
         Ok(Self::new(Arc::new(relay)))
+    }
+
+    /// [`Self::from_pool_with_config`] with the relay identity derived from a
+    /// declared endpoint host (the SALES relay's `SALES_RELAY_URL` host): the
+    /// host is used verbatim as both the HELO domain and the `Reporting-MTA`
+    /// identity, so sales submissions present the operator's declared relay
+    /// and never the customer relay's default name. `require_starttls` maps
+    /// the endpoint's scheme onto the relay's TLS policy: `smtps://` demands a
+    /// completed STARTTLS on every recipient-facing connection, while
+    /// `smtp://` keeps the library's per-destination-port derivation.
+    pub fn from_pool_with_endpoint(
+        pool: &PgPool,
+        redis: Option<&deadpool_redis::Pool>,
+        endpoint_host: String,
+        require_starttls: bool,
+    ) -> ProcessorResult<Self> {
+        let host = endpoint_host.trim().trim_end_matches('.').to_string();
+        if host.is_empty() {
+            return Err(ProcessorError::Config(
+                "the sales relay endpoint host is empty — refusing to build a sales \
+                 transport without a declared relay identity"
+                    .into(),
+            ));
+        }
+        let config = RelayConfig {
+            helo_domain: host.clone(),
+            reporting_mta: host,
+            tls_policy_override: require_starttls
+                .then_some(outbound_mta::tls::TlsPolicy::StartTlsRequired),
+            ..RelayConfig::default()
+        };
+        Self::from_pool_with_config(pool, redis, config)
     }
 
     /// Build the typed submission the MTA ledger keys on.

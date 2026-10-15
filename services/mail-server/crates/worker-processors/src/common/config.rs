@@ -106,6 +106,10 @@ pub struct EmailConfig {
     /// WORKER PRE-SEND DLP gate configuration (`WORKER_DLP_ENABLED`,
     /// default OFF — see [`DlpGateConfig`]).
     pub dlp: DlpGateConfig,
+    /// Dedicated SALES transport slot (`SALES_TRANSPORT` et al — see
+    /// [`SalesTransportConfig`]). Separate from `smtp`/`ses` by design:
+    /// sales mail never rides the customer transport.
+    pub sales: SalesTransportConfig,
 }
 
 impl Default for EmailConfig {
@@ -123,7 +127,273 @@ impl Default for EmailConfig {
             warmup: WarmupConfig::default(),
             ip_rate_limiting: IpRateLimitConfig::default(),
             dlp: DlpGateConfig::default(),
+            sales: SalesTransportConfig::default(),
         }
+    }
+}
+
+/// Which dedicated SALES transport carries sales-autopilot mail.
+///
+/// The sales isolation invariant ("sales sending never shares a transport
+/// account, IP, sending domain or suppression list with customer mail")
+/// makes the sales transport a SEPARATE slot from the customer
+/// [`SmtpConfig`]/[`SesConfig`] routes: sales mail never rides the customer
+/// SES account or the customer relay, whatever the customer transport's
+/// configuration says. Absent/unrecognized configuration resolves to
+/// [`SalesTransportMode::None`] — sales sends then HOLD in the queue with
+/// the named reason `sales_transport_unconfigured` instead of falling back
+/// (fail closed; see `crate::email::sales`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SalesTransportMode {
+    /// No dedicated sales transport configured (the default): sales sends
+    /// are HELD, never routed through the customer transport.
+    #[default]
+    None,
+    /// ApexMail's own outbound MTA dedicated to sales (`SALES_TRANSPORT=relay`).
+    /// The relay binds the sales identity's source IP for the recipient-facing
+    /// socket and reports the verified IP in the same acceptance record, so
+    /// `metadata.sales_sender_source_ip` is BINDING and required.
+    Relay,
+    /// A dedicated AWS SES account purchased for sales
+    /// (`SALES_TRANSPORT=ses_account`), constructed from the `SALES_SES_*`
+    /// credentials — never the customer account's AWS provider chain.
+    SesAccount,
+}
+
+impl SalesTransportMode {
+    /// Parse the `SALES_TRANSPORT` switch. `none`/`off`/absent → `None`;
+    /// `relay`/`own_mta`/`smtp` → `Relay`; `ses_account`/`ses` → `SesAccount`;
+    /// anything else → `None` with the caller logging the unrecognized value
+    /// (fail closed: an unknown mode must never be treated as "configured").
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" | "disabled" | "" => Some(Self::None),
+            "relay" | "own_mta" | "smtp" => Some(Self::Relay),
+            "ses_account" | "ses" => Some(Self::SesAccount),
+            _ => None,
+        }
+    }
+
+    /// Whether this mode has a transport that could carry a sales send.
+    pub fn is_configured(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// The wire label recorded in hold annotations and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Relay => "relay",
+            Self::SesAccount => "ses_account",
+        }
+    }
+}
+
+/// The dedicated sales RELAY endpoint (`SALES_RELAY_URL`).
+///
+/// Accepts `smtp://host` and `smtps://host`. The host is the relay identity
+/// sales submissions present (HELO name / `Reporting-MTA`), so the deployment
+/// declares one explicit endpoint instead of inheriting the customer relay's
+/// default name; the scheme selects the TLS posture (`smtps://` requires
+/// STARTTLS on every recipient-facing connection, `smtp://` keeps the relay's
+/// per-destination-port policy).
+///
+/// Deliberately NOT accepted: an explicit port (the own MTA delivers to
+/// recipient MX ports, so a submission port in the URL would be a lie), user
+/// info (the own MTA is ApexMail's own infrastructure — there is no
+/// third-party AUTH to carry), paths, and unknown schemes. Any of those is
+/// MISCONFIGURED and the caller refuses to build a sales transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SalesRelayConfig {
+    /// The relay's declared identity (HELO name / `Reporting-MTA`).
+    pub host: String,
+    /// `smtps://` — every recipient-facing connection must complete STARTTLS.
+    pub require_starttls: bool,
+}
+
+impl SalesRelayConfig {
+    /// Parse `SALES_RELAY_URL`; `None` for anything that is not a bare
+    /// `smtp(s)://host` endpoint (see the type docs).
+    pub fn parse(url: &str) -> Option<Self> {
+        let trimmed = url.trim();
+        let (require_starttls, rest) = if let Some(rest) = trimmed.strip_prefix("smtps://") {
+            (true, rest)
+        } else {
+            (false, trimmed.strip_prefix("smtp://")?)
+        };
+        if rest.contains('@') || rest.contains(':') {
+            return None;
+        }
+        // A path (other than a bare trailing slash) is not part of an
+        // endpoint and is refused rather than silently ignored.
+        let host = rest.trim_end_matches('/');
+        if host.is_empty() || host.trim() != host || host.contains('/') || host.contains(' ') {
+            return None;
+        }
+        Some(Self {
+            host: host.to_string(),
+            require_starttls,
+        })
+    }
+}
+
+/// The dedicated sales SES account credentials (`SALES_SES_*`).
+///
+/// A separate AWS account is an owner purchase; this struct only carries
+/// what the owner provisioned. Both key id and secret are REQUIRED for the
+/// account to count as configured (an account without credentials is not a
+/// transport).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SalesSesConfig {
+    pub region: String,
+    pub configuration_set: Option<String>,
+    pub access_key_id: Zeroizing<String>,
+    pub secret_access_key: Zeroizing<String>,
+}
+
+/// Dedicated SALES transport configuration — the `SALES_TRANSPORT` switch
+/// plus its endpoint/credentials and the sales sending-domain allowlist.
+///
+/// Default is [`SalesTransportMode::None`] with an EMPTY allowlist: an
+/// unconfigured deployment holds sales mail by name rather than guessing a
+/// route. Every field is `SALES_*`-namespaced so it can never collide with
+/// the customer transport's variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SalesTransportConfig {
+    pub mode: SalesTransportMode,
+    /// `SALES_SENDING_DOMAINS` — the exact sender domains a sales send may
+    /// use (comma-separated, lowercased, deduplicated). A sender domain
+    /// outside this list is refused BY NAME
+    /// (`sales_send_domain_not_allowed`); an empty list refuses every sales
+    /// send by name rather than allowing any domain.
+    pub sending_domains: Vec<String>,
+    /// The relay endpoint (`SALES_RELAY_URL`); required for
+    /// [`SalesTransportMode::Relay`].
+    pub relay: Option<SalesRelayConfig>,
+    /// The dedicated SES account; required for
+    /// [`SalesTransportMode::SesAccount`].
+    pub ses_account: Option<SalesSesConfig>,
+    /// Admission rate for sales sends (sends/second; `0` disables the gate).
+    pub send_rate_per_second: u32,
+}
+
+impl SalesTransportConfig {
+    const MODE_ENV: &'static str = "SALES_TRANSPORT";
+    const DOMAINS_ENV: &'static str = "SALES_SENDING_DOMAINS";
+    const RELAY_URL_ENV: &'static str = "SALES_RELAY_URL";
+    const SES_REGION_ENV: &'static str = "SALES_SES_REGION";
+    const SES_CONFIG_SET_ENV: &'static str = "SALES_SES_CONFIGURATION_SET";
+    const SES_ACCESS_KEY_ENV: &'static str = "SALES_SES_ACCESS_KEY_ID";
+    const SES_SECRET_KEY_ENV: &'static str = "SALES_SES_SECRET_ACCESS_KEY";
+    const RATE_ENV: &'static str = "SALES_SEND_RATE_PER_SECOND";
+
+    /// The default sales admission rate when `SALES_SEND_RATE_PER_SECOND` is
+    /// unset: deliberately conservative (sales is a low-volume motion) and
+    /// small enough that a misconfigured deployment cannot blast the relay.
+    pub const DEFAULT_SEND_RATE_PER_SECOND: u32 = 5;
+
+    /// Parse the allowlist: trimmed, lowercased, dot-trimmed, deduplicated,
+    /// order-preserved.
+    pub fn parse_sending_domains(raw: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for entry in raw.split(',') {
+            let domain = entry.trim().trim_end_matches('.').to_ascii_lowercase();
+            if !domain.is_empty() && !out.contains(&domain) {
+                out.push(domain);
+            }
+        }
+        out
+    }
+
+    /// Build from the environment. The mode is the only switch: absent →
+    /// `None` (fail closed). Endpoint/credential material is read only for
+    /// the selected mode, so customer variables are never repurposed.
+    pub fn from_env() -> Self {
+        let mode = match std::env::var(Self::MODE_ENV) {
+            Ok(raw) => match SalesTransportMode::parse(&raw) {
+                Some(parsed) => parsed,
+                None => {
+                    tracing::warn!(
+                        value = %raw,
+                        "unrecognized SALES_TRANSPORT value — failing CLOSED to 'none' \
+                         (sales sends will be held, never routed through the customer transport)"
+                    );
+                    SalesTransportMode::None
+                }
+            },
+            Err(_) => SalesTransportMode::None,
+        };
+        let env_value = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let sending_domains =
+            Self::parse_sending_domains(&std::env::var(Self::DOMAINS_ENV).unwrap_or_default());
+        let relay = if mode == SalesTransportMode::Relay {
+            env_value(Self::RELAY_URL_ENV).and_then(|url| SalesRelayConfig::parse(&url))
+        } else {
+            None
+        };
+        let ses_account = if mode == SalesTransportMode::SesAccount {
+            let access_key_id = env_value(Self::SES_ACCESS_KEY_ENV);
+            let secret_access_key = env_value(Self::SES_SECRET_KEY_ENV);
+            match (access_key_id, secret_access_key) {
+                (Some(access_key_id), Some(secret_access_key)) => Some(SalesSesConfig {
+                    region: env_value(Self::SES_REGION_ENV)
+                        .unwrap_or_else(|| "eu-west-1".to_string()),
+                    configuration_set: env_value(Self::SES_CONFIG_SET_ENV),
+                    access_key_id: Zeroizing::new(access_key_id),
+                    secret_access_key: Zeroizing::new(secret_access_key),
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let send_rate_per_second = std::env::var(Self::RATE_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(Self::DEFAULT_SEND_RATE_PER_SECOND);
+        Self {
+            mode,
+            sending_domains,
+            relay,
+            ses_account,
+            send_rate_per_second,
+        }
+    }
+
+    /// Whether the mode's endpoint/credentials are actually present. A mode
+    /// selected without its material is MISCONFIGURED: the worker refuses to
+    /// boot (loud) rather than silently holding every sales send, and the
+    /// send path additionally fails closed if this is ever reached.
+    pub fn is_provisioned(&self) -> bool {
+        match self.mode {
+            SalesTransportMode::None => true,
+            SalesTransportMode::Relay => self.relay.is_some(),
+            SalesTransportMode::SesAccount => self.ses_account.is_some(),
+        }
+    }
+
+    /// Whether `domain` (case/dot-insensitive) is on the sales allowlist.
+    pub fn domain_allowed(&self, domain: &str) -> bool {
+        let normalized = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.sending_domains
+            .iter()
+            .any(|allowed| allowed == &normalized)
+    }
+
+    /// The mode's wire label, for hold annotations and logs.
+    pub fn mode_label(&self) -> &'static str {
+        self.mode.as_str()
+    }
+}
+
+impl Default for SalesTransportConfig {
+    fn default() -> Self {
+        Self::from_env()
     }
 }
 
@@ -621,6 +891,198 @@ mod tests {
         assert!(!TrackingConfig::default().enabled);
 
         clear_tracking_env();
+    }
+}
+
+#[cfg(test)]
+mod sales_transport_config_tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    const SALES_ENV: [&str; 7] = [
+        "SALES_TRANSPORT",
+        "SALES_SENDING_DOMAINS",
+        "SALES_RELAY_URL",
+        "SALES_SES_REGION",
+        "SALES_SES_CONFIGURATION_SET",
+        "SALES_SES_ACCESS_KEY_ID",
+        "SALES_SES_SECRET_ACCESS_KEY",
+    ];
+
+    fn clear_sales_env() {
+        for name in SALES_ENV {
+            std::env::remove_var(name);
+        }
+    }
+
+    /// The mode switch: absent is NONE (fail closed — sales mail is held,
+    /// never routed through the customer transport), every documented
+    /// spelling maps, and an UNRECOGNIZED value fails closed to NONE rather
+    /// than being treated as "configured".
+    #[test]
+    fn sales_transport_mode_parses_documented_values_and_fails_closed() {
+        assert_eq!(
+            SalesTransportMode::parse("none"),
+            Some(SalesTransportMode::None)
+        );
+        assert_eq!(
+            SalesTransportMode::parse(""),
+            Some(SalesTransportMode::None)
+        );
+        assert_eq!(
+            SalesTransportMode::parse(" relay "),
+            Some(SalesTransportMode::Relay)
+        );
+        assert_eq!(
+            SalesTransportMode::parse("SES_ACCOUNT"),
+            Some(SalesTransportMode::SesAccount)
+        );
+        assert_eq!(
+            SalesTransportMode::parse("something-else"),
+            None,
+            "an unknown mode must never parse as configured"
+        );
+        assert!(!SalesTransportMode::None.is_configured());
+        assert!(SalesTransportMode::Relay.is_configured());
+        assert!(SalesTransportMode::SesAccount.is_configured());
+        assert_eq!(SalesTransportMode::default(), SalesTransportMode::None);
+    }
+
+    /// Absent env: the default is an UNCONFIGURED sales slot with an empty
+    /// allowlist — nothing is guessed, nothing falls back.
+    #[test]
+    fn sales_config_defaults_to_unconfigured_and_holds() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sales_env();
+        let config = SalesTransportConfig::from_env();
+        assert_eq!(config.mode, SalesTransportMode::None);
+        assert!(config.relay.is_none());
+        assert!(config.ses_account.is_none());
+        assert!(config.sending_domains.is_empty());
+        assert!(!config.domain_allowed("sales.example.com"));
+        assert!(config.is_provisioned(), "`none` needs no material");
+        clear_sales_env();
+    }
+
+    /// The allowlist parser: trimmed, lowercased, dot-stripped, deduplicated,
+    /// order preserved; an empty list allows NOTHING.
+    #[test]
+    fn sales_sending_domains_parse_normalizes_and_allows_nothing_when_empty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sales_env();
+        assert_eq!(
+            SalesTransportConfig::parse_sending_domains(
+                " Sales.ApexMail.EE , sales.apexmail.ee,outbound.example.com., , "
+            ),
+            vec!["sales.apexmail.ee", "outbound.example.com"]
+        );
+        assert!(SalesTransportConfig::parse_sending_domains(" , ").is_empty());
+        let config = SalesTransportConfig::from_env();
+        assert!(!config.domain_allowed("anything.example"));
+        clear_sales_env();
+    }
+
+    /// `SALES_RELAY_URL` parsing: bare `smtp(s)://host` endpoints only. The
+    /// scheme selects the TLS posture; ports, user info, paths and unknown
+    /// schemes are refused (an endpoint that cannot mean what it says must
+    /// not be silently accepted).
+    #[test]
+    fn sales_relay_url_parses_only_bare_endpoints() {
+        let plain = SalesRelayConfig::parse("smtp://relay.sales.example").expect("plain smtp");
+        assert_eq!(plain.host, "relay.sales.example");
+        assert!(
+            !plain.require_starttls,
+            "smtp:// keeps the relay's per-destination-port TLS policy"
+        );
+
+        let secure = SalesRelayConfig::parse("smtps://relay.sales.example").expect("smtps");
+        assert!(secure.require_starttls);
+        let trailing = SalesRelayConfig::parse("smtps://relay.sales.example/").expect("slash");
+        assert_eq!(trailing, secure, "a bare trailing slash is harmless");
+
+        for bad in [
+            "",
+            "relay.sales.example",
+            "http://relay.sales.example",
+            "smtp://",
+            "smtp://user:secret@relay.sales.example",
+            "smtp://relay.sales.example:587",
+            "smtp://relay.sales.example:not-a-port",
+            "smtp://relay.sales.example/submission",
+            "smtp://relay .sales.example",
+        ] {
+            assert!(
+                SalesRelayConfig::parse(bad).is_none(),
+                "{bad:?} must not parse as a relay endpoint"
+            );
+        }
+    }
+
+    /// The env-driven mode requires its material: `relay` without
+    /// `SALES_RELAY_URL` (and `ses_account` without `SALES_SES_*`) is
+    /// MISCONFIGURED — the caller refuses to boot, never silently holds.
+    #[test]
+    fn selected_sales_mode_without_material_is_unprovisioned() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sales_env();
+
+        std::env::set_var("SALES_TRANSPORT", "relay");
+        std::env::set_var("SALES_SENDING_DOMAINS", "sales.example.com");
+        let relay_missing = SalesTransportConfig::from_env();
+        assert_eq!(relay_missing.mode, SalesTransportMode::Relay);
+        assert!(!relay_missing.is_provisioned());
+
+        std::env::set_var("SALES_RELAY_URL", "smtps://relay.sales.example");
+        std::env::set_var("SALES_SES_ACCESS_KEY_ID", "AKIA-not-used-in-relay-mode");
+        let relay_ready = SalesTransportConfig::from_env();
+        assert!(relay_ready.is_provisioned());
+        assert!(relay_ready.relay.is_some());
+        assert!(
+            relay_ready.ses_account.is_none(),
+            "the non-selected mode's credentials are never read"
+        );
+
+        std::env::set_var("SALES_TRANSPORT", "ses_account");
+        let ses_missing = SalesTransportConfig::from_env();
+        assert_eq!(ses_missing.mode, SalesTransportMode::SesAccount);
+        assert!(
+            !ses_missing.is_provisioned(),
+            "ses_account without SALES_SES_SECRET_ACCESS_KEY is unprovisioned"
+        );
+
+        std::env::set_var("SALES_SES_SECRET_ACCESS_KEY", "secret");
+        let ses_ready = SalesTransportConfig::from_env();
+        assert!(ses_ready.is_provisioned());
+        assert_eq!(
+            ses_ready
+                .ses_account
+                .as_ref()
+                .map(|ses| ses.access_key_id.as_str()),
+            Some("AKIA-not-used-in-relay-mode")
+        );
+
+        // An unrecognized switch value fails CLOSED to `none`.
+        std::env::set_var("SALES_TRANSPORT", "carrier-pigeon");
+        let unknown = SalesTransportConfig::from_env();
+        assert_eq!(unknown.mode, SalesTransportMode::None);
+
+        clear_sales_env();
+    }
+
+    /// `EmailConfig::default()` picks the sales slot up from the environment
+    /// (the same env-driven construction contract as the DLP/tracking
+    /// switches), and the field defaults to the unconfigured mode in tests
+    /// that do not set it.
+    #[test]
+    fn email_config_default_carries_the_sales_slot() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sales_env();
+        assert_eq!(
+            EmailConfig::default().sales.mode,
+            SalesTransportMode::None,
+            "the shipped default must be the fail-closed (unconfigured) mode"
+        );
+        clear_sales_env();
     }
 }
 

@@ -20,6 +20,10 @@ pub enum ProcurementDocument {
     InsuranceDetails,
     CertificationStatus,
     StandardVendorQuestionnaire,
+    /// A DRAFT document: written, not approved, not offered to customers. It
+    /// is listed so the package's pending work is visible and honest — never
+    /// as an available artifact.
+    UsDpaAddendum,
 }
 
 impl ProcurementDocument {
@@ -42,6 +46,7 @@ impl ProcurementDocument {
             Self::InsuranceDetails => "PROC-015",
             Self::CertificationStatus => "PROC-016",
             Self::StandardVendorQuestionnaire => "PROC-017",
+            Self::UsDpaAddendum => "PROC-018",
         }
     }
 
@@ -64,6 +69,7 @@ impl ProcurementDocument {
             Self::InsuranceDetails => "Insurance Details",
             Self::CertificationStatus => "Certification Status",
             Self::StandardVendorQuestionnaire => "Standard Vendor Questionnaire",
+            Self::UsDpaAddendum => "US DPA Addendum (draft — awaiting owner approval)",
         }
     }
 
@@ -86,6 +92,14 @@ impl ProcurementDocument {
             Self::InsuranceDetails => "Insurance coverage types, policy limits, and insurer information where applicable.",
             Self::CertificationStatus => "Current certification and attestation status with scope, auditor, and validity dates.",
             Self::StandardVendorQuestionnaire => "Pre-completed SIG/CAIQ/HECVAT questionnaire with current response data.",
+            Self::UsDpaAddendum => {
+                "DRAFT addendum to the Data Processing Agreement for US customers \
+                 (templates/legal/us-dpa-addendum.md): CCPA/CPRA service-provider terms, US state \
+                 privacy law consumer-rights assistance, the GDPR transfer and residency clauses \
+                 for EU data a US customer sends, breach notification, deletion and return, audit, \
+                 and the state-law order of precedence. Not effective and not offered to customers \
+                 until the owner approves it; no approved_by/approved_at record exists."
+            }
         }
     }
 
@@ -108,6 +122,9 @@ impl ProcurementDocument {
             Self::InsuranceDetails => DocumentVisibility::NDA,
             Self::CertificationStatus => DocumentVisibility::Qualified,
             Self::StandardVendorQuestionnaire => DocumentVisibility::NDA,
+            // A draft is not available to anyone yet, so it is not routed
+            // through the Public/Qualified/NDA availability ladder.
+            Self::UsDpaAddendum => DocumentVisibility::Draft,
         }
     }
 
@@ -118,11 +135,24 @@ impl ProcurementDocument {
     pub fn all_documents() -> Vec<ProcurementDocumentEntry> {
         use ProcurementDocument::*;
         [
-            CompanyProfile, ProductOverview, SecurityOverview, ComplianceOverview, DPA,
-            SubprocessorList, SLATemplate, SupportPolicy, BusinessContinuitySummary,
-            DisasterRecoverySummary, IncidentResponseSummary, DataRetentionPolicy,
-            DataDeletionPolicy, ArchitectureOverview, InsuranceDetails,
-            CertificationStatus, StandardVendorQuestionnaire,
+            CompanyProfile,
+            ProductOverview,
+            SecurityOverview,
+            ComplianceOverview,
+            DPA,
+            SubprocessorList,
+            SLATemplate,
+            SupportPolicy,
+            BusinessContinuitySummary,
+            DisasterRecoverySummary,
+            IncidentResponseSummary,
+            DataRetentionPolicy,
+            DataDeletionPolicy,
+            ArchitectureOverview,
+            InsuranceDetails,
+            CertificationStatus,
+            StandardVendorQuestionnaire,
+            UsDpaAddendum,
         ]
         .iter()
         .map(|doc| ProcurementDocumentEntry {
@@ -142,6 +172,9 @@ pub enum DocumentVisibility {
     Public,
     Qualified,
     NDA,
+    /// Written but NOT approved and NOT offered: the package lists it so the
+    /// pending work is visible, and no availability claim is made.
+    Draft,
 }
 
 impl DocumentVisibility {
@@ -150,6 +183,7 @@ impl DocumentVisibility {
             Self::Public => "Publicly available",
             Self::Qualified => "Available to qualified prospects",
             Self::NDA => "Available under NDA only",
+            Self::Draft => "Draft — awaiting owner approval; not offered",
         }
     }
 }
@@ -205,7 +239,9 @@ impl ProcurementRequestStatus {
 
 pub fn validate_procurement_package() -> ProcurementPackageValidation {
     let docs = ProcurementDocument::all_documents();
-    let expected = 17;
+    // 17 available documents + the US DPA addendum, which is listed as a
+    // DRAFT while it awaits owner approval.
+    let expected = 18;
 
     ProcurementPackageValidation {
         total_documents: docs.len(),
@@ -228,9 +264,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_all_17_procurement_documents_defined() {
+    fn test_all_procurement_documents_defined() {
+        // 17 available documents plus PROC-018, the US DPA addendum, which is
+        // carried as a draft (see `test_the_us_dpa_addendum_is_a_draft`).
         let docs = ProcurementDocument::all_documents();
-        assert_eq!(docs.len(), 17);
+        assert_eq!(docs.len(), 18);
+    }
+
+    /// The US DPA addendum is a DRAFT row: listed, clearly not approved, and
+    /// NOT offered (its visibility is `Draft`, not an availability tier).
+    #[test]
+    fn test_the_us_dpa_addendum_is_a_draft() {
+        let docs = ProcurementDocument::all_documents();
+        let addendum = docs
+            .iter()
+            .find(|d| d.id == "PROC-018")
+            .expect("the US DPA addendum row must be listed");
+        assert_eq!(addendum.visibility, DocumentVisibility::Draft);
+        assert!(
+            addendum.display_name.contains("draft"),
+            "the display name must say it is a draft: {}",
+            addendum.display_name
+        );
+        let description = addendum.description.to_ascii_lowercase();
+        for needle in ["draft", "not effective", "owner approves", "approved_by"] {
+            assert!(
+                description.contains(needle),
+                "the description must carry '{needle}': {}",
+                addendum.description
+            );
+        }
+        // No other document is a draft, and no row claims an approval.
+        assert_eq!(
+            docs.iter()
+                .filter(|d| d.visibility == DocumentVisibility::Draft)
+                .count(),
+            1,
+            "only the US DPA addendum may be carried as a draft"
+        );
+        for doc in &docs {
+            for forbidden in ["approved_by:", "approved_at:", "approved by ApexMail"] {
+                assert!(
+                    !doc.description.contains(forbidden),
+                    "{} must not claim an approval ({forbidden})",
+                    doc.id
+                );
+            }
+        }
+    }
+
+    /// The draft tier's label is honest: it says the document is not offered.
+    #[test]
+    fn test_draft_visibility_label_is_honest() {
+        assert_eq!(
+            DocumentVisibility::Draft.label(),
+            "Draft — awaiting owner approval; not offered"
+        );
     }
 
     #[test]
@@ -238,7 +327,11 @@ mod tests {
         let docs = ProcurementDocument::all_documents();
         let mut ids = std::collections::HashSet::new();
         for doc in &docs {
-            assert!(ids.insert(doc.id.clone()), "Duplicate document ID: {}", doc.id);
+            assert!(
+                ids.insert(doc.id.clone()),
+                "Duplicate document ID: {}",
+                doc.id
+            );
         }
     }
 
@@ -246,15 +339,25 @@ mod tests {
     fn test_all_documents_version_controlled() {
         let docs = ProcurementDocument::all_documents();
         for doc in &docs {
-            assert!(doc.version_controlled, "Document {} must be version controlled", doc.id);
+            assert!(
+                doc.version_controlled,
+                "Document {} must be version controlled",
+                doc.id
+            );
         }
     }
 
     #[test]
     fn test_visibility_categories() {
         let docs = ProcurementDocument::all_documents();
-        let public_count = docs.iter().filter(|d| d.visibility == DocumentVisibility::Public).count();
-        let nda_count = docs.iter().filter(|d| d.visibility == DocumentVisibility::NDA).count();
+        let public_count = docs
+            .iter()
+            .filter(|d| d.visibility == DocumentVisibility::Public)
+            .count();
+        let nda_count = docs
+            .iter()
+            .filter(|d| d.visibility == DocumentVisibility::NDA)
+            .count();
         assert!(public_count > 0, "Must have public documents");
         assert!(nda_count > 0, "Must have NDA-restricted documents");
     }
@@ -263,11 +366,17 @@ mod tests {
     fn test_no_confidential_public_exposure() {
         let docs = ProcurementDocument::all_documents();
         let insurance = docs.iter().find(|d| d.id == "PROC-015").unwrap();
-        assert_eq!(insurance.visibility, DocumentVisibility::NDA,
-            "Insurance details must not be publicly exposed");
+        assert_eq!(
+            insurance.visibility,
+            DocumentVisibility::NDA,
+            "Insurance details must not be publicly exposed"
+        );
         let bc = docs.iter().find(|d| d.id == "PROC-009").unwrap();
-        assert_eq!(bc.visibility, DocumentVisibility::NDA,
-            "Business continuity details must not be publicly exposed");
+        assert_eq!(
+            bc.visibility,
+            DocumentVisibility::NDA,
+            "Business continuity details must not be publicly exposed"
+        );
     }
 
     #[test]

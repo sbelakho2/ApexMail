@@ -1547,6 +1547,29 @@ services:
       # Block → bounced refusal; engine error fails OPEN, detection fails
       # CLOSED).
       WORKER_DLP_ENABLED: "${WORKER_DLP_ENABLED:?production must define the outbound DLP policy (managed baseline — true)}"
+      # ── Dedicated SALES transport (sales sending isolation) ───────────────
+      # Sales mail is enqueued into the same email_queue this worker drains,
+      # so the transport boundary lives HERE: a queue row carrying the
+      # dispatcher's provenance (metadata.source = "sales-autopilot" / the
+      # typed sales_step_execution_id column) may travel on the sales
+      # transport and NOTHING else. `none` (the default) HOLDS every sales
+      # send with the named reason sales_transport_unconfigured — the customer
+      # SES/relay transport is never a fallback. `relay` requires
+      # SALES_RELAY_URL (a bare smtp:// or smtps:// host naming our own sales
+      # MTA) and binds metadata.sales_sender_source_ip there; `ses_account`
+      # requires the SALES_SES_* credentials of a SEPARATE
+      # AWS account. Every sales sender domain must be listed in
+      # SALES_SENDING_DOMAINS. Values are plain deployment .env entries (like
+      # HETZNER_API_TOKEN / ENRICHMENT_API_KEY); none is required while the
+      # mode is `none`, so no new mandatory Docker secret was introduced.
+      SALES_TRANSPORT: ${SALES_TRANSPORT:-none}
+      SALES_SENDING_DOMAINS: ${SALES_SENDING_DOMAINS:-}
+      SALES_RELAY_URL: ${SALES_RELAY_URL:-}
+      SALES_SES_REGION: ${SALES_SES_REGION:-}
+      SALES_SES_CONFIGURATION_SET: ${SALES_SES_CONFIGURATION_SET:-}
+      SALES_SES_ACCESS_KEY_ID: ${SALES_SES_ACCESS_KEY_ID:-}
+      SALES_SES_SECRET_ACCESS_KEY: ${SALES_SES_SECRET_ACCESS_KEY:-}
+      SALES_SEND_RATE_PER_SECOND: ${SALES_SEND_RATE_PER_SECOND:-5}
       # ── VERP bounce routing (SMTP transport) ──────────────────────────────
       # Envelope Return-Path domain for bounces+{message_id}=... addresses.
       # MUST equal the MTA bounce server's VERP_DOMAIN so generated addresses

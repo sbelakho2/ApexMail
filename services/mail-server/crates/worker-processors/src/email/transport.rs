@@ -1091,6 +1091,47 @@ impl SesTransport {
         })
     }
 
+    /// Create around an EXPLICIT credential pair — the dedicated SALES
+    /// account's `SALES_SES_ACCESS_KEY_ID`/`SALES_SES_SECRET_ACCESS_KEY`.
+    ///
+    /// Deliberately does NOT go through the default provider chain: the
+    /// customer account's `AWS_ACCESS_KEY_ID`/IAM role must never sign a
+    /// sales send (the sales transport is a separate account by invariant).
+    /// Client construction is credential-lazy, so this performs no network
+    /// call.
+    pub async fn from_explicit_credentials(
+        ses_config: SesConfig,
+        access_key_id: &str,
+        secret_access_key: &str,
+    ) -> ProcessorResult<Self> {
+        if access_key_id.trim().is_empty() || secret_access_key.is_empty() {
+            return Err(ProcessorError::Config(
+                "the dedicated sales SES account needs both SALES_SES_ACCESS_KEY_ID and \
+                 SALES_SES_SECRET_ACCESS_KEY — refusing to fall back to the customer \
+                 account's credential chain"
+                    .into(),
+            ));
+        }
+        let region = aws_sdk_sesv2::config::Region::new(ses_config.region.clone());
+        let credentials = aws_sdk_sesv2::config::Credentials::new(
+            access_key_id.trim(),
+            secret_access_key,
+            None,
+            None,
+            "apexmail-sales-ses-account",
+        );
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(region)
+            .credentials_provider(credentials)
+            .load()
+            .await;
+        let client = SesClient::new(&sdk_config);
+        Ok(Self {
+            client,
+            config: ses_config,
+        })
+    }
+
     /// Build a raw RFC 5322 MIME message from a `PreparedEmail`.
     /// We use `mail-builder` to construct the message identically to
     /// how `SmtpTransport` does it, then extract the raw bytes for SES.

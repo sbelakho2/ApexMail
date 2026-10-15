@@ -51,6 +51,7 @@ TEMPLATES = [
     ROOT / "templates/compliance/security-measures.md",
     ROOT / "templates/compliance/trust-center.md",
     ROOT / "templates/legal/dpa.md",
+    ROOT / "templates/legal/us-dpa-addendum.md",
     ROOT / "templates/compliance/incident-response.md",
 ]
 

@@ -24,6 +24,10 @@ pub mod ledger_sweep;
 pub mod legal_archive;
 pub mod legal_hold;
 pub mod obligations;
+/// Procurement document index (the package a US customer's procurement
+/// review asks for). Carries the US DPA addendum as a DRAFT row until the
+/// owner approves it — never as an available artifact.
+pub mod procurement_package;
 pub mod registry_monitor;
 pub mod retention;
 pub mod retention_classes;

@@ -12,8 +12,8 @@ pub use backpressure::{Backpressure, BackpressureConfig};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use config::{
     AnalyticsConfig, DkimConfig, DlpGateConfig, EmailConfig, IpRateLimitConfig, ProcessorConfig,
-    ReplyHandlerConfig, SesConfig, SmtpConfig, TrackingConfig, TransportType, WarmupConfig,
-    WebhookConfig,
+    ReplyHandlerConfig, SalesRelayConfig, SalesSesConfig, SalesTransportConfig, SalesTransportMode,
+    SesConfig, SmtpConfig, TrackingConfig, TransportType, WarmupConfig, WebhookConfig,
 };
 pub use error::{ProcessorError, ProcessorResult};
 pub use pool::{create_db_pool, create_redis_pool, DbPool, RedisPool};
