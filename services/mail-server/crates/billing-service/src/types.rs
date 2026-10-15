@@ -45,6 +45,18 @@ pub struct PlanFeatures {
     pub dedicated_ip_count: i32,
     /// RuntimeEnforced capacity — domain creation checks the requested total.
     pub max_sending_domains: i32,
+    /// RuntimeEnforced — activating EU-only routing (`PUT /v1/routing`) requires this entitlement;
+    /// the worker then sends through our own MTAs only and HOLDS (never SES) when that route is
+    /// unavailable. Included on Enterprise Cloud / the Compliance contract line; add-on on
+    /// self-serve Pro+ via `settings.addons.euOnlyRouting` (`platform-catalog` `eu_only_routing`).
+    ///
+    /// `#[serde(default)]`: plan rows written before this key existed carry no
+    /// value for it, and a missing entitlement Bool must read as NOT entitled
+    /// (fail-closed) — never as a deserialization error that would fail every
+    /// tenant's entitlement lookup on a rolling deploy (`get_entitlement_snapshot`
+    /// treats malformed-but-present JSON as corruption, Fix #10).
+    #[serde(default)]
+    pub eu_only_routing: bool,
 
     // Auth & Security
     /// RuntimeEnforced — enterprise SSO is gated at the SSO-enforced login path.
@@ -127,6 +139,7 @@ impl Default for PlanFeatures {
             dedicated_ip: false,
             dedicated_ip_count: 0,
             max_sending_domains: 1,
+            eu_only_routing: false,
             sso_enabled: false,
             audit_logs: false,
             api_access: true,

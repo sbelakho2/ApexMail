@@ -1,7 +1,7 @@
 # Production Readiness Guides
 
 > Index of operational guides for taking ApexMail to production.
-> Last updated: 2026-07-29
+> Last updated: 2026-10-15
 
 ## Required Guides
 
@@ -25,9 +25,10 @@
 | [Rate-Limit Handling](../api/rate-limits.md) | Handle rate limits with backoff and monitoring | Documented |
 | [Data Retention](../architecture/overview.md) | Understand event and message retention | Documented |
 | [Account Deletion](../user-guide/getting-started.md) | Delete your account and export data | Documented |
-| Migration from SendGrid | Step-by-step migration guide | Planned |
-| Migration from Resend | Step-by-step migration guide | Planned |
-| Migration from Postmark | Step-by-step migration guide | Planned |
+| [Migration from SendGrid](https://apexmail.ee/migrate/sendgrid/) | Step-by-step migration guide plus the served `POST /v3/mail/send` compatibility endpoint | Documented |
+| [Migration from Resend](https://apexmail.ee/migrate/resend/) | Step-by-step migration guide plus the served `POST /emails` and `POST /emails/batch` compatibility endpoints | Documented |
+| [Migration from Postmark](https://apexmail.ee/migrate/postmark/) | Step-by-step migration guide plus the served `POST /email` and `POST /email/batch` compatibility endpoints | Documented |
+| [Migration from Mailgun](https://apexmail.ee/migrate/mailgun/) | Step-by-step migration guide plus the served `POST /v3/{domain}/messages` compatibility endpoint and the named `501` on `messages.mime` | Documented |
 | Private Cloud Onboarding | BYOC and Dedicated Tenant setup | Documented |
 
 ## Guide Standards

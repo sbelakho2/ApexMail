@@ -143,7 +143,10 @@ pub struct ListTemplatesQuery {
 /// Template customization requires the `custom_templates` entitlement
 /// (403 Forbidden otherwise). Applied to every mutating template handler so
 /// create/update/duplicate/rollback cannot be used to bypass the gate.
-async fn require_template_write(state: &AppState, tenant_id: &str) -> Result<(), ApiError> {
+pub(crate) async fn require_template_write(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
     crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTemplates)
         .await
         .map(|_| ())
@@ -185,7 +188,11 @@ async fn audit_template(
     }
 }
 
-async fn create_template(
+/// The canonical template create handler. `pub(crate)` because the provider
+/// importer (`routes::provider_import::templates`) calls THIS function per
+/// imported template — one writer, one validator, one v1 snapshot, one audit
+/// path; an import can never diverge from `POST /v1/templates`.
+pub(crate) async fn create_template(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<CreateTemplateRequest>,

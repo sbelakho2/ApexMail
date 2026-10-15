@@ -485,16 +485,21 @@ pub(crate) fn provider_error(
             };
             (status, Json(serde_json::json!({ "errors": errors }))).into_response()
         }
-        // Mailgun: `{"message": "..."}`.
-        Provider::Mailgun => {
-            (status, Json(serde_json::json!({ "message": message }))).into_response()
-        }
+        // Mailgun: `{"message": "..."}`. Mailgun's shape has no per-field
+        // slot for the canonical refusal's details, so they are folded into
+        // the message — a refusal that dropped them would hide WHICH field or
+        // recipient was refused.
+        Provider::Mailgun => (
+            status,
+            Json(serde_json::json!({ "message": fold_details(message, details) })),
+        )
+            .into_response(),
         // Postmark: `{"ErrorCode": <provider error code>, "Message": "..."}`.
         Provider::Postmark => (
             status,
             Json(serde_json::json!({
                 "ErrorCode": postmark_error_code(status),
-                "Message": message,
+                "Message": fold_details(message, details),
             })),
         )
             .into_response(),
@@ -504,7 +509,7 @@ pub(crate) fn provider_error(
             Json(serde_json::json!({
                 "statusCode": status.as_u16(),
                 "name": resend_error_name(status),
-                "message": message,
+                "message": fold_details(message, details),
             })),
         )
             .into_response(),
@@ -513,6 +518,19 @@ pub(crate) fn provider_error(
         .extensions_mut()
         .insert(crate::middleware::request_logger::ProviderShapedBody);
     response
+}
+
+/// Fold the canonical refusal's per-field details into a provider shape that
+/// carries a single message string (Mailgun `message`, Postmark `Message`,
+/// Resend `message`). SendGrid has a dedicated `errors[]` array and renders
+/// the details there instead. Without this fold a canonical validation
+/// refusal ("validation failed" + the field/recipient list) would reach the
+/// caller with the reason dropped.
+fn fold_details(message: &str, details: &[String]) -> String {
+    if details.is_empty() {
+        return message.to_string();
+    }
+    format!("{message}: {}", details.join("; "))
 }
 
 /// The provider's own status for a canonical refusal: only the 400/422

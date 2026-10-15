@@ -61,7 +61,8 @@ comparison_sections = [
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.
 methodology_note = """\
-<strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and Postmark standard plans. Pricing and plan details last reviewed: 2026-08-19. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details."""
+<strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and Postmark standard plans. Pricing and plan details last reviewed: 2026-08-19. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details. <strong>Migrating from Postmark?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href="/migrate/postmark/" class="text-brand-600 hover:text-brand-700 underline">Postmark migration guide</a>.
+"""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

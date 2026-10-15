@@ -20,6 +20,7 @@ These scripts are part of the current repeatable developer workflow and are refe
 - `check-risk-lua-parity.sh`: WAF risk-Lua parity + trust-neutrality gate (byte-identical packaged Lua copies; `event == 3` stays trust-neutral). Wired into the validate stage 2026-10-07 after the gates review found it orphaned.
 - `check_hsts_preload.py`: manual HSTS-preload readiness probe (`python3 tools/check_hsts_preload.py <domain>`), run by hand when preparing a preload submission — see `docs/security/hsts-preload.md`; it needs a public HTTPS endpoint, so it is not a CI stage gate.
 - `update-checksums.sh`: refreshes `tools/checksums.sha256` from real local release artifacts instead of hand-editing hashes.
+- `provider-import.py`: the switching importer's CLI (`tools/provider-import.py --provider sendgrid --kind suppressions --file bounces.csv [--commit]`). Uploads a SendGrid/Mailgun/Postmark/Resend export to `POST /v1/import/{provider}/{kind}`, prints the report (counts, conflicts, template conversions, the domains keep/delete plan), and defaults to a dry run; see the endpoint's contract in `services/mail-server/crates/api-server/src/routes/provider_import/mod.rs`.
 
 ## Quality Gates
 

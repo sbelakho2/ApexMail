@@ -255,7 +255,7 @@ mod tests {
             for (title, offset) in [("farther-event", "10 days"), ("sooner-event", "1 day")] {
                 sqlx::query(
                     "INSERT INTO calendar_events (id, tenant_id, title, type, start_time)
-                     VALUES ($1, NULL, $2, 'meeting', NOW() + ($3 || ' days')::interval)",
+                     VALUES ($1, NULL, $2, 'meeting', NOW() + $3::interval)",
                 )
                 .bind(uuid::Uuid::new_v4())
                 .bind(title)

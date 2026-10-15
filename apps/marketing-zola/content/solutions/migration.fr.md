@@ -32,6 +32,15 @@ La migration de fournisseur email est une opération à haut risque. Toute livra
 - **Compatibilité webhook** — Types d'événements normalisés avec documentation de mappage des payloads.
 - **Validation par envoi parallèle** — Routez un pourcentage configurable du trafic via ApexMail tout en conservant votre fournisseur actuel.
 
+## Guides de migration par fournisseur
+
+Quatre fournisseurs disposent d'un guide dédié : point d'accès de compatibilité, bascule de l'authentification, correspondance champ par champ avec les éléments refusés nommément, liste de contrôle DNS, noms d'événements webhook à réabonner, et un plan de bascule en six étapes avec retour arrière.
+
+- [Migrer depuis SendGrid](/fr/migrate/sendgrid/) — `POST /v3/mail/send` servi avec votre clé ApexMail dans l'emplacement bearer Authorization.
+- [Migrer depuis Mailgun](/fr/migrate/mailgun/) — `POST /v3/{domain}/messages` servi avec l'emplacement Basic auth ; `messages.mime` répond un 501 nommé.
+- [Migrer depuis Postmark](/fr/migrate/postmark/) — `POST /email` et `POST /email/batch` servis avec l'en-tête `X-Postmark-Server-Token`.
+- [Migrer depuis Resend](/fr/migrate/resend/) — `POST /emails` et `POST /emails/batch` servis avec l'emplacement bearer Authorization que vous envoyez déjà.
+
 ## Implémentation technique
 
 1. Créez un compte ApexMail et vérifiez votre domaine d'envoi.

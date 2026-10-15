@@ -98,7 +98,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **225 `*.sql` files**, latest `253_plan_usd_prices.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **226 `*.sql` files**, latest `254_provider_import_reports.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

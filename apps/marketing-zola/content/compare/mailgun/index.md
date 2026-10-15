@@ -73,7 +73,7 @@ sources = [
   { ref = "mg8", n = 8, label = "Mailgun Pricing page", url = "https://www.mailgun.com/pricing/" },
   { ref = "mg9", n = 9, label = "Mailgun Email Validation", url = "https://www.mailgun.com/email-validation/" }
 ]
-sources_disclaimer = "Last verified: 2026-08-19. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes. Reviewed by: ApexMail marketing engineering."
+sources_disclaimer = "Last verified: 2026-08-19. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes. Reviewed by: ApexMail marketing engineering. <strong>Migrating from Mailgun?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href=\"/migrate/mailgun/\" class=\"text-brand-600 hover:text-brand-700 underline\">Mailgun migration guide</a>."
 +++
 
 <!-- Comparison rows and sources block are rendered from the

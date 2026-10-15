@@ -350,6 +350,43 @@ mod tests {
         assert!(snap.has_feature(FeatureKey::Webhooks));
     }
 
+    /// EU-only routing: RuntimeEnforced, denied unless the plan includes it
+    /// (Enterprise Cloud / the Compliance contract line) — and the
+    /// per-tenant override channel grants it, which is how the API expresses
+    /// the purchased self-serve `eu_only_routing` add-on.
+    #[test]
+    fn eu_only_routing_is_runtime_enforced_and_grants_via_plan_or_override() {
+        let denied = snapshot(json!({}));
+        assert!(!denied.has_feature(FeatureKey::EuOnlyRouting));
+        assert_eq!(
+            denied.require_feature(FeatureKey::EuOnlyRouting),
+            Err(EntitlementError::FeatureNotEntitled {
+                feature: "eu_only_routing",
+                plan: "growth".into(),
+            })
+        );
+
+        let included = snapshot(json!({"eu_only_routing": true}));
+        assert!(included.has_feature(FeatureKey::EuOnlyRouting));
+        assert!(included.require_feature(FeatureKey::EuOnlyRouting).is_ok());
+
+        let mut addon = snapshot(json!({}));
+        assert!(
+            addon.apply_override("eu_only_routing", &json!(true)),
+            "the runtime-enforced key accepts a per-tenant grant"
+        );
+        assert!(addon.require_feature(FeatureKey::EuOnlyRouting).is_ok());
+        // The grant is revocable the same way (add-on cancelled).
+        assert!(addon.apply_override("eu_only_routing", &json!(false)));
+        assert_eq!(
+            addon.require_feature(FeatureKey::EuOnlyRouting),
+            Err(EntitlementError::FeatureNotEntitled {
+                feature: "eu_only_routing",
+                plan: "growth".into(),
+            })
+        );
+    }
+
     #[test]
     fn contractual_fields_are_never_runtime_gates() {
         let snap = snapshot(json!({

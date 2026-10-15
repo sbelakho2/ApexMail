@@ -47,7 +47,8 @@ comparison_sections = [
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Methodik:</strong> Die Funktionszeilen fassen öffentlich dokumentiertes Resend-Verhalten zusammen. Verglichene Tarife: ApexMail-Self-Service-Stufen und veröffentlichte Resend-Tarife; wo kein vergleichbarer veröffentlichter Messwert existiert (zum Beispiel Zustellrate), sagt die Zeile, dass kein direkter Vergleich möglich ist. Geprüft: 2026-10-04. Quellenstandards: <a href="/de/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">Vergleichsmethodik</a>."""
+<strong>Methodik:</strong> Die Funktionszeilen fassen öffentlich dokumentiertes Resend-Verhalten zusammen. Verglichene Tarife: ApexMail-Self-Service-Stufen und veröffentlichte Resend-Tarife; wo kein vergleichbarer veröffentlichter Messwert existiert (zum Beispiel Zustellrate), sagt die Zeile, dass kein direkter Vergleich möglich ist. Geprüft: 2026-10-04. Quellenstandards: <a href="/de/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">Vergleichsmethodik</a>. <strong>Migration von Resend?</strong> Der Basis-URL-Wechsel und die exakt abgebildete Teilmenge der API sind im <a href="/de/migrate/resend/" class="text-brand-600 hover:text-brand-700 underline">Migrationsleitfaden Resend</a> dokumentiert.
+"""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

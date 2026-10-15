@@ -138,6 +138,10 @@ struct LegacyPlanFeaturesPayload {
     dedicated_ip: bool,
     dedicated_ip_count: i32,
     max_sending_domains: i32,
+    /// EU-only routing (own EU MTAs only; holds rather than failing over to
+    /// SES). Included on Enterprise Cloud; add-on on self-serve Pro+.
+    #[serde(default)]
+    eu_only_routing: bool,
     sso_enabled: bool,
     audit_logs: bool,
     api_access: bool,
@@ -175,6 +179,7 @@ impl From<PlanFeatures> for LegacyPlanFeaturesPayload {
             dedicated_ip: features.dedicated_ip,
             dedicated_ip_count: features.dedicated_ip_count,
             max_sending_domains: features.max_sending_domains,
+            eu_only_routing: features.eu_only_routing,
             sso_enabled: features.sso_enabled,
             audit_logs: features.audit_logs,
             api_access: features.api_access,
@@ -214,6 +219,7 @@ impl From<LegacyPlanFeaturesPayload> for PlanFeatures {
             dedicated_ip: features.dedicated_ip,
             dedicated_ip_count: features.dedicated_ip_count,
             max_sending_domains: features.max_sending_domains,
+            eu_only_routing: features.eu_only_routing,
             sso_enabled: features.sso_enabled,
             audit_logs: features.audit_logs,
             api_access: features.api_access,

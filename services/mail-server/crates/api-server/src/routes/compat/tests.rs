@@ -428,6 +428,113 @@ async fn a_key_without_the_send_scope_is_refused_in_the_provider_shape() {
     assert_eq!(message_count(&fixture.pool, &fixture.tenant).await, 0);
 }
 
+/// Validation parity, per provider: the canonical suppression gate refuses a
+/// suppressed recipient on EVERY compat surface — in that provider's own
+/// error shape — and nothing is queued. A mapping layer that had bypassed or
+/// re-implemented the gate would answer a success here.
+#[tokio::test]
+async fn every_provider_refuses_a_suppressed_recipient_in_its_own_shape() {
+    let Some(fixture) = fixture("compat_suppression_parity").await else {
+        return;
+    };
+    sqlx::query(
+        "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+         VALUES ($1, $2, 'blocked@example.com', 'unsubscribe', 'test', NOW())",
+    )
+    .bind(apexmail_lib::id::generate_id("sup", 22))
+    .bind(&fixture.tenant)
+    .execute(&fixture.pool)
+    .await
+    .expect("seed suppression");
+    let from = format!("sender@{}", fixture.domain);
+
+    // SendGrid: 400 + `errors[].message` naming the recipient.
+    let (status, body) = post_json(
+        &fixture.app,
+        Provider::SendGrid,
+        &fixture.key,
+        "/v3/mail/send",
+        &serde_json::json!({
+            "personalizations": [{"to": [{"email": "blocked@example.com"}]}],
+            "from": {"email": from},
+            "subject": "suppressed",
+            "content": [{"type": "text/plain", "value": "t"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["errors"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("blocked@example.com"),
+        "{body}"
+    );
+
+    // Mailgun: 400 + `{"message": …}`.
+    let (name, value) = auth_header(Provider::Mailgun, &fixture.key);
+    let (status, _headers, bytes) = call(
+        &fixture.app,
+        Method::POST,
+        &format!("/v3/{}/messages", fixture.domain),
+        &[(name, value)],
+        "application/x-www-form-urlencoded",
+        format!("from={from}&to=blocked@example.com&subject=s&text=t").into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("blocked@example.com"),
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    // Postmark: 422 + `{"ErrorCode":422,"Message": …}`.
+    let (status, body) = post_json(
+        &fixture.app,
+        Provider::Postmark,
+        &fixture.key,
+        "/email",
+        &serde_json::json!({
+            "From": from, "To": "blocked@example.com", "Subject": "suppressed", "TextBody": "t"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["ErrorCode"], 422, "{body}");
+    assert!(
+        body["Message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("blocked@example.com"),
+        "{body}"
+    );
+
+    // Resend: 422 + `{"statusCode":422,"name":"validation_error","message": …}`.
+    let (status, body) = post_json(
+        &fixture.app,
+        Provider::Resend,
+        &fixture.key,
+        "/emails",
+        &serde_json::json!({
+            "from": from, "to": "blocked@example.com", "subject": "suppressed", "text": "t"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["statusCode"], 422, "{body}");
+    assert_eq!(body["name"], "validation_error", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("blocked@example.com"),
+        "{body}"
+    );
+
+    assert_eq!(message_count(&fixture.pool, &fixture.tenant).await, 0);
+}
+
 // ─── SendGrid ──────────────────────────────────────────────────
 
 #[tokio::test]
@@ -528,14 +635,64 @@ async fn sendgrid_send_maps_every_field_onto_the_canonical_send_path() {
     assert_eq!(headers["from_mailbox"]["name"], "Sender Name");
     assert_eq!(row.message_category, "marketing", "the canonical default");
 
-    // …and the per-recipient fan-out ran through the same insert.
+    // …and the per-recipient fan-out ran through the same insert: every
+    // queue row carries the RENDERED message the provider payload mapped to
+    // (recipient, subject, html/text bodies, tags, metadata, headers and
+    // attachment bytes), which a mapping layer that bypassed the canonical
+    // insert could not produce.
     let queued = queue_rows(&fixture.pool, &message_id).await;
     assert_eq!(queued.len(), 4, "to+to+cc+bcc queue rows");
-    assert!(queued.iter().all(|row| row.1 == "SendGrid subject"));
-    assert!(queued
-        .iter()
-        .all(|row| row.4 == Some(vec!["welcome".to_string(), "onboarding".to_string()])));
-    assert!(queued.iter().all(|row| row.8 == "marketing"));
+    // Compared as a set: the DB's ORDER BY "to" collation is environment
+    // dependent, only the recipient SET is the contract.
+    let mut recipients: Vec<&str> = queued.iter().map(|row| row.0.as_str()).collect();
+    recipients.sort_unstable();
+    assert_eq!(
+        recipients,
+        vec![
+            "bcc@example.com",
+            "cc@example.com",
+            "to2@example.com",
+            "to@example.com"
+        ],
+        "each envelope recipient gets its own queue row"
+    );
+    for row in &queued {
+        assert_eq!(row.1, "SendGrid subject", "queue subject for {}", row.0);
+        assert_eq!(
+            row.2.as_deref(),
+            Some("<p>html body</p>"),
+            "queue html for {}",
+            row.0
+        );
+        assert_eq!(
+            row.3.as_deref(),
+            Some("plain body"),
+            "queue text for {}",
+            row.0
+        );
+        assert_eq!(
+            row.4,
+            Some(vec!["welcome".to_string(), "onboarding".to_string()]),
+            "queue tags for {}",
+            row.0
+        );
+        assert_eq!(
+            row.5,
+            Some(serde_json::json!({"campaign": "launch", "tenant_key": "abc"})),
+            "queue metadata for {}",
+            row.0
+        );
+        let headers = row.6.as_ref().expect("queue MIME headers");
+        assert_eq!(headers["custom"]["X-Personalization"], "yes");
+        assert_eq!(headers["from_mailbox"]["name"], "Sender Name");
+        assert_eq!(
+            row.7.as_ref().unwrap()[0]["filename"],
+            "report.txt",
+            "queue attachment for {}",
+            row.0
+        );
+        assert_eq!(row.8, "marketing");
+    }
 }
 
 /// The `X-ApexMail-Category` extension is the documented opt-in for the
@@ -1500,6 +1657,48 @@ async fn resend_unmappable_fields_are_named_refusals() {
 }
 
 // ─── Surface-level contracts ───────────────────────────────────
+
+/// Body-size parity: a declared body above the documented send ceiling
+/// (`MAX_SEND_BODY_BYTES` — the same limit `/v1/messages` enforces and nginx's
+/// `client_max_body_size` mirrors) is refused with `413` on EVERY compat
+/// surface, before any mapping or canonical work, and nothing is queued.
+#[tokio::test]
+async fn oversized_bodies_are_refused_on_every_compat_surface() {
+    let Some(fixture) = fixture("compat_size_caps").await else {
+        return;
+    };
+    let oversized = (crate::routes::messages::MAX_SEND_BODY_BYTES + 1).to_string();
+    for (provider, uri, media_type) in [
+        (Provider::SendGrid, "/v3/mail/send", "application/json"),
+        (
+            Provider::Mailgun,
+            "/v3/example.com/messages",
+            "application/x-www-form-urlencoded",
+        ),
+        (Provider::Postmark, "/email", "application/json"),
+        (Provider::Resend, "/emails", "application/json"),
+    ] {
+        let (name, value) = auth_header(provider, &fixture.key);
+        // The declared Content-Length alone trips the limit layer, so this
+        // proves the cap without allocating the 40 MiB body.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("content-type", media_type)
+            .header("content-length", oversized.clone())
+            .header(name, value)
+            .body(Body::empty())
+            .expect("request");
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+    }
+    assert_eq!(message_count(&fixture.pool, &fixture.tenant).await, 0);
+}
 
 /// Every compat route is registered on the REAL app: a POST with a VALID
 /// credential reaches the mapping layer (its own named refusal — never a 404),

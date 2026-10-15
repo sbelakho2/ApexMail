@@ -32,6 +32,15 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 - **Webhook Compatibility** — Standardized event types with payload mapping documentation.
 - **Parallel Send Validation** — Route a configurable percentage of traffic through ApexMail while maintaining your existing provider.
 
+## Per-Provider Migration Guides
+
+Four providers have a dedicated guide covering the compatibility endpoint, the auth swap, the field-by-field mapping with the constructs refused by name, the DNS checklist, the webhook event names to re-subscribe, and a six-step cutover with rollback.
+
+- [Migrate from SendGrid](/migrate/sendgrid/) — `POST /v3/mail/send` served with your ApexMail key in the Authorization bearer slot.
+- [Migrate from Mailgun](/migrate/mailgun/) — `POST /v3/{domain}/messages` served with the Basic auth slot; `messages.mime` answers a named 501.
+- [Migrate from Postmark](/migrate/postmark/) — `POST /email` and `POST /email/batch` served with the `X-Postmark-Server-Token` header.
+- [Migrate from Resend](/migrate/resend/) — `POST /emails` and `POST /emails/batch` served with the Authorization bearer slot you already send.
+
 ## Technical Implementation
 
 1. Create an ApexMail account and verify your sending domain.

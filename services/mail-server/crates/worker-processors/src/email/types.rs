@@ -306,7 +306,7 @@ pub struct DkimConfig {
 /// The route is NOT a replacement for `EmailJob.metadata` / `Domain::warmup_ip`
 /// — it is the derived, per-send value that travels with the send so the
 /// admission decision and the network path cannot disagree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryRoute {
     /// AWS SES shared IP pool — no dedicated source IP to bind. The
     /// dedicated-source-IP verification deliberately does NOT apply.

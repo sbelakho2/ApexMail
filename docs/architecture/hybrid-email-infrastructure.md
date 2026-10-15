@@ -235,6 +235,27 @@ When a tenant downgrades or releases an IP:
 
 ---
 
+## EU-only routing mode
+
+A tenant can pin outbound routing to ApexMail's own MTAs through the tenant
+routing mode (`tenants.settings.routingMode`, written by `PUT /v1/routing`).
+Under `eu_only` the worker resolves every send to the dedicated own-MTA route.
+The shared SES pool stays out of reach for that tenant.
+
+An own-MTA route can be unavailable: no approved dedicated IP, an unconfigured
+transport, DKIM signing switched off, or every identity at its warmup cap. In
+that case the message is held. The queue row moves to `deferred` with a named
+reason in `error_message`, a `metadata.eu_only_routing` annotation and one
+hash-chained `audit_logs` row, committed in a single transaction. A held
+message is inspectable and releasable once the cause clears. It never reaches
+SES, and it is never dead-lettered.
+
+Activation is entitlement-gated. The `eu_only_routing` capability is included
+on Enterprise Cloud and the Compliance contract line. On self-serve Pro and
+above it is sold as the EUR 149 / USD 165 per-month add-on.
+
+---
+
 ## Migration Path
 
 For existing tenants on the old SES-only architecture:

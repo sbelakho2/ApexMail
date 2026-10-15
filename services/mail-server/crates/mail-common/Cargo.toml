@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# Typed readers for tenant settings facts (routing_mode: settings.routingMode)
+serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true

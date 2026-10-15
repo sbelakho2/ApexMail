@@ -32,6 +32,15 @@ Die Migration eines E-Mail-Anbieters ist ein riskanter Vorgang. Verlorene Zustel
 - **Webhook-Kompatibilität** — Standardisierte Ereignistypen mit Dokumentation des Payload-Mappings.
 - **Parallelversand-Validierung** — Leiten Sie einen konfigurierbaren Anteil des Verkehrs über ApexMail, während Sie Ihren bestehenden Anbieter weiterbetreiben.
 
+## Migrationsleitfäden je Anbieter
+
+Für vier Anbieter gibt es einen eigenen Leitfaden: Kompatibilitätsendpunkt, Auth-Umstellung, Feld-für-Feld-Zuordnung mit den benannt abgelehnten Konstrukten, DNS-Checkliste, die neu zu abonnierenden Webhook-Ereignisnamen und ein sechsschrittiger Umschaltplan mit Rollback.
+
+- [Von SendGrid migrieren](/de/migrate/sendgrid/) — `POST /v3/mail/send` mit Ihrem ApexMail-Schlüssel im Authorization-Bearer-Slot.
+- [Von Mailgun migrieren](/de/migrate/mailgun/) — `POST /v3/{domain}/messages` mit dem Basic-Auth-Slot; `messages.mime` antwortet mit einem benannten 501.
+- [Von Postmark migrieren](/de/migrate/postmark/) — `POST /email` und `POST /email/batch` mit dem Header `X-Postmark-Server-Token`.
+- [Von Resend migrieren](/de/migrate/resend/) — `POST /emails` und `POST /emails/batch` mit dem Authorization-Bearer-Slot, den Sie bereits senden.
+
 ## Technische Umsetzung
 
 1. Erstellen Sie ein ApexMail-Konto und verifizieren Sie Ihre Sende-Domain.

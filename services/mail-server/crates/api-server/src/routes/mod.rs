@@ -30,7 +30,14 @@ pub mod message_timeline;
 pub mod messages;
 pub mod notification_drain;
 pub mod pagination;
+/// Provider-export importer (SendGrid / Mailgun / Postmark / Resend): reads a
+/// switching customer's export and writes through the EXISTING canonical
+/// paths — suppressions table, `routes::contacts::import_contact_rows`,
+/// `routes::templates::create_template` — plus the read-only domains DNS
+/// report. No writer is re-implemented here.
+pub mod provider_import;
 pub mod retention;
+pub mod routing;
 pub mod scim;
 pub mod segments;
 pub mod self_hosted_bounces;
@@ -80,6 +87,15 @@ mod tests {
         "events.rs",
         "lists.rs",
         "messages.rs",
+        // The importer's SQL-bearing files (the per-kind parsers are pure).
+        // Listed so the tenant-scope guard covers the importer's probes,
+        // writes and report reads like every other tenant-scoped surface.
+        "provider_import/mod.rs",
+        "provider_import/contacts.rs",
+        "provider_import/domains.rs",
+        "provider_import/suppressions.rs",
+        "provider_import/templates.rs",
+        "routing.rs",
         "scim.rs",
         "support.rs",
         "suppressions.rs",

@@ -54,6 +54,10 @@ impl FeatureClass {
 pub enum FeatureKey {
     /// `dedicated_ip` — dedicated sending IP allocation (eligibility-checked).
     DedicatedIp,
+    /// `eu_only_routing` — EU-only delivery routing: the tenant's sends must
+    /// leave through ApexMail's own MTAs; the send path HOLDS a message whose
+    /// own-MTA route is unavailable rather than failing over to SES.
+    EuOnlyRouting,
     /// `sso_enabled` — enterprise single sign-on.
     Sso,
     /// `audit_logs` — customer-facing audit log access.
@@ -111,6 +115,7 @@ impl FeatureKey {
     /// the closed enum without a wildcard match.
     pub const ALL: &'static [FeatureKey] = &[
         Self::DedicatedIp,
+        Self::EuOnlyRouting,
         Self::Sso,
         Self::AuditLogs,
         Self::ApiAccess,
@@ -141,6 +146,7 @@ impl FeatureKey {
     pub const fn field_name(self) -> &'static str {
         match self {
             Self::DedicatedIp => "dedicated_ip",
+            Self::EuOnlyRouting => "eu_only_routing",
             Self::Sso => "sso_enabled",
             Self::AuditLogs => "audit_logs",
             Self::ApiAccess => "api_access",
@@ -281,6 +287,21 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         class: FeatureClass::ContractualOnly,
         gate: Gate::Capacity(CapacityKey::DedicatedIps),
         rationale: "Included-IP count is a billing term: extra IPs are charged, not refused, so it must not be used as an access gate.",
+    },
+    // RuntimeEnforced — the customer routing settings surface
+    // (`PUT /v1/routing`, api-server `routes/routing.rs`) requires
+    // `FeatureKey::EuOnlyRouting` before it may activate the mode, and the
+    // worker's dispatch path enforces the mode it wrote (own-MTA transport
+    // only; the message is HELD, never failed over to SES, when that route
+    // is unavailable). Included on Enterprise Cloud / the Compliance
+    // contract line; add-on on self-serve Pro+ via
+    // `settings.addons.euOnlyRouting` (platform-catalog
+    // `addon_by_name("eu_only_routing")`, €149/$165 per month).
+    FieldClassification {
+        field: "eu_only_routing",
+        class: FeatureClass::RuntimeEnforced,
+        gate: Gate::Feature(FeatureKey::EuOnlyRouting),
+        rationale: "The routing-mode activation handler is gated on the entitlement and the worker enforces the activated mode fail-closed (own-MTA route or hold), so the plan/add-on grant is the runtime gate.",
     },
     // RuntimeEnforced — `domains::create_domain` gates domain creation
     // with `require_capacity(CapacityKey::SendingDomains, count + 1)`.

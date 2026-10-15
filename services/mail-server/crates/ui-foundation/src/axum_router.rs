@@ -442,6 +442,26 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/inbox-placement/index.html"
         ),)),
+        "/de/migrate" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/migrate/index.html"
+        ),)),
+        "/de/migrate/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/migrate/mailgun/index.html"
+        ),)),
+        "/de/migrate/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/migrate/postmark/index.html"
+        ),)),
+        "/de/migrate/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/migrate/resend/index.html"
+        ),)),
+        "/de/migrate/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/migrate/sendgrid/index.html"
+        ),)),
         "/de/pricing" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/pricing/index.html"
@@ -646,6 +666,26 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/inbox-placement/index.html"
         ),)),
+        "/es/migrate" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/migrate/index.html"
+        ),)),
+        "/es/migrate/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/migrate/mailgun/index.html"
+        ),)),
+        "/es/migrate/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/migrate/postmark/index.html"
+        ),)),
+        "/es/migrate/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/migrate/resend/index.html"
+        ),)),
+        "/es/migrate/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/migrate/sendgrid/index.html"
+        ),)),
         "/es/pricing" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/pricing/index.html"
@@ -818,6 +858,26 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/inbox-placement/index.html"
         ),)),
+        "/fr/migrate" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/migrate/index.html"
+        ),)),
+        "/fr/migrate/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/migrate/mailgun/index.html"
+        ),)),
+        "/fr/migrate/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/migrate/postmark/index.html"
+        ),)),
+        "/fr/migrate/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/migrate/resend/index.html"
+        ),)),
+        "/fr/migrate/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/migrate/sendgrid/index.html"
+        ),)),
         "/fr/pricing" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/pricing/index.html"
@@ -897,6 +957,26 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         "/inbox-placement" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/inbox-placement/index.html"
+        ),)),
+        "/migrate" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/migrate/index.html"
+        ),)),
+        "/migrate/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/migrate/mailgun/index.html"
+        ),)),
+        "/migrate/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/migrate/postmark/index.html"
+        ),)),
+        "/migrate/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/migrate/resend/index.html"
+        ),)),
+        "/migrate/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/migrate/sendgrid/index.html"
         ),)),
         "/performance-methodology" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),

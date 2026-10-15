@@ -324,6 +324,15 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 custom_tracking_domain: true,
                 custom_retention: true,
                 subaccounts: true,
+                // EU-only routing is INCLUDED on Enterprise Cloud (and the
+                // Compliance contract line): sends leave through ApexMail's
+                // own MTAs only, and the worker holds a message whose
+                // own-MTA route is unavailable instead of failing over to
+                // SES. Self-serve buys it as the `eu_only_routing` add-on,
+                // which billing records as `settings.addons.euOnlyRouting`
+                // (runtime gate: `FeatureKey::EuOnlyRouting` +
+                // `mail_common::eu_only_addon_enabled`).
+                eu_only_routing: true,
                 max_subaccounts: -1,
                 max_retention_days: 730,
                 max_team_members: -1,
@@ -1466,6 +1475,37 @@ mod tests {
                 .unwrap_or(SupportLevel::Community),
             SupportLevel::Dedicated
         );
+    }
+
+    /// EU-only routing is INCLUDED on Enterprise Cloud (and the Compliance
+    /// contract line) and NOT granted by any self-serve plan seed — those
+    /// tenants activate it through the `eu_only_routing` add-on flag the
+    /// billing flow records as `settings.addons.euOnlyRouting`
+    /// (`mail_common::eu_only_addon_enabled`). This pins the mapping the
+    /// classification rationale and docs/pricing.md state.
+    #[test]
+    fn eu_only_routing_is_included_on_enterprise_and_addon_on_self_serve() {
+        let plans = default_plans();
+        let enterprise = plans
+            .iter()
+            .find(|p| p.name == "enterprise")
+            .expect("enterprise plan");
+        assert!(
+            enterprise.features.eu_only_routing,
+            "Enterprise Cloud includes EU-only routing (docs/pricing.md contract line)"
+        );
+        for seed in plans.iter().filter(|p| p.name != "enterprise") {
+            assert!(
+                !seed.features.eu_only_routing,
+                "{} must NOT include EU-only routing in the plan itself — on self-serve it is the \
+                 eu_only_routing add-on (settings.addons.euOnlyRouting)",
+                seed.name
+            );
+        }
+        // The catalog sells exactly the add-on the self-serve path gates on.
+        let addon = platform_catalog::addon_by_name("eu_only_routing").expect("add-on row");
+        assert_eq!(addon.price_cents, 14_900);
+        assert_eq!(addon.price_usd_cents, 16_500);
     }
 
     // ------------------------------------------------------------------

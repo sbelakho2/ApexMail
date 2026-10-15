@@ -47,7 +47,8 @@ comparison_sections = [
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Méthodologie :</strong> Les lignes de fonctionnalités résument le comportement de Resend documenté publiquement. Forfaits comparés : les paliers self-service d’ApexMail et les forfaits publiés de Resend ; lorsqu’une mesure publiée comparable n’existe pas (par exemple le taux de livraison), la ligne indique qu’une comparaison directe n’est pas possible. Vérifié : 2026-10-04. Consultez notre <a href="/fr/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">méthodologie de comparaison</a>."""
+<strong>Méthodologie :</strong> Les lignes de fonctionnalités résument le comportement de Resend documenté publiquement. Forfaits comparés : les paliers self-service d’ApexMail et les forfaits publiés de Resend ; lorsqu’une mesure publiée comparable n’existe pas (par exemple le taux de livraison), la ligne indique qu’une comparaison directe n’est pas possible. Vérifié : 2026-10-04. Consultez notre <a href="/fr/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">méthodologie de comparaison</a>. <strong>Migrer depuis Resend ?</strong> Le changement d'URL de base et le sous-ensemble exactement pris en charge de son API sont documentés dans le <a href="/fr/migrate/resend/" class="text-brand-600 hover:text-brand-700 underline">guide de migration Resend</a>.
+"""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

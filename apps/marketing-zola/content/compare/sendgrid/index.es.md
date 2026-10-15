@@ -66,7 +66,8 @@ comparison_sections = [
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Metodología:</strong> Las filas de funciones resumen el comportamiento de SendGrid documentado públicamente y los precios publicados; las filas de precios nombran los planes comparados (SendGrid Pro, Essentials) con 100.000 emails/mes. Precios y detalles de los planes revisados por última vez: 2026-10-04. Cuando una cifra del competidor no está documentada públicamente, la fila lo indica en lugar de afirmar un número. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a>."""
+<strong>Metodología:</strong> Las filas de funciones resumen el comportamiento de SendGrid documentado públicamente y los precios publicados; las filas de precios nombran los planes comparados (SendGrid Pro, Essentials) con 100.000 emails/mes. Precios y detalles de los planes revisados por última vez: 2026-10-04. Cuando una cifra del competidor no está documentada públicamente, la fila lo indica en lugar de afirmar un número. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a>. <strong>¿Migrar desde SendGrid?</strong> El cambio de URL base y el subconjunto exactamente admitido de su API están documentados en la <a href="/es/migrate/sendgrid/" class="text-brand-600 hover:text-brand-700 underline">guía de migración de SendGrid</a>.
+"""
 +++
 
 <!-- Comparison rows rendered from [extra].comparison_sections by partials/compare/table.html. -->

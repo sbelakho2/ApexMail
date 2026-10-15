@@ -47,7 +47,8 @@ comparison_sections = [
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Metodología:</strong> Las filas de funciones resumen el comportamiento de Resend documentado públicamente. Planes comparados: los niveles de autoservicio de ApexMail y los planes publicados de Resend; cuando no existe una medición publicada comparable (por ejemplo, la tasa de entrega), la fila indica que no es directamente comparable. Revisado: 2026-10-04. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a>."""
+<strong>Metodología:</strong> Las filas de funciones resumen el comportamiento de Resend documentado públicamente. Planes comparados: los niveles de autoservicio de ApexMail y los planes publicados de Resend; cuando no existe una medición publicada comparable (por ejemplo, la tasa de entrega), la fila indica que no es directamente comparable. Revisado: 2026-10-04. Consulte nuestra <a href="/es/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">metodología de comparación</a>. <strong>¿Migrar desde Resend?</strong> El cambio de URL base y el subconjunto exactamente admitido de su API están documentados en la <a href="/es/migrate/resend/" class="text-brand-600 hover:text-brand-700 underline">guía de migración de Resend</a>.
+"""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

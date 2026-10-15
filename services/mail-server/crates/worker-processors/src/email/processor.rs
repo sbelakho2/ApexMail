@@ -10,6 +10,7 @@ use apexmail_lib::dkim::{
     public_key_base64_from_private_key_pem,
 };
 use chrono::{DateTime, Utc};
+use mail_common::routing_mode::RoutingMode;
 use mail_common::warmup::WarmupSchedule;
 use moka::sync::Cache;
 use rand::Rng;
@@ -823,6 +824,85 @@ const DLP_HOLD_UPDATE_SQL: &str = r#"
 "#;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// W4A: EU-only routing — the fail-closed hold
+//
+// The tenant routing mode (`tenants.settings.routingMode`, read through the
+// shared typed reader `mail_common::RoutingMode`) is a routing FACT the send
+// path must execute: under `eu_only` every message leaves through ApexMail's
+// OWN relay MTA and nothing else. When that own-MTA route is unavailable —
+// no approved dedicated-IP identity, an unconfigured/unverifiable dedicated
+// transport, DKIM signing unavailable, the warmup quota exhausted or its
+// store unreachable — the message is HELD, never handed to the shared
+// third-party transport (SES). This is the plan's headline invariant:
+// "A message on EU-only routing is held, never sent through SES or any
+// non-EU transport."
+//
+// Hold mechanism (chosen to mirror the pre-send DLP quarantine, the existing
+// precedent): the row moves to `deferred` — the queue's honest hold-in-queue
+// state, never re-claimed by the poller because it claims only `pending` and
+// expired-`processing` rows — with the NAMED reason in `error_message` and a
+// `metadata.eu_only_routing` annotation (disposition/mode/reason/detail).
+// The row write and the hash-chained `audit_logs` evidence row commit in ONE
+// transaction: a hold without evidence must not exist. The message stays
+// inspectable (admin delivery analytics already counts `deferred`) and
+// releasable (an operator resolves it exactly like a DLP hold), and nothing
+// is dead-lettered. No recipient event is written: nothing happened to this
+// recipient copy.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// W4A: EU-only hold write, fenced on the lease token exactly like
+/// [`DLP_HOLD_UPDATE_SQL`]. `$2` is the `metadata.eu_only_routing`
+/// annotation; the hold applies to the whole MESSAGE (every per-recipient
+/// copy shares the held content), so `pending_recipients` is untouched.
+const EU_ONLY_HOLD_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+            '{eu_only_routing}', $2::jsonb
+        ),
+        status = 'deferred',
+        error_message = $1,
+        updated_at = NOW()
+    WHERE id = $3::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// W4A: named reason — no approved dedicated-IP identity exists for this
+/// tenant, so there is no own-MTA route to send from.
+const EU_ONLY_HOLD_NO_OWN_MTA_ROUTE: &str = "eu_only_own_mta_route_unavailable";
+/// W4A: named reason — the own-MTA route cannot be dispatched on this worker
+/// (dedicated transport missing or unable to bind the source IP).
+const EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE: &str = "eu_only_own_mta_transport_unavailable";
+/// W4A: named reason — DKIM signing is disabled, so the own-MTA route's
+/// mandatory local signature cannot be produced.
+const EU_ONLY_HOLD_DKIM_DISABLED: &str = "eu_only_dkim_unavailable";
+/// W4A: named reason — every own-MTA identity is at its canonical daily
+/// warmup cap.
+const EU_ONLY_HOLD_WARMUP_LIMIT: &str = "eu_only_warmup_limit";
+/// W4A: named reason — the warmup quota store is unreachable, so admission
+/// cannot be proven (fail closed).
+const EU_ONLY_HOLD_WARMUP_STORE: &str = "eu_only_warmup_admission_unavailable";
+/// W4A: named reason — the resolved route was NOT the own-MTA dedicated
+/// route. Structurally unreachable (planning already holds without a
+/// candidate); if it ever fires, the guard holds the message instead of
+/// crossing the transport boundary the mode exists to forbid.
+const EU_ONLY_HOLD_ROUTE_GUARD: &str = "eu_only_route_guard_violation";
+
+/// W4A: the routing-mode lookup itself failed. The row is DEFERRED
+/// (retryable, 5-minute requeue) rather than held: the mode is UNKNOWN, not
+/// unavailable — and the job never proceeds past this deferral, so the
+/// EU-only invariant cannot be violated by an unreadable setting.
+const ROUTING_MODE_LOOKUP_FAILED: &str = "routing_mode_unavailable";
+
+/// W4A: the tenant routing-mode read (`tenants.settings.routingMode`), on the
+/// same authoritative row the F18 policy gate reads. `->` (not `->>`) keeps
+/// the raw JSON value so the typed reader can tell "absent" from "corrupt":
+/// absent → `global` (documented default), any unrecognized value → fail
+/// CLOSED to `eu_only` (never silently downgrade a possibly-residency-bound
+/// tenant onto the shared transport).
+const TENANT_ROUTING_MODE_SQL: &str = "SELECT settings->'routingMode' FROM tenants WHERE id = $1";
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Durable exactly-once acceptance ledger (`sales_delivery_acceptances`)
 //
 // The Redis SETNX send marker used to be the authority, with a TTL: once it
@@ -1325,6 +1405,64 @@ impl ReservedDeliveryIp {
             source_ip: self.candidate.source_ip,
         }
     }
+}
+
+/// W4A: the route planning OUTCOME for one send under a routing mode.
+///
+/// [`plan_delivery_route`] is the single decision point: it is PURE, so the
+/// fail-closed property is provable without a database or a transport — under
+/// `eu_only` there is no input that yields [`DeliveryRoute::SesShared`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlannedDeliveryRoute {
+    /// Hand this route to the transport layer.
+    Route(DeliveryRoute),
+    /// EU-only mode with no own-MTA identity available: HOLD the message
+    /// with this named reason instead of routing it anywhere.
+    EuOnlyHold {
+        reason: &'static str,
+        detail: String,
+    },
+}
+
+/// W4A: plan the delivery route for one send (pure).
+///
+/// * a selected dedicated-IP candidate → [`DeliveryRoute::Dedicated`] — our
+///   own relay MTA binds the tenant's source IP (the historical behavior);
+/// * no candidate, `global` mode → [`DeliveryRoute::SesShared`] — unchanged;
+/// * no candidate, `eu_only` mode → [`PlannedDeliveryRoute::EuOnlyHold`] —
+///   the shared transport is FORBIDDEN, so the message is held.
+///
+/// This function is where the invariant lives, and it is deliberately total:
+/// the `EuOnly` × empty-pool cell can never be planned onto the shared
+/// route, whatever the transport configuration says.
+fn plan_delivery_route(
+    mode: RoutingMode,
+    candidate: Option<&RoutingCandidate>,
+) -> PlannedDeliveryRoute {
+    match candidate {
+        Some(candidate) => PlannedDeliveryRoute::Route(DeliveryRoute::Dedicated {
+            dedicated_ip_id: candidate.dedicated_ip_id.clone(),
+            source_ip: candidate.source_ip,
+        }),
+        None if mode.is_eu_only() => PlannedDeliveryRoute::EuOnlyHold {
+            reason: EU_ONLY_HOLD_NO_OWN_MTA_ROUTE,
+            detail: "the tenant has no approved dedicated-IP identity on a warmup/active pool, \
+                     so no own-MTA route exists for an EU-only send — the shared third-party \
+                     transport is forbidden by the routing mode"
+                .to_string(),
+        },
+        None => PlannedDeliveryRoute::Route(DeliveryRoute::SesShared),
+    }
+}
+
+/// W4A: the structural route guard. Under `eu_only` the resolved route MUST
+/// be the own-MTA dedicated route; anything else (the SES/shared route, or a
+/// future non-dedicated variant) is a violation that HOLDS the message
+/// before any submission. The last line of defence: `plan_delivery_route`
+/// already refuses to plan the shared route for an EU-only tenant, and this
+/// re-checks the route the reservation actually produced.
+fn eu_only_route_guard_violation(mode: RoutingMode, route: &DeliveryRoute) -> Option<&'static str> {
+    (mode.is_eu_only() && !route.is_dedicated()).then_some(EU_ONLY_HOLD_ROUTE_GUARD)
 }
 
 /// Route-aware domain readiness. A shared-pool send THROUGH SES requires
@@ -2413,6 +2551,29 @@ impl EmailProcessor {
             }
         }
 
+        // W4A: read the tenant's routing mode (`tenants.settings.routingMode`)
+        // IMMEDIATELY after the policy gate and before any route planning —
+        // the mode decides which transports may even be considered. A failed
+        // read defers the row (retryable, 5-minute requeue) and exits: an
+        // unread mode must never be treated as `global` (that would let a
+        // possibly-EU-only tenant's mail onto the shared transport), and it
+        // must never be treated as `eu_only` either (that would hold a
+        // global tenant's mail on a lookup blip). The row is not sent.
+        let routing_mode = match self.tenant_routing_mode(&job.tenant_id).await {
+            Ok(mode) => mode,
+            Err(error) => {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    error = %error,
+                    "tenant routing-mode lookup failed — deferring the row (fail closed; \
+                     the mode is unknown, so neither the global nor the EU-only path may run)"
+                );
+                self.requeue_job(job, ROUTING_MODE_LOOKUP_FAILED).await?;
+                return Ok(());
+            }
+        };
+
         // F55: authoritative consent decision immediately before dispatch —
         // global suppression AND the per-category preference, both read
         // from CURRENT database state (no cache participates in the
@@ -2465,12 +2626,25 @@ impl EmailProcessor {
         // acceptance row exists. The old post-acceptance verification could
         // only fail after the message had already left, producing a
         // refund-then-retry of a possibly-accepted send.
-        let planned_route = match pool.first() {
-            Some(candidate) => DeliveryRoute::Dedicated {
-                dedicated_ip_id: candidate.dedicated_ip_id.clone(),
-                source_ip: candidate.source_ip,
-            },
-            None => DeliveryRoute::SesShared,
+        //
+        // W4A: under `eu_only` this is also the mode's decision point — with
+        // no dedicated-IP candidate there is NO own-MTA route, and the shared
+        // transport is forbidden, so the message is HELD (named reason,
+        // inspectable, releasable) instead of being planned onto SES.
+        let planned_route = match plan_delivery_route(routing_mode, pool.first()) {
+            PlannedDeliveryRoute::Route(route) => route,
+            PlannedDeliveryRoute::EuOnlyHold { reason, detail } => {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    domain_id = %job.domain_id,
+                    reason,
+                    "EU-only routing: no own-MTA route for this send — HOLDING the message \
+                     (the shared third-party transport is forbidden)"
+                );
+                self.handle_eu_only_hold(job, reason, &detail).await?;
+                return Ok(());
+            }
         };
         let shared_route_is_ses = self
             .transport
@@ -2491,8 +2665,28 @@ impl EmailProcessor {
         // A dedicated relay send must be DKIM-signed (verified domains must
         // not leave unsigned). Defer — retryable — instead of letting
         // prepare_email's Config error strand the row in 'processing' across
-        // leases.
+        // leases. W4A: under `eu_only` the own-MTA route is the ONLY route,
+        // so an unavailable signature is a route outage: HOLD, never defer
+        // into a mode where a later retry could pick a different route.
         if planned_route.is_dedicated() && !self.config.dkim.enabled {
+            if routing_mode.is_eu_only() {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    route = %planned_route,
+                    reason = EU_ONLY_HOLD_DKIM_DISABLED,
+                    "EU-only routing: DKIM signing is disabled on this worker — HOLDING the message"
+                );
+                self.handle_eu_only_hold(
+                    job,
+                    EU_ONLY_HOLD_DKIM_DISABLED,
+                    "DKIM signing is disabled on this worker; an own-MTA send must carry the \
+                     local signature and the EU-only mode forbids falling back to the shared \
+                     third-party transport",
+                )
+                .await?;
+                return Ok(());
+            }
             warn!(
                 job_id = %job.id,
                 route = %planned_route,
@@ -2511,6 +2705,32 @@ impl EmailProcessor {
             } else {
                 "ses_transport_unconfigured"
             };
+            // W4A: under `eu_only` the dedicated transport IS the route, so
+            // its absence/unverifiability is a route outage — HOLD (never
+            // defer onto a retry that could later cross the boundary).
+            if routing_mode.is_eu_only() {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    route = %planned_route,
+                    reason = EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
+                    dispatch_reason = reason,
+                    error = %error,
+                    "EU-only routing: the own-MTA route is not dispatchable on this worker — \
+                     HOLDING the message BEFORE DATA"
+                );
+                self.handle_eu_only_hold(
+                    job,
+                    EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
+                    &format!(
+                        "the own-MTA delivery route {planned_route} is not dispatchable on this \
+                         worker ({reason}: {error}); the EU-only mode forbids the shared \
+                         third-party transport"
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
             warn!(
                 job_id = %job.id,
                 tenant_id = %job.tenant_id,
@@ -2539,6 +2759,29 @@ impl EmailProcessor {
                 Ok(Some(reserved)) => Some(reserved),
                 Ok(None) => {
                     let candidates = pool.len();
+                    // W4A: every own-MTA identity at its canonical daily cap
+                    // is a route outage under EU-only — HOLD, never defer to a
+                    // later global retry.
+                    if routing_mode.is_eu_only() {
+                        debug!(
+                            job_id = %job.id,
+                            candidates,
+                            reason = EU_ONLY_HOLD_WARMUP_LIMIT,
+                            "EU-only routing: every own-MTA identity is at its canonical daily \
+                             cap — HOLDING the message"
+                        );
+                        self.handle_eu_only_hold(
+                            job,
+                            EU_ONLY_HOLD_WARMUP_LIMIT,
+                            &format!(
+                                "all {candidates} approved own-MTA identit(y/ies) are at their \
+                                 canonical daily warmup cap; the EU-only mode forbids the shared \
+                                 third-party transport"
+                            ),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     debug!(
                         job_id = %job.id,
                         candidates,
@@ -2548,6 +2791,28 @@ impl EmailProcessor {
                     return Ok(());
                 }
                 Err(error) => {
+                    // W4A: an unprovable warmup admission is a route outage
+                    // under EU-only — HOLD rather than send unthrottled later.
+                    if routing_mode.is_eu_only() {
+                        warn!(
+                            job_id = %job.id,
+                            reason = EU_ONLY_HOLD_WARMUP_STORE,
+                            error = %error,
+                            "EU-only routing: warmup quota store unavailable — HOLDING the \
+                             message (fail closed)"
+                        );
+                        self.handle_eu_only_hold(
+                            job,
+                            EU_ONLY_HOLD_WARMUP_STORE,
+                            &format!(
+                                "the warmup admission store is unreachable ({error}), so the \
+                                 own-MTA send cannot be admitted safely; the EU-only mode \
+                                 forbids the shared third-party transport"
+                            ),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     warn!(
                         job_id = %job.id,
                         error = %error,
@@ -2567,6 +2832,32 @@ impl EmailProcessor {
             Some(reserved) => reserved.route(),
             None => DeliveryRoute::SesShared,
         };
+        // W4A route guard: under `eu_only` the submitted route MUST be the
+        // own-MTA dedicated route. `plan_delivery_route` already holds when
+        // no candidate exists, so this is structurally unreachable — but it
+        // is the last line of defence, and a violation HOLDS the message
+        // rather than letting it cross the transport boundary the mode
+        // exists to forbid (and rather than silently sending it).
+        if let Some(reason) = eu_only_route_guard_violation(routing_mode, &route) {
+            error!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                route = %route,
+                reason,
+                "EU-only route guard: the resolved route is not the own-MTA route — \
+                 HOLDING the message instead of submitting it"
+            );
+            self.handle_eu_only_hold(
+                job,
+                reason,
+                &format!(
+                    "the resolved route {route} is not an own-MTA dedicated route; a route that \
+                     contradicts the EU-only mode is held, never submitted"
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
         let route_kind = transport_kind_for(&route);
         let warmup_selected = reserved.is_some();
         debug!(
@@ -2883,6 +3174,53 @@ impl EmailProcessor {
                     .insert(tenant_id.to_string(), "tenant_missing".to_string());
                 TenantPolicy::Restricted("tenant_missing".to_string())
             }
+        }
+    }
+
+    /// W4A: the tenant's outbound routing mode, read from the SAME
+    /// authoritative row the policy gate reads (`tenants.settings.routingMode`)
+    /// and resolved through the shared typed reader so the API that writes
+    /// the mode and the worker that enforces it cannot disagree.
+    ///
+    /// Fail-closed contract:
+    ///
+    /// * key absent/null → `global` (documented default; existing tenants are
+    ///   unaffected);
+    /// * a recognized value → that mode;
+    /// * an unrecognized/corrupt value → `eu_only` with a loud warning — the
+    ///   strict mode is the only safe reading of a value that might mean
+    ///   EU-only, and a held message is inspectable/releasable while a
+    ///   message sent through a forbidden transport is neither;
+    /// * a lookup failure or a vanished tenant row → `Err`; the caller
+    ///   requeues (never sends: the mode is UNKNOWN, so neither path is
+    ///   permitted to run).
+    ///
+    /// Deliberately NOT cached: the mode is one indexed primary-key read on a
+    /// path that already performs several mandatory lookups (policy, consent,
+    /// domain), and a stale cached `global` would send EU-only mail through
+    /// the shared transport after a mode change — exactly the failure this
+    /// feature exists to make impossible.
+    async fn tenant_routing_mode(&self, tenant_id: &str) -> ProcessorResult<RoutingMode> {
+        let stored: Option<Option<JsonValue>> = sqlx::query_scalar(TENANT_ROUTING_MODE_SQL)
+            .bind(tenant_id)
+            .fetch_optional(&self.db)
+            .await?;
+        match stored {
+            Some(value) => {
+                let resolved = RoutingMode::resolve_value(value.as_ref());
+                if let Some(raw) = &resolved.unrecognized {
+                    warn!(
+                        tenant_id = tenant_id,
+                        stored_value = %raw,
+                        "unrecognized tenants.settings.routingMode — failing CLOSED to eu_only \
+                         (an unreadable mode must never downgrade a tenant onto the shared transport)"
+                    );
+                }
+                Ok(resolved.mode)
+            }
+            None => Err(ProcessorError::Job(
+                "tenant row vanished between the policy gate and the routing-mode read".into(),
+            )),
         }
     }
 
@@ -3773,6 +4111,91 @@ impl EmailProcessor {
             return Err(ProcessorError::Database(error));
         }
         tx.commit().await?;
+
+        // F25: the hold is a durable recipient transition (non-terminal) —
+        // reconcile the parent aggregate so it does not lag the queue row.
+        self.reconcile_parent_progress(job).await;
+
+        Ok(())
+    }
+
+    /// W4A: EU-ONLY ROUTING HOLD — the fail-closed half of the routing mode.
+    ///
+    /// Called from every dispatch point where the own-MTA route is
+    /// unavailable or not permitted under `eu_only`. The message MUST NOT be
+    /// sent through any other transport and MUST NOT be dead-lettered: it is
+    /// moved to `deferred` (the queue's honest hold-in-queue state — the
+    /// poller claims only `pending`/expired-`processing` rows, so the message
+    /// stays visible, unsent and un-retried pending operator review) with the
+    /// NAMED reason in `error_message` and a `metadata.eu_only_routing`
+    /// annotation (disposition, mode, reason, detail, recipient, send unit).
+    ///
+    /// The row write and the hash-chained `audit_logs` evidence row commit in
+    /// ONE transaction — a hold without evidence must not exist, the same
+    /// discipline [`EmailProcessor::handle_dlp_hold`] applies. No recipient
+    /// event is written: nothing happened to this recipient copy; the queue
+    /// row + audit row are the operator-facing record, and the message is
+    /// releasable exactly like a DLP hold (resolve the cause, then return the
+    /// row to `pending`).
+    async fn handle_eu_only_hold(
+        &self,
+        job: &EmailJob,
+        reason: &'static str,
+        detail: &str,
+    ) -> ProcessorResult<()> {
+        metrics::counter!("apexmail_eu_only_routing_holds").increment(1);
+        let copy = format!(
+            "Message held by EU-only routing policy: {detail}. Reason: {reason}. \
+             Held in queue pending review; not delivered, and never routed through a \
+             shared third-party transport."
+        );
+        let annotation = serde_json::json!({
+            "disposition": "held",
+            "mode": RoutingMode::EuOnly.as_str(),
+            "reason": reason,
+            "detail": detail,
+            "gate": "worker_dispatch",
+            "recipient": job.to,
+            "message_id": job.message_id,
+            "send_unit": send_unit_of(job),
+        });
+        let mut tx = self.db.begin().await?;
+        let updated = sqlx::query(EU_ONLY_HOLD_UPDATE_SQL)
+            .bind(&copy)
+            .bind(&annotation)
+            .bind(&job.id)
+            .bind(lease_token_of(job))
+            .execute(&mut *tx)
+            .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_eu_only_hold fenced out — lease lost, hold write skipped"
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = record_eu_only_hold_audit(&mut tx, job, reason, detail).await {
+            error!(
+                job_id = %job.id,
+                error = %error,
+                "EU-only hold audit write failed — rolling the hold back so it can be re-recorded \
+                 WITH its evidence (never a silent hold)"
+            );
+            return Err(ProcessorError::Database(error));
+        }
+        tx.commit().await?;
+
+        warn!(
+            job_id = %job.id,
+            tenant_id = %job.tenant_id,
+            recipient = %job.to,
+            reason,
+            "EU-only routing: message HELD in queue (deferred, named reason, audit evidence) — \
+             never sent through a non-EU/third-party transport"
+        );
 
         // F25: the hold is a durable recipient transition (non-terminal) —
         // reconcile the parent aggregate so it does not lag the queue row.
@@ -4858,6 +5281,41 @@ async fn record_dlp_audit(
             resource_id: Some(&job.id),
             details,
             outcome,
+        },
+    )
+    .await
+}
+
+/// W4A: the hash-chained audit evidence for one EU-only routing hold
+/// (`routing.eu_only_hold`, outcome `held`). Mirrors [`record_dlp_audit`]:
+/// the caller commits it in the SAME transaction as the queue-row hold, so a
+/// hold and its evidence are atomic.
+async fn record_eu_only_hold_audit(
+    conn: &mut sqlx::PgConnection,
+    job: &EmailJob,
+    reason: &str,
+    detail: &str,
+) -> Result<(), sqlx::Error> {
+    let details = serde_json::json!({
+        "disposition": "held",
+        "mode": RoutingMode::EuOnly.as_str(),
+        "reason": reason,
+        "detail": detail,
+        "recipient": job.to,
+        "message_id": job.message_id,
+        "send_unit": send_unit_of(job),
+        "gate": "worker_dispatch",
+        "policy": "eu_only_routing",
+    });
+    crate::common::audit::append_audit_log(
+        conn,
+        crate::common::audit::AuditEntry {
+            tenant_id: Some(&job.tenant_id),
+            action: "routing.eu_only_hold",
+            resource: "email_queue",
+            resource_id: Some(&job.id),
+            details,
+            outcome: "held",
         },
     )
     .await
@@ -8224,6 +8682,198 @@ mod tests {
         );
     }
 
+    // ── W4A: EU-only routing — the fail-closed route decision ─────────
+
+    fn routing_candidate(id: &str, ip: &str) -> RoutingCandidate {
+        RoutingCandidate {
+            dedicated_ip_id: id.to_string(),
+            ip_address: ip.to_string(),
+            source_ip: ip.parse().expect("valid test IP"),
+            warmup_day: 1,
+            daily_limit: Some(100),
+        }
+    }
+
+    /// THE invariant, at its decision point: under `eu_only` an empty
+    /// dedicated-IP pool can never produce a sendable route. This is the
+    /// fail-before test for the whole feature — if anyone "allows the
+    /// fallback" by planning [`DeliveryRoute::SesShared`] here, this fails.
+    #[test]
+    fn eu_only_never_plans_the_shared_route() {
+        let planned = plan_delivery_route(RoutingMode::EuOnly, None);
+        match planned {
+            PlannedDeliveryRoute::EuOnlyHold { reason, detail } => {
+                assert_eq!(reason, EU_ONLY_HOLD_NO_OWN_MTA_ROUTE);
+                assert!(
+                    detail.contains("shared third-party transport is forbidden"),
+                    "the hold detail must name the forbidden transport: {detail}"
+                );
+            }
+            PlannedDeliveryRoute::Route(route) => panic!(
+                "eu_only with no own-MTA candidate must HOLD, never plan {route} \
+                 (SES must be structurally unreachable for an EU-only tenant)"
+            ),
+        }
+
+        // With a candidate, both modes ride our own MTA.
+        let candidate = routing_candidate("dip-1", "203.0.113.9");
+        for mode in [RoutingMode::Global, RoutingMode::EuOnly] {
+            match plan_delivery_route(mode, Some(&candidate)) {
+                PlannedDeliveryRoute::Route(DeliveryRoute::Dedicated {
+                    dedicated_ip_id,
+                    source_ip,
+                }) => {
+                    assert_eq!(dedicated_ip_id, "dip-1");
+                    assert_eq!(source_ip.to_string(), "203.0.113.9");
+                }
+                other => {
+                    panic!("{mode:?} with a candidate must plan the dedicated route, got {other:?}")
+                }
+            }
+        }
+    }
+
+    /// The global-mode behavior is UNCHANGED: no candidate still means the
+    /// shared route, exactly as before this feature.
+    #[test]
+    fn global_mode_keeps_the_shared_route_without_a_candidate() {
+        assert_eq!(
+            plan_delivery_route(RoutingMode::Global, None),
+            PlannedDeliveryRoute::Route(DeliveryRoute::SesShared)
+        );
+    }
+
+    /// The structural route guard: a resolved route that contradicts
+    /// `eu_only` is held; global mode is unaffected.
+    #[test]
+    fn eu_only_route_guard_refuses_any_non_dedicated_route() {
+        assert_eq!(
+            eu_only_route_guard_violation(RoutingMode::EuOnly, &DeliveryRoute::SesShared),
+            Some(EU_ONLY_HOLD_ROUTE_GUARD)
+        );
+        assert_eq!(
+            eu_only_route_guard_violation(
+                RoutingMode::EuOnly,
+                &DeliveryRoute::Dedicated {
+                    dedicated_ip_id: "dip-1".into(),
+                    source_ip: "203.0.113.9".parse().expect("ip"),
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            eu_only_route_guard_violation(RoutingMode::Global, &DeliveryRoute::SesShared),
+            None
+        );
+    }
+
+    /// The mode lookup must never be cached and must never fail toward a
+    /// sendable route: the SQL reads the raw JSON value (so `absent` and
+    /// `corrupt` stay distinguishable) and the gate exits dispatch on a
+    /// failed read. Structural guards on the production source.
+    #[test]
+    fn routing_mode_lookup_is_fail_closed_and_never_cached() {
+        assert!(
+            TENANT_ROUTING_MODE_SQL.contains("SELECT settings->'routingMode' FROM tenants"),
+            "the lookup must read the raw settings value from the tenant row"
+        );
+        let source = include_str!("processor.rs");
+        let gate_start = source
+            .find("match self.tenant_routing_mode(&job.tenant_id).await {")
+            .expect("routing-mode gate present");
+        let gate_end = gate_start
+            + source[gate_start..]
+                .find("// F55: authoritative consent decision")
+                .expect("the consent gate follows the routing-mode gate");
+        let gate = &source[gate_start..gate_end];
+        assert!(
+            gate.contains("self.requeue_job(job, ROUTING_MODE_LOOKUP_FAILED).await?;"),
+            "a failed mode read must requeue with the named reason"
+        );
+        assert!(
+            gate.contains("return Ok(());"),
+            "a failed mode read must exit dispatch before any route planning"
+        );
+        // The gate runs BEFORE the planned-route block (ordering matters:
+        // the mode decides which routes may be considered at all).
+        let planned = source
+            .find("plan_delivery_route(routing_mode, pool.first())")
+            .expect("planned-route decision present");
+        assert!(
+            gate_start < planned,
+            "the routing-mode read must precede route planning"
+        );
+        // And it is NOT cached: the method must not touch the restriction
+        // cache or any moka cache.
+        let method_start = source
+            .find("async fn tenant_routing_mode(&self, tenant_id: &str)")
+            .expect("method present");
+        let method = &source[method_start..method_start + 2200];
+        assert!(
+            !method.contains("tenant_restriction_cache") && !method.contains(".insert("),
+            "the routing mode must be read fresh on every dispatch (a stale cached global \
+             would route EU-only mail through the shared transport)"
+        );
+    }
+
+    /// Every EU-only hold writes the queue's honest hold state with its
+    /// named reason, and the SQL carries the metadata annotation + lease
+    /// fence (mirroring the DLP hold).
+    #[test]
+    fn eu_only_hold_sql_is_the_dlp_hold_shape() {
+        assert!(EU_ONLY_HOLD_UPDATE_SQL.contains("'{eu_only_routing}'"));
+        assert!(EU_ONLY_HOLD_UPDATE_SQL.contains("status = 'deferred'"));
+        assert!(EU_ONLY_HOLD_UPDATE_SQL.contains("error_message = $1"));
+        assert!(EU_ONLY_HOLD_UPDATE_SQL
+            .contains("(metadata->>'lease_token') IS NOT DISTINCT FROM $4::text"));
+        // Distinct named reasons, none silently shared with a deferral.
+        let reasons = [
+            EU_ONLY_HOLD_NO_OWN_MTA_ROUTE,
+            EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE,
+            EU_ONLY_HOLD_DKIM_DISABLED,
+            EU_ONLY_HOLD_WARMUP_LIMIT,
+            EU_ONLY_HOLD_WARMUP_STORE,
+            EU_ONLY_HOLD_ROUTE_GUARD,
+        ];
+        let mut unique: Vec<&str> = reasons.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), reasons.len(), "hold reasons must be distinct");
+        assert!(reasons.iter().all(|reason| reason.starts_with("eu_only_")));
+        assert_eq!(ROUTING_MODE_LOOKUP_FAILED, "routing_mode_unavailable");
+    }
+
+    /// The dispatch source contains exactly one eu_only hold call site per
+    /// fail-closed arm, each exiting immediately — no arm may fall through
+    /// into transport.
+    #[test]
+    fn every_eu_only_hold_arm_exits_dispatch() {
+        let source = include_str!("processor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half");
+        assert_eq!(
+            production.matches("self.handle_eu_only_hold(").count(),
+            6,
+            "expected the six fail-closed hold sites (no route, not dispatchable, dkim, \
+             warmup limit, warmup store, route guard)"
+        );
+        assert_eq!(
+            production.matches("async fn handle_eu_only_hold(").count(),
+            1,
+            "exactly one hold implementation"
+        );
+        // Each hold site is immediately followed by the dispatch exit.
+        for site in production.split("self.handle_eu_only_hold(").skip(1) {
+            let window = &site[..site.len().min(600)];
+            assert!(
+                window.contains("return Ok(());"),
+                "each hold arm must exit dispatch after recording the hold"
+            );
+        }
+    }
+
     // ── F55: explicit consent decision result ─────────────────────────
 
     #[test]
@@ -10373,6 +11023,7 @@ mod end_to_end_db_tests {
     //! rest of the crate: unset soft-skips, configured-but-broken FAILS.
 
     use super::*;
+    use crate::test_support::DkimKeyEnv;
     use sqlx::PgPool;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12523,6 +13174,383 @@ mod end_to_end_db_tests {
         pool.close().await;
         Ok(())
     }
+
+    // ── W4A: EU-only routing — the fail-closed hold on the send path ─────
+
+    /// Set the tenant's routing mode in the settings JSON — the source of
+    /// truth the worker reads on every dispatch (`tenants.settings.routingMode`).
+    async fn set_routing_mode(pool: &PgPool, tenant_id: &str, mode: &str) {
+        sqlx::query(
+            "UPDATE tenants SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), \
+             '{routingMode}', to_jsonb($2::text)) WHERE id = $1",
+        )
+        .bind(tenant_id)
+        .bind(mode)
+        .execute(pool)
+        .await
+        .expect("set routing mode");
+    }
+
+    /// THE headline invariant, end to end: an EU-only tenant with NO own-MTA
+    /// route is HELD with the named reason, the SES transport is never
+    /// called (the spy records the opposite when the fallback is allowed —
+    /// the fail-before proof), the row stays deferred (never re-claimed,
+    /// never dead-lettered) and the hold commits its audit evidence.
+    #[tokio::test]
+    async fn eu_only_without_own_mta_route_holds_and_never_calls_ses(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_eu_only_hold").await else { return Ok(()) };
+        let fixture = seed(&pool, "eu-only-hold").await;
+        set_routing_mode(&pool, &fixture.tenant_id, "eu_only").await;
+
+        // BOTH transports are configured and BOTH are spies: a fallback to
+        // SES would be recorded, not merely absent from the configuration.
+        let ses_spy = ScriptedTransport::new(SendMode::Success);
+        let relay_spy = Arc::new(DedicatedDouble {
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig::default(),
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.dkim.enabled = true;
+        let hybrid = HybridTransport::new(
+            Some(ses_spy.clone() as Arc<dyn EmailTransport>),
+            Some(relay_spy.clone() as Arc<dyn EmailTransport>),
+        );
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect("a hold is a clean outcome, not an error");
+
+        // THE invariant: never through SES — or any other transport.
+        assert_eq!(
+            ses_spy.calls(),
+            0,
+            "an EU-only message must NEVER reach the SES transport (fail closed)"
+        );
+        assert_eq!(
+            relay_spy.calls.load(Ordering::SeqCst),
+            0,
+            "with no own-MTA route there is nothing to send through"
+        );
+
+        // Held, with the named reason in error_message + the annotation.
+        let (status, error_message): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("queue row");
+        assert_eq!(
+            status, "deferred",
+            "a held row is deferred: visible, unsent, never dead-lettered"
+        );
+        let message = error_message.unwrap_or_default();
+        assert!(
+            message.contains(EU_ONLY_HOLD_NO_OWN_MTA_ROUTE),
+            "the hold must carry its named reason: {message}"
+        );
+        assert!(
+            message.contains("never routed through"),
+            "the hold copy must state the transport guarantee: {message}"
+        );
+
+        let metadata = queue_metadata(&pool, fixture.queue_id).await;
+        let annotation = &metadata["eu_only_routing"];
+        assert_eq!(annotation["disposition"], "held");
+        assert_eq!(annotation["mode"], "eu_only");
+        assert_eq!(annotation["reason"], EU_ONLY_HOLD_NO_OWN_MTA_ROUTE);
+        assert!(
+            annotation["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("shared third-party transport is forbidden"),
+            "the annotation must name what was refused: {annotation}"
+        );
+
+        // The hold survives every poll: the claim query skips `deferred`.
+        let drained = processor.fetch_jobs(10).await.expect("drain claim");
+        assert!(
+            drained.is_empty(),
+            "a held row must not be re-claimed (no silent retry loop)"
+        );
+
+        // Audit evidence: exactly one hold row, outcome `held` (the hold and
+        // its evidence commit in ONE transaction).
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'routing.eu_only_hold' AND outcome = 'held'",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit probe");
+        assert_eq!(audits, 1, "the hold must commit its hash-chained evidence");
+
+        // Nothing was dead-lettered and no recipient event was fabricated:
+        // nothing happened to this recipient copy.
+        let dlq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1")
+                .bind(fixture.queue_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("dlq probe");
+        assert_eq!(dlq, 0, "a hold is not a dead-letter");
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM events WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("events probe");
+        assert_eq!(events, 0, "no recipient event is written for a hold");
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The positive half: an EU-only tenant WITH a graduated own-MTA
+    /// identity sends through the relay spy and NEVER through SES.
+    #[tokio::test]
+    async fn eu_only_with_own_mta_route_sends_via_the_relay_and_never_ses(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_eu_only_relay").await else { return Ok(()) };
+        // A dedicated relay send is DKIM-signed LOCALLY from the domain's
+        // encrypted key, so the fixture provisions a real keypair encrypted
+        // under the shared test master key and installs that key for the
+        // dispatch (see `crate::test_support::DkimKeyEnv`).
+        let _dkim_key = {
+            let _env_lock = crate::test_support::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            DkimKeyEnv::set()
+        };
+        let fixture = seed(&pool, "eu-only-relay").await;
+        set_routing_mode(&pool, &fixture.tenant_id, "eu_only").await;
+        let keypair = apexmail_lib::dkim::generate_dkim_keypair().expect("dkim keypair");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            &fixture.tenant_id,
+            &fixture.domain_id.to_string(),
+        );
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(keypair.private_key_pem.as_str(), &aad)
+                .expect("encrypt dkim key");
+        sqlx::query("UPDATE domains SET dkim_public_key = $2, dkim_private_key = $3 WHERE id = $1")
+            .bind(fixture.domain_id)
+            .bind(&keypair.public_key)
+            .bind(&encrypted)
+            .execute(&pool)
+            .await
+            .expect("provision domain key");
+        // A graduated (active) dedicated IP: routed dedicated without any
+        // warmup quota, so the reservation binds it synchronously.
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status) \
+             VALUES ($1, $2, '198.51.100.42', 'active')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("dedicated ip");
+
+        let ses_spy = ScriptedTransport::new(SendMode::Success);
+        let relay_spy = Arc::new(DedicatedDouble {
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig::default(),
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.dkim.enabled = true;
+        let hybrid = HybridTransport::new(
+            Some(ses_spy.clone() as Arc<dyn EmailTransport>),
+            Some(relay_spy.clone() as Arc<dyn EmailTransport>),
+        );
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor.process_job(job).await.expect("dispatch");
+
+        assert_eq!(
+            relay_spy.calls.load(Ordering::SeqCst),
+            1,
+            "the own-MTA relay carries the EU-only send"
+        );
+        assert_eq!(
+            ses_spy.calls(),
+            0,
+            "even with a route available, SES must never carry an EU-only send"
+        );
+        let (status, sent_at, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        assert!(sent_at.is_some());
+        // The sent route was the dedicated one (the acceptance ledger
+        // records the route the send actually took).
+        let (transport, requested_ip): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT transport, host(requested_source_ip) FROM sales_delivery_acceptances \
+             WHERE queue_id = $1",
+        )
+        .bind(fixture.queue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("acceptance route probe");
+        assert_eq!(
+            transport.as_deref(),
+            Some("dedicated"),
+            "the acceptance ledger must record the own-MTA dedicated route"
+        );
+        assert_eq!(requested_ip.as_deref(), Some("198.51.100.42"));
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The harshest configuration: an EU-only tenant WITH an own-MTA identity
+    /// (approved dedicated IP) but a worker that carries ONLY the SES
+    /// shared-pool transport. The planned own-MTA route is not dispatchable
+    /// here, so the message is HELD with the transport-unavailable reason —
+    /// the SES spy records zero calls even though it is the ONLY usable
+    /// transport on this worker. This is the "the SES client is never used
+    /// for an EU-only tenant" proof: the fallback exists, is configured, and
+    /// is still never taken.
+    #[tokio::test]
+    async fn eu_only_with_indispatchable_own_mta_holds_even_when_ses_is_the_only_transport(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_eu_only_ses_only").await else { return Ok(()) };
+        let fixture = seed(&pool, "eu-only-ses-only").await;
+        set_routing_mode(&pool, &fixture.tenant_id, "eu_only").await;
+        // An own-MTA identity EXISTS for the tenant (the plan resolves to the
+        // dedicated route) — but this worker has no relay transport.
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status) \
+             VALUES ($1, $2, '198.51.100.77', 'active')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("dedicated ip");
+
+        let ses_spy = ScriptedTransport::new(SendMode::Success);
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig::default(),
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.dkim.enabled = true;
+        // SES ONLY: the dedicated/relay side is deliberately absent.
+        let hybrid = HybridTransport::new(Some(ses_spy.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect("a hold is a clean outcome, not an error");
+
+        assert_eq!(
+            ses_spy.calls(),
+            0,
+            "SES is the only configured transport and must still NEVER carry an EU-only message"
+        );
+
+        let (status, error_message): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("queue row");
+        assert_eq!(status, "deferred", "held, never dead-lettered");
+        let message = error_message.unwrap_or_default();
+        assert!(
+            message.contains(EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE),
+            "the hold must carry the transport-unavailable reason: {message}"
+        );
+        let metadata = queue_metadata(&pool, fixture.queue_id).await;
+        assert_eq!(
+            metadata["eu_only_routing"]["reason"],
+            EU_ONLY_HOLD_OWN_MTA_NOT_DISPATCHABLE
+        );
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs \
+             WHERE tenant_id = $1 AND action = 'routing.eu_only_hold' AND outcome = 'held'",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit probe");
+        assert_eq!(audits, 1, "the hold commits its evidence");
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Global mode is UNCHANGED: even with a relay transport also configured,
+    /// a tenant without a dedicated IP still rides the shared route (SES here)
+    /// exactly as before this feature.
+    #[tokio::test]
+    async fn global_mode_without_dedicated_ip_still_uses_the_shared_route(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_global_shared").await else { return Ok(()) };
+        let fixture = seed(&pool, "global-shared").await;
+        // No routingMode key at all: the documented default applies.
+
+        let ses_spy = ScriptedTransport::new(SendMode::Success);
+        let relay_spy = Arc::new(DedicatedDouble {
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig::default(),
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.dkim.enabled = true;
+        let hybrid = HybridTransport::new(
+            Some(ses_spy.clone() as Arc<dyn EmailTransport>),
+            Some(relay_spy.clone() as Arc<dyn EmailTransport>),
+        );
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor.process_job(job).await.expect("dispatch");
+
+        assert_eq!(ses_spy.calls(), 1, "global mode keeps the shared route");
+        assert_eq!(
+            relay_spy.calls.load(Ordering::SeqCst),
+            0,
+            "global mode without a dedicated IP never uses the relay"
+        );
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        pool.close().await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -12535,6 +13563,7 @@ mod orchestration_tests {
 
     use super::*;
     use crate::common::ProcessorConfig;
+    use crate::test_support::DkimKeyEnv;
     use sqlx::PgPool;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -14676,34 +15705,6 @@ mod orchestration_tests {
             ..bare_orch_job()
         };
         (fixture, job)
-    }
-
-    /// 32-byte master key (hex) for the DKIM private-key envelope, installed
-    /// for the duration of one test and restored on drop.
-    const DKIM_TEST_MASTER_KEY: &str =
-        "3a1f9c0d7e2b5a4891c6f0d3e7b2a5c4891f6d0e3c7b2a5d4891c6f0e3d7b2a5";
-
-    struct DkimKeyEnv {
-        previous: Option<String>,
-    }
-
-    impl DkimKeyEnv {
-        fn set() -> Self {
-            let var = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
-            let previous = std::env::var(var).ok();
-            std::env::set_var(var, DKIM_TEST_MASTER_KEY);
-            Self { previous }
-        }
-    }
-
-    impl Drop for DkimKeyEnv {
-        fn drop(&mut self) {
-            let var = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
-            match self.previous.take() {
-                Some(value) => std::env::set_var(var, value),
-                None => std::env::remove_var(var),
-            }
-        }
     }
 
     /// With warmup throttling disabled the send still rides the dedicated

@@ -44,7 +44,8 @@ comparison_sections = [
 
 # Trailing methodology paragraph (rendered by partials/compare/table.html).
 methodology_note = """\
-<strong>Methodology:</strong> Feature rows summarize publicly documented Resend behavior. Plans compared: ApexMail self-service tiers and Resend published plans; where a comparable published measurement does not exist (for example delivery rate), the row states that it is not directly comparable. Reviewed: 2026-10-04. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing standards."""
+<strong>Methodology:</strong> Feature rows summarize publicly documented Resend behavior. Plans compared: ApexMail self-service tiers and Resend published plans; where a comparable published measurement does not exist (for example delivery rate), the row states that it is not directly comparable. Reviewed: 2026-10-04. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing standards. <strong>Migrating from Resend?</strong> The base-URL swap and the exactly mapped subset of its API are documented in the <a href="/migrate/resend/" class="text-brand-600 hover:text-brand-700 underline">Resend migration guide</a>.
+"""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

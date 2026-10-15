@@ -717,6 +717,11 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/domains", routes::domains::router())
         .nest("/v1/tracking-domains", routes::tracking_domains::router())
         .nest("/v1/retention", routes::retention::router())
+        // Tenant delivery-routing mode (`global` | `eu_only`). Activation of
+        // EU-only routing is entitlement-gated (Enterprise Cloud inclusion or
+        // the purchased `eu_only_routing` add-on); the worker enforces the
+        // mode fail-closed on the send path.
+        .nest("/v1/routing", routes::routing::router())
         .nest("/v1/templates", routes::templates::router())
         .nest("/v1/suppressions", routes::suppressions::router())
         .nest("/v1/events", routes::events::router())
@@ -735,6 +740,11 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/campaigns", routes::campaign_experiments::router())
         .nest("/v1/segments", routes::segments::router())
         .nest("/v1/contacts", routes::contacts::router())
+        // Provider-export importer: the switching customer's SendGrid /
+        // Mailgun / Postmark / Resend export (suppressions, contacts,
+        // templates) plus the read-only domains DNS report. Writes go through
+        // the canonical handlers; see routes/provider_import.
+        .nest("/v1/import", routes::provider_import::router())
         .nest("/v1/lists", routes::lists::router())
         .nest("/v1/dashboard", routes::dashboard::router())
         .nest("/v1/client-errors", routes::client_errors::router())

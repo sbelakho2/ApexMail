@@ -1085,6 +1085,226 @@ const MAX_XLSX_TOTAL_CELLS: u64 = 5_000_000;
 /// round-trip let a 10k-row file hold 10k sequential queries.
 const IMPORT_CHUNK_SIZE: usize = 500;
 
+/// The number of per-row error details an import response (or report) keeps.
+/// The COUNT is always complete; this bounds the examples so a pathological
+/// file cannot turn the response into a second copy of itself.
+pub(crate) const MAX_IMPORT_ERROR_DETAILS: usize = 50;
+
+/// One MAPPED import row, keyed by its 1-based source row for error notes —
+/// the shape both the CSV/XLSX route and the provider presets produce before
+/// handing off to the shared engine below.
+#[derive(Debug, Clone)]
+pub(crate) struct ImportContactRow {
+    pub row_number: usize,
+    pub email: String,
+    pub name: Option<String>,
+}
+
+/// A row that survived validation (`email` lowercased).
+#[derive(Debug, Clone)]
+pub(crate) struct ValidImportRow {
+    pub row_number: usize,
+    pub email: String,
+    pub name: Option<String>,
+}
+
+/// One bounded per-row note: `(row_number, message)` — callers render the
+/// "Row N: …" form (the route's wire text) or a [`crate::routes::provider_import::RowNote`].
+#[derive(Debug, Clone)]
+pub(crate) struct ImportRowNote {
+    pub row_number: usize,
+    pub message: String,
+}
+
+/// Result of the shared validation pass.
+#[derive(Debug, Default)]
+pub(crate) struct ContactImportValidation {
+    pub valid: Vec<ValidImportRow>,
+    pub invalid: i64,
+    pub duplicates: i64,
+    pub error_count: usize,
+    pub errors: Vec<ImportRowNote>,
+}
+
+impl ContactImportValidation {
+    fn note_error(&mut self, row_number: usize, message: String, max_details: usize) {
+        self.error_count += 1;
+        if self.errors.len() < max_details {
+            self.errors.push(ImportRowNote {
+                row_number,
+                message,
+            });
+        }
+    }
+}
+
+/// The shared validation pass every contact import runs (route and provider
+/// presets alike): invalid emails, in-file duplicates and the name column
+/// bound are classified HERE, so a chunk that later fails at the database can
+/// never be blamed on a row the validator would have caught.
+pub(crate) fn validate_import_rows(
+    rows: &[ImportContactRow],
+    max_details: usize,
+) -> ContactImportValidation {
+    let mut outcome = ContactImportValidation::default();
+    let mut seen_emails: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        let email = row.email.trim();
+
+        if email.is_empty() || !apexmail_lib::validation::is_valid_email(email) {
+            outcome.note_error(row.row_number, "invalid email".into(), max_details);
+            outcome.invalid += 1;
+            continue;
+        }
+
+        // Normalise to lowercase so rows are deduped against the
+        // case-sensitive unique index consistently with create_contact.
+        let email = email.to_lowercase();
+        // In-file duplicates are skipped up front: a multi-row upsert cannot
+        // touch the same conflict row twice in one statement.
+        if !seen_emails.insert(email.clone()) {
+            outcome.note_error(
+                row.row_number,
+                "duplicate email in file".into(),
+                max_details,
+            );
+            outcome.duplicates += 1;
+            continue;
+        }
+        // Name column bound (VARCHAR(512)): reject the row here so one
+        // oversized name cannot fail its entire 500-row chunk at the
+        // database (every row of a failed chunk is skipped).
+        if row
+            .name
+            .as_deref()
+            .is_some_and(|name| name.chars().count() > MAX_CONTACT_NAME_LEN)
+        {
+            outcome.note_error(
+                row.row_number,
+                format!("name exceeds {MAX_CONTACT_NAME_LEN} characters"),
+                max_details,
+            );
+            outcome.invalid += 1;
+            continue;
+        }
+        outcome.valid.push(ValidImportRow {
+            row_number: row.row_number,
+            email,
+            name: row.name.clone(),
+        });
+    }
+    outcome
+}
+
+/// Result of the chunked upsert pass.
+#[derive(Debug, Default)]
+pub(crate) struct ContactUpsertOutcome {
+    pub imported: i64,
+    pub failed: i64,
+    pub error_count: usize,
+    pub errors: Vec<ImportRowNote>,
+}
+
+/// The chunked multi-row upsert (audit J: one statement per
+/// [`IMPORT_CHUNK_SIZE`] rows; a failed chunk is counted, its raw sqlx error
+/// logged and never echoed). Existing contacts are updated, never duplicated —
+/// replaying an import is idempotent by `(tenant_id, email)`.
+pub(crate) async fn upsert_import_rows(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    valid: &[ValidImportRow],
+    max_details: usize,
+) -> ContactUpsertOutcome {
+    let mut outcome = ContactUpsertOutcome::default();
+    for chunk in valid.chunks(IMPORT_CHUNK_SIZE) {
+        let ids: Vec<Uuid> = chunk.iter().map(|_| Uuid::new_v4()).collect();
+        let emails: Vec<String> = chunk.iter().map(|row| row.email.clone()).collect();
+        let names: Vec<Option<String>> = chunk.iter().map(|row| row.name.clone()).collect();
+
+        let result = sqlx::query(
+            r#"INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
+               SELECT id, $2, email, name, 'active', NOW(), NOW()
+               FROM UNNEST($1::uuid[], $3::text[], $4::text[]) AS t(id, email, name)
+               ON CONFLICT (tenant_id, email) DO UPDATE SET
+                  name = COALESCE(EXCLUDED.name, contacts.name),
+                  updated_at = NOW()"#,
+        )
+        .bind(&ids)
+        .bind(tenant_id.to_string())
+        .bind(&emails)
+        .bind(&names)
+        .execute(db)
+        .await;
+
+        match result {
+            Ok(_) => outcome.imported += chunk.len() as i64,
+            Err(e) => {
+                // Audit J: never return the raw sqlx error string (it can
+                // leak schema details and query fragments) — log the detail,
+                // report a generic per-row message.
+                tracing::error!(error = %e, tenant_id = %tenant_id, "contact import chunk failed");
+                outcome.failed += chunk.len() as i64;
+                for row in chunk {
+                    outcome.error_count += 1;
+                    if outcome.errors.len() < max_details {
+                        outcome.errors.push(ImportRowNote {
+                            row_number: row.row_number,
+                            message: "failed to import".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    outcome
+}
+
+/// Outcome of a mapped-row import, with counts split so every caller reports
+/// the same classes. `errors` is bounded by [`MAX_IMPORT_ERROR_DETAILS`];
+/// `error_count` is always complete.
+#[derive(Debug, Default)]
+pub(crate) struct ContactImportOutcome {
+    pub imported: i64,
+    pub skipped: i64,
+    pub errors: Vec<String>,
+    pub error_count: usize,
+}
+
+/// Validate + upsert mapped contact rows — the ONE implementation behind
+/// `POST /v1/contacts/import` and the provider importer's presets (audit J
+/// contract: validate everything up front so DB failures cannot leave a
+/// half-imported batch of validated rows behind; one multi-row upsert per
+/// [`IMPORT_CHUNK_SIZE`] rows; per-row DB errors reported generically, the
+/// raw sqlx error logged, never echoed).
+pub(crate) async fn import_contact_rows(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    rows: &[ImportContactRow],
+) -> ContactImportOutcome {
+    let validation = validate_import_rows(rows, MAX_IMPORT_ERROR_DETAILS);
+    let upsert =
+        upsert_import_rows(db, tenant_id, &validation.valid, MAX_IMPORT_ERROR_DETAILS).await;
+
+    let mut errors: Vec<String> = validation
+        .errors
+        .iter()
+        .map(|note| format!("Row {}: {}", note.row_number, note.message))
+        .collect();
+    errors.extend(
+        upsert
+            .errors
+            .iter()
+            .map(|note| format!("Row {}: {}", note.row_number, note.message)),
+    );
+    errors.truncate(MAX_IMPORT_ERROR_DETAILS);
+    ContactImportOutcome {
+        imported: upsert.imported,
+        skipped: validation.invalid + validation.duplicates + upsert.failed,
+        errors,
+        error_count: validation.error_count + upsert.error_count,
+    }
+}
+
 async fn import_contacts(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -1125,92 +1345,24 @@ async fn import_contacts(
         )]));
     }
 
-    let mut imported = 0i64;
-    let mut skipped = 0i64;
-    let mut errors = Vec::new();
-
-    // Validate + normalise everything up front so DB failures cannot leave
-    // a half-imported batch of validated rows behind.
-    let mut valid_rows: Vec<(usize, String, Option<String>)> = Vec::new();
-    let mut seen_emails: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (idx, (raw_email, name)) in rows.iter().enumerate() {
-        let email = raw_email.trim();
-
-        if email.is_empty() || !apexmail_lib::validation::is_valid_email(email) {
-            errors.push(format!("Row {}: invalid email", idx + 1));
-            skipped += 1;
-            continue;
-        }
-
-        // Normalise to lowercase so rows are deduped against the
-        // case-sensitive unique index consistently with create_contact.
-        let email = email.to_lowercase();
-        // In-file duplicates are skipped up front: a multi-row upsert cannot
-        // touch the same conflict row twice in one statement.
-        if !seen_emails.insert(email.clone()) {
-            errors.push(format!("Row {}: duplicate email in file", idx + 1));
-            skipped += 1;
-            continue;
-        }
-        // Name column bound (VARCHAR(512)): reject the row here so one
-        // oversized name cannot fail its entire 500-row chunk at the
-        // database (every row of a failed chunk is skipped).
-        if name
-            .as_deref()
-            .is_some_and(|n| n.chars().count() > MAX_CONTACT_NAME_LEN)
-        {
-            errors.push(format!(
-                "Row {}: name exceeds {MAX_CONTACT_NAME_LEN} characters",
-                idx + 1
-            ));
-            skipped += 1;
-            continue;
-        }
-        valid_rows.push((idx + 1, email, name.clone()));
-    }
-
-    // Batched inserts (audit J): one multi-row upsert per 500-row chunk
-    // instead of one round-trip per row.
-    for chunk in valid_rows.chunks(IMPORT_CHUNK_SIZE) {
-        let ids: Vec<Uuid> = chunk.iter().map(|_| Uuid::new_v4()).collect();
-        let emails: Vec<String> = chunk.iter().map(|(_, email, _)| email.clone()).collect();
-        let names: Vec<Option<String>> = chunk.iter().map(|(_, _, name)| name.clone()).collect();
-
-        let result = sqlx::query(
-            r#"INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
-               SELECT id, $2, email, name, 'active', NOW(), NOW()
-               FROM UNNEST($1::uuid[], $3::text[], $4::text[]) AS t(id, email, name)
-               ON CONFLICT (tenant_id, email) DO UPDATE SET
-                  name = COALESCE(EXCLUDED.name, contacts.name),
-                  updated_at = NOW()"#,
-        )
-        .bind(&ids)
-        .bind(auth.tenant_id.to_string())
-        .bind(&emails)
-        .bind(&names)
-        .execute(&state.db)
-        .await;
-
-        match result {
-            Ok(_) => imported += chunk.len() as i64,
-            Err(e) => {
-                // Audit J: never return the raw sqlx error string (it can
-                // leak schema details and query fragments) — log the detail,
-                // report a generic per-row message.
-                tracing::error!(error = %e, tenant_id = %auth.tenant_id, "contact import chunk failed");
-                for (row_number, _, _) in chunk {
-                    errors.push(format!("Row {row_number}: failed to import"));
-                }
-                skipped += chunk.len() as i64;
-            }
-        }
-    }
+    // The mapped rows feed the shared validation + upsert engine (the same
+    // one the provider importer's presets use).
+    let mapped: Vec<ImportContactRow> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (email, name))| ImportContactRow {
+            row_number: index + 1,
+            email: email.clone(),
+            name: name.clone(),
+        })
+        .collect();
+    let outcome = import_contact_rows(&state.db, &auth.tenant_id, &mapped).await;
 
     Ok(Json(serde_json::json!({
-        "imported": imported,
-        "skipped": skipped,
-        "errors": errors.len(),
-        "error_details": if errors.len() <= 50 { errors } else { errors[..50].to_vec() },
+        "imported": outcome.imported,
+        "skipped": outcome.skipped,
+        "errors": outcome.error_count,
+        "error_details": outcome.errors,
         "format": if is_xlsx { "xlsx" } else { "csv" },
     })))
 }

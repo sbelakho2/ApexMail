@@ -54,6 +54,42 @@ pub use webhook::WebhookProcessor;
 pub(crate) mod test_support {
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// 32-byte master key (hex) for the DKIM private-key envelope, installed
+    /// for the duration of one test and restored on drop. Shared by every
+    /// module that dispatches a dedicated-route send (which DKIM-signs
+    /// LOCALLY from the domain's encrypted key).
+    pub(crate) const DKIM_TEST_MASTER_KEY: &str =
+        "3a1f9c0d7e2b5a4891c6f0d3e7b2a5c4891f6d0e3c7b2a5d4891c6f0e3d7b2a5";
+
+    /// Scoped installer for [`DKIM_TEST_MASTER_KEY`].
+    ///
+    /// Callers take [`ENV_LOCK`] around [`DkimKeyEnv::set`] and then RELEASE
+    /// the lock (not the guard): the guard captures the pre-test value and
+    /// restores it after the dispatch, while the env value stays installed
+    /// for the worker's send-time decryption.
+    pub(crate) struct DkimKeyEnv {
+        previous: Option<String>,
+    }
+
+    impl DkimKeyEnv {
+        pub(crate) fn set() -> Self {
+            let var = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
+            let previous = std::env::var(var).ok();
+            std::env::set_var(var, DKIM_TEST_MASTER_KEY);
+            Self { previous }
+        }
+    }
+
+    impl Drop for DkimKeyEnv {
+        fn drop(&mut self) {
+            let var = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
+            match self.previous.take() {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+
     /// Cross-process guard for tests that touch SHARED Redis keyspaces
     /// (`rl:send:*` admission buckets, warmup counters keyed on real IPs):
     /// nextest runs each test in its own process, so only a Postgres advisory
