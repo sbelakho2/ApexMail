@@ -37,13 +37,13 @@ from evaluate import score_golden_answer  # noqa: E402
 from sweep_currency_to_eur import sweep_text  # noqa: E402
 from prompts_v2 import PRICING_TABLE, PAYG_INFO, build_system_prompt  # noqa: E402
 
-CANONICAL = {"free": 0, "developer": 29, "pro": 89, "growth": 229, "business": 699, "enterprise cloud": 1750}
+CANONICAL = {"free": 0, "developer": 20, "pro": 89, "growth": 229, "business": 699, "enterprise cloud": 1750}
 
 
 # ── validate_pricing ───────────────────────────────────────────────────────
 
 def test_canonical_table_matches_plans_rs():
-    assert validate_pricing.PRICE_BY_PLAN["developer"] == "€29"
+    assert validate_pricing.PRICE_BY_PLAN["developer"] == "€20"
     assert validate_pricing.PRICE_BY_PLAN["pro"] == "€89"
     assert validate_pricing.PRICE_BY_PLAN["growth"] == "€229"
     assert validate_pricing.PRICE_BY_PLAN["business"] == "€699"
@@ -58,7 +58,7 @@ def test_wrong_plan_prices_are_rejected():
         f"The Developer plan costs {legacy_dev}/month and Pro is {legacy_pro}/month."
     )
     messages = " | ".join(f["message"] for f in findings)
-    assert "€29" in messages, f"Developer wrong price not flagged: {messages}"
+    assert "€20" in messages, f"Developer wrong price not flagged: {messages}"
     assert "€89" in messages, f"Pro wrong price not flagged: {messages}"
 
 
@@ -70,7 +70,7 @@ def test_dollar_symbol_is_reported_even_with_right_number():
 
 def test_correct_euro_prices_pass():
     assert validate_pricing.validate_pricing_in_text(
-        "Developer (€29/month), Pro (€89/mo), Enterprise Cloud (€1,750/month), Free plan is €0."
+        "Developer (€20/month), Pro (€89/mo), Enterprise Cloud (€1,750/month), Free plan is €0."
     ) == []
 
 
@@ -82,7 +82,7 @@ def test_sweep_fixes_wrong_prices_and_tier3_rate():
     legacy_dev = "€" + "25"
     out = sweep_text(f"**Pro ({legacy_pro}/month)** and **Developer ({legacy_dev}/month)** tier €0.50/1K", counters)
     assert "€89" in out and legacy_pro not in out
-    assert "€29" in out and legacy_dev not in out
+    assert "€20" in out and legacy_dev not in out
     assert "€0.50/1K" in out, "PAYG tier-3 per-1K rate must be 0.50, not 0.40"
 
 
@@ -177,11 +177,11 @@ def test_non_pricing_answer_has_no_price_gate():
 
 def test_found_wrong_numbers_fail_the_check():
     result = granular.check_pricing_in_response(
-        "The Pro plan is €89/month and the add-on is €30/mo.", expected_plan="pro"
+        "The Pro plan is €89/month and the add-on is €49/mo.", expected_plan="pro"
     )
     assert result["passed"], "canonical price + canonical add-on should pass"
     result = granular.check_pricing_in_response(
-        "The Pro plan is €89/month plus €99 setup.", expected_plan="pro"
+        "The Pro plan is €89/month plus €19 setup.", expected_plan="pro"
     )
     assert not result["passed"], "extra wrong number must fail (found_wrong now used)"
     assert any(v.get("wrong_number") for v in result["violations"])
@@ -212,14 +212,14 @@ def test_feature_gate_hipaa_matches_plans_rs():
 # ── generate_dataset stable splits ─────────────────────────────────────────
 
 def test_row_bucket_is_deterministic_and_order_independent():
-    row = {"text": "Developer is €29/mo", "id": 1}
+    row = {"text": "Developer is €20/mo", "id": 1}
     first = generate_dataset.row_bucket(row, 0.10, 0.10)
     assert first == generate_dataset.row_bucket(row, 0.10, 0.10)
     assert first == generate_dataset.row_bucket(row, 0.10, 0.10)
 
 
 def test_appending_rows_never_moves_existing_rows():
-    rows = [{"text": f"example {i} costs €29"} for i in range(200)]
+    rows = [{"text": f"example {i} costs €20"} for i in range(200)]
     fractions = (0.10, 0.10)
     before = {json.dumps(r, sort_keys=True): generate_dataset.row_bucket(r, *fractions) for r in rows}
     # Append 50 more rows: every original row must keep its bucket.
@@ -241,7 +241,7 @@ def test_split_fractions_hold_at_scale():
 # ── prompts_v2 ─────────────────────────────────────────────────────────────
 
 def test_pricing_table_is_canonical_euro():
-    for price in ("€0", "€29", "€89", "€229", "€699", "€1,750"):
+    for price in ("€0", "€20", "€89", "€229", "€699", "€1,750"):
         assert price in PRICING_TABLE, f"{price} missing from PRICING_TABLE"
     assert "$" not in PRICING_TABLE
     assert "$" not in PAYG_INFO
@@ -279,7 +279,7 @@ def test_validator_catches_adversarial_corpus(tmp_path: Path) -> None:
 
 def test_validator_passes_canonical_corpus(tmp_path: Path) -> None:
     good_rows = [
-        {"messages": [{"role": "assistant", "content": "Developer is €29/month; Pro €89."}]},
+        {"messages": [{"role": "assistant", "content": "Developer is €20/month; Pro €89."}]},
         {"messages": [{"role": "assistant", "content": "PAYG: €0.001 per email; overage €0.80 per 1,000."}]},
     ]
     with tempfile.TemporaryDirectory() as tmp:

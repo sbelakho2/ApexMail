@@ -4,8 +4,8 @@ Validate training data against canonical pricing and prompt catalog.
 
 Checks:
   1. Every training example uses a valid system_prompt_id from prompts_v2.py
-  2. No hallucinated prices (€29, €49, €129, etc.) appear in assistant responses
-  3. All canonical prices (Free €0, Developer €29, Pro €89, Growth €229,
+  2. No hallucinated prices (€25, €65, €129, etc.) appear in assistant responses
+  3. All canonical prices (Free €0, Developer €20, Pro €89, Growth €229,
      Business €699, Enterprise Cloud €1,750) appear in appropriate contexts
   4. No ONNX/GPU/vLLM references remain in training data
   5. ChatML format is valid (balanced <|im_start|>/<|im_end|> tags)
@@ -45,7 +45,7 @@ CANONICAL_EMAIL_LIMITS = set(EMAIL_LIMIT_BY_PLAN.values())
 CANONICAL_TEAM_LIMITS = {1, 5, 10, 25, 50}
 
 _CANDIDATE_FORBIDDEN = {
-    19, 25, 35, 39, 45, 49, 55, 59, 65, 75, 79, 99, 125, 129, 149, 150,
+    19, 25, 29, 35, 39, 45, 49, 55, 59, 65, 75, 79, 99, 125, 129, 149, 150,
     199, 249, 299, 349, 350, 399, 449, 499, 599, 649, 650, 749, 799, 899,
     999, 1199, 1299, 1499, 1999, 2499, 2999, 3999, 4999, 5999, 9999, 12999,
 }

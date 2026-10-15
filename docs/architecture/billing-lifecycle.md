@@ -17,15 +17,16 @@ The current implementation lives in the `billing-service` crate and is the sourc
 
 Plan facts (names, prices, included limits) live in the canonical
 `platform-catalog` crate (`PLANS`); `src/plans.rs` seeds the `plans` table from
-it and derives overage rates from it. The 2026-09-08 pricing review set the
-current ladder (Developer €29 / Pro €89 / Growth €229 / Business €699 /
-Enterprise Cloud from €1,750; Free 3,000/month plus a one-time 30,000-email
-launch allowance for the first 30 days).
+it and derives overage rates from it. The current ladder is Developer €20 /
+Pro €89 / Growth €229 / Business €699 / Enterprise Cloud from €1,750; Free
+3,000/month plus a one-time 30,000-email launch allowance for the first 30
+days. Compliance, Platform, Dedicated Tenant and Mailboxes are contractual
+lines outside the self-service catalog (see `docs/pricing.md`).
 
 | Plan | Plan ID | Monthly | Yearly | Emails / month | API calls / month | Rate-limit tier |
 |------|---------|---------|--------|----------------|-------------------|-----------------|
 | Free | `free` | `0` cents | `0` cents | `3,000` + one-time 30,000 launch allowance | `30,000` | `Free` |
-| Developer | `starter` | `2,900` cents | `29,000` cents | `50,000` | `500,000` | `Standard` |
+| Developer | `starter` | `2,000` cents | `20,000` cents | `50,000` | `500,000` | `Standard` |
 | Pro | `pro` | `8,900` cents | `89,000` cents | `150,000` | `2,000,000` | `Standard` |
 | Growth | `growth` | `22,900` cents | `229,000` cents | `500,000` | `5,000,000` | `High` |
 | Business | `scale` | `69,900` cents | `699,000` cents | `2,000,000` | `20,000,000` | `High` |

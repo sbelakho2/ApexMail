@@ -19,7 +19,7 @@ All prices are EUR (the 2026-09-08 pricing review):
 | Plan | Plan ID | Monthly | Annual | Generic public Checkout |
 |---|---|---:|---:|---|
 | Free | `free` | €0 | €0 | No — initial entitlement |
-| Developer | `starter` | €29 | €290/year | Yes |
+| Developer | `starter` | €20 | €200/year | Yes |
 | Pro | `pro` | €89 | €890/year | Yes |
 | Growth | `growth` | €229 | €2,290/year | Yes |
 | Business | `scale` | €699 | €6,990/year | Yes |

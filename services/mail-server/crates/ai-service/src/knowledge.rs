@@ -198,9 +198,9 @@ mod tests {
     #[test]
     fn catalog_is_the_canonical_source() {
         // The catalog IS the source now: this pins the derived table to
-        // platform-catalog and carries the pricing review's numbers as the
-        // regression record.
-        assert_eq!(plan_prices(), vec![0, 29, 89, 229, 699, 1750]);
+        // platform-catalog and carries the owner's 2026-10-15 price table as
+        // the regression record (Developer moved 29 → 20).
+        assert_eq!(plan_prices(), vec![0, 20, 89, 229, 699, 1750]);
         assert_eq!(
             email_limits(),
             vec![3_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000]

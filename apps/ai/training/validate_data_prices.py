@@ -8,8 +8,8 @@ services/mail-server/crates/platform-catalog (pinned by
 tools/check_knowledge_consistency.py):
 
   1. Every plan-adjacent price token matches the canonical table
-     (Free €0, Developer €29, Pro €89, Growth €229, Business €699,
-     Enterprise Cloud €1,750; dedicated-IP add-on €30).
+     (Free €0, Developer €20, Pro €89, Growth €229, Business €699,
+     Enterprise Cloud €1,750; dedicated-IP add-on €49 first / €69 additional).
   2. Every quoted per-email PAYG rate is one of €0.001/€0.0008/€0.0005/€0.0003
      and every per-1,000 rate is one of €1.00 / €0.80 / €0.50 / €0.30 (PAYG),
      €0.80 / €0.60 / €0.35 (plan overage) or €0.10 (API).
@@ -47,7 +47,7 @@ CANONICAL_PLAN_PRICES = {
     int(row["price"].replace("€", "").replace(",", "")): key
     for key, row in PLAN_BY_NAME.items()
 }
-ADDON_PRICES = {30}  # dedicated IP / month
+ADDON_PRICES = {49, 69}  # dedicated IP: first / each additional
 CANONICAL_PER_EMAIL_RATES = {"0.001", "0.0008", "0.0005", "0.0003"}
 # EUR per 1,000: PAYG bands (1.00/0.80/0.50/0.30), plan overage
 # (0.80/0.60/0.35) and the PAYG API rate (0.10).
@@ -142,7 +142,7 @@ def check_text(text: str, source: str) -> list[str]:
             continue
 
         # A plan-adjacent €N is either the plan's own price, or (Pro/Growth+)
-        # the €30 dedicated-IP add-on. Anything else is a wrong price.
+        # the €49/€69 dedicated-IP add-on ladder. Anything else is a wrong price.
         if "$" in m.group():
             problems.append(f"{source}: dollar price for {plan}: {m.group()!r}")
         elif int(value) != expected and not (int(value) in ADDON_PRICES and "ip" in text.lower()):

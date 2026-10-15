@@ -151,7 +151,7 @@ REPLY_LAYERS = ["deterministic", "ai"]
 #: plan price, email limit, API limit, overage rate, PAYG tier and the
 #: compliance/SDK truths. A catalog change fails here until the corpus follows.
 REQUIRED_CHAT_FACTS = [
-    "29", "89", "229", "699", "1,750",  # monthly prices
+    "20", "89", "229", "699", "1,750",  # monthly prices
     "3,000", "50,000", "150,000", "500,000", "2,000,000", "5,000,000",  # emails
     "30,000", "500,000", "2,000,000", "5,000,000", "20,000,000",  # api calls
     "0.8", "0.6", "0.35",  # overage per 1k
@@ -231,17 +231,80 @@ def _unfold(src: str) -> str:
     return re.sub(r"\s+", " ", src)
 
 
+def _strip_rust_comments(src: str) -> str:
+    """Drop Rust comments, keeping string literals intact.
+
+    The facts text is the surface the assistant may state facts FROM; a doc
+    comment is an implementation note, not a fact. Without this, a banned
+    phrase could be tripped (or a required phrase "found") by a comment such
+    as "the price table names …" (the 2026-10-15 catalog banner). The scanner
+    understands normal and raw string literals so `//` inside a URL in a
+    string is never treated as a comment.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch == "\"":
+            # normal string literal
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == "\"":
+                    j += 1
+                    break
+                j += 1
+            out.append(src[i:j])
+            i = j
+            continue
+        if ch == "r" and i + 1 < n and src[i + 1] in ('"', "#"):
+            # raw string literal r"…" / r#"…"# / r##"…"##
+            j = i + 1
+            hashes = 0
+            while j < n and src[j] == "#":
+                hashes += 1
+                j += 1
+            if j < n and src[j] == '"':
+                closing = '"' + "#" * hashes
+                end = src.find(closing, j + 1)
+                if end == -1:
+                    out.append(src[i:])
+                    break
+                j = end + len(closing)
+                out.append(src[i:j])
+                i = j
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        if src.startswith("//", i):
+            end = src.find("\n", i)
+            i = n if end == -1 else end
+            continue
+        if src.startswith("/*", i):
+            end = src.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def canonical_facts_text() -> str:
     """The CANONICAL fact sources — the catalog, the ai-service knowledge
     module (production only), the chat module's public disclosure and the
     pricing reference. A numeric token a golden requires must be findable
     here; the wider docs tree is deliberately NOT included, because prose
     mentioning a number is not the same as the assistant being allowed to
-    state it."""
+    state it. Rust comments are stripped: implementation notes are not
+    facts the assistant may state."""
     text = PRICING_DOC.read_text()
-    text += _unfold(_production_only(KNOWLEDGE.read_text()))
-    text += _unfold(_production_only(CHAT_MODULE.read_text()))
-    text += _unfold(_production_only(CATALOG.read_text()))
+    text += _unfold(_strip_rust_comments(_production_only(KNOWLEDGE.read_text())))
+    text += _unfold(_strip_rust_comments(_production_only(CHAT_MODULE.read_text())))
+    text += _unfold(_strip_rust_comments(_production_only(CATALOG.read_text())))
     return text.lower()
 
 

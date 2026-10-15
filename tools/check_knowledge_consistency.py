@@ -329,7 +329,7 @@ def _first_count(cell: str) -> int:
 
 
 def _cents_cell(cell: str) -> int:
-    """'`2,900` cents' -> 2900 (the lifecycle table states cents directly)."""
+    """'`2,000` cents' -> 2000 (the lifecycle table states cents directly)."""
     value = cell.replace("`", "").replace("cents", "").replace(",", "").strip()
     return int(float(value))
 
@@ -648,6 +648,159 @@ def check_ai_training_matches_catalog(
     if extra:
         fail(f"apps/ai training canon names unknown overage plans: {sorted(extra)}")
 
+    # The owner's contract lines and paid add-ons: the training canon restates
+    # them too (as strings), so the millicent-level facts must agree. The
+    # add-on ladder is the one the runtime estimator charges.
+    canon_addons = table.get("addons") or {}
+    addon_expectations = {
+        "dedicated_ip": ("€49", "€69"),          # first / each additional, one string
+        "inbox_placement_monitoring": ("€99",),
+        "eu_only_routing": ("€149",),
+    }
+    for key, needles in addon_expectations.items():
+        stated = str(canon_addons.get(key, ""))
+        for needle in needles:
+            if needle not in stated:
+                fail(
+                    f"apps/ai training canon addons.{key} must state {needle}: {stated!r}"
+                )
+
+
+# ── Contract lines / add-ons: catalog ↔ docs pin ──────────────────────────
+CATALOG_PRODUCT_LINES = re.compile(
+    r"ProductLineRow \{(.*?)\n    \}", re.DOTALL
+)
+CATALOG_ADDONS = re.compile(r"AddonRow \{(.*?)\n    \}", re.DOTALL)
+
+#: Add-on id -> (docs price token, docs keyword on the same line).
+ADDON_DOC_NEEDLES: dict[str, tuple[str, str]] = {
+    "dedicated_ip": ("€49", "dedicated ip"),
+    "dedicated_ip_additional": ("€69", "dedicated ip"),
+    "inbox_placement_monitoring": ("€99", "inbox placement"),
+    "eu_only_routing": ("€149", "eu-only routing"),
+    "mailboxes": ("€6", "mailbox"),
+    "mailbox_archive_journaling": ("€2", "archive"),
+}
+
+
+def check_product_lines_match_docs(catalog_src: str, docs_src: str) -> None:
+    """The catalog's PRODUCT_LINES / ADDONS / platform constants vs
+    docs/pricing.md's contract table and add-on text.
+
+    These lines are NOT PlanRows (they are sold on contract, not through
+    Checkout), so they never reach `parse_catalog`; without this pin the
+    owner's new rows could drift in the public reference unnoticed.
+    """
+    rows = {}
+    for block in CATALOG_PRODUCT_LINES.findall(catalog_src):
+        name = re.search(r'name: "([^"]+)"', block)
+        display = re.search(r'display_name: "([^"]+)"', block)
+        eur = re.search(r"price_monthly_cents: ([\d_]+)", block)
+        usd = re.search(r"price_monthly_usd_cents: ([\d_]+)", block)
+        if name and display and eur and usd:
+            rows[re.search(r'display_name: "([^"]+)"', block).group(1)] = (
+                _int(eur.group(1)) // 100,
+                _int(usd.group(1)) // 100,
+            )
+    if not rows:
+        fail("platform-catalog has no PRODUCT_LINES rows to pin against docs")
+        return
+    for display_name, (eur, usd) in rows.items():
+        # A table row whose first cell is the display name; the EUR cell must
+        # carry the canonical amount (the Enterprise Cloud row lives in the
+        # plain catalog table instead of the contract table — accept either).
+        line = next(
+            (
+                candidate
+                for candidate in docs_src.splitlines()
+                if candidate.strip().startswith("|")
+                and candidate.split("|")[1].strip() == display_name
+            ),
+            None,
+        )
+        if line is None:
+            fail(f"docs/pricing.md has no table row for the catalog line {display_name!r}")
+            continue
+        if f"€{eur:,}" not in line:
+            fail(
+                f"docs/pricing.md {display_name!r} row is missing the catalog price "
+                f"€{eur:,}"
+            )
+        if f"${usd:,}" not in line:
+            fail(
+                f"docs/pricing.md {display_name!r} row is missing the catalog USD price "
+                f"${usd:,}"
+            )
+    # Platform usage fees and the dedicated-tenant setup range.
+    platform_overage = re.search(
+        r"PLATFORM_OVERAGE_CENTS_PER_1K: i64 = ([\d_]+)", catalog_src
+    )
+    platform_usd_overage = re.search(
+        r"PLATFORM_OVERAGE_USD_CENTS_PER_1K: i64 = ([\d_]+)", catalog_src
+    )
+    platform_subaccounts = re.search(
+        r"PLATFORM_SUBACCOUNT_MONTHLY_CENTS: i64 = ([\d_]+)", catalog_src
+    )
+    setup_min = re.search(r"DEDICATED_TENANT_SETUP_MIN_CENTS: i64 = ([\d_]+)", catalog_src)
+    setup_max = re.search(r"DEDICATED_TENANT_SETUP_MAX_CENTS: i64 = ([\d_]+)", catalog_src)
+    for match, needle_tpl, label in (
+        (platform_overage, "€{v:.2f} per 1,000", "platform EUR overage"),
+        (platform_usd_overage, "${v:.2f} per 1,000", "platform USD overage"),
+        (platform_subaccounts, "€{v:.0f} per active subaccount", "platform subaccount fee"),
+    ):
+        if match is None:
+            fail(f"platform-catalog is missing the {label} constant")
+            continue
+        needle = needle_tpl.format(v=_int(match.group(1)) / 100)
+        if needle not in docs_src:
+            fail(f"docs/pricing.md is missing the catalog {label} text {needle!r}")
+    if setup_min and setup_max:
+        needle = f"€{_int(setup_min.group(1)) // 100_000}k–€{_int(setup_max.group(1)) // 100_000}k"
+        if needle not in docs_src:
+            fail(f"docs/pricing.md is missing the dedicated-tenant setup range {needle!r}")
+    else:
+        fail("platform-catalog is missing the dedicated-tenant setup bounds")
+    # Add-ons: the price token must sit on a line that names the add-on.
+    # Rows may reference a named constant (`price_cents: DEDICATED_IP_FIRST_CENTS`),
+    # so resolve const references through the catalog's own constants.
+    def _const_value(name: str) -> int | None:
+        match = re.search(rf"pub const {re.escape(name)}: i64 = (-?[\d_]+);", catalog_src)
+        return _int(match.group(1)) if match else None
+
+    addons = {}
+    for block in CATALOG_ADDONS.findall(catalog_src):
+        name = re.search(r'name: "([^"]+)"', block)
+        price = re.search(r"price_cents: ([\d_]+|[A-Z_]+)\s*,", block)
+        if not (name and price):
+            continue
+        raw = price.group(1)
+        value = _int(raw) if raw.isdigit() or "_" in raw and raw[0].isdigit() else _const_value(raw)
+        if value is not None:
+            addons[name.group(1)] = value // 100
+    if not addons:
+        fail("platform-catalog has no ADDONS rows to pin against docs")
+        return
+    for addon_id, (price, keyword) in ADDON_DOC_NEEDLES.items():
+        if addon_id not in addons:
+            fail(f"platform-catalog ADDONS is missing {addon_id!r}")
+            continue
+        expected = f"€{addons[addon_id]}"
+        if expected != price:
+            fail(
+                f"platform-catalog ADDONS {addon_id} price is €{addons[addon_id]}, "
+                f"the docs pin expects {price} — update the pin with the price"
+            )
+        lines = [
+            line.lower()
+            for line in docs_src.splitlines()
+            if keyword in line.lower() and price in line
+        ]
+        if not lines:
+            fail(
+                f"docs/pricing.md does not state {price} for {addon_id} "
+                f"(expected on a line naming {keyword!r})"
+            )
+
 
 def run_checks(root: Path) -> list[str]:
     global FAILURES
@@ -690,6 +843,7 @@ def run_checks(root: Path) -> list[str]:
             parse_catalog_payg_uppers(catalog_src),
             (root / AI_TRAINING_PRICING.relative_to(ROOT)).read_text(),
         )
+        check_product_lines_match_docs(catalog_src, docs_src)
         reexport_src = (root / SALES_KB_REEXPORT.relative_to(ROOT)).read_text()
         if "pub use sales_knowledge::*;" not in reexport_src:
             fail(
@@ -755,8 +909,8 @@ def _self_test() -> int:
     expect_failure(
         "billing seed drift vs catalog",
         BILLING_PLANS,
-        "price_monthly: 2_900,",
-        "price_monthly: 3_900,",
+        "price_monthly: 2_000,",
+        "price_monthly: 3_000,",
         "billing seed 'starter'.monthly_cents",
     )
     expect_failure(
@@ -794,7 +948,7 @@ def _self_test() -> int:
     expect_failure(
         "verifier table drift vs catalog",
         AI_VERIFIER,
-        "const CANONICAL_PRICES: &[i64] = &[0, 29, 89, 229, 699, 1750];",
+        "const CANONICAL_PRICES: &[i64] = &[0, 20, 89, 229, 699, 1750];",
         "const CANONICAL_PRICES: &[i64] = &[0, 25, 65, 150, 350, 3000];",
         "CANONICAL_PRICES",
     )
@@ -836,7 +990,7 @@ def _self_test() -> int:
     expect_failure(
         "billing lifecycle table drift vs catalog",
         BILLING_LIFECYCLE,
-        "| Developer | `starter` | `2,900` cents | `29,000` cents | `50,000` | `500,000` | `Standard` |",
+        "| Developer | `starter` | `2,000` cents | `20,000` cents | `50,000` | `500,000` | `Standard` |",
         "| Developer | `starter` | `2,500` cents | `25,000` cents | `50,000` | `500,000` | `Standard` |",
         "docs/architecture/billing-lifecycle.md 'starter'.monthly_cents",
     )
@@ -853,6 +1007,20 @@ def _self_test() -> int:
         '{"min": 10_001,   "max": 100_000,    "rate": 0.0008},',
         '{"min": 10_001,   "max": 100_000,    "rate": 0.0009},',
         "PAYG tier 1",
+    )
+    expect_failure(
+        "contract line price drift vs catalog",
+        DOCS_PRICING,
+        "| Compliance | €990/month, annual |",
+        "| Compliance | €970/month, annual |",
+        "docs/pricing.md 'Compliance' row is missing the catalog price",
+    )
+    expect_failure(
+        "add-on price drift vs catalog",
+        DOCS_PRICING,
+        "**Inbox placement monitoring** — €99/month",
+        "**Inbox placement monitoring** — €89/month",
+        "does not state €99 for inbox_placement_monitoring",
     )
     if not run_checks(ROOT):
         print("self-test PASS [pristine tree]")

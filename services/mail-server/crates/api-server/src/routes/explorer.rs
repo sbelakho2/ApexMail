@@ -890,8 +890,12 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
             ));
         }
         let total = base + overage;
-        // Dedicated IP add-on (2026-09-08 pricing): first managed IP
-        // €49/mo, each additional €69/mo — on Pro and above.
+        // Dedicated IP add-on (owner price table 2026-10-15): first managed
+        // IP €49/mo, each additional €69/mo — on Pro and above. The literals
+        // are the ones the pricing-drift gate parses as the add-on price
+        // authority (`tools/validate_pricing_drift.py`); they must equal
+        // `platform_catalog::DEDICATED_IP_FIRST_CENTS` /
+        // `DEDICATED_IP_ADDITIONAL_CENTS` (pinned by the test below).
         let ip_fee = if f.dedicated_ips > 0 && plan.name != "free" && plan.name != "starter" {
             4_900 + (f.dedicated_ips.saturating_sub(1)) * 6_900
         } else {
@@ -1320,6 +1324,12 @@ mod tests {
             .expect("dedicated ip row");
         assert_eq!(ip_row.0, "Dedicated IP (1× €49)");
         assert_eq!(ip_row.1, "€49.00");
+
+        // The ladder literals above ARE the catalog add-on prices: the
+        // owner's 2026-10-15 table (€49 first / €69 additional) and the
+        // catalog must never diverge.
+        assert_eq!(platform_catalog::DEDICATED_IP_FIRST_CENTS, 4_900);
+        assert_eq!(platform_catalog::DEDICATED_IP_ADDITIONAL_CENTS, 6_900);
 
         // Several IPs itemise the first + additional pricing.
         let pro_many = CalculatorForm {

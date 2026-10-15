@@ -22,7 +22,7 @@
       "category": "plans",
       "kind": "answer",
       "must_contain": [
-        "29",
+        "20",
         "50,000",
         "500,000"
       ],
@@ -832,9 +832,10 @@
       "category": "chat-plans",
       "question": "What is the monthly price of the Developer plan?",
       "must_contain": [
-        "€29"
+        "€20"
       ],
       "must_not_contain": [
+        "29",
         "19"
       ],
       "live": {

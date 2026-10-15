@@ -45,8 +45,8 @@ PLANS: Dict[str, Dict] = {
     },
     "starter": {
         "display_name": "Developer",
-        "price_cents": 2_900,
-        "price_yearly_cents": 29_000,
+        "price_cents": 2_000,
+        "price_yearly_cents": 20_000,
         "emails": 50_000,
         "api_calls": 500_000,
         "domains": 5,
@@ -128,6 +128,53 @@ PAYG_TIERS_MILLICENTS: Tuple[Tuple[int, int], ...] = (
 # parsed and pinned by the drift validator.
 DEDICATED_IP_FIRST_CENTS = 4_900      # €49/month for the first dedicated IP
 DEDICATED_IP_ADDITIONAL_CENTS = 6_900  # €69/month per additional dedicated IP
+
+# ── Contract / non-subscription lines (owner's price table) ──────────────
+# These are the sales-led revenue lines from the owner's pricing plan. They
+# are NOT part of the executable subscription catalog (`PLANS` above): they
+# are quoted on an annual contract and cannot be bought through public
+# Checkout. EUR cents are the billing storage unit; the USD figures are the
+# published dollar list price for the same line (documentation only — this
+# module stays EUR-only for every value a gate reads).
+CONTRACT_LINES_CENTS: Dict[str, Dict[str, int]] = {
+    "compliance": {
+        "eur_monthly_cents": 99_000,        # €990/month, annual
+        "usd_monthly_cents": 109_000,       # USD 1,090/month
+    },
+    "platform": {
+        "eur_monthly_base_cents": 99_000,   # €990/month base
+        "usd_monthly_base_cents": 109_000,  # USD 1,090/month base
+        # €0.30 / USD 0.35 per 1,000 emails above 1M: millicents per email.
+        "eur_overage_millicents_per_email_above_1m": 30,
+        "usd_overage_millicents_per_email_above_1m": 35,
+        # €1 / USD 1 per active subaccount above 100.
+        "eur_subaccount_cents": 100,
+        "usd_subaccount_cents": 100,
+    },
+    "dedicated_tenant": {
+        "eur_monthly_from_cents": 400_000,      # from €4,000/month
+        "usd_monthly_from_cents": 450_000,      # from USD 4,500/month
+        "minimum_term_months": 12,
+        "setup_eur_min_cents": 1_000_000,       # €10,000
+        "setup_eur_max_cents": 4_000_000,       # €40,000
+    },
+    "mailboxes": {
+        "eur_seat_monthly_cents": 600,          # €6/seat/month
+        "usd_seat_monthly_cents": 700,          # USD 7/seat/month
+        "minimum_seats": 10,
+        "eur_archive_seat_monthly_cents": 200,  # +€2/seat archive and journaling
+        "usd_archive_seat_monthly_cents": 200,  # +USD 2/seat
+    },
+    "inbox_placement_monitoring": {
+        "eur_monthly_cents": 9_900,             # €99/month
+        "usd_monthly_cents": 10_900,            # USD 109/month
+    },
+    "eu_only_routing": {
+        "eur_monthly_cents": 14_900,            # €149/month on Pro and above
+        "usd_monthly_cents": 16_500,            # USD 165/month
+        "minimum_plan": "pro",
+    },
+}
 
 # ── Per-plan overage (cents per 1,000 emails) ────────────────────────────
 # 1 millicent = 1/1000 cent, so 80 millicents/email = 0.08 cents/email =

@@ -6,7 +6,7 @@ services/mail-server/crates/platform-catalog/src/lib.rs `PLANS`, which
 billing-service/src/plans.rs seeds and delegates to since the 2026-09-08
 pricing review). Pinned by tools/validate_pricing_drift.py:
   Free: €0 3,000 emails/month (+ a one-time 30,000-email launch allowance), 30,000 API
-  Developer: €29 50K emails, 500K API
+  Developer: €20 50K emails, 500K API
   Pro: €89 150K emails, 2M API
   Growth: €229 500K emails, 5M API
   Business: €699 2M emails, 20M API
@@ -47,7 +47,7 @@ EXTENDED_PROFILES = {
     "starter_healthy_v2": {
         "account_id": "acct_8f3k2j",
         "plan_name": "Developer",
-        "plan_price": "29",
+        "plan_price": "20",
         "emails_sent": "36,240",
         "email_limit": "50,000",
         "api_calls": "285,000",
@@ -63,7 +63,7 @@ EXTENDED_PROFILES = {
     "starter_webhook_dead_v2": {
         "account_id": "acct_wh7d3k",
         "plan_name": "Developer",
-        "plan_price": "29",
+        "plan_price": "20",
         "emails_sent": "24,800",
         "email_limit": "50,000",
         "api_calls": "178,000",
@@ -77,7 +77,7 @@ EXTENDED_PROFILES = {
     "starter_dmarc_quarantine": {
         "account_id": "acct_dmq2k3",
         "plan_name": "Developer",
-        "plan_price": "29",
+        "plan_price": "20",
         "emails_sent": "18,500",
         "email_limit": "50,000",
         "api_calls": "95,000",

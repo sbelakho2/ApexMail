@@ -19,14 +19,30 @@ Adyen confirms the subscription through a verified webhook.
 | Plan ID | Plan | Monthly | Annual | Emails/month | API calls/month | Domains | Team members | Event retention | Dedicated IPs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
 | `free` | Free | €0 | €0 | 3,000 | 30,000 | 1 | 1 | 7 days | — |
-| `starter` | Developer | €29 | €290/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
+| `starter` | Developer | €20 | €200/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
 | `pro` | Pro | €89 | €890/year | 150,000 | 2,000,000 | 25 | 10 | 60 days | Add-on eligible |
 | `growth` | Growth | €229 | €2,290/year | 500,000 | 5,000,000 | 100 | 25 | 90 days | 1 included |
 | `scale` | Business | €699 | €6,990/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 1 included |
 | `enterprise` | Enterprise Cloud | €1,750 | €17,500/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 3 included |
 
-Annual billing is 10 times the monthly price: two months free, or roughly a
-17% discount compared with twelve monthly payments.
+Annual billing is 10 times the monthly price: two months free, or a 16.7%
+saving compared with twelve monthly payments.
+
+## Contract and non-subscription lines
+
+These lines are sold on an annual contract (or an approved billing setup for
+mailboxes and PAYG); they are not part of the self-service subscription
+catalog above and cannot be bought through public Checkout. EUR is the
+billing currency; the USD figure is the published list price for the same
+line.
+
+| Line | EUR | USD | What it includes |
+|---|---:|---:|---|
+| Compliance | €990/month, annual | $1,090/month | 1M emails, EU-only routing included, dedicated IP, DORA/NIS2 evidence pack, GDPR processor pack (DPA, SCCs, sub-processor list), signed routing receipts, 1-year audit log, SSO |
+| Enterprise Cloud | €1,750/month, annual | $1,950/month | 5M emails, 3 dedicated IPs, legal hold and archive, quarterly evidence refresh, EU-only routing included |
+| Platform | €990/month base + €0.30 per 1,000 above 1M + €1 per active subaccount above 100 | $1,090 base + $0.35 per 1,000 + $1 per subaccount | Subaccounts with isolated reputation, white-label tracking and bounce domains, provisioning API |
+| Dedicated Tenant | from €4,000/month (12-month minimum, €10k–€40k setup) | from $4,500/month | Single-tenant stack on dedicated hardware, EU region by default, 5M recipients, 2 managed IPs, named owner, monthly review |
+| Mailboxes | €6 per seat/month (10-seat minimum); archive and journaling +€2 per seat | $7 per seat/month; +$2 archive | EU-hosted IMAP/SMTP mailboxes on the existing stack, autoconfig, spam and AV filtering, self-serve import |
 
 ## Public purchase paths
 
@@ -91,6 +107,14 @@ additional) on Pro and above — the same ladder the runtime estimator charges
 includes one (a second is assigned where traffic justifies it), and Enterprise
 Cloud includes up to three based on architecture. Provisioning remains subject
 to operational and abuse controls.
+
+Two further add-ons are sold on eligible plans (USD list prices in
+parentheses):
+
+- **Inbox placement monitoring** — €99/month ($109/month) on any paid plan;
+  per-plan deliverability telemetry and provider postmaster signals.
+- **EU-only routing** — €149/month ($165/month) on Pro and above; sends
+  through ApexMail's own EU MTAs, with no third-party transport.
 
 ## Billing lifecycle
 

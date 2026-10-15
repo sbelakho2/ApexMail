@@ -249,7 +249,7 @@ else:
 print("\n=== 13. Class Distribution Analysis ===")
 PLAN_KEYWORDS = {
     "free": ["free", "trial", "€0"],
-    "developer": ["developer", "€29"],
+    "developer": ["developer", "€20"],
     "pro": ["pro", "€89"],
     "growth": ["growth", "€229"],
     "business": ["business", "€699"],

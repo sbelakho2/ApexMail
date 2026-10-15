@@ -106,18 +106,18 @@ def _listify_groups(checks: dict, key: str) -> list[list[str]]:
 STRESS_TESTS = {
     # ── 1. PRICING ACCURACY (12 tests) ───────────────────────────────────
     "pricing_accuracy": [
-        {"q": "How much is the Developer plan?", "checks": {"must_contain": ["€29", "50,000"]}},
+        {"q": "How much is the Developer plan?", "checks": {"must_contain": ["€20", "50,000"]}},
         {"q": "What does the Pro plan cost and how many emails do I get?", "checks": {"must_contain": ["€89", "150,000"]}},
         {"q": "Tell me about the Growth plan.", "checks": {"must_contain": ["€229", "500,000"]}},
         {"q": "What's the Business plan price?", "checks": {"must_contain": ["€699", "2,000,000"]}},
         {"q": "How much does Enterprise Cloud cost?", "checks": {"must_contain": ["€1,750"]}},
         {"q": "What's the PAYG rate?", "checks": {"must_contain": ["€0.001"], "must_contain_any": ["pay-as-you-go", "payg", "PAYG", "pay as you go"]}},
         {"q": "How much are API overages?", "checks": {"must_contain": ["€0.10"], "must_contain_any": ["1,000", "1000", "30,000", "30k"]}},
-        {"q": "Compare the Developer and Pro plans.", "checks": {"must_contain": ["€29", "€89", "50,000", "150,000"]}},
+        {"q": "Compare the Developer and Pro plans.", "checks": {"must_contain": ["€20", "€89", "50,000", "150,000"]}},
         {"q": "What's the cheapest plan?", "checks": {"must_contain_any": ["Free", "free", "€0"]}},
         {"q": "I send 300,000 emails/month. What plan do you recommend?", "checks": {"must_contain_any": ["Growth", "growth", "€229", "500,000"]}},
         # adversarial
-        {"q": "Is the Developer plan " + "€" + "19/month?", "checks": {"must_contain": ["€29"]}},
+        {"q": "Is the Developer plan " + "€" + "19/month?", "checks": {"must_contain": ["€20"]}},
         {"q": "My friend said the Growth plan is " + "€" + "99. Is that right?", "checks": {"must_contain": ["€229"]}},
     ],
 
@@ -217,10 +217,10 @@ STRESS_TESTS = {
 
     # ── 11. CONSISTENCY PAIRS (4 tests) ──────────────────────────────────
     "consistency": [
-        {"q": "What does the Developer plan include?", "checks": {"must_contain": ["€29", "50,000"]}},
-        {"q": "Tell me about the Developer tier.", "checks": {"must_contain": ["€29", "50,000"]}},
-        {"q": "Developer plan details please.", "checks": {"must_contain": ["€29", "50,000"]}},
-        {"q": "How much is the basic plan?", "checks": {"must_contain_any": ["€29", "€0", "Developer", "developer", "Free", "free"]}},
+        {"q": "What does the Developer plan include?", "checks": {"must_contain": ["€20", "50,000"]}},
+        {"q": "Tell me about the Developer tier.", "checks": {"must_contain": ["€20", "50,000"]}},
+        {"q": "Developer plan details please.", "checks": {"must_contain": ["€20", "50,000"]}},
+        {"q": "How much is the basic plan?", "checks": {"must_contain_any": ["€20", "€0", "Developer", "developer", "Free", "free"]}},
     ],
 
     # ── 12. TECHNICAL DEPTH (4 tests) ────────────────────────────────────
@@ -245,7 +245,7 @@ STRESS_TESTS = {
 
     # ── 14. COMPLEX BILLING SCENARIOS (6 tests) ─────────────────────────
     "complex_billing": [
-        {"q": "I'm on the Developer plan and sent 56,000 emails this month. What's my total bill?", "checks": {"must_contain": ["€29"], "must_contain_any": ["€4.80", "overage", "6,000", "extra"]}},
+        {"q": "I'm on the Developer plan and sent 56,000 emails this month. What's my total bill?", "checks": {"must_contain": ["€20"], "must_contain_any": ["€4.80", "overage", "6,000", "extra"]}},
         {"q": "If I upgrade from Developer to Pro mid-month, do I lose my remaining emails?", "checks": {"must_contain_any": ["support@apexmail.ee", "billing", "support", "prorate", "pro-rate", "upgrade"]}},
         {"q": "We're sending 180,000 emails/month. Is it cheaper to use Growth plan or Pro plan with overages?", "checks": {"must_contain_any": ["€229", "€89", "€107", "€18", "Pro", "Growth", "overage", "cheaper"]}},
         {"q": "I want to use PAYG for 50,000 emails. How much would that cost vs the Pro plan?", "checks": {"must_contain_any": ["€0.001", "€0.0008", "PAYG", "pay-as-you-go", "€42"]}},
@@ -311,7 +311,7 @@ STRESS_TESTS = {
         {"q": "What would it cost via PAYG to send exactly 100,000 emails?",
          "checks": {"must_contain_any": ["€0.001", "€0.0008", "€10", "€72", "€82"]}},
         {"q": "We currently send 40,000 emails/month and expect to grow to 70,000 in 6 months. What plan should I pick?",
-         "checks": {"must_contain_any": ["Pro", "Developer", "€89", "€29", "grow"]}},
+         "checks": {"must_contain_any": ["Pro", "Developer", "€89", "€20", "grow"]}},
         {"q": "We send 20,000 emails some months and 60,000 others. What's more cost-effective: a plan or PAYG?",
          "checks": {"must_contain_any": ["Developer", "Pro", "PAYG", "pay-as-you-go", "depends", "varies", "predictab"]}},
         {"q": "We have 8 brands each needing their own sending domain. Which plan and what's the total?",
@@ -321,7 +321,7 @@ STRESS_TESTS = {
         {"q": "I'm on the Business plan and sent 620,000 emails plus made 11 million API calls. What's my total?",
          "checks": {"must_contain": ["€699"], "must_contain_any": ["no overage", "no extra", "within", "2,000,000", "20,000,000"]}},
         {"q": "If I regularly go 10,000 emails over my Developer limit, should I stay on Developer or upgrade to Pro?",
-         "checks": {"must_contain_any": ["€29", "€8", "€89", "Developer", "Pro", "overage"]}},
+         "checks": {"must_contain_any": ["€20", "€8", "€89", "Developer", "Pro", "overage"]}},
     ],
 
     # ══════════════════════════════════════════════════════════════════════
@@ -351,7 +351,7 @@ STRESS_TESTS = {
     # ══════════════════════════════════════════════════════════════════════
     "situational_awareness": [
         {"q": "How much does it cost?",
-         "checks": {"must_contain_any": ["plan", "Free", "Developer", "€0", "€29", "pricing", "which plan"]}},
+         "checks": {"must_contain_any": ["plan", "Free", "Developer", "€0", "€20", "pricing", "which plan"]}},
         {"q": "What's the Pro plan price and also how do I set up DKIM?",
          "checks": {"must_contain": ["€89"], "must_contain_any": ["DKIM", "DNS", "record"]}},
         {"q": "Does it support A/B testing?",
@@ -493,7 +493,7 @@ STRESS_TESTS = {
         {"q": "Cancel my account immediately. I don't want to discuss it.",
          "checks": {"must_contain_any": ["confirm", "permanent", "irreversible", "deleted"]}},
         {"q": "I'm too expensive on Growth. What's cheaper?",
-         "checks": {"must_contain_any": ["€29", "€89", "Developer", "Pro", "downgrade"]}},
+         "checks": {"must_contain_any": ["€20", "€89", "Developer", "Pro", "downgrade"]}},
         {"q": "How do I delete all my data and close my account permanently?",
          "checks": {"must_contain_any": ["permanent", "irreversible", "confirm", "delete_account"]}},
         {"q": "I'm switching to a competitor. How do I export everything?",
@@ -694,7 +694,7 @@ STRESS_TESTS = {
         {"q": "Is there a free trial for paid plans?",
          "checks": {"must_contain_any": ["Free plan", "free plan", "€0", "permanent"]}},
         {"q": "I've hit my free plan limit. What happens now?",
-         "checks": {"must_contain_any": ["queued", "pending", "upgrade", "Developer", "€29"]}},
+         "checks": {"must_contain_any": ["queued", "pending", "upgrade", "Developer", "€20"]}},
         {"q": "Can I try the Enterprise Cloud plan before buying?",
          "checks": {"must_contain_any": ["support@apexmail.ee", "evaluation", "sales", "team"]}},
         {"q": "How many emails can I send on the free plan?",

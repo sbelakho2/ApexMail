@@ -462,9 +462,20 @@ impl SalesKnowledgeBase {
         ));
 
         // ── Deployment capabilities ─────────────────────────────────────
+        // Commercial terms DERIVED from the canonical catalog's product
+        // line (the same row the pricing pages quote from), never a second
+        // hardcoded number.
+        let tenant_line = platform_catalog::product_line_by_name("dedicated_tenant")
+            .expect("canonical catalog product line");
         facts.push(fact(
             "KB-DEPLOY-DEDICATED-TENANT",
-            "A dedicated tenant is offered from EUR 4,000/month with a 12-month minimum term, one-time setup of EUR 10,000-40,000, EEA region and an enhanced SLA.",
+            &format!(
+                "A dedicated tenant is offered from EUR {}/month with a {}-month minimum term, one-time setup of EUR {}-{}, EEA region and an enhanced SLA.",
+                thousands(tenant_line.price_monthly_cents / 100),
+                tenant_line.minimum_contract_months,
+                thousands(platform_catalog::DEDICATED_TENANT_SETUP_MIN_CENTS / 100),
+                thousands(platform_catalog::DEDICATED_TENANT_SETUP_MAX_CENTS / 100),
+            ),
             KnowledgeStatus::Verified,
             v2,
             None,
@@ -723,6 +734,50 @@ mod tests {
         }
     }
 
+    /// The KB plan facts are DERIVED from `platform-catalog` and state the
+    /// owner's 2026-10-15 table: Developer EUR 20 (was 29), Pro EUR 89,
+    /// Growth EUR 229, Business EUR 699, Enterprise Cloud from EUR 1,750;
+    /// the Dedicated Tenant line from EUR 4,000 with a 12-month minimum.
+    #[test]
+    fn kb_plan_facts_match_the_canonical_catalog() {
+        let kb = SalesKnowledgeBase::canonical();
+        for (id, plan) in [
+            ("KB-PLAN-DEVELOPER", "starter"),
+            ("KB-PLAN-PRO", "pro"),
+            ("KB-PLAN-GROWTH", "growth"),
+            ("KB-PLAN-BUSINESS", "scale"),
+        ] {
+            let fact = kb.get(id).unwrap_or_else(|| panic!("{id} exists"));
+            let row = platform_catalog::plan_by_name(plan).expect("canonical catalog row");
+            let monthly = format!("EUR {} per month", row.price_monthly_cents / 100);
+            let yearly = format!("EUR {} per year", row.price_yearly_cents / 100);
+            assert!(
+                fact.claim.contains(&monthly),
+                "{id}: claim {} must state `{monthly}`",
+                fact.claim
+            );
+            assert!(
+                fact.claim.contains(&yearly),
+                "{id}: claim {} must state `{yearly}`",
+                fact.claim
+            );
+        }
+        let enterprise = kb.get("KB-PLAN-ENTERPRISE").expect("fact exists");
+        assert!(
+            enterprise.claim.contains("from EUR 1750 per month"),
+            "{}",
+            enterprise.claim
+        );
+        let tenant = kb.get("KB-DEPLOY-DEDICATED-TENANT").expect("fact exists");
+        assert!(
+            tenant.claim.contains("from EUR 4,000/month"),
+            "{}",
+            tenant.claim
+        );
+        assert!(tenant.claim.contains("12-month minimum"));
+        assert!(tenant.claim.contains("EUR 10,000-40,000"));
+    }
+
     #[test]
     fn external_copy_facts_are_only_verified_in_date_and_allowed() {
         let now = at(2026, 9, 11);
@@ -877,7 +932,7 @@ mod tests {
             "99.99% uptime",
             "commits to 99.9% monthly uptime"
         ));
-        assert!(!numbers_are_grounded("EUR 5 plan", "the plan is EUR 29"));
+        assert!(!numbers_are_grounded("EUR 5 plan", "the plan is EUR 20"));
     }
 
     #[test]

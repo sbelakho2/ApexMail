@@ -121,8 +121,8 @@ TEST_CASES = [
     {
         "name": "pricing_developer",
         "input": "What's the Developer plan price?",
-        "required": ["€29", "50,000 emails", "500,000 API"],
-        "forbidden": [_legacy(25), "€20", "250,000 API"],
+        "required": ["€20", "50,000 emails", "500,000 API"],
+        "forbidden": [_legacy(25), _legacy(29), "250,000 API"],
     },
     {
         "name": "pricing_business",
@@ -158,7 +158,7 @@ TEST_CASES = [
         "name": "dedicated_ip_addon",
         "input": "How much is a dedicated IP add-on?",
         "required": ["€49", "Pro"],
-        "forbidden": ["€30", "€20"],
+        "forbidden": ["€30", _legacy(19)],
     },
     {
         "name": "dedicated_ip_included",
@@ -169,7 +169,7 @@ TEST_CASES = [
     {
         "name": "annual_discount",
         "input": "Is there a discount for annual billing?",
-        "required": ["annual", "17%", "€290"],
+        "required": ["annual", "16.7%", "€200"],
         "forbidden": ["20%", "3 months"],
     },
     {

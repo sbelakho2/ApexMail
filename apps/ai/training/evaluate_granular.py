@@ -62,9 +62,13 @@ PAYG_TIERS = [
 ]
 
 # Overages are per-plan (platform-catalog overage_millicents_per_email).
-ADDON_PRICES = {30}  # dedicated IP add-on (€30/mo) is canonical
-FORBIDDEN_PRICES = [19, 25, 35, 39, 45, 49, 55, 59, 65, 75, 79, 99, 125, 129,
-                    149, 150, 199, 249, 299, 349, 350, 399, 449, 499, 599, 649,
+ADDON_PRICES = {49, 69}  # dedicated IP add-on ladder (€49 first / €69 additional) is canonical
+# Known hallucinated figures seen in evaluations. 49, 99 and 149 were retired
+# from this list when they became PUBLISHED prices (dedicated IP €49 first /
+# €69 additional, inbox placement €99/mo, EU-only routing €149/mo) — a
+# legitimate answer may quote them.
+FORBIDDEN_PRICES = [19, 25, 35, 39, 45, 55, 59, 65, 75, 79, 125, 129,
+                    150, 199, 249, 299, 349, 350, 399, 449, 499, 599, 649,
                     650, 749, 799, 899, 999, 1199, 1299, 1499, 1999, 2499, 2999,
                     3999, 4999, 5999, 9999, 12999]
 
@@ -380,7 +384,7 @@ def main() -> None:
             model_responses = {}
             for question, expected_plan, expected_price in PRICING_TESTS:
                 messages = [
-                    {"role": "system", "content": "You are the ApexMail email assistant. Answer concisely with exact pricing from the pricing table. The pricing table is: Free=€0/3K (plus a one-time 30K-email launch allowance in the first 30 days), Developer=€29/50K, Pro=€89/150K, Growth=€229/500K, Business=€699/2M, Enterprise Cloud=€1,750/5M."},
+                    {"role": "system", "content": "You are the ApexMail email assistant. Answer concisely with exact pricing from the pricing table. The pricing table is: Free=€0/3K (plus a one-time 30K-email launch allowance in the first 30 days), Developer=€20/50K, Pro=€89/150K, Growth=€229/500K, Business=€699/2M, Enterprise Cloud=€1,750/5M."},
                     {"role": "user", "content": question},
                 ]
                 prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)

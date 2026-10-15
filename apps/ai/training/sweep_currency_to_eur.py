@@ -8,13 +8,13 @@ services/mail-server/crates/platform-catalog (pinned by
 tools/check_knowledge_consistency.py):
 
     Free €0 / 3,000 emails / 30,000 API (plus a one-time 30,000-email launch
-    allowance in the first 30 days), Developer €29 / 50,000 / 500,000,
+    allowance in the first 30 days), Developer €20 / 50,000 / 500,000,
     Pro €89 / 150,000 / 2,000,000, Growth €229 / 500,000 / 5,000,000,
     Business €699 / 2,000,000 / 20,000,000,
     Enterprise Cloud €1,750 / 5,000,000 / unlimited API,
     PAYG €0.001/€0.0008/€0.0005/€0.0003,
     overage €0.80 (Developer) / €0.60 (Pro) / €0.35 (Growth+) per 1,000,
-    dedicated IP add-on €30/mo, annual = 10× monthly.
+    dedicated IP add-on €49 first / €69 each additional, annual = 10× monthly.
 
 The pre-2026-09-08 table (Free 30,000 / Starter €25 / Pro €65 / Growth
 €150 / Scale €350 / Enterprise €3,000) is what this script migrates FROM.

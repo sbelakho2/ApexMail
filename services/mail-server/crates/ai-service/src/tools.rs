@@ -9,7 +9,9 @@
 use crate::{defense, domain_dns::DomainDnsStore};
 use serde::{Deserialize, Serialize};
 
-const OVERAGE_RATE: f64 = 0.40;
+// Pricing tool facts are DERIVED from `platform_catalog` (see
+// `canonical_tool_plan` / `canonical_price_eur`) — there is deliberately no
+// flat overage-rate constant here: the per-plan ladder lives in the catalog.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RBAC: Role-Based Access Control for tool execution
@@ -289,6 +291,45 @@ fn fmt_number(n: i64) -> String {
 // Existing tools (6 — unchanged except tenant isolation wrapper)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Canonical plan facts for the pricing tools — DERIVED from
+/// `platform-catalog` (the source the billing runtime seeds from), never a
+/// second hardcoded price table. Returns `(base EUR, included emails,
+/// EUR per 1,000 extra emails)` for the six self-serve/contract plans the
+/// tools answer for. `None` means "unknown plan" (including PAYG, which has
+/// no base fee/overage shape).
+fn canonical_tool_plan(plan_name: &str) -> Option<(i64, i64, f64)> {
+    match plan_name {
+        "free" | "starter" | "pro" | "growth" | "scale" | "enterprise" => {}
+        _ => return None,
+    }
+    let row = platform_catalog::plan_by_name(plan_name)?;
+    // millicents/email → EUR per 1,000 emails: 80 millicents/email =
+    // €0.80/1K (the same conversion the knowledge module uses).
+    let overage_per_1k = row
+        .overage_millicents_per_email
+        .map(|m| m as f64 / 100.0)
+        .unwrap_or(0.0);
+    Some((
+        row.price_monthly_cents / 100,
+        row.email_limit,
+        overage_per_1k,
+    ))
+}
+
+/// Canonical monthly price in whole EUR, or `None` for unknown plans.
+fn canonical_price_eur(plan_name: &str) -> Option<i64> {
+    platform_catalog::plan_by_name(plan_name).map(|row| row.price_monthly_cents / 100)
+}
+
+/// Render a limit for the JSON tools: -1 (unlimited) → "Unlimited".
+fn limit_json(value: i64) -> serde_json::Value {
+    if value < 0 {
+        serde_json::Value::String("Unlimited".to_string())
+    } else {
+        serde_json::json!(value)
+    }
+}
+
 fn calculate_overage(params: &serde_json::Value) -> serde_json::Value {
     let plan_name = params
         .get("plan")
@@ -298,19 +339,12 @@ fn calculate_overage(params: &serde_json::Value) -> serde_json::Value {
         .get("emails_sent")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let plan = match plan_name {
-        "free" => (0, 30_000),
-        "starter" => (25, 50_000),
-        "pro" => (65, 150_000),
-        "growth" => (150, 500_000),
-        "scale" => (350, 2_000_000),
-        "enterprise" => (3_000, 5_000_000),
-        _ => return serde_json::json!({"error": format!("unknown plan: {plan_name}")}),
+    let Some((price, limit, overage_rate_per_1k)) = canonical_tool_plan(plan_name) else {
+        return serde_json::json!({"error": format!("unknown plan: {plan_name}")});
     };
-    let (price, limit) = plan;
     let over = std::cmp::max(0, emails_sent - limit);
     let blocks = ((over as f64) / 1000.0).ceil() as i64;
-    let overage = (blocks as f64 * OVERAGE_RATE * 100.0).round() / 100.0;
+    let overage = (blocks as f64 * overage_rate_per_1k * 100.0).round() / 100.0;
     serde_json::json!({"plan":plan_name,"base_price":price,"limit":limit,"sent":emails_sent,"over":over,"blocks":blocks,"overage":overage,"total":price as f64 + overage,"within_limit":emails_sent<=limit})
 }
 
@@ -345,21 +379,12 @@ fn calculate_payg(params: &serde_json::Value) -> serde_json::Value {
 fn compare_plans(params: &serde_json::Value) -> serde_json::Value {
     let a = params.get("plan_a").and_then(|v| v.as_str()).unwrap_or("");
     let b = params.get("plan_b").and_then(|v| v.as_str()).unwrap_or("");
-    // Short lookup by name only for price diff
-    let prices = [
-        ("free", 0),
-        ("starter", 25),
-        ("pro", 65),
-        ("growth", 150),
-        ("scale", 350),
-        ("enterprise", 3000),
-    ];
-    let get_price = |n: &str| prices.iter().find(|(nm, _)| *nm == n).map(|p| p.1);
-    let (pa_price, pb_price) = match (get_price(a), get_price(b)) {
+    // Canonical catalog prices (whole EUR) — the billing runtime's numbers.
+    let (pa_price, pb_price) = match (canonical_price_eur(a), canonical_price_eur(b)) {
         (Some(pa), Some(pb)) => (pa, pb),
         _ => return serde_json::json!({"error":format!("unknown plan: {a} or {b}")}),
     };
-    let diff: i32 = pb_price - pa_price;
+    let diff: i64 = pb_price - pa_price;
     serde_json::json!({
         "plan_a":{"name":a,"price":pa_price},"plan_b":{"name":b,"price":pb_price},
         "price_diff":diff,
@@ -372,47 +397,74 @@ fn get_plan_details(params: &serde_json::Value) -> serde_json::Value {
         .get("plan")
         .and_then(|v| v.as_str())
         .unwrap_or("starter");
-    let details = serde_json::json!({
-        "free": {"price":0,"emails":30000,"api_calls":300000,"team":1,"domains":1,"retention":7,
-            "webhooks":0,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
-            "white_label":false,"sto":false,"ab_testing":false,"audit_logs":false,"sla_credit":0,"support":"community","contacts":10000},
-        "starter": {"price":25,"emails":50000,"api_calls":500000,"team":5,"domains":5,"retention":30,
-            "webhooks":5,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
-            "white_label":false,"sto":false,"ab_testing":false,"audit_logs":false,"sla_credit":0,"support":"email","contacts":10000},
-        "pro": {"price":65,"emails":150000,"api_calls":2000000,"team":10,"domains":25,"retention":60,
-            "webhooks":10,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
-            "white_label":false,"sto":true,"ab_testing":false,"audit_logs":false,"sla_credit":0,"support":"email","contacts":50000},
-        "growth": {"price":150,"emails":500000,"api_calls":5000000,"team":25,"domains":100,"retention":90,
-            "webhooks":25,"dedicated_ips":1,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
-            "white_label":false,"sto":true,"ab_testing":true,"audit_logs":true,"sla_credit":0,"support":"priority","contacts":200000},
-        "scale": {"price":350,"emails":2000000,"api_calls":20000000,"team":50,"domains":"Unlimited","retention":365,
-            "webhooks":50,"dedicated_ips":3,"sso":true,"hipaa":false,"soc2":false,"byoip":false,
-            "white_label":false,"sto":true,"ab_testing":true,"audit_logs":true,"sla_credit":10,"support":"priority_async","contacts":500000},
-        "enterprise": {"price":3000,"emails":5000000,"api_calls":"Unlimited","team":"Unlimited","domains":"Unlimited","retention":730,
-            "webhooks":"Unlimited","dedicated_ips":10,"sso":true,"hipaa":false,"soc2":false,"byoip":true,
-            "white_label":true,"sto":true,"ab_testing":true,"audit_logs":true,"sla_credit":25,"support":"dedicated","contacts":"Unlimited"},
-    });
+    let Some(row) = platform_catalog::plan_by_name(n) else {
+        return serde_json::json!({"error":format!("unknown plan: {n}")});
+    };
+    // Presentation extras the catalog does not model (domain/webhook
+    // allowances, SLA credit, support tier, contact ceilings). EVERY
+    // catalog-owned fact — price, email/API quotas, team, retention,
+    // capability flags, subaccount ceiling, dedicated-IP inclusions — is
+    // derived below so this tool can never quote a second price table.
+    let mut details = match n {
+        "free" => {
+            serde_json::json!({"domains":1,"webhooks":0,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
+            "white_label":false,"sto":false,"sla_credit":0,"support":"community","contacts":10000})
+        }
+        "starter" => {
+            serde_json::json!({"domains":5,"webhooks":5,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
+            "white_label":false,"sto":false,"sla_credit":0,"support":"email","contacts":10000})
+        }
+        "pro" => {
+            serde_json::json!({"domains":25,"webhooks":10,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
+            "white_label":false,"sto":true,"sla_credit":0,"support":"email","contacts":50000})
+        }
+        "growth" => {
+            serde_json::json!({"domains":100,"webhooks":25,"dedicated_ips":1,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
+            "white_label":false,"sto":true,"sla_credit":0,"support":"email","contacts":200000})
+        }
+        "scale" => {
+            serde_json::json!({"domains":"Unlimited","webhooks":50,"dedicated_ips":1,"sso":true,"hipaa":false,"soc2":false,"byoip":false,
+            "white_label":false,"sto":true,"sla_credit":30,"support":"priority","contacts":500000})
+        }
+        "enterprise" => {
+            serde_json::json!({"domains":"Unlimited","webhooks":"Unlimited","dedicated_ips":3,"sso":true,"hipaa":false,"soc2":false,"byoip":true,
+            "white_label":true,"sto":true,"sla_credit":25,"support":"dedicated","contacts":"Unlimited"})
+        }
+        "payg" => {
+            serde_json::json!({"domains":5,"webhooks":0,"dedicated_ips":0,"sso":false,"hipaa":false,"soc2":false,"byoip":false,
+            "white_label":false,"sto":false,"sla_credit":0,"support":"email","contacts":10000})
+        }
+        _ => return serde_json::json!({"error":format!("unknown plan: {n}")}),
+    };
+    if let Some(obj) = details.as_object_mut() {
+        obj.insert(
+            "price".into(),
+            serde_json::json!(row.price_monthly_cents / 100),
+        );
+        obj.insert(
+            "price_usd".into(),
+            serde_json::json!(row.price_monthly_usd_cents / 100),
+        );
+        obj.insert("emails".into(), limit_json(row.email_limit));
+        obj.insert("api_calls".into(), limit_json(row.api_call_limit));
+        obj.insert("team".into(), limit_json(row.max_team_members));
+        obj.insert(
+            "retention".into(),
+            serde_json::json!(row.max_retention_days),
+        );
+        obj.insert("ab_testing".into(), serde_json::json!(row.ab_testing));
+        obj.insert("audit_logs".into(), serde_json::json!(row.audit_logs));
+        obj.insert("subaccounts".into(), limit_json(row.max_subaccounts));
+    }
     details
-        .get(n)
-        .cloned()
-        .unwrap_or(serde_json::json!({"error":format!("unknown plan: {n}")}))
 }
 
 fn get_price_diff(params: &serde_json::Value) -> serde_json::Value {
     let a = params.get("plan_a").and_then(|v| v.as_str()).unwrap_or("");
     let b = params.get("plan_b").and_then(|v| v.as_str()).unwrap_or("");
-    let prices = [
-        ("free", 0),
-        ("starter", 25),
-        ("pro", 65),
-        ("growth", 150),
-        ("scale", 350),
-        ("enterprise", 3000),
-    ];
-    let get = |n: &str| prices.iter().find(|(nm, _)| *nm == n).map(|p| p.1);
-    match (get(a), get(b)) {
+    match (canonical_price_eur(a), canonical_price_eur(b)) {
         (Some(pa), Some(pb)) => {
-            let d: i32 = pb - pa;
+            let d: i64 = pb - pa;
             serde_json::json!({"plan_a":a,"plan_a_price":pa,"plan_b":b,"plan_b_price":pb,"diff":d,"label":if d>0{format!("\u{20ac}{d} more")}else if d<0{format!("\u{20ac}{} less", d.abs())}else{"Same price".into()}})
         }
         _ => serde_json::json!({"error":format!("unknown plan: {a} or {b}")}),
@@ -827,13 +879,16 @@ mod tests {
     // Existing tool tests
     #[test]
     fn test_overage_pro_160k() {
+        // Pro €89 + 10,000 overage emails at the canonical €0.60/1K = €95.
         let r = calculate_overage(&serde_json::json!({"plan":"pro","emails_sent":160000}));
-        assert_eq!(r["total"], 69.0);
+        assert_eq!(r["total"], 95.0);
     }
     #[test]
     fn test_overage_starter_210k() {
+        // Developer €20 + 160,000 overage emails at the canonical €0.80/1K
+        // = €20 + €128 = €148.
         let r = calculate_overage(&serde_json::json!({"plan":"starter","emails_sent":210000}));
-        assert_eq!(r["total"], 89.0);
+        assert_eq!(r["total"], 148.0);
     }
     #[test]
     fn test_payg_50k() {
@@ -877,14 +932,64 @@ mod tests {
     #[test]
     fn price_diff_labels_use_euro_not_dollar() {
         let r = compare_plans(&serde_json::json!({"plan_a":"starter","plan_b":"pro"}));
-        assert_eq!(r["label"], "\u{20ac}40 more");
+        // Canonical catalog prices: Developer €20 → Pro €89 = €69 more.
+        assert_eq!(r["label"], "\u{20ac}69 more");
         let r = get_price_diff(&serde_json::json!({"plan_a":"scale","plan_b":"pro"}));
-        assert_eq!(r["label"], "\u{20ac}285 less");
+        // Business €699 → Pro €89 = €610 less.
+        assert_eq!(r["label"], "\u{20ac}610 less");
         let rendered = serde_json::to_string(&r).unwrap();
         assert!(
             !rendered.contains('$'),
             "euro outputs must not use $ labels"
         );
+    }
+
+    /// The pricing tools are DERIVED from `platform-catalog`: base prices,
+    /// limits and the overage ladder must equal the catalog rows (the old
+    /// literal table quoted Starter 25 / Pro 65 / Growth 150 / Scale 350 /
+    /// Enterprise 3000 with a flat €0.40 overage for every plan).
+    #[test]
+    fn pricing_tools_quote_the_canonical_catalog() {
+        for row in platform_catalog::PLANS {
+            let eur = row.price_monthly_cents / 100;
+            let details = get_plan_details(&serde_json::json!({"plan": row.name}));
+            assert_eq!(details["price"], eur, "{}: tool price", row.name);
+            assert_eq!(
+                details["price_usd"],
+                row.price_monthly_usd_cents / 100,
+                "{}: tool USD price",
+                row.name
+            );
+            assert_eq!(
+                details["emails"],
+                limit_json(row.email_limit),
+                "{}: tool email limit",
+                row.name
+            );
+
+            let diff =
+                get_price_diff(&serde_json::json!({"plan_a": row.name, "plan_b": "enterprise"}));
+            assert_eq!(
+                diff["plan_a_price"], eur,
+                "{}: price-diff base price",
+                row.name
+            );
+        }
+
+        // Overage quotes the plan's canonical ladder rate, not a flat €0.40:
+        // 1,000 extra Developer emails cost €0.80.
+        let r = calculate_overage(&serde_json::json!({"plan":"starter","emails_sent":51_000}));
+        assert_eq!(r["base_price"], 20);
+        assert_eq!(r["limit"], 50_000);
+        assert_eq!(r["overage"], 0.80);
+        let r = calculate_overage(&serde_json::json!({"plan":"pro","emails_sent":151_000}));
+        assert_eq!(r["overage"], 0.60);
+        let r = calculate_overage(&serde_json::json!({"plan":"growth","emails_sent":501_000}));
+        assert_eq!(r["overage"], 0.35);
+        // Free has no automatic overage → €0 even past the recurring limit.
+        let r = calculate_overage(&serde_json::json!({"plan":"free","emails_sent":10_000}));
+        assert_eq!(r["limit"], 3_000);
+        assert_eq!(r["overage"], 0.0);
     }
 
     #[test]
@@ -918,8 +1023,9 @@ mod tests {
     }
     #[test]
     fn test_price_diff() {
+        // Business €699 → Enterprise Cloud €1,750 = €1,051 (canonical catalog).
         let r = get_price_diff(&serde_json::json!({"plan_a":"scale","plan_b":"enterprise"}));
-        assert_eq!(r["diff"], 2650);
+        assert_eq!(r["diff"], 1051);
     }
 
     // Tenant and RBAC isolation tests
@@ -981,7 +1087,8 @@ mod tests {
             role: None,
         };
         let r = execute_tool(&call, "any-tenant", &crate::tools::Role::Owner);
-        assert_eq!(r["total"], 65.0);
+        // Pro €89/month, 100,000 sent within the 150,000 included volume.
+        assert_eq!(r["total"], 89.0);
     }
 
     // New support tool tests
@@ -1394,7 +1501,8 @@ mod tests {
             role: None,
         };
         let r = execute_tool_with_authoritative_data(&pricing, &caller, None).await;
-        assert_eq!(r["total"], 69.0);
+        // Pro €89 + 10,000 overage emails at the canonical €0.60/1K = €95.
+        assert_eq!(r["total"], 95.0);
 
         // A viewer passes the DNS RBAC gate but still cannot assert another
         // tenant: identity binding is independent of role.

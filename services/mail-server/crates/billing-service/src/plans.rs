@@ -62,12 +62,22 @@ pub struct PlanSeed {
     pub description: &'static str,
     pub price_monthly: i64,
     pub price_yearly: i64,
+    /// Monthly USD list price in cents — the published USD ladder (the
+    /// checkout still charges the EUR `price_monthly`). Mirrors
+    /// `platform_catalog::PlanRow::price_monthly_usd_cents`.
+    pub price_monthly_usd: i64,
+    /// Annual USD list price in cents (10 monthly payments).
+    pub price_yearly_usd: i64,
     pub email_limit: i64,
     pub api_call_limit: i64,
     pub sort_order: i32,
     pub features: PlanFeatures,
 }
 
+/// Admin/operator plan upsert input. The USD list columns
+/// (`price_monthly_usd` / `price_yearly_usd`, migration 253) are catalog
+/// facts owned by the seed/reconcile paths, not part of this input: a new
+/// custom plan defaults them to 0 and an existing row keeps its value.
 #[derive(Debug, Clone)]
 pub struct PlanUpsertInput {
     pub name: String,
@@ -104,10 +114,12 @@ pub struct PlanUpsertInput {
 /// tenants instead get a ONE-TIME 30-day launch allowance of 30,000
 /// emails (enforced in usage.rs `resolve_plan_limits`: the effective
 /// ceiling is 30,000 for the tenant's first 30 days, then 3,000).
-/// Paid tiers were repositioned so Growth/Business are no longer
-/// suspiciously inexpensive for what they include (dedicated IPs,
-/// SSO, SLA): Developer €29, Pro €89, Growth €229, Business €699,
-/// Enterprise Cloud from €1,750.
+///
+/// 2026-10-15 owner price table: Developer €20 (was €29), Pro €89 /
+/// $99, Growth €229 / $249, Business €699 / $749, Enterprise Cloud
+/// from €1,750 / $1,950 — the USD ladder rides the same seeds
+/// (`price_monthly_usd` / `price_yearly_usd`, migration 253) and annual
+/// is 10 monthly payments in both currencies.
 fn free_plan_seed() -> PlanSeed {
     PlanSeed {
         name: "free",
@@ -115,6 +127,8 @@ fn free_plan_seed() -> PlanSeed {
         description: "3,000 emails/month forever + a one-time 30,000-email launch allowance for your first 30 days",
         price_monthly: 0,
         price_yearly: 0,
+        price_monthly_usd: 0,
+        price_yearly_usd: 0,
         email_limit: 3_000,
         api_call_limit: 30_000,
         sort_order: 0,
@@ -137,8 +151,10 @@ pub fn default_plans() -> Vec<PlanSeed> {
             name: "starter",
             display_name: "Developer",
             description: "For developers wiring up production email",
-            price_monthly: 2_900,
-            price_yearly: 29_000,
+            price_monthly: 2_000,
+            price_yearly: 20_000,
+            price_monthly_usd: 2_000,
+            price_yearly_usd: 20_000,
             email_limit: 50_000,
             api_call_limit: 500_000,
             sort_order: 1,
@@ -161,6 +177,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             description: "For scaling teams with custom tracking needs",
             price_monthly: 8_900,
             price_yearly: 89_000,
+            price_monthly_usd: 9_900,
+            price_yearly_usd: 99_000,
             email_limit: 150_000,
             api_call_limit: 2_000_000,
             sort_order: 2,
@@ -189,6 +207,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             description: "For teams that need advanced deliverability features",
             price_monthly: 22_900,
             price_yearly: 229_000,
+            price_monthly_usd: 24_900,
+            price_yearly_usd: 249_000,
             email_limit: 500_000,
             api_call_limit: 5_000_000,
             sort_order: 3,
@@ -225,6 +245,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             description: "For high-volume senders needing isolation",
             price_monthly: 69_900,
             price_yearly: 699_000,
+            price_monthly_usd: 74_900,
+            price_yearly_usd: 749_000,
             email_limit: 2_000_000,
             api_call_limit: 20_000_000,
             sort_order: 4,
@@ -273,6 +295,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 "From €1,750/month — annual-contract platform plan for large organizations",
             price_monthly: 175_000,
             price_yearly: 1_750_000,
+            price_monthly_usd: 195_000,
+            price_yearly_usd: 1_950_000,
             email_limit: 5_000_000,
             api_call_limit: -1,
             sort_order: 5,
@@ -324,6 +348,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             description: "Flexible usage-based pricing for variable volume",
             price_monthly: 0,
             price_yearly: 0,
+            price_monthly_usd: 0,
+            price_yearly_usd: 0,
             email_limit: -1,
             api_call_limit: -1,
             sort_order: 6,
@@ -435,7 +461,7 @@ pub fn is_builtin_plan_name(plan_name: &str) -> bool {
 /// Live P1 (capability flips): the BOOLEAN capability flags are catalog
 /// facts — the grant list a plan sells — not operator preferences. Every
 /// [`billing_entitlements::FeatureKey`] value in the seed is overlaid onto
-/// the existing `features` object (`$11` names exactly those keys), so an
+/// the existing `features` object (`$13` names exactly those keys), so an
 /// environment whose rows predate a capability wave gains the new grants on
 /// re-seed instead of keeping them false forever (which made the new
 /// capabilities ungrantable by plan). `max_subaccounts` rides the same
@@ -445,19 +471,23 @@ pub fn is_builtin_plan_name(plan_name: &str) -> bool {
 const SEED_PLAN_UPSERT_SQL: &str = r#"
         INSERT INTO plans (
             id, name, display_name, description,
-            price_monthly, price_yearly, email_limit, api_call_limit,
+            price_monthly, price_yearly, price_monthly_usd, price_yearly_usd,
+            email_limit, api_call_limit,
             features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
             $4, $5, $6, $7,
-            $8, NULL, NULL, true, $9, $10, $10
+            $8, $9,
+            $10, NULL, NULL, true, $11, $12, $12
         )
         ON CONFLICT (name) DO UPDATE SET
             display_name  = EXCLUDED.display_name,
             description   = EXCLUDED.description,
             price_monthly = COALESCE(plans.price_monthly, EXCLUDED.price_monthly),
             price_yearly  = COALESCE(plans.price_yearly, EXCLUDED.price_yearly),
+            price_monthly_usd = COALESCE(plans.price_monthly_usd, EXCLUDED.price_monthly_usd),
+            price_yearly_usd  = COALESCE(plans.price_yearly_usd, EXCLUDED.price_yearly_usd),
             email_limit   = COALESCE(plans.email_limit, EXCLUDED.email_limit),
             api_call_limit= COALESCE(plans.api_call_limit, EXCLUDED.api_call_limit),
             features      = CASE
@@ -466,13 +496,13 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
                     (
                         SELECT jsonb_object_agg(flag.key, flag.value)
                         FROM jsonb_each(EXCLUDED.features) AS flag(key, value)
-                        WHERE flag.key = ANY($11)
+                        WHERE flag.key = ANY($13)
                     ),
                     '{}'::jsonb
                 )
             END,
             sort_order    = EXCLUDED.sort_order,
-            updated_at    = $10
+            updated_at    = $12
         RETURNING
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
@@ -481,7 +511,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
         "#;
 
 /// The catalog-owned keys overlaid onto an existing row's `features` by
-/// [`SEED_PLAN_UPSERT_SQL`] (`$11`): every [`billing_entitlements::FeatureKey`]
+/// [`SEED_PLAN_UPSERT_SQL`] (`$13`): every [`billing_entitlements::FeatureKey`]
 /// boolean field plus `max_subaccounts`.
 ///
 /// `max_subaccounts` is a capability fact, not an operator preference: the
@@ -527,6 +557,8 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
         .bind(seed.description)
         .bind(seed.price_monthly)
         .bind(seed.price_yearly)
+        .bind(seed.price_monthly_usd)
+        .bind(seed.price_yearly_usd)
         .bind(seed.email_limit)
         .bind(seed.api_call_limit)
         .bind(&features_json)
@@ -554,26 +586,30 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
 const RECONCILE_PLAN_UPSERT_SQL: &str = r#"
         INSERT INTO plans (
             id, name, display_name, description,
-            price_monthly, price_yearly, email_limit, api_call_limit,
+            price_monthly, price_yearly, price_monthly_usd, price_yearly_usd,
+            email_limit, api_call_limit,
             features, adyen_plan_code_monthly, adyen_plan_code_yearly,
             is_active, sort_order, created_at, updated_at, price_cents
         ) VALUES (
             'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
             $4, $5, $6, $7,
-            $8, NULL, NULL, true, $9, $10, $10, CAST($4 AS INTEGER)
+            $8, $9,
+            $10, NULL, NULL, true, $11, $12, $12, CAST($4 AS INTEGER)
         )
         ON CONFLICT (name) DO UPDATE SET
             display_name   = EXCLUDED.display_name,
             description    = EXCLUDED.description,
             price_monthly  = EXCLUDED.price_monthly,
             price_yearly   = EXCLUDED.price_yearly,
+            price_monthly_usd = EXCLUDED.price_monthly_usd,
+            price_yearly_usd  = EXCLUDED.price_yearly_usd,
             email_limit    = EXCLUDED.email_limit,
             api_call_limit = EXCLUDED.api_call_limit,
             features       = EXCLUDED.features,
             price_cents    = EXCLUDED.price_cents,
             sort_order     = EXCLUDED.sort_order,
             is_active      = true,
-            updated_at     = $10
+            updated_at     = $12
         "#;
 
 /// Outcome of one [`reconcile_plans_with_catalog`] pass.
@@ -627,6 +663,8 @@ pub async fn reconcile_plans_with_catalog(
         description: String,
         price_monthly: i64,
         price_yearly: i64,
+        price_monthly_usd: i64,
+        price_yearly_usd: i64,
         email_limit: i64,
         api_call_limit: i64,
         sort_order: i32,
@@ -635,6 +673,7 @@ pub async fn reconcile_plans_with_catalog(
     }
     let existing: Vec<ExistingPlanRow> = sqlx::query_as(
         "SELECT name, display_name, description, price_monthly, price_yearly,
+                price_monthly_usd, price_yearly_usd,
                 email_limit, api_call_limit, sort_order, is_active, features
          FROM plans
          WHERE name = ANY($1)",
@@ -655,6 +694,8 @@ pub async fn reconcile_plans_with_catalog(
                     || row.description != seed.description
                     || row.price_monthly != seed.price_monthly
                     || row.price_yearly != seed.price_yearly
+                    || row.price_monthly_usd != seed.price_monthly_usd
+                    || row.price_yearly_usd != seed.price_yearly_usd
                     || row.email_limit != seed.email_limit
                     || row.api_call_limit != seed.api_call_limit
                     || row.sort_order != seed.sort_order
@@ -672,6 +713,8 @@ pub async fn reconcile_plans_with_catalog(
             .bind(seed.description)
             .bind(seed.price_monthly)
             .bind(seed.price_yearly)
+            .bind(seed.price_monthly_usd)
+            .bind(seed.price_yearly_usd)
             .bind(seed.email_limit)
             .bind(seed.api_call_limit)
             .bind(&features_json)
@@ -1351,6 +1394,8 @@ mod tests {
         for column in [
             "price_monthly",
             "price_yearly",
+            "price_monthly_usd",
+            "price_yearly_usd",
             "email_limit",
             "api_call_limit",
         ] {
@@ -1370,7 +1415,7 @@ mod tests {
             "WHEN plans.features IS NULL THEN EXCLUDED.features",
             "plans.features || COALESCE(",
             "jsonb_each(EXCLUDED.features)",
-            "flag.key = ANY($11)",
+            "flag.key = ANY($13)",
         ] {
             assert!(
                 SEED_PLAN_UPSERT_SQL.contains(fragment),
@@ -2414,6 +2459,16 @@ mod catalog_drift_tests {
                 seed.name
             );
             assert_eq!(
+                seed.price_monthly_usd, row.price_monthly_usd_cents,
+                "{}: monthly USD list price drifted from the canonical catalog",
+                seed.name
+            );
+            assert_eq!(
+                seed.price_yearly_usd, row.price_yearly_usd_cents,
+                "{}: yearly USD list price drifted",
+                seed.name
+            );
+            assert_eq!(
                 seed.email_limit, row.email_limit,
                 "{}: email_limit",
                 seed.name
@@ -2439,6 +2494,54 @@ mod catalog_drift_tests {
             platform_catalog::PLANS.len(),
             "plan count drifted"
         );
+    }
+
+    /// The owner's 2026-10-15 price table pinned through the RUNTIME seeds,
+    /// EUR and USD: Developer 20/20, Pro 89/99, Growth 229/249,
+    /// Business 699/749, Enterprise Cloud 1,750/1,950 — annual = 10×
+    /// monthly in both currencies.
+    #[test]
+    fn seeds_pin_the_owner_price_table_in_both_currencies() {
+        let cases: &[(&str, i64, i64, i64, i64)] = &[
+            // plan, EUR monthly, USD monthly, EUR yearly, USD yearly
+            ("free", 0, 0, 0, 0),
+            ("starter", 2_000, 2_000, 20_000, 20_000),
+            ("pro", 8_900, 9_900, 89_000, 99_000),
+            ("growth", 22_900, 24_900, 229_000, 249_000),
+            ("scale", 69_900, 74_900, 699_000, 749_000),
+            ("enterprise", 175_000, 195_000, 1_750_000, 1_950_000),
+            ("payg", 0, 0, 0, 0),
+        ];
+        for (name, eur_m, usd_m, eur_y, usd_y) in cases {
+            let seed = builtin_plan_seed(Some(name));
+            assert_eq!(seed.price_monthly, *eur_m, "{name}: EUR monthly");
+            assert_eq!(seed.price_monthly_usd, *usd_m, "{name}: USD monthly");
+            assert_eq!(seed.price_yearly, *eur_y, "{name}: EUR yearly");
+            assert_eq!(seed.price_yearly_usd, *usd_y, "{name}: USD yearly");
+        }
+    }
+
+    /// The USD columns land in the schema through migration 253 (the ONLY
+    /// migration that may carry them): guarded additive ALTERs plus the
+    /// absolute backfill of the owner's USD table. Applied migrations are
+    /// never edited, so this test also freezes the file's values.
+    #[test]
+    fn migration_253_adds_and_backfills_the_usd_price_columns() {
+        let migration = include_str!("../../../migrations/253_plan_usd_prices.sql");
+        for fragment in [
+            "price_monthly_usd BIGINT NOT NULL DEFAULT 0",
+            "price_yearly_usd BIGINT NOT NULL DEFAULT 0",
+            "('starter',     2000,      20000)",
+            "('pro',         9900,      99000)",
+            "('growth',      24900,     249000)",
+            "('scale',       74900,     749000)",
+            "('enterprise',  195000,    1950000)",
+        ] {
+            assert!(
+                migration.contains(fragment),
+                "migration 253 must carry `{fragment}` (the owner's USD table)"
+            );
+        }
     }
 
     #[test]

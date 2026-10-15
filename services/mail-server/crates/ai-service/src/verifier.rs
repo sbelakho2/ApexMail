@@ -25,10 +25,12 @@ use std::collections::HashSet;
 // what the model was told.
 // Canonical values DERIVED from `platform-catalog` (the source the billing
 // runtime seeds from) via the knowledge module — the verifier can never
-// bless a stale price or reject a real one. Overage: Developer €0.80/1K,
-// Pro €0.60/1K, Growth/Business €0.35/1K, Enterprise contractual €0.35
-// default; PAYG API overage €0.10/1K calls.
-const CANONICAL_PRICES: &[i64] = &[0, 29, 89, 229, 699, 1750];
+// bless a stale price or reject a real one. Owner price table 2026-10-15:
+// Developer €20 (was €29), Pro €89, Growth €229, Business €699,
+// Enterprise Cloud €1,750. Overage: Developer €0.80/1K, Pro €0.60/1K,
+// Growth/Business €0.35/1K, Enterprise contractual €0.35 default; PAYG API
+// overage €0.10/1K calls.
+const CANONICAL_PRICES: &[i64] = &[0, 20, 89, 229, 699, 1750];
 const CANONICAL_EMAIL_LIMITS: &[i64] = &[3_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000];
 /// Canonical per-unit rates: PAYG per-email tiers, then the subscription
 /// overage rates per plan (Developer/Pro/Growth/Business/Enterprise) and
@@ -2061,7 +2063,7 @@ mod tests {
         let v = ResponseVerifier::new();
         let long_form = "The Free plan is \u{20ac}0 per month, with 3,000 emails per month, \
              30,000 API calls per month, 1 team member and 7 days event retention.\n\
-             The Developer plan is \u{20ac}29 per month, with 50,000 emails per month, \
+             The Developer plan is \u{20ac}20 per month, with 50,000 emails per month, \
              500,000 API calls per month, 5 team members and 30 days event retention.\n\
              The Pro plan is \u{20ac}89 per month, with 150,000 emails per month, \
              2,000,000 API calls per month, 10 team members and 60 days event retention.\n\
@@ -2082,7 +2084,7 @@ mod tests {
         );
 
         let compact = "The published plans are: Free is \u{20ac}0 per month with 3,000 \
-             emails per month; Developer is \u{20ac}29 per month with 50,000 emails per \
+             emails per month; Developer is \u{20ac}20 per month with 50,000 emails per \
              month; Pro is \u{20ac}89 per month with 150,000 emails per month; Growth is \
              \u{20ac}229 per month with 500,000 emails per month; Business is \u{20ac}699 \
              per month with 2,000,000 emails per month; Enterprise Cloud is \u{20ac}1750 \

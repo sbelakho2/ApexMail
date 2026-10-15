@@ -528,7 +528,7 @@ pub fn seed_feature_registry() -> FeatureRegistry {
         definition: "Managed dedicated IP assignment with reverse DNS, warm-up schedule, reputation monitoring, blocklist monitoring, feedback loops, and controlled replacement policy. Eligibility review required.".into(),
         status: FeatureStatus::Planned,
         minimum_plan: FeaturePlan::AddOn,
-        additional_limits: Some("€49/mo first IP, €69/mo additional. ~100k monthly volume recommended.".into()),
+        additional_limits: Some("€49/mo first IP, €69/mo each additional (USD $55/$75); Pro and above. ~100k monthly volume recommended.".into()),
         api_endpoint: None,
         smtp_behavior: Some("Dedicated IP pool assignment".into()),
         dashboard_route: Some("/dashboard/ips".into()),
@@ -571,8 +571,12 @@ pub fn seed_feature_registry() -> FeatureRegistry {
         customer_outcome: "Organise sending under separate subaccounts with independent quotas, domains, and API keys.".into(),
         definition: "Hierarchical subaccount model with per-subaccount quotas, domain isolation, API key scoping, and consolidated billing. Subaccount users cannot access other subaccounts.".into(),
         status: FeatureStatus::Planned,
-        minimum_plan: FeaturePlan::Growth,
-        additional_limits: Some("Growth: 5 subaccounts. Business: 25. Enterprise: 50.".into()),
+        // Sold on Business and Enterprise Cloud only — the canonical
+        // catalog sells `subaccounts` on `scale` (Business, ceiling 10) and
+        // `enterprise` (unlimited); the earlier "Growth 5 / Business 25 /
+        // Enterprise 50" text contradicted the runtime seeds.
+        minimum_plan: FeaturePlan::Business,
+        additional_limits: Some("Business: 10 subaccounts. Enterprise Cloud: unlimited.".into()),
         api_endpoint: Some("POST /v1/subaccounts".into()),
         smtp_behavior: None,
         dashboard_route: Some("/dashboard/subaccounts".into()),

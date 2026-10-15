@@ -7,7 +7,9 @@
 //! Only plans with `dedicated_ip = true` in their feature set may
 //! allocate IPs. IPs within the plan's `dedicated_ip_count` are
 //! marked `included` (no charge); additional IPs are `pending_charge`
-//! and billed at $30/mo via the billing service.
+//! and billed at the canonical add-on ladder — €49/mo for the first
+//! address, €69/mo for each additional (USD $55/$75) — via the billing
+//! service.
 //!
 //! ## Hetzner Cloud integration
 //!
@@ -93,7 +95,10 @@ pub struct AllocationResponse {
     pub included: i32,
     pub active: i64,
     pub add_on_available: bool,
+    /// First dedicated IP: the canonical catalog price (€49/mo = 4,900).
     pub add_on_price_monthly: i32,
+    /// Each additional dedicated IP (€69/mo = 6,900).
+    pub add_on_price_additional_monthly: i32,
 }
 
 /// Top-level envelope matching the console's `ListResponse`.
@@ -133,8 +138,13 @@ pub struct ListIpsQuery {
     pub offset: i64,
 }
 
-/// Dedicated IP add-on price in cents/month (matches billing service constant).
-const ADD_ON_PRICE_CENTS: i32 = 3000;
+/// Dedicated IP add-on price in cents/month — the canonical catalog's
+/// first-address price (owner price table 2026-10-15; the same constant the
+/// `ip_provider` module exposes, so all modules quote one ladder).
+const ADD_ON_PRICE_CENTS: i32 = platform_catalog::DEDICATED_IP_FIRST_CENTS as i32;
+
+/// Each additional dedicated IP in cents/month (catalog €69 = 6,900).
+const ADD_ON_ADDITIONAL_PRICE_CENTS: i32 = platform_catalog::DEDICATED_IP_ADDITIONAL_CENTS as i32;
 
 // ─── Handlers ──────────────────────────────────────────────────
 
@@ -377,6 +387,7 @@ fn allocation_response(allowed: bool, included: i32, active: i64) -> AllocationR
         active,
         add_on_available: allowed,
         add_on_price_monthly: ADD_ON_PRICE_CENTS,
+        add_on_price_additional_monthly: ADD_ON_ADDITIONAL_PRICE_CENTS,
     }
 }
 
@@ -634,7 +645,8 @@ mod tests {
                 included: 1,
                 active: 2,
                 add_on_available: true,
-                add_on_price_monthly: 3000,
+                add_on_price_monthly: 4_900,
+                add_on_price_additional_monthly: 6_900,
             }),
             pagination: PaginationMeta {
                 total: 0,
@@ -645,7 +657,8 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["allocation"]["included"], 1);
-        assert_eq!(json["allocation"]["addOnPriceMonthly"], 3000);
+        assert_eq!(json["allocation"]["addOnPriceMonthly"], 4900);
+        assert_eq!(json["allocation"]["addOnPriceAdditionalMonthly"], 6900);
         assert_eq!(json["pagination"]["hasMore"], false);
     }
 
@@ -657,6 +670,10 @@ mod tests {
         assert_eq!(resp.active, 0);
         assert!(!resp.add_on_available);
         assert_eq!(resp.add_on_price_monthly, ADD_ON_PRICE_CENTS);
+        assert_eq!(
+            resp.add_on_price_additional_monthly,
+            ADD_ON_ADDITIONAL_PRICE_CENTS
+        );
     }
 
     #[test]
@@ -805,10 +822,16 @@ mod tests {
     }
 
     #[test]
-    fn test_add_on_price_is_30_dollars() {
+    fn test_add_on_price_matches_the_canonical_catalog_ladder() {
+        // Owner price table 2026-10-15: €49 first / €69 additional
+        // (USD $55/$75) — the retired flat $30 add-on must never return.
         assert_eq!(
-            ADD_ON_PRICE_CENTS, 3000,
-            "add-on price must be $30.00 = 3000 cents"
+            ADD_ON_PRICE_CENTS, 4_900,
+            "add-on price must be €49.00 = 4900 cents"
+        );
+        assert_eq!(
+            ADD_ON_ADDITIONAL_PRICE_CENTS, 6_900,
+            "each additional IP must be €69.00 = 6900 cents"
         );
     }
 

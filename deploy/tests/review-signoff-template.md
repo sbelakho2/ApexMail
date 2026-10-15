@@ -92,11 +92,11 @@
 | Plan | Web Price | Billing Config | Match |
 |------|-----------|----------------|-------|
 | Free | €0, 3,000 emails | €0, 3,000 emails | [x] |
-| Developer | €29/mo, 50,000 emails | €29/mo, 50,000 emails | [x] |
+| Developer | €20/mo, 50,000 emails | €20/mo, 50,000 emails | [x] |
 | Pro | €89/mo, 150,000 emails | €89/mo, 150,000 emails | [x] |
 | Growth | €229/mo, 500,000 emails | €229/mo, 500,000 emails | [x] |
 | Business | €699/mo, 2M emails | €699/mo, 2M emails | [x] |
-| Enterprise | €3,000/mo, 5M emails | €3,000/mo, 5M emails | [x] |
+| Enterprise | €1,750/mo, 5M emails | €1,750/mo, 5M emails | [x] |
 | Dedicated Tenant | €4,000/mo, 12mo min | €4,000/mo, 12mo min | [x] |
 | BYOC | €6,500/mo, 12-24mo min | €6,500/mo, 12-24mo min | [x] |
 

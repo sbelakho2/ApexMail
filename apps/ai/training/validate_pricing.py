@@ -38,7 +38,7 @@ from typing import Any
 CANONICAL_PRICING = {
     "plans": [
         {"name": "Free",             "price": "€0",     "annual": "€0",      "emails": 3_000,    "api_calls": 30_000,     "team": 1,    "domains": 1},
-        {"name": "Developer",        "price": "€29",    "annual": "€290",    "emails": 50_000,   "api_calls": 500_000,    "team": 5,    "domains": 5},
+        {"name": "Developer",        "price": "€20",    "annual": "€200",    "emails": 50_000,   "api_calls": 500_000,    "team": 5,    "domains": 5},
         {"name": "Pro",              "price": "€89",    "annual": "€890",    "emails": 150_000,  "api_calls": 2_000_000,  "team": 10,   "domains": 25},
         {"name": "Growth",           "price": "€229",   "annual": "€2,290",  "emails": 500_000,  "api_calls": 5_000_000,  "team": 25,   "domains": 100},
         {"name": "Business",         "price": "€699",   "annual": "€6,990",  "emails": 2_000_000,"api_calls": 20_000_000, "team": 50,   "domains": -1},   # -1 = unlimited
@@ -65,7 +65,27 @@ CANONICAL_PRICING = {
     },
     "addons": {
         "dedicated_ip": "€49/mo first, €69/mo each additional",
+        "inbox_placement_monitoring": "€99/mo",
+        "eu_only_routing": "€149/mo on Pro and above",
     },
+    # Contract / non-subscription lines (owner's price table): annual-contract
+    # or approved-setup lines, never sold through generic public Checkout.
+    "contract_lines": [
+        {"name": "Compliance", "price": "€990/mo, annual", "usd": "USD 1,090/mo",
+         "includes": "1M emails, EU-only routing, dedicated IP, DORA/NIS2 evidence pack, "
+                     "GDPR processor pack, signed routing receipts, 1-year audit log, SSO"},
+        {"name": "Platform", "price": "€990/mo base + €0.30 per 1,000 above 1M + €1 per active subaccount above 100",
+         "usd": "USD 1,090 base + USD 0.35 per 1,000 + USD 1 per subaccount",
+         "includes": "Isolated-reputation subaccounts, white-label tracking and bounce domains, provisioning API"},
+        {"name": "Dedicated Tenant", "price": "from €4,000/mo, 12-month minimum, €10k–€40k setup",
+         "usd": "from USD 4,500/mo",
+         "includes": "Single-tenant stack on dedicated hardware, EU region by default, "
+                     "5M recipients, 2 managed IPs, named owner, monthly review"},
+        {"name": "Mailboxes", "price": "€6 per seat/mo, 10-seat minimum; archive +€2 per seat",
+         "usd": "USD 7 per seat/mo; +USD 2 archive",
+         "includes": "EU-hosted IMAP/SMTP mailboxes on the existing stack, autoconfig, "
+                     "spam and AV filtering, self-serve import"},
+    ],
     "free_launch_allowance_emails": 30_000,  # one-time, first 30 days — a promo
 }
 
@@ -95,8 +115,11 @@ FREE_LAUNCH_ALLOWANCE_EMAILS = CANONICAL_PRICING["free_launch_allowance_emails"]
 
 VALID_PRICES = set(p["price"] for p in CANONICAL_PRICING["plans"])
 VALID_PRICES.update({"€49", "€69"})  # Dedicated IP add-on: first / additional
-# Numeric canonical price values (validated regardless of currency symbol)
-CANONICAL_PRICE_NUMBERS = {0, 29, 89, 229, 699, 1750, 49, 69}
+VALID_PRICES.update({"€99", "€149"})  # Inbox placement / EU-only routing add-ons
+# Numeric canonical price values (validated regardless of currency symbol).
+# Plan prices, the dedicated-IP ladder and the add-on/contract list prices.
+CANONICAL_PRICE_NUMBERS = {0, 20, 89, 229, 699, 1750, 49, 69, 99, 149,
+                           990, 1090, 4000, 4500, 6, 7, 2}
 
 # Legacy display names still found in pre-2026-09-08 corpora map onto the
 # shipped plans (platform-catalog keeps "starter"/"scale"/"enterprise" as
@@ -112,7 +135,9 @@ LEGACY_DISPLAY_NAMES = {"Starter": "Developer", "Scale": "Business",
 
 
 # Pre-review plan prices; a price-bearing assertion must never REQUIRE one.
-LEGACY_PLAN_PRICE_NUMBERS = frozenset({25, 65, 150, 350, 3000})
+# 29 is the retired Developer price (now €20) and 290 the retired Developer
+# annual figure (now €200) — both are legacy tokens the sweep must rewrite.
+LEGACY_PLAN_PRICE_NUMBERS = frozenset({25, 29, 65, 150, 350, 3000, 290})
 
 
 def legacy_price_tokens(text: str) -> list[str]:
@@ -196,7 +221,7 @@ def render_payg_info() -> str:
 # ── Validation ─────────────────────────────────────────────────────────
 
 # Plan price references: "Developer (€29/month)", "Pro plan at €89/mo",
-# "Developer costs €29/month", "Growth €229/month". A bounded amount of
+# "Developer costs €20/month", "Growth €229/month". A bounded amount of
 # connecting text ("costs", "is", "at", ...) may sit between the plan name
 # and the price. Both € and $ symbols are accepted — the NUMBERS are
 # validated against the canonical table, and a '$' is itself reported as a
@@ -387,7 +412,7 @@ _PLAN_PRICE_FIX_RE = re.compile(
 _SKIP_CONNECTORS = ("save", "saving", "overage", "total", "difference", "less",
                     "more", "credit", "proration", "vs", "versus", "than",
                     "approx", "~", "≈", "off")
-_ANNUAL_FIXES = {"€250": "€290", "€650": "€890", "€1,500": "€2,290",
+_ANNUAL_FIXES = {"€250": "€200", "€290": "€200", "€650": "€890", "€1,500": "€2,290",
                  "€3,500": "€6,990", "€30,000": "€17,500"}
 
 
@@ -724,7 +749,7 @@ def default_corpus_files() -> list[Path]:
 # detector stops flagging the numbers the sweep exists to catch.
 SELF_TEST_EXPECTED = {
     "free": ("€0", 3_000),
-    "developer": ("€29", 50_000),
+    "developer": ("€20", 50_000),
     "pro": ("€89", 150_000),
     "growth": ("€229", 500_000),
     "business": ("€699", 2_000_000),

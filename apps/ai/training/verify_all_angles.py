@@ -3,7 +3,7 @@
 ApexMail Training Data Verification Harness — 20 Angles × 10 Checks Each.
 
 Verifies:
-  1.  Plan pricing (€0/€29/€89/€229/€699/€1,750)
+  1.  Plan pricing (€0/€20/€89/€229/€699/€1,750)
   2.  Email limits (30K/50K/150K/500K/2M/5M)
   3.  API call limits (300K/500K/2M/5M/20M/Unlimited)
   4.  Team limits (1/5/10/25/50/Unlimited)
@@ -11,7 +11,7 @@ Verifies:
   6.  Retention periods (7/30/60/90/365/730 days)
   7.  Feature gates (webhooks, A/B, SSO, HIPAA, BYOIP, dedicated IP)
   8.  PAYG tiered pricing (€0.001/0.0008/0.0005/0.0003)
-  9.  Overage cost (€0.80 (Developer) / €29.00 (Pro) / €89.00 (Growth+) per 1,000)
+  9.  Overage cost (€0.80 (Developer) / €0.60 (Pro) / €0.35 (Growth+) per 1,000)
   10. PAYG calculations at multiple volumes
   11. Plan comparison logic
   12. DNS record correctness (SPF/DKIM/DMARC)
@@ -133,7 +133,7 @@ OVERRIDE_MILLICENTS = OVERAGE_MILLICENTS_BY_PLAN
 API_OVERRIDE_RATE = API_RATE_PER_1K
 API_OVERRIDE_FREE = API_FREE_TIER
 
-CANONICAL_PRICE_SET = {_int_price(k) for k in PLAN_BY_NAME} | {30}
+CANONICAL_PRICE_SET = {_int_price(k) for k in PLAN_BY_NAME} | {49, 69}
 _FORBIDDEN_CANDIDATES = {19, 25, 35, 39, 45, 49, 55, 59, 65, 75, 79, 99, 125,
                          129, 149, 150, 199, 249, 299, 349, 350, 399, 449, 499,
                          599, 649, 650, 749, 799, 899, 999, 1199, 1299, 1499, 1999,
@@ -159,7 +159,7 @@ UNSUBSCRIBE_MAILTO = "unsubscribe@apexmail.ee"
 
 def angle_1_pricing() -> list[str]:
     errors = []
-    expected_prices = {"free":0,"developer":29,"pro":89,"growth":229,"business":699,"enterprise cloud":1_750}
+    expected_prices = {"free":0,"developer":20,"pro":89,"growth":229,"business":699,"enterprise cloud":1_750}
     for plan, exp in expected_prices.items():
         actual = PLANS[plan]["price"]
         if actual != exp:
@@ -167,13 +167,13 @@ def angle_1_pricing() -> list[str]:
     # Quick checks
     checks = [
         ("Free=€0", PLANS["free"]["price"], 0),
-        ("Developer=€29", PLANS["developer"]["price"], 29),
+        ("Developer=€20", PLANS["developer"]["price"], 20),
         ("Pro=€89", PLANS["pro"]["price"], 89),
         ("Growth=€229", PLANS["growth"]["price"], 229),
         ("Business=€699", PLANS["business"]["price"], 699),
         ("Enterprise Cloud=€1,750", PLANS["enterprise cloud"]["price"], 1750),
         ("All prices unique", len({p["price"] for p in PLANS.values()}), 6),
-        ("Prices ascending", sorted([p["price"] for p in PLANS.values()]), [0,29,89,229,699,1750]),
+        ("Prices ascending", sorted([p["price"] for p in PLANS.values()]), [0,20,89,229,699,1750]),
         ("No forbidden prices in canonical", len(set(PLANS[p]["price"] for p in PLANS) & FORBIDDEN_PRICES), 0),
         ("Pro price < Growth price", PLANS["pro"]["price"] < PLANS["growth"]["price"], True),
     ]
@@ -334,15 +334,15 @@ def angle_10_dns() -> list[str]:
 def angle_11_plan_comparisons() -> list[str]:
     errors = []
     # Pro vs Developer price difference
-    errors.append(check_eq("Pro - Developer = €60", PLANS["pro"]["price"] - PLANS["developer"]["price"], 60))
+    errors.append(check_eq("Pro - Developer = €69", PLANS["pro"]["price"] - PLANS["developer"]["price"], 69))
     errors.append(check_eq("Growth - Pro = €140", PLANS["growth"]["price"] - PLANS["pro"]["price"], 140))
     errors.append(check_eq("Business - Growth = €470", PLANS["business"]["price"] - PLANS["growth"]["price"], 470))
     errors.append(check_eq("Enterprise Cloud - Business = €1,051",
                            PLANS["enterprise cloud"]["price"] - PLANS["business"]["price"], 1051))
 
-    # Compare at 55K emails: Developer (€29 + 5,000 over at €0.80/1,000) = €33 vs Pro (€89)
+    # Compare at 55K emails: Developer (€20 + 5,000 over at €0.80/1,000) = €24 vs Pro (€89)
     dev_55k = PLANS["developer"]["price"] + _plan_overage("developer", 55_000, 50_000)
-    errors.append(check_eq("55K emails: Developer=€33", dev_55k, 33.0))
+    errors.append(check_eq("55K emails: Developer=€24", dev_55k, 24.0))
     errors.append(check_lt("55K: Developer < Pro", dev_55k, float(PLANS["pro"]["price"])))
 
     # Compare at 160K: Pro (€89 + 10,000 over at €0.60/1,000) = €95
@@ -352,7 +352,7 @@ def angle_11_plan_comparisons() -> list[str]:
     # PAYG vs Developer at 50K
     payg_50k = payg_cost(50_000)
     errors.append(check_eq("PAYG 50K=€42", payg_50k, 42.0))
-    errors.append(check_lt("PAYG 50K > Developer €29", 29.0, payg_50k))
+    errors.append(check_lt("PAYG 50K > Developer €20", 20.0, payg_50k))
 
     # PAYG vs Pro at 150K
     payg_150k = payg_cost(150_000)
@@ -475,10 +475,10 @@ def angle_20_consistency() -> list[str]:
     errors.append(check_eq("6 unique prices", len(set(prices)), 6))
 
     # Total prices sum
-    errors.append(check_eq("Total prices = €2,796", sum(prices), 2796))
+    errors.append(check_eq("Total prices = €2,787", sum(prices), 2787))
 
     # PAYG is MORE expensive per-email than Developer at low volumes
-    errors.append(check_lt("Developer per-email < PAYG tier1", 29.0/50000, PAYG_TIERS[0][2]))
+    errors.append(check_lt("Developer per-email < PAYG tier1", 20.0/50000, PAYG_TIERS[0][2]))
 
     # PAYG at 1M should be €532
     errors.append(check_eq("PAYG 1M=€532", payg_cost(1_000_000), 532.0))

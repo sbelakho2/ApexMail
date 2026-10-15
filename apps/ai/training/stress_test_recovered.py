@@ -8,7 +8,7 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=€0/3K/30K (+30K launch allowance), Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Free=€0/3K/30K (+30K launch allowance), Developer=€20/50K/500K, Pro=€89/150K/2M,
   Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/∞
 """
 

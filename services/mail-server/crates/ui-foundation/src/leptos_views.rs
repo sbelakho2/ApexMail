@@ -5629,7 +5629,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"mt-3 text-sm text-muted-foreground\">Plan changes are arranged with the billing team. Submitting the request below records a change request for them — nothing is charged from this page and no checkout session opens here.</p>\
 <form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"apex-klabel mb-2\" for=\"upgrade-plan\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
-<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Developer — €29/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
+<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Developer — €20/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
 <button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Request plan change</button>\
 </form>\
 </div>\
@@ -7191,20 +7191,23 @@ pub fn marketing_pricing_page() -> String {
         ("Free", "€0", "3,000 emails/month", ""),
         (
             "Developer",
-            "€29",
-            "50,000 emails/month · €0.40 per extra 1,000",
+            "€20",
+            // Per-plan canonical overage ladder (platform-catalog):
+            // Developer €0.80/1K, Pro €0.60/1K, Growth/Business €0.35/1K —
+            // never the retired flat €0.40.
+            "50,000 emails/month · €0.80 per extra 1,000",
             "",
         ),
         (
             "Pro",
             "€89",
-            "150,000 emails/month · €0.40 per extra 1,000",
+            "150,000 emails/month · €0.60 per extra 1,000",
             "border-2 border-primary",
         ),
         (
             "Growth",
             "€229",
-            "500,000 emails/month · €0.40 per extra 1,000",
+            "500,000 emails/month · €0.35 per extra 1,000",
             "",
         ),
         (
@@ -7239,7 +7242,7 @@ pub fn marketing_pricing_page() -> String {
 <div class=\"text-center mb-16\"><h1 class=\"text-4xl font-bold text-surface-900\">Simple, transparent pricing</h1>\
 <p class=\"mt-4 text-lg text-surface-600\">Start free, scale as you grow. All prices in EUR, VAT excluded.</p></div>\
 <div class=\"grid md:grid-cols-3 gap-8 max-w-5xl mx-auto\">{cards}</div>\
-<p class=\"mt-10 text-center text-sm text-surface-500\">Dedicated IPs €30/mo on eligible plans. See the <a class=\"text-primary font-bold hover:underline\" href=\"/pricing/calculator\">pricing calculator</a> for usage-based estimates.</p>\
+<p class=\"mt-10 text-center text-sm text-surface-500\">Dedicated IPs €49/mo for the first and €69/mo for each additional on Pro and above. See the <a class=\"text-primary font-bold hover:underline\" href=\"/pricing/calculator\">pricing calculator</a> for usage-based estimates.</p>\
 </div></section>"
     )
 }
@@ -7719,19 +7722,39 @@ mod tests {
     }
 
     /// The fallback pricing page must mirror the marketing catalog (six
-    /// plans, EUR) — previously it invented three USD plans.
+    /// plans, EUR) — previously it invented three USD plans. Prices are the
+    /// owner's 2026-10-15 table: Developer €20 (was €29), Pro €89,
+    /// Growth €229, Business €699, Enterprise Cloud from €1,750.
     #[test]
     fn fallback_pricing_matches_marketing_catalog() {
         let html = marketing_pricing_page();
-        for expected in ["€0", "€29", "€89", "€229", "€699", "€1,750"] {
+        for expected in ["€0", "€20", "€89", "€229", "€699", "€1,750"] {
             assert!(html.contains(expected), "missing EUR price {expected}");
         }
+        assert!(
+            !html.contains("€29"),
+            "the retired Developer €29 must be gone"
+        );
         assert!(!html.contains("$0"), "no USD prices");
         assert!(!html.contains("$65"));
         assert!(html.contains("Developer"));
         assert!(html.contains("Growth"));
         assert!(html.contains("Business"));
         assert!(html.contains("Enterprise Cloud"));
+        // Per-plan overage ladder and the add-on ladder are the canonical
+        // catalog values (never the retired flat €0.40 / $30 add-on).
+        for expected in [
+            "€0.80 per extra 1,000",
+            "€0.60 per extra 1,000",
+            "€0.35 per extra 1,000",
+            "Dedicated IPs €49/mo",
+            "€69/mo for each additional",
+        ] {
+            assert!(
+                html.contains(expected),
+                "missing canonical value {expected}"
+            );
+        }
     }
 
     /// Backslash return_to values are open redirects: WHATWG URL parsing

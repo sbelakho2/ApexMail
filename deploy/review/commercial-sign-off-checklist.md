@@ -14,11 +14,11 @@
 | Area | Web Value | Billing Config | Match |
 |------|-----------|----------------|-------|
 | Free plan | €0/month, 3,000 emails | €0/month, 3,000 emails | [x] |
-| Developer plan | €29/month, 50,000 emails | €29/month, 50,000 emails | [x] |
+| Developer plan | €20/month, 50,000 emails | €20/month, 50,000 emails | [x] |
 | Pro plan | €89/month, 150,000 emails | €89/month, 150,000 emails | [x] |
 | Growth plan | €229/month, 500,000 emails | €229/month, 500,000 emails | [x] |
 | Business plan | €699/month, 2,000,000 emails | €699/month, 2,000,000 emails | [x] |
-| Enterprise plan | €3,000/month, 5,000,000 emails | €3,000/month, 5,000,000 emails | [x] |
+| Enterprise plan | €1,750/month, 5,000,000 emails | €1,750/month, 5,000,000 emails | [x] |
 | Dedicated Tenant | €4,000/month, 12-month min | €4,000/month, 12-month min | [x] |
 | BYOC | €6,500/month, 12-24 month min | €6,500/month, 12-24 month min | [x] |
 
@@ -39,7 +39,7 @@
 |------|----------|-------|
 | Annual discount (10%) | [x] | All plans show ~10% annual discount |
 | Dedicated IP add-on (€49/mo) | [x] | Pro+ plans |
-| Enterprise minimum | [x] | €3,000/month, annual agreement |
+| Enterprise minimum | [x] | €1,750/month, annual agreement |
 | Support tiers | [x] | Community → 2-day → 1-day → 8hr → 4hr → negotiated |
 | SLA commitments | [x] | 99.9% for Enterprise, contractual |
 | Migration support | [x] | Documented at `/solutions/migration/` |

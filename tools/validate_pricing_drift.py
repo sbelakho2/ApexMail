@@ -96,7 +96,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "starter": PlanExpectation(
-        "Developer", 2_900, 29_000, 50_000, 500_000, 5, 5, 30, 0, "Email",
+        "Developer", 2_000, 20_000, 50_000, 500_000, 5, 5, 30, 0, "Email",
         {
             "api_access": True,
             "webhooks_enabled": True,
@@ -678,6 +678,108 @@ def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -
         )
 
 
+# ── Contract / product lines and paid add-ons (owner's 2026-10-15 table) ──
+# These are NOT subscription plans: the canonical platform catalog carries
+# them as `PRODUCT_LINES` / `ADDONS` constants (platform-catalog/src/lib.rs,
+# plus the DedicatedTenant floor in compliance/deployment_products.rs). The
+# marketing data table is the only NON-Rust mirror that restates them, so its
+# values are pinned here, structurally, exactly like the PLANS rows.
+# (name -> (eur_cents, usd_cents))
+EXPECTED_PRODUCT_LINES: dict[str, tuple[int, int]] = {
+    "compliance": (99_000, 109_000),        # €990/mo, USD 1,090/mo (annual)
+    "platform": (99_000, 109_000),          # base, plus the usage fees below
+    "dedicated_tenant": (400_000, 450_000), # from €4,000/mo, from USD 4,500/mo
+}
+PLATFORM_RATES = {
+    "overage_eur_cents_per_1k": 30,     # €0.30 per 1,000 above 1M
+    "overage_usd_cents_per_1k": 35,     # USD 0.35 per 1,000
+    "subaccount_eur_cents": 100,        # €1 per active subaccount above 100
+    "subaccount_usd_cents": 100,
+    "included_emails": 1_000_000,
+    "included_subaccounts": 100,
+}
+DEDICATED_TENANT_SETUP = {"min_eur_cents": 1_000_000, "max_eur_cents": 4_000_000, "min_months": 12}
+MAILBOX_MINIMUM_SEATS = 10
+# (name -> (eur_cents, usd_cents))
+EXPECTED_ADDONS: dict[str, tuple[int, int]] = {
+    "dedicated_ip": (4_900, 5_500),                 # €49 first / USD 55
+    "dedicated_ip_additional": (6_900, 7_500),      # €69 extra / USD 75
+    "inbox_placement_monitoring": (9_900, 10_900),  # €99 / USD 109
+    "eu_only_routing": (14_900, 16_500),            # €149 on Pro+ / USD 165
+    "mailboxes": (600, 700),                        # €6/seat / USD 7 (10-seat min)
+    "mailbox_archive_journaling": (200, 200),       # +€2/seat / +USD 2
+}
+
+
+def validate_contract_lines(errors: list[str]) -> None:
+    """data/pricing.json contract_lines/addons vs the owner's price table."""
+    try:
+        data: dict[str, Any] = json.loads(read(MARKETING_PRICING_JSON))
+    except json.JSONDecodeError as error:
+        errors.append(f"apps/marketing-zola/data/pricing.json is invalid JSON: {error}")
+        return
+    lines = {row.get("id"): row for row in data.get("contract_lines", []) if isinstance(row, dict)}
+    addons = {row.get("id"): row for row in data.get("addons", []) if isinstance(row, dict)}
+    for line_id, (eur_cents, usd_cents) in EXPECTED_PRODUCT_LINES.items():
+        row = lines.get(line_id)
+        if row is None:
+            errors.append(f"pricing.json contract_lines is missing {line_id!r}")
+            continue
+        check(
+            f"€{eur_cents // 100:,}" in str(row.get("eur_display", "")),
+            f"pricing.json contract_lines {line_id}.eur_display is missing "
+            f"€{eur_cents // 100:,}: {row.get('eur_display')!r}",
+            errors,
+        )
+        check(
+            f"${usd_cents // 100:,}" in str(row.get("usd_display", "")),
+            f"pricing.json contract_lines {line_id}.usd_display is missing "
+            f"${usd_cents // 100:,}: {row.get('usd_display')!r}",
+            errors,
+        )
+    platform = str(lines.get("platform", {}).get("eur_display", ""))
+    for needle in (
+        f"€{PLATFORM_RATES['overage_eur_cents_per_1k'] / 100:.2f} per 1,000",
+        f"€{PLATFORM_RATES['subaccount_eur_cents'] / 100:.0f} per active subaccount "
+        f"above {PLATFORM_RATES['included_subaccounts']}",
+    ):
+        check(needle in platform, f"pricing.json platform line is missing {needle!r}", errors)
+    tenant = str(lines.get("dedicated_tenant", {}).get("eur_display", ""))
+    for needle in (
+        f"{DEDICATED_TENANT_SETUP['min_months']}-month minimum",
+        f"€{DEDICATED_TENANT_SETUP['min_eur_cents'] // 100_000}k",
+        f"€{DEDICATED_TENANT_SETUP['max_eur_cents'] // 100_000}k",
+    ):
+        check(needle in tenant, f"pricing.json dedicated_tenant line is missing {needle!r}", errors)
+    mailboxes = str(lines.get("mailboxes", {}).get("eur_display", ""))
+    for needle in (
+        f"€{EXPECTED_ADDONS['mailboxes'][0] / 100:,.0f} per seat/mo",
+        f"{MAILBOX_MINIMUM_SEATS}-seat minimum",
+        f"+€{EXPECTED_ADDONS['mailbox_archive_journaling'][0] / 100:.0f} per seat",
+    ):
+        check(needle in mailboxes, f"pricing.json mailboxes line is missing {needle!r}", errors)
+    for addon_id, (eur_cents, usd_cents) in EXPECTED_ADDONS.items():
+        row = addons.get(addon_id)
+        if row is None:
+            errors.append(f"pricing.json addons is missing {addon_id!r}")
+            continue
+        check(
+            f"€{eur_cents / 100:,.0f}" in str(row.get("display", "")),
+            f"pricing.json addon {addon_id}.display is missing "
+            f"€{eur_cents / 100:,.0f}: {row.get('display')!r}",
+            errors,
+        )
+        check(
+            f"${usd_cents / 100:,.0f}" in str(row.get("usd_display", "")),
+            f"pricing.json addon {addon_id}.usd_display is missing "
+            f"${usd_cents / 100:,.0f}: {row.get('usd_display')!r}",
+            errors,
+        )
+    # The retired Developer price must not survive anywhere in the data table.
+    raw = read(MARKETING_PRICING_JSON)
+    check('"€29"' not in raw, "pricing.json still carries the retired price '€29'", errors)
+
+
 def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
     cards = read(MARKETING_PLANS)
     calculator = read(MARKETING_CALCULATOR)
@@ -711,6 +813,13 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
     # the plan identity KEYS remain starter/scale, so key-form links are stale.
     for stale in ("plan=developer", "plan=business"):
         check(stale not in cards, f"pricing cards contain stale token {stale!r}", errors)
+    # The owner's contract lines and paid add-ons are rendered from the
+    # data/pricing.json blocks (checked structurally by
+    # validate_contract_lines); the cards must at least name them and must
+    # not resurrect the retired Developer price.
+    for needle in ("Compliance", "Platform", "Mailboxes", "Dedicated Tenant"):
+        check(needle in cards, f"pricing cards are missing the contract/add-on row {needle!r}", errors)
+    check("€29" not in cards, "pricing cards still carry the retired Developer price '€29'", errors)
     check("Pay-as-you-go usage pricing is available" in cards, "pricing cards omit PAYG managed-flow disclosure", errors)
     check("HIPAA availability is not currently offered" in cards, "pricing cards omit current HIPAA availability status", errors)
 
@@ -718,6 +827,9 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
         "Developer (50K/mo)",
         "Business (2M/mo)",
         "Annual subscriptions are billed at 10&times; the monthly price",
+        # The owner's paid add-ons are named in the calculator disclosure too.
+        "€99/month",
+        "€149/month",
     ):
         check(needle in calculator, f"calculator source is missing {needle!r}", errors)
     addon = extract_dedicated_ip_addon(errors)
@@ -736,9 +848,9 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
     for stale in ("Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
         check(stale not in calculator, f"calculator source contains stale token {stale!r}", errors)
 
-    for needle in ("€29", "€89", "€229", "€699", "€1,750", "€17,500/yr", "€0.80, Pro €0.60, Growth/Business €0.35 per 1,000"):
+    for needle in ("€20", "€89", "€229", "€699", "€1,750", "€200/yr", "€17,500/yr", "€0.80, Pro €0.60, Growth/Business €0.35 per 1,000"):
         check(needle in island, f"generated pricing island source is missing {needle!r}", errors)
-    for stale in ("SendGrid", "Mailchimp", "You Save"):
+    for stale in ("€29", "€290/yr", "SendGrid", "Mailchimp", "You Save"):
         check(stale not in island, f"generated pricing island contains stale token {stale!r}", errors)
 
     # Annual-savings needle DERIVED from the marketing catalog: the FAQ must
@@ -1000,11 +1112,19 @@ def validate_built_output(errors: list[str]) -> None:
         errors.append("no generated home/pricing HTML found; run zola build before pricing validation")
         return
     output = "\n".join(read(path) for path in pages)
-    for needle in ("Developer", "Business", "€29", "€89", "€229", "€699", "€1,750", "€0.80, Pro €0.60, Growth/Business €0.35"):
+    for needle in ("Developer", "Business", "€20", "€89", "€229", "€699", "€1,750", "€0.80, Pro €0.60, Growth/Business €0.35"):
         check(needle in output, f"generated marketing output is missing {needle!r}", errors)
+    # The owner's 2026-10-15 table also publishes the contract lines and the
+    # paid add-ons; the rendered pricing page must carry them (the values come
+    # from data/pricing.json's contract_lines/addons blocks).
+    for needle in ("€990/mo", "€4,000", "€6 per seat/mo", "€49/mo", "€99/mo", "€149/mo"):
+        check(needle in output, f"generated marketing output is missing the contract/add-on row {needle!r}", errors)
     # 2026-09-08: the retired generation's names and prices (the ladder was
     # Free 30k / Starter EUR25 / Pro 65 / Growth 150 / Scale 350 / Ent 3000).
-    for stale in ("Starter", "Scale", "€25", "€65", "€150", "€350", "plan=developer", "plan=business"):
+    # 2026-10-15: Developer's old €29 (and its €290/year) joined the retired
+    # set — the owner's table cut it to €20/€200.
+    for stale in ("Starter", "Scale", "€25", "€65", "€150", "€350", "plan=developer", "plan=business",
+                  "€29", "€290/yr", "€2,900"):
         check(stale not in output, f"generated marketing output contains stale token {stale!r}", errors)
 
     # ── Rendered LOCALE pricing pages ─────────────────────────────────────
@@ -1020,13 +1140,13 @@ def validate_built_output(errors: list[str]) -> None:
             )
             continue
         locale_output = read(locale_page)
-        for needle in ("€29", "€89", "€229", "€699", "€1,750"):
+        for needle in ("€20", "€89", "€229", "€699", "€1,750"):
             check(
                 needle in locale_output,
                 f"rendered [{locale}] pricing page is missing the current price {needle!r}",
                 errors,
             )
-        for stale in ("€25", "€65", "€150", "€350"):
+        for stale in ("€25", "€29", "€65", "€150", "€350"):
             check(
                 stale not in locale_output,
                 f"rendered [{locale}] pricing page still carries the retired price {stale!r}",
@@ -1451,6 +1571,7 @@ def main() -> int:
         validate_pricing_reference(catalog, errors)
         validate_marketing_data(catalog, errors)
         validate_marketing_source(catalog, errors)
+    validate_contract_lines(errors)
     validate_canonical_artifacts(errors)
     if catalog:
         validate_extended_artifacts(catalog, errors)

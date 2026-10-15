@@ -10,7 +10,7 @@ Extracts and transforms all content from:
 - /tmp/apexmail_scenarios/expand_dataset.py (training patterns)
 
 All pricing transformed: Schema A (USD) → canonical EUR catalog
-  USD 29→€29 (Developer), USD 59→€89 (Pro), USD 129→€229 (Growth),
+  USD 29→€20 (Developer), USD 59→€89 (Pro), USD 129→€229 (Growth),
   USD 399→€699 (Business), USD 1299→€1,750 (Enterprise Cloud)
   Free: 1K→3K emails/mo, 10K→30K API (30K launch allowance separate)
   Developer: 25K→50K emails, 250K→500K API
@@ -533,7 +533,7 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=€0/30K/300K, Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Free=€0/30K/300K, Developer=€20/50K/500K, Pro=€89/150K/2M,
   Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/∞
 """
 

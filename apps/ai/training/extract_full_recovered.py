@@ -12,7 +12,7 @@ Sources:
 
 Canonical pricing applied:
   Free: €0 30K emails, 300K API
-  Developer: €29 50K emails, 500K API
+  Developer: €20 50K emails, 500K API
   Pro: €89 150K emails, 2M API
   Growth: €229 500K emails, 5M API
   Business: €699 2M emails, 20M API
@@ -45,7 +45,7 @@ CANONICAL_PRICES = {
 # Also match human-readable forms
 CANONICAL_PRICE_PATTERNS = [
     r"€0",
-    r"€29",
+    r"€20",
     r"€89",
     r"€229",
     r"€699",
@@ -61,7 +61,7 @@ CANONICAL_PRICE_PATTERNS = [
 
 # Known plan display names
 KNOWN_PLANS = ["Free", "Developer", "Pro", "Growth", "Business", "Enterprise Cloud"]
-KNOWN_PRICES = ["€0", "€29", "€89", "€229", "€699", "€1,750"]
+KNOWN_PRICES = ["€0", "€20", "€89", "€229", "€699", "€1,750"]
 
 
 def validate_recovered_price(text: str, source: str = "unknown") -> bool:
@@ -109,10 +109,10 @@ def validate_recovered_price(text: str, source: str = "unknown") -> bool:
 
 PRICE_FIXES = {
     # Monthly prices
-    r"\$29/mo": "€29/mo",
-    r"\$29 per month": "€29 per month",
-    r"\$29/month": "€29/month",
-    r"Developer \(\$29\)": "Developer (€29)",
+    r"\$29/mo": "€20/mo",
+    r"\$29 per month": "€20 per month",
+    r"\$29/month": "€20/month",
+    r"Developer \(\$29\)": "Developer (€20)",
     r"\$59/mo": "€89/mo",
     r"\$59 per month": "€89 per month",
     r"\$59/month": "€89/month",
@@ -218,7 +218,7 @@ NEW_PROFILES = {
         "open_issues": "- SPF failure: 2 SPF TXT records found (ApexMail + Mailchimp). Only 1 SPF record per domain allowed.",
     },
     
-    # === STARTER TIER PROFILES (€29, 50K emails, 500K API) ===
+    # === STARTER TIER PROFILES (€20, 50K emails, 500K API) ===
     "starter_healthy_v2": {
         "account_id": "acct_8f3k2j",
         "plan_name": "Developer",
@@ -450,7 +450,7 @@ Extended Customer Profiles — Recovered from deleted files with canonical prici
 
 Canonical pricing:
   Free: €0 30K emails, 300K API
-  Developer: €29 50K emails, 500K API  
+  Developer: €20 50K emails, 500K API  
   Pro: €89 150K emails, 2M API
   Growth: €229 500K emails, 5M API
   Business: €699 2M emails, 20M API
@@ -474,7 +474,7 @@ EXTENDED_PROFILES = '''
 MULTI_TURN_EXAMPLES = [
     # --- DNS Troubleshooting with tool calls ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Developer plan (€29/mo, 50K emails).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Developer plan (€20/mo, 50K emails).",
         "user": "My emails aren't being delivered. Can you check what's wrong?",
         "assistant": "I'll check your domain's DNS configuration and deliverability status.\n\n```tool\n{\"action\": \"check_domain_health\", \"params\": {\"domain\": \"acmecorp.com\"}}\n```",
         "tool": '{"spf": "pass", "dkim": "fail", "dmarc": "none", "bounce_rate": "8.2%", "last_check": "2026-02-23T10:15:00Z"}',
@@ -498,7 +498,7 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Webhook failure diagnosis ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Developer plan (€29/mo).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Developer plan (€20/mo).",
         "user": "My webhook stopped receiving events",
         "assistant": "I'll check your webhook configuration and recent delivery attempts.\n\n```tool\n{\"action\": \"get_webhook_status\", \"params\": {\"webhook_id\": \"wh_bd01\"}}\n```",
         "tool": '{"webhook_id": "wh_bd01", "url": "https://api.bakerydelight.com/email-events", "events": ["delivered", "bounced", "opened"], "status": "auto-disabled", "consecutive_failures": 8, "last_error": "HTTP 500", "last_attempt": "2026-02-22T14:00:00Z", "disabled_at": "2026-02-22T14:30:00Z"}',
@@ -518,7 +518,7 @@ MULTI_TURN_EXAMPLES = [
         "user": "I keep running out of emails. What are my options?",
         "assistant": "Let me check your usage pattern to recommend the best option.\n\n```tool\n{\"action\": \"get_usage_history\", \"params\": {\"months\": 3}}\n```",
         "tool": '{"usage": [{"month": "Dec 2025", "emails": 28000}, {"month": "Jan 2026", "emails": 29500}, {"month": "Feb 2026", "emails": 29900}], "average": 29133, "trend": "growing", "projected_next_month": 31000}',
-        "assistant_final": "Your usage is growing steadily:\n\n| Month | Emails Sent |\n|-------|-------------|\n| Dec 2025 | 28,000 |\n| Jan 2026 | 29,500 |\n| Feb 2026 | 29,900 |\n\n**Projected next month:** ~31,000 (you'll exceed the 30,000 limit)\n\n**Recommendations:**\n\n1. **Developer Plan (€29/mo)** — 50,000 emails\n   - Best value for your growth trajectory\n   - Includes webhooks, 3 domains, 3 team members\n   - about 1.7× more emails for €29\n\n2. **Pay-As-You-Go** — €0 base + €0.35 per 1,000 emails\n   - At ~3,000 emails/mo, you'd pay about €26/mo\n   - Good if volume is unpredictable\n\nGiven your growth trend, I'd recommend **Developer** — it gives you room to scale without worrying about limits.\n\nReady to upgrade? I can walk you through it."
+        "assistant_final": "Your usage is growing steadily:\n\n| Month | Emails Sent |\n|-------|-------------|\n| Dec 2025 | 28,000 |\n| Jan 2026 | 29,500 |\n| Feb 2026 | 29,900 |\n\n**Projected next month:** ~31,000 (you'll exceed the 30,000 limit)\n\n**Recommendations:**\n\n1. **Developer Plan (€20/mo)** — 50,000 emails\n   - Best value for your growth trajectory\n   - Includes webhooks, 3 domains, 3 team members\n   - about 1.7× more emails for €20\n\n2. **Pay-As-You-Go** — €0 base + €0.35 per 1,000 emails\n   - At ~3,000 emails/mo, you'd pay about €26/mo\n   - Good if volume is unpredictable\n\nGiven your growth trend, I'd recommend **Developer** — it gives you room to scale without worrying about limits.\n\nReady to upgrade? I can walk you through it."
     },
     # --- Complaint rate warning ---
     {

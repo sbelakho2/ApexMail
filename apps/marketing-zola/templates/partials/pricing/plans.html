@@ -69,7 +69,7 @@
       {% include "partials/pricing/card.html" %}
 
       {# Developer #}
-      {% set plan_name = "Developer" %}{% set plan_price = "€29" %}
+      {% set plan_name = "Developer" %}{% set plan_price = "€20" %}
       {% set plan_features = [
         p_developer.included_volume_display ~ " emails/month",
         p_developer.included_domains ~ " sending domains",
@@ -78,7 +78,7 @@
         "Advanced analytics and data export",
         p_developer.retention_days ~ "-day event retention",
         "Email support"] %}
-      {% set plan_period = "/month" %}{% set plan_description = "For developers wiring up production email." %}{% set plan_cta_label = "Start Developer" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=starter" %}{% set plan_cta_aria_label = "Start Developer - Developer plan at €29/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% set plan_period = "/month" %}{% set plan_description = "For developers wiring up production email." %}{% set plan_cta_label = "Start Developer" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=starter" %}{% set plan_cta_aria_label = "Start Developer - Developer plan at €20/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
       {# Pro #}
@@ -164,6 +164,37 @@
           <p class="text-sm text-surface-600 mt-2 flex-1">Customer-controlled environment: ApexMail running in your cloud account, your keys, your boundaries — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">BYOC details</a>.</p>
           <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Architecture review</a>
         </div>
+      </div>
+    </div>
+
+    {# ── Contract lines (owner pricing plan): Compliance, Platform and
+       Mailboxes. Dedicated Tenant is the deployment card above (same
+       €4,000/mo floor, 12-month minimum, €10k–€40k setup). Sold on contract
+       or an approved billing setup, never through public Checkout. Rendered
+       from the addons/contract_lines blocks in data/pricing.json. ── #}
+    <div class="mt-16 pt-10 border-t border-surface-200">
+      <h2 class="text-2xl font-bold text-surface-950 tracking-tight mb-2">Contract and platform lines</h2>
+      <p class="text-sm text-surface-500 mb-8">Annual-contract and approved-setup lines for regulated senders, platforms and teams that need mailboxes in the same account. Dedicated Tenant is quoted in the deployment cards above.</p>
+      <div class="grid md:grid-cols-3 gap-6">
+        {% for line in pricing_data.contract_lines %}{% if line.id != "dedicated_tenant" %}
+        <div class="card-dna p-6 flex flex-col">
+          <span class="k-arc-label">{{ line.name | lower }}</span>
+          <div class="flex items-baseline gap-2 mt-3 mb-1">
+            <span class="price-value" style="font-size:20px">{{ line.eur_display }}</span>
+          </div>
+          <p class="text-xs text-surface-400 mb-2">{{ line.usd_display }}</p>
+          <p class="text-sm text-surface-600 mt-2 flex-1">{{ line.description }}</p>
+          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Talk to sales</a>
+        </div>
+        {% endif %}{% endfor %}
+      </div>
+      <div class="grid md:grid-cols-3 gap-6 mt-6">
+        {% for addon in pricing_data.addons %}
+        <div class="p-5 bg-surface-50 rounded-lg border border-surface-200">
+          <span class="block font-bold text-surface-950 mb-1">{{ addon.name }}</span>
+          <span class="block text-sm text-surface-500 font-medium">{{ addon.display }} <span class="text-surface-400">({{ addon.usd_display }})</span> — {{ addon.unit }}, {{ addon.availability | lower }}</span>
+        </div>
+        {% endfor %}
       </div>
     </div>
 

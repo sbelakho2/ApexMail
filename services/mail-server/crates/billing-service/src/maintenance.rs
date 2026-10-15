@@ -2860,14 +2860,33 @@ fn dedicated_ip_idempotency_key(ip_id: &str) -> String {
     format!("dedicated_ip_{}", hex::encode(&digest[..24]))
 }
 
-/// The dedicated-IP add-on price in CENTS (minor units),
-/// `ADYEN_DEDICATED_IP_PRICE`. Unset, blank or non-positive → the sweep is
-/// disabled (`None`): never invent a price.
+/// The dedicated-IP add-on price in CENTS (minor units). The canonical
+/// price lives in `platform-catalog` (the plan's rule: prices change only at
+/// the source); `ADYEN_DEDICATED_IP_PRICE` stays as an explicit operator
+/// override. An explicit non-positive override (0 or negative) disables the
+/// sweep; a missing/blank/unparseable value falls back to the catalog price
+/// (and the unparseable case warns loudly).
 fn dedicated_ip_price_cents() -> Option<i64> {
-    std::env::var("ADYEN_DEDICATED_IP_PRICE")
-        .ok()
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .filter(|cents| *cents > 0)
+    match std::env::var("ADYEN_DEDICATED_IP_PRICE") {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Some(platform_catalog::DEDICATED_IP_FIRST_CENTS);
+            }
+            match trimmed.parse::<i64>() {
+                Ok(cents) if cents > 0 => Some(cents),
+                Ok(_) => None,
+                Err(_) => {
+                    tracing::warn!(
+                        value = %trimmed,
+                        "ADYEN_DEDICATED_IP_PRICE is not an integer — falling back to the platform-catalog price"
+                    );
+                    Some(platform_catalog::DEDICATED_IP_FIRST_CENTS)
+                }
+            }
+        }
+        Err(_) => Some(platform_catalog::DEDICATED_IP_FIRST_CENTS),
+    }
 }
 
 fn is_missing_table_error(error: &sqlx::Error) -> bool {
@@ -6602,26 +6621,38 @@ mod coverage_adversarial {
             )
             .await;
             let client = Client::new();
-            // Unset, blank, non-numeric and non-positive prices all disable
-            // the sweep: the variable is a CENTS amount, never a provider
-            // price id.
-            for price in [
-                None,
-                Some(""),
-                Some("   "),
-                Some("0"),
-                Some("-5"),
-                Some("abc"),
-            ] {
+            // The canonical price lives in platform-catalog (prices change
+            // only at the source). A missing, blank or non-numeric override
+            // therefore falls back to the catalog price — the sweep MOVES —
+            // while an explicit non-positive override (0 / negative) is the
+            // operator's disable switch and moves nothing.
+            for price in [None, Some(""), Some("   "), Some("abc")] {
                 match price {
                     Some(value) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value),
                     None => std::env::remove_var("ADYEN_DEDICATED_IP_PRICE"),
                 }
+                // No stored token on the seeded subscription: the sweep runs
+                // at the catalog price and reports the charge as a failure
+                // (never a silent no-op) — assert it is no longer disabled.
                 let result = process_dedicated_ip_billing(&env.state, &client)
                     .await
                     .expect("dip billing");
-                assert_eq!((result.charged, result.canceled), (0, 0), "price {price:?}");
+                assert_eq!(result.canceled, 0, "price {price:?}");
             }
+            for price in [Some("0"), Some("-5")] {
+                if let Some(value) = price {
+                    std::env::set_var("ADYEN_DEDICATED_IP_PRICE", value);
+                }
+                let result = process_dedicated_ip_billing(&env.state, &client)
+                    .await
+                    .expect("dip billing");
+                assert_eq!(
+                    (result.charged, result.canceled),
+                    (0, 0),
+                    "explicit non-positive override disables the sweep: {price:?}"
+                );
+            }
+            std::env::remove_var("ADYEN_DEDICATED_IP_PRICE");
             let (billing, failures): (String, i32) = sqlx::query_as(
                 "SELECT billing_status, COALESCE(billing_failure_count, 0)
              FROM dedicated_ips WHERE id = 'cov_dip_noprice'",
@@ -6629,7 +6660,15 @@ mod coverage_adversarial {
             .fetch_one(&env.pool)
             .await
             .expect("ip state");
-            assert_eq!((billing.as_str(), failures), ("pending_charge", 0));
+            // The row never moves to provisioned (no charge could be made
+            // without a stored token) — but with the catalog price as the
+            // default the sweep is no longer a SILENT no-op: every enabled
+            // attempt records its failure visibly.
+            assert_eq!(billing.as_str(), "pending_charge");
+            assert!(
+                failures >= 1,
+                "enabled sweeps must record their failures, got {failures}"
+            );
 
             match previous {
                 Some(price) => std::env::set_var("ADYEN_DEDICATED_IP_PRICE", price),

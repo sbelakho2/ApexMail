@@ -202,6 +202,8 @@ async fn seed_entitled_plan(db: &PgPool) {
         description: "wave-1 entitlement fixture",
         price_monthly: 0,
         price_yearly: 0,
+        price_monthly_usd: 0,
+        price_yearly_usd: 0,
         email_limit: 1_000_000,
         api_call_limit: 1_000_000,
         sort_order: 999,

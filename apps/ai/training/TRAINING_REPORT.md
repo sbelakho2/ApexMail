@@ -11,7 +11,7 @@
 > pricing review. The canonical catalog is now
 > `services/mail-server/crates/platform-catalog`: Free €0 / 3,000 emails /
 > 30,000 API calls (plus a one-time 30,000-email launch allowance in the first
-> 30 days), Developer €29 / 50,000 / 500,000, Pro €89 / 150,000 / 2,000,000,
+> 30 days), Developer €20 / 50,000 / 500,000, Pro €89 / 150,000 / 2,000,000,
 > Growth €229 / 500,000 / 5,000,000, Business €699 / 2,000,000 / 20,000,000,
 > Enterprise Cloud €1,750 / 5,000,000 / unlimited API; PAYG
 > €0.001/€0.0008/€0.0005/€0.0003 per email; overage €0.80 (Developer) /
@@ -100,7 +100,7 @@ Location: `/workspace/output_agent/` on instance. Local metadata copies are trea
 |---|---|
 | **Accuracy** | 25/51 (49.0%) |
 
-**Analysis**: The model excels at format, tone, and general knowledge (SPF, DKIM, DMARC, deliverability topics scored 0.5–0.9 match). However, it struggles with **exact numerical recall** — hallucinating wrong plan prices (e.g. €49, €129, €249 instead of the canonical Free €0, Developer €29, Pro €89, Growth €229, Business €699, Enterprise Cloud €1,750), wrong email limits, and wrong feature availability. This is a known limitation of LoRA fine-tuning for factual grounding — the adapter modifies style/behavior but doesn't fully override the base model's priors for specific numbers.
+**Analysis**: The model excels at format, tone, and general knowledge (SPF, DKIM, DMARC, deliverability topics scored 0.5–0.9 match). However, it struggles with **exact numerical recall** — hallucinating wrong plan prices (e.g. €49, €129, €249 instead of the canonical Free €0, Developer €20, Pro €89, Growth €229, Business €699, Enterprise Cloud €1,750), wrong email limits, and wrong feature availability. This is a known limitation of LoRA fine-tuning for factual grounding — the adapter modifies style/behavior but doesn't fully override the base model's priors for specific numbers.
 
 **Failure categories**:
 - Wrong prices: 8 instances (model generates plausible but incorrect prices)
@@ -174,7 +174,7 @@ Location: `/workspace/output_agent/` on instance. Local metadata copies are trea
 - ✅ All imports resolve (prompts_v2, test_agent.ALL_TESTS, stress_test.STRESS_TESTS)
 - ✅ 262 tests across 41 categories + 247 stress tests across 40 categories
 - ✅ 50 context profiles in prompts_v2
-- ✅ All 6 pricing tiers correct (Free €0 / Developer €29 / Pro €89 / Growth €229 / Business €699 / Enterprise Cloud €1,750; limits 3,000 / 50,000 / 150,000 / 500,000 / 2,000,000 / 5,000,000 emails per month)
+- ✅ All 6 pricing tiers correct (Free €0 / Developer €20 / Pro €89 / Growth €229 / Business €699 / Enterprise Cloud €1,750; limits 3,000 / 50,000 / 150,000 / 500,000 / 2,000,000 / 5,000,000 emails per month)
 - ✅ No legacy USD pricing references (the old $29/$59/$129/$399/$1,299 ladder) and no pre-review EUR ladder
 - ✅ Config file valid (model, LoRA, dataset paths)
 - ✅ Data file integrity: 549+68+68 = 685 ✓

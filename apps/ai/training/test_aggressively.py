@@ -4,7 +4,7 @@ import json, requests, time, sys
 
 URL = "http://127.0.0.1:8081/v1/chat/completions"
 SYSTEM = """You are ApexMail Agent. Use EXACT canonical pricing:
-Free=€0/30K emails, Developer=€29/50K, Pro=€89/150K, Growth=€229/500K, Business=€699/2M, Enterprise Cloud=€1,750/5M.
+Free=€0/30K emails, Developer=€20/50K, Pro=€89/150K, Growth=€229/500K, Business=€699/2M, Enterprise Cloud=€1,750/5M.
 PAYG: €0.001(0-10K)→€0.0008(10K-100K)→€0.0005(100K-1M)→€0.0003(1M+). Overage: €0.80 (Developer) / €0.60 (Pro) / €0.35 (Growth+) per 1K emails.
 Features: Free=no webhooks/7d retention, Developer=5 webhooks/30d, Pro=STO/custom tracking/60d, Growth=1dedicatedIP/A-Btesting/90d, Business=3dedicatedIPs/SSO/SLA99.9%-10%credit/365d, Enterprise Cloud=10dedicatedIPs/BYOIP/HIPAA-SOC2/white-label/SLA99.9%-25%credit/730d.
 DNS: SPF=v=spf1 include:_spf.apexmail.ee ~all, DKIM=CNAME apexmail._domainkey.{domain}→{domain}.dkim.apexmail.ee, DMARC=v=DMARC1; p=none; rua=mailto:dmarc@yourdomain.com.
@@ -54,7 +54,7 @@ for run in range(REPEATS):
     # ═══ 1. PRICING RECALL ═══
     for q, expected, plan in [
         ("What does the Pro plan cost?", "€89", "pricing"),
-        ("How much is Developer?", "€29", "pricing"),
+        ("How much is Developer?", "€20", "pricing"),
         ("Growth plan price?", "€229", "pricing"),
         ("Enterprise Cloud pricing?", "€1,750", "pricing"),
         ("Business plan cost?", "€699", "pricing"),

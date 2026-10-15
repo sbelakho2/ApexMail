@@ -99,8 +99,16 @@ use uuid::Uuid;
 /// Hetzner Cloud API base URL.
 const HETZNER_API_BASE: &str = "https://api.hetzner.cloud/v1";
 
-/// Dedicated IP add-on price in cents/month.
-pub const ADD_ON_PRICE_CENTS: i32 = 3000;
+/// Dedicated IP add-on price in cents/month — the canonical catalog's
+/// first-address price (owner price table 2026-10-15: €49/mo = 4,900 cents;
+/// USD $55). Read from `platform-catalog` so the API can never quote the
+/// retired $30 flat add-on.
+pub const ADD_ON_PRICE_CENTS: i32 = platform_catalog::DEDICATED_IP_FIRST_CENTS as i32;
+
+/// Each additional dedicated IP in cents/month — the catalog's additional
+/// address price (€69/mo = 6,900 cents; USD $75).
+pub const ADD_ON_ADDITIONAL_PRICE_CENTS: i32 =
+    platform_catalog::DEDICATED_IP_ADDITIONAL_CENTS as i32;
 
 /// Statuses that do NOT occupy the tenant's dedicated-IP allowance.
 ///
@@ -3178,11 +3186,24 @@ mod tests {
 
     #[test]
     fn test_allocating_ip_add_on_price_consistency() {
-        // The price constant in ip_provider must match dedicated_ips route
+        // The price constants are the CANONICAL catalog ladder (owner price
+        // table 2026-10-15): €49 = 4,900 cents for the first address and
+        // €69 = 6,900 cents for each additional — the retired flat $30
+        // (3,000 cents) add-on is gone, and the dedicated_ips route quotes
+        // the same constants.
         assert_eq!(
             super::ADD_ON_PRICE_CENTS,
-            3000,
-            "add-on price must be $30.00 = 3000 cents across all modules"
+            4_900,
+            "add-on price must be €49.00 = 4900 cents across all modules"
+        );
+        assert_eq!(
+            super::ADD_ON_ADDITIONAL_PRICE_CENTS,
+            6_900,
+            "each additional IP must be €69.00 = 6900 cents across all modules"
+        );
+        assert_eq!(
+            super::ADD_ON_PRICE_CENTS as i64,
+            platform_catalog::DEDICATED_IP_FIRST_CENTS
         );
     }
 

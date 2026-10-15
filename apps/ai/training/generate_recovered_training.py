@@ -10,7 +10,7 @@ Creates high-quality ChatML training examples based on the patterns found in:
   - industry-knowledge-base.ts (domain knowledge)
 
 All pricing uses canonical schema:
-  Free=€0/30K/300K, Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Free=€0/30K/300K, Developer=€20/50K/500K, Pro=€89/150K/2M,
   Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/∞
 """
 
@@ -43,7 +43,7 @@ RECOVERED_TRAINING_EXAMPLES = [
     {
         "context": "starter_healthy",
         "q": "How many emails do I have left this month?",
-        "a": """Based on your account, you've sent **32,500 out of 50,000 emails** this month on the Developer plan (€29/mo). That leaves you **17,500 emails** remaining.
+        "a": """Based on your account, you've sent **32,500 out of 50,000 emails** this month on the Developer plan (€20/mo). That leaves you **17,500 emails** remaining.
 
 You're at **65% usage** — you're on pace, but if you have a large campaign planned, keep an eye on it. If you exceed 50,000, overages are billed at **€0.80 (Developer) / €0.60 (Pro) / €0.35 (Growth+) per 1,000 extra emails**.
 
@@ -113,7 +113,7 @@ The more urgent issue is the **0.13% complaint rate** — that's above the 0.1% 
 Your options:
 
 1. **Wait for the monthly reset** — your quota resets on the 1st of each month.
-2. **Upgrade to Developer (€29/mo)** — gives you 50,000 emails/month (16x more), plus webhooks and 5 sending domains.
+2. **Upgrade to Developer (€20/mo)** — gives you 50,000 emails/month (16x more), plus webhooks and 5 sending domains.
 3. **Switch to Pay-As-You-Go** — €0 base with per-email pricing starting at €0.001/email, so an extra 1,000 emails would cost only €1.00.
 
 Given your volume (~2,850 emails/month), Developer would give you plenty of room to grow. Would you like me to walk through the upgrade process?"""
@@ -595,11 +595,11 @@ Would you like me to show the exact DNS record you need?"""
         "q": "I'm sending 60,000 emails per month now. What plan should I be on?",
         "a": """With 60,000 emails/month, you're currently over your Developer plan limit (50,000). Let me break down your options:
 
-**Current situation (Developer €29/mo):**
+**Current situation (Developer €20/mo):**
 - Limit: 50,000 emails
 - Your usage: 60,000 emails
 - Overage: 10,000 × €0.50/1K = **€4.00 extra**
-- **Total cost: €29/mo**
+- **Total cost: €20/mo**
 
 **If you upgrade to Pro (€89/mo):**
 - Limit: 150,000 emails
@@ -607,7 +607,7 @@ Would you like me to show the exact DNS record you need?"""
 - Overage: None ✓
 - **Total cost: €89/mo**
 
-**Recommendation:** At 60,000 emails, Developer + overage (€29) is cheaper than Pro (€89). However:
+**Recommendation:** At 60,000 emails, Developer + overage (€20) is cheaper than Pro (€89). However:
 
 - If you expect growth beyond 150,000/mo, Pro becomes better value
 - Pro includes **send-time optimization** and custom tracking domains
@@ -628,14 +628,14 @@ What's your growth trajectory looking like?"""
 |--------|------|--------|------|
 | First 10,000 | €0.001 | 10,000 | €10.00 |
 | 10,001 – 100,000 | €0.0008 | 90,000 | €72.00 |
-| 100,001 – 150,000 | €0.0005 | 50,000 | €29.00 |
+| 100,001 – 150,000 | €0.0005 | 50,000 | €25.00 |
 | **Total** | | **150,000** | **€107.00** |
 
 **Comparison to plans:**
 - **Growth (€229/mo):** 500,000 emails included — better if you send more than ~188K/mo
 - **Pro (€89/mo):** 150,000 emails included — break-even with PAYG at exactly your volume!
 
-**Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **€89/mo** saves you **€42/mo** compared to PAYG.
+**Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **€89/mo** saves you **€18/mo** compared to PAYG.
 
 Pro also includes:
 - Send-time optimization
@@ -726,7 +726,7 @@ Looking at your recent sends:
 - Resume sending at 25% volume
 - Monitor bounce rate (target: under 2%)
 
-**Plan impact:** On Developer (€29/mo), your 50,000 email limit is still available, but your sender reputation needs recovery.
+**Plan impact:** On Developer (€20/mo), your 50,000 email limit is still available, but your sender reputation needs recovery.
 
 Your threshold is 2% — you're at 15%. This takes 2-4 weeks of clean sending to recover.
 

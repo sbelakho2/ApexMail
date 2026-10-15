@@ -10,11 +10,11 @@ This script:
 4. Merges into current stress_test.py and generates more training data
 
 Schema A (stale):
-  Free=€0/1K emails/10K API, Developer=€29/25K/250K, Pro=€89/50K/500K,
+  Free=€0/1K emails/10K API, Developer=€20/25K/250K, Pro=€89/50K/500K,
   Growth=€229/100K/1M, Business=€699/500K/5M, Enterprise Cloud=€1,750/2M/20M
 
 Canonical:
-  Free=€0/30K emails/300K API, Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Free=€0/30K emails/300K API, Developer=€20/50K/500K, Pro=€89/150K/2M,
   Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/Unlimited
 """
 
@@ -33,8 +33,8 @@ TEMP_DIR = os.environ.get("TEMP_DIR", "/tmp/apexmail_scenarios")
 
 PRICE_MAP = {
     # Schema A → Canonical
-    "€29": "€29",
-    "€29/mo": "€29/mo",
+    "€29": "€20",
+    "€29/mo": "€20/mo",
     "€59": "€89",
     "€59/mo": "€89/mo",
     "€129": "€229",
@@ -286,7 +286,7 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["€0.80", "overage", "2,000"]}},
         
         {"q": "Developer plan: sent 55,000 emails AND used 600,000 API calls. Break down the total bill.",
-         "checks": {"must_contain": ["€29"], "must_contain_any": ["€0.80", "overage", "5,000"]}},
+         "checks": {"must_contain": ["€20"], "must_contain_any": ["€0.80", "overage", "5,000"]}},
         
         {"q": "If I switch from Business (€699) to PAYG and send 1,500,000 emails, am I saving money?",
          "checks": {"must_contain_any": ["PAYG", "tier", "€0.0005", "€0.0003", "Business"]}},
@@ -518,7 +518,7 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["500,000", "downgrade", "overage", "€0.80"]}},
         
         {"q": "Compare Developer vs Pro features, prices, and which is better for a 75K monthly volume.",
-         "checks": {"must_contain": ["€29", "€89"], "must_contain_any": ["Pro", "75,000", "150,000"]}},
+         "checks": {"must_contain": ["€20", "€89"], "must_contain_any": ["Pro", "75,000", "150,000"]}},
         
         {"q": "Explain PAYG tiers, then calculate cost for 500K emails, then tell me if Business would be cheaper.",
          "checks": {"must_contain": ["€699"], "must_contain_any": ["€0.001", "€0.0008", "€0.0005", "Business"]}},
@@ -585,7 +585,7 @@ Extracted from:
 - stress_test_r34.py (171 tests)
 
 All pricing updated from Schema A to canonical:
-  Developer=€29 Pro=€89 Growth=€229 Business=€699 Enterprise Cloud=€1,750
+  Developer=€20 Pro=€89 Growth=€229 Business=€699 Enterprise Cloud=€1,750
   Plus corrected email/API limits
 """
 

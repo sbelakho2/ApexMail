@@ -3121,11 +3121,23 @@ async fn create_checkout_session(
         )
             .into_response());
     };
-    let amount_cents = if yearly {
+    // Currency follows the tenant's billing currency (the plan doc: cards in
+    // either currency; SEPA Direct Debit for EU customers). The USD list
+    // lives on the same catalog row — one source, two currencies.
+    let checkout_currency = resolve_tenant_billing_currency(&state, &auth.tenant_id).await;
+    let checkout_in_usd = checkout_currency.eq_ignore_ascii_case("USD");
+    let amount_cents = if checkout_in_usd {
+        if yearly {
+            plan_row.price_yearly_usd_cents
+        } else {
+            plan_row.price_monthly_usd_cents
+        }
+    } else if yearly {
         plan_row.price_yearly_cents
     } else {
         plan_row.price_monthly_cents
     };
+    let currency_code = if checkout_in_usd { "USD" } else { "EUR" };
     if amount_cents <= 0 {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -3176,7 +3188,10 @@ async fn create_checkout_session(
         .json_post::<AdyenCheckoutSessionResponse>(
             "/sessions",
             &serde_json::json!({
-                "amount": { "currency": "EUR", "value": amount_cents },
+                "amount": { "currency": currency_code, "value": amount_cents },
+                // Cards in either currency plus SEPA Direct Debit for EU
+                // customers (the plan's payment-method set for Adyen).
+                "allowedPaymentMethods": ["scheme", "sepadirectdebit"],
                 "merchantAccount": adyen.merchant_account.clone(),
                 "reference": format!("checkout:{plan_name}:{interval_label}"),
                 "returnUrl": body.success_url,
