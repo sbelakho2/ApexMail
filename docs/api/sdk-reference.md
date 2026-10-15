@@ -1,6 +1,6 @@
 # SDK Reference
 
-ApexMail provides SDKs for **five languages** (Python, Go, Ruby, Java, PHP) to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling. **All five are in development and not yet published to their language registries** — see the per-SDK notes below for source installs. There is no Node.js SDK.
+ApexMail provides SDKs for **six languages** (Python, Go, Ruby, Java, PHP, TypeScript) to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling. **All six are in development and not yet published to their language registries** — see the per-SDK notes below for source installs.
 
 | Language | Package | Min. version |
 |----------|---------|--------------|
@@ -9,6 +9,7 @@ ApexMail provides SDKs for **five languages** (Python, Go, Ruby, Java, PHP) to s
 | Ruby | `apexmail` (RubyGems) | Ruby ≥ 3.0 |
 | Java | `ee.apexmail:apexmail-java` (Maven Central) | Java 17 |
 | PHP | `apexmail/apexmail-php` (Packagist) | PHP ≥ 8.1 |
+| TypeScript | `@apexmail/node` (npm) | Node.js ≥ 20 |
 
 ---
 
@@ -29,7 +30,7 @@ If you need another client language, use the HTTP API directly or maintain that 
 
 ## Common Resources
 
-The examples below use the Python SDK for the shared API surface. The same resources are available in Go, Ruby, Java, and PHP with language-appropriate naming.
+The examples below use the Python SDK for the shared API surface. The same resources are available in Go, Ruby, Java, PHP, and TypeScript with language-appropriate naming.
 
 ### Emails
 
@@ -294,6 +295,73 @@ client.domains.verify(domain.id)
 
 ---
 
+## Node.js / TypeScript SDK
+
+**npm name:** `@apexmail/node`
+
+> **Registry publication is pending.** Vendor `packages/sdk-typescript` from this monorepo and pin a commit until the npm release lands.
+
+Vendor install:
+
+```bash
+npm install ./packages/sdk-typescript
+```
+
+**Runtime:** Node.js 20+. The built-in fetch is the only transport, so the package adds no runtime dependencies. Dual builds ship as ES modules and CommonJS with type declarations.
+
+### Node client setup
+
+```ts
+import { ApexMail } from "@apexmail/node";
+
+const client = new ApexMail("am_live_your_api_key", {
+  baseUrl: "https://api.apexmail.ee", // optional
+  timeout: 30,                        // optional, seconds
+  maxRetries: 3,                      // optional
+});
+```
+
+### Send a message from Node
+
+```ts
+const message = await client.emails.send({
+  from: "Sender <hello@example.com>",
+  to: ["user@example.com"],
+  subject: "Hello from ApexMail",
+  html: "<p>Hello!</p>",
+});
+console.log(message.id); // msg_x9y8z7w6
+```
+
+### Node batch send
+
+```ts
+const results = await client.emails.sendBatch([
+  { from: "hello@example.com", to: "a@example.com", subject: "Hi A", html: "..." },
+  { from: "hello@example.com", to: "b@example.com", subject: "Hi B", html: "..." },
+]);
+```
+
+### Node error handling
+
+```ts
+import { RateLimitError, ApexMailError } from "@apexmail/node";
+
+try {
+  await client.emails.send({ ... });
+} catch (error) {
+  if (error instanceof RateLimitError) {
+    console.log(`Rate limited. Retry after ${error.retryAfter}s`);
+  } else if (error instanceof ApexMailError) {
+    console.log(`API error: ${error.code} - ${error.message}`);
+  }
+}
+```
+
+The typed client covers the same resource groups as the sibling SDKs, with `apiKeys` as the TypeScript spelling of the API-keys resource. `verifySignature` handles webhook verification against the header pair described above.
+
+---
+
 ## Shared Features
 
 ### Automatic Retry with Exponential Backoff
@@ -343,14 +411,15 @@ Official SDKs expose helpers for verifying webhook payload signatures to ensure 
 from apexmail.webhooks import verify_signature
 
 is_valid = verify_signature(
-    payload=request.body,                       # raw request body bytes
-    signature=request.headers["X-ApexMail-Signature"],
+    payload=request.body,                                  # raw request body bytes
+    signature_header=request.headers["X-ApexMail-Signature"],
     secret="whsec_your_signing_secret",
-    tolerance=300,                              # optional, max age in seconds (default: 300)
+    timestamp_header=request.headers["X-ApexMail-Timestamp"],
+    tolerance_seconds=300,                                 # optional (default: 300)
 )
 ```
 
-Signatures use HMAC-SHA256 over the `timestamp.payload` format. The `X-ApexMail-Signature` header contains `t=<timestamp>,v1=<signature>`.
+Signatures use HMAC-SHA256 over the `"{timestamp}.{payload}"` string. The platform sends `X-ApexMail-Signature: sha256=<hex>` plus the millisecond `X-ApexMail-Timestamp` header; the SDKs verify that pair and also accept the legacy `t=<timestamp>,v1=<signature>` form.
 
 ---
 

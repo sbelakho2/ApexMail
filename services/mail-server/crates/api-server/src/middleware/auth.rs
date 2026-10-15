@@ -437,6 +437,25 @@ impl FromRequestParts<AppState> for AuthUser {
 
 // ─── API Key authentication ────────────────────────────────────
 
+/// API-key authentication for the provider compatibility surface
+/// (`routes::compat`): SendGrid/Mailgun/Postmark/Resend clients carry the
+/// ApexMail key in the provider's own header, and this is the ONE place that
+/// turns such a credential into an [`AuthUser`] — by calling the canonical
+/// `authenticate_api_key` with the same hashing, cache, expiry, tenant
+/// binding and tenant-status gates the `X-API-Key` mechanism rides. The
+/// tenant resolution is therefore identical to `/v1` by construction, not by
+/// a parallel copy of the lookup.
+pub(crate) async fn authenticate_compat_api_key(
+    key: &str,
+    request_path: &str,
+    state: &AppState,
+) -> Result<AuthUser, ApiError> {
+    // Compat routes are POST-only send endpoints; the path is passed so the
+    // path-tenant binding and the control-plane static-key surface check run
+    // exactly as they do for a canonical request.
+    authenticate_api_key(key, &Method::POST, request_path, false, state).await
+}
+
 async fn authenticate_api_key(
     key: &str,
     request_method: &Method,

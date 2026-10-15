@@ -33,7 +33,7 @@
 #      ci/coverage-baseline.txt (below = FAIL, CI_COVERAGE_CHECK)
 #   7. PHP: three phpunit suites (REQUIRED; composer install when the
 #      checkout has no vendor/ yet)
-#   8. the five SDK lanes (python/go/java/ruby/php — CI_SDK_CHECK)
+#   8. the six SDK lanes (python/go/java/ruby/php/typescript — CI_SDK_CHECK)
 #   9. the satellite Rust crates (CI_SATELLITE_CHECK)
 #  10. static lint gates: shellcheck/hadolint/py_compile
 #      (CI_STATIC_LINT_CHECK)
@@ -781,6 +781,34 @@ run_sdk_tests() {
                     provision_composer_vendor packages/sdk-php || return "$CI_EXIT_FAIL"
                     (cd "$REPO_ROOT/packages/sdk-php" && ci_check "sdk-php (phpunit)" \
                         ./vendor/bin/phpunit) || return "$CI_EXIT_FAIL"
+                    ;;
+            esac
+            ;;
+    esac
+
+    # sdk-typescript (@apexmail/node): node + npm are host tools (the CI
+    # image bakes node 22 for the contrast/layout gates). The package has
+    # ZERO runtime dependencies; `npm ci` installs the two devDependencies
+    # (typescript, @types/node) from the committed package-lock.json, and
+    # `npm test` builds dist/ (ESM + CJS) and runs the node:test contract
+    # suite — local stub server only, no external network.
+    _st=$(lane_tool_status node sdk-typescript "${CI_SDK_CHECK:-required}")
+    case $_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        run)
+            _st=$(lane_tool_status npm sdk-typescript "${CI_SDK_CHECK:-required}")
+            case $_st in
+                fail) return "$CI_EXIT_FAIL" ;;
+                run)
+                    if [ ! -f "$REPO_ROOT/packages/sdk-typescript/package-lock.json" ]; then
+                        ci_err "packages/sdk-typescript/package-lock.json missing — the \
+lane cannot provision deterministically (commit the lockfile)"
+                        return "$CI_EXIT_FAIL"
+                    fi
+                    (cd "$REPO_ROOT/packages/sdk-typescript" && \
+                        ci_check "sdk-typescript (npm ci + node:test)" \
+                        sh -c 'npm ci --no-audit --no-fund && npm test') \
+                        || return "$CI_EXIT_FAIL"
                     ;;
             esac
             ;;

@@ -76,7 +76,7 @@ install_apt_deps() {
 
 # --- 1b. polyglot toolchains (SDK lanes, satellite crates, static lint) -------------
 # Everything the test stage's new lanes need (see ci/README.md "SDK lanes"
-# and "Static lint gates"): go/java+maven/ruby/php+composer for the five SDK
+# and "Static lint gates"): go/java+maven/ruby/php+composer/node for the six SDK
 # lanes and the PHP suites; shellcheck + hadolint for the static lint gates.
 # Idempotent: each package installs only when its command is absent.
 install_sdk_toolchains() {

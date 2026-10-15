@@ -26,7 +26,7 @@ The ApexMail SDKs are **not yet published to public package registries** — `pi
 # SDK source is distributed on request until the first public registry
 # release — email support@apexmail.ee for a pinned source drop.
 # (Replace ./packages/sdk-python with the drop you receive.)
-pip install ./packages/sdk-python   # the Go, PHP, Ruby, and Java SDKs live alongside it in packages/
+pip install ./packages/sdk-python   # the Go, TypeScript, PHP, Ruby, and Java SDKs live alongside it in packages/
 ```
 
 See the [SDK status page](https://apexmail.ee/docs/sdks/) for per-language build instructions and the current release state.

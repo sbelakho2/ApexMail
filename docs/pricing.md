@@ -31,8 +31,8 @@ saving compared with twelve monthly payments.
 ## Contract and non-subscription lines
 
 These lines are sold on an annual contract (or an approved billing setup for
-mailboxes and PAYG); they are not part of the self-service subscription
-catalog above and cannot be bought through public Checkout. EUR is the
+mailboxes and pay-as-you-go); they are not part of the self-service
+subscription catalog above and cannot be bought through public Checkout. EUR is the
 billing currency; the USD figure is the published list price for the same
 line.
 

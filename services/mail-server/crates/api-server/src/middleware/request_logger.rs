@@ -140,9 +140,28 @@ fn normalize_error_payload(
     .ok()
 }
 
+/// Response marker set by the provider compatibility surface
+/// (`routes::compat`): the body is ALREADY the provider's own error contract
+/// (SendGrid `{"errors":[…]}`, Mailgun `{"message":…}`, Postmark
+/// `{"ErrorCode":…,"Message":…}`, Resend
+/// `{"statusCode":…,"name":…,"message":…}`) and must be passed through
+/// verbatim — re-wrapping it into the canonical `{"error":{…}}` envelope
+/// would break the wire contract a migrated SendGrid/Mailgun/Postmark/Resend
+/// SDK parses. Only the compatibility surface sets it; every canonical route
+/// keeps the envelope normalization below.
+#[derive(Clone, Copy, Debug)]
+pub struct ProviderShapedBody;
+
 async fn normalize_error_response(response: Response, request_id: &str) -> Response {
     let status = response.status();
     if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+
+    // Provider-shaped refusals are final: the compatibility surface has
+    // already rendered the provider's own error contract (see
+    // [`ProviderShapedBody`]).
+    if response.extensions().get::<ProviderShapedBody>().is_some() {
         return response;
     }
 

@@ -806,6 +806,23 @@ pub fn build_app(state: AppState) -> Router {
             ddos::ddos_protection_middleware,
         ));
 
+    // ── Provider compatibility surface ──────────────────────
+    // SendGrid (`POST /v3/mail/send`), Mailgun
+    // (`POST /v3/{domain}/messages`), Postmark (`POST /email`,
+    // `POST /email/batch`) and Resend (`POST /emails`,
+    // `POST /emails/batch`). A PURE mapping layer onto the canonical send
+    // path (routes::compat delegates to routes::messages::send_message /
+    // send_batch — same validation, DKIM/sender-domain gate, suppression and
+    // consent enforcement, entitlements/quota admission, ledger and queue
+    // inserts). Mounted OUTSIDE the canonical authenticated stack because the
+    // credential arrives in the PROVIDER's header (Bearer/Basic/
+    // X-Postmark-Server-Token) and every refusal — including an auth refusal —
+    // must come back in the provider's own error shape; the compat router
+    // installs its own provider-shaped auth middleware followed by the SAME
+    // per-tenant rate limiter, and its own outermost DDoS layer (the same
+    // order as the canonical `ddos → auth → rate_limit` stack).
+    let compat = routes::compat::router(state.clone());
+
     // ── Assemble ────────────────────────────────────────────
     let overload_protection = ServiceBuilder::new()
         .layer(HandleErrorLayer::new(handle_backpressure_error))
@@ -816,6 +833,7 @@ pub fn build_app(state: AppState) -> Router {
 
     Router::new()
         .merge(public)
+        .merge(compat)
         .merge(routes::explorer::router())
         .merge(authenticated)
         .fallback(fallback_handler)

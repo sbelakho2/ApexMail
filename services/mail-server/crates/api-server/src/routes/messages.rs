@@ -1929,7 +1929,15 @@ async fn insert_message_and_queue(
 
 // ─── Handlers ──────────────────────────────────────────────────
 
-async fn send_message(
+/// THE canonical send handler. `POST /v1/messages` is the only route that
+/// dispatches to it directly, but the provider compatibility surface
+/// (`routes::compat`) reuses this exact function for SendGrid/Mailgun/
+/// Postmark/Resend payloads it has mapped into a [`SendMessageRequest`] — so
+/// every compat send runs the same validation, sender-domain/DKIM gate,
+/// suppression + consent enforcement, entitlements/quota admission, durable
+/// idempotency ledger and `messages`/`email_queue` insert as a canonical
+/// send, with no second implementation to keep in sync.
+pub(crate) async fn send_message(
     State(state): State<AppState>,
     auth: AuthUser,
     headers: HeaderMap,
@@ -2387,7 +2395,11 @@ fn replay_ledger_response(status: i64, body: &str) -> Result<Response, ApiError>
     Err(corrupt("unknown stored response schema version"))
 }
 
-async fn send_batch(
+/// THE canonical batch send handler — reused by the Postmark `/email/batch`
+/// and Resend `/emails/batch` compatibility routes exactly like
+/// [`send_message`] is by their single-send routes (same per-item validation,
+/// quota admission, ledger and queue inserts).
+pub(crate) async fn send_batch(
     State(state): State<AppState>,
     auth: AuthUser,
     headers: HeaderMap,

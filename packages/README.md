@@ -6,17 +6,21 @@ This directory contains official ApexMail SDK packages for various languages:
 |----------|---------|---------|--------|------------|
 | Go | `packages/sdk-go/` | 1.0.1 | ✅ Active | ApexMail Team |
 | Ruby | `packages/sdk-ruby/` | 1.0.1 | ✅ Active | ApexMail Team |
+| TypeScript | `packages/sdk-typescript/` (`@apexmail/node`) | 1.0.1 | ✅ Active | ApexMail Team |
 | Java | `packages/sdk-java/` | 1.0.1 | ✅ Available | ApexMail Team |
 | Python | `packages/sdk-python/` | 1.0.1 | ✅ Available | ApexMail Team |
 | PHP | `packages/sdk-php/` | 1.0.1 | ✅ Available | ApexMail Team |
 | Rust | (planned) | — | 🔄 Planned | ApexMail Team |
 
-All five SDKs are released in lockstep at the same version. Each SDK's
+All six SDKs are released in lockstep at the same version. Each SDK's
 version constant (Go `sdkVersion`, Python `__version__`/`pyproject.toml`,
 Ruby `SDK_VERSION`/gemspec, Java `ApexMailClient.SDK_VERSION`, PHP
-`Client::SDK_VERSION`) must equal the head entry of its `CHANGELOG.md`.
+`Client::SDK_VERSION`, TypeScript `SDK_VERSION`/`package.json`) must equal
+the head entry of its `CHANGELOG.md`.
 `python3 packages/check_versions.py` enforces this mechanically (exit 1 on
-drift) and is the CI gate for the invariant (audit SM15 F4).
+drift) and is the CI gate for the invariant (audit SM15 F4). Each SDK is
+built and tested by its own REQUIRED lane in `ci/stages/test.sh`
+(`run_sdk_tests`, gated by `CI_SDK_CHECK`).
 
 ## Rust SDK
 
@@ -63,5 +67,9 @@ implements the following contract:
   methods raise for `cursor`, and list models expose `cursor`/`has_more`.
 - **Ruby SDK:** `cursor:` is forwarded on messages only; the other list
   methods raise `ArgumentError` for `cursor`.
+- **TypeScript SDK:** `emails.list({ cursor })` is forwarded; the other list
+  methods throw a `ValidationError` with code `UNSUPPORTED_PAGINATION` for
+  `cursor`, and `EmailListResponse.cursor`/`has_more` (like Go's
+  `Pagination`) capture the messages envelope metadata.
 
 SDK clients should return typed error objects with `Code` and `Message` fields.

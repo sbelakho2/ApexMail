@@ -10,6 +10,11 @@ pub mod billing;
 pub mod campaign_experiments;
 pub mod campaigns;
 pub mod client_errors;
+/// Provider compatibility surface (SendGrid / Mailgun / Postmark / Resend):
+/// a pure mapping layer that translates each provider's send syntax onto the
+/// EXISTING canonical send path (`routes::messages` — the same handler
+/// `POST /v1/messages` uses). No send logic lives here.
+pub mod compat;
 pub mod contact;
 pub mod contacts;
 pub mod dashboard;

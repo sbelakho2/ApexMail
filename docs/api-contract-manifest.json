@@ -5,6 +5,15 @@
     "/v1",
     "/api/v1"
   ],
+  "providerCompatibilityPrefixes": [
+    "/v3/mail/send",
+    "/v3/{domain}/messages",
+    "/v3/{domain}/messages.mime",
+    "/email",
+    "/email/batch",
+    "/emails",
+    "/emails/batch"
+  ],
   "frontendRequiredEndpoints": [
     "/v1/campaigns",
     "/v1/contacts",

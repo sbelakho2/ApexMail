@@ -206,20 +206,22 @@ If you reuse a key with a **different request payload** than the original, the A
 
 ## Webhooks
 
-Webhook payloads are signed with HMAC-SHA256. Verify signatures using `X-ApexMail-Signature` header:
+Webhook payloads are signed with HMAC-SHA256. Each delivery carries the `X-ApexMail-Signature` header (`sha256=<hex hmac>`) and the millisecond `X-ApexMail-Timestamp` header:
 ```
-t=1690000000,v1=hmac_sha256_value
+X-ApexMail-Signature: sha256=31d18ff09cab4d0547ab1c518ffc67124406e128598a7ecfa5dbcc520e4996b2
+X-ApexMail-Timestamp: 1750000000000
 ```
-Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events use the canonical `message.*` vocabulary: `message.accepted`, `message.delivered`, `message.opened`, `message.clicked`, `message.bounced`, `message.complained` (full list in the [webhook guide](/docs/webhooks/)).
+Payload: `{timestamp}.{raw_body}` signed with your webhook secret; the SDKs expose verify helpers for the pair, and the legacy `t=<seconds>,v1=<hex>` header form still verifies. Events use the canonical `message.*` vocabulary: `message.accepted`, `message.delivered`, `message.opened`, `message.clicked`, `message.bounced`, `message.complained` (full list in the [webhook guide](/docs/webhooks/)).
 
 ## SDKs
 
-ApexMail ships first-party SDKs for Python, Go, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). SDK source is currently private and available to approved preview customers (support@apexmail.ee) until the first registry release; see the [SDKs page](/docs/sdks/) for the per-language status and planned install commands. There is no Node.js SDK — Node developers should call the HTTP API directly with `fetch`.
+ApexMail ships first-party SDKs for Python, Go, TypeScript, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (npm, PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). SDK source is currently private and available to approved preview customers (support@apexmail.ee) until the first registry release; see the [SDKs page](/docs/sdks/) for the per-language status and planned install commands. Node.js and TypeScript applications are covered by `@apexmail/node`.
 
 | Language   | Module / package            | Minimum runtime | Status          |
 |------------|-----------------------------|-----------------|-----------------|
 | Python     | `apexmail`                  | Python 3.9+     | Source only     |
 | Go         | `github.com/apexmail/apexmail-go` | Go 1.21+   | Source only     |
+| TypeScript | `@apexmail/node`            | Node.js 20+     | Source only     |
 | PHP        | `apexmail/apexmail-php`     | PHP 8.1+        | Source only     |
 | Ruby       | `apexmail` (gem)            | Ruby 3.0+       | Source only     |
 | Java       | `ee.apexmail:apexmail-java` | Java 17+        | Source only     |

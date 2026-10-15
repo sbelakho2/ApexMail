@@ -1,5 +1,5 @@
 {
-  "contract": "ApexMail send-message shared contract (audit F48). One fixture set consumed by all five SDK serialization suites (sdk-go, sdk-java, sdk-php, sdk-python, sdk-ruby) and the api-server contract tests (services/mail-server/crates/api-server/src/routes/messages.rs). The wire target is SendMessageRequest in messages.rs (serde deny_unknown_fields): every case here must serialize/validate identically everywhere.",
+  "contract": "ApexMail send-message shared contract (audit F48). One fixture set consumed by all six SDK serialization suites (sdk-go, sdk-java, sdk-php, sdk-python, sdk-ruby, sdk-typescript) and the api-server contract tests (services/mail-server/crates/api-server/src/routes/messages.rs). The wire target is SendMessageRequest in messages.rs (serde deny_unknown_fields): every case here must serialize/validate identically everywhere.",
   "priority": {
     "integer_min": 1,
     "integer_max": 10,

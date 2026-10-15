@@ -44,7 +44,7 @@ comparison_sections = [
   ]},
   { title = "DEVELOPER EXPERIENCE", rows = [
     { feature = "Time to First Email", apex = '<span class="text-brand-600 font-semibold">Minutes (after domain verification)</span>', comp = '<span class="text-surface-600">See provider quickstart</span>', winner = "none" },
-    { feature = "Official SDK Coverage", apex = '<span class="text-brand-600 font-semibold">Five SDKs in active development (Python, Go, PHP, Ruby, Java); source in the monorepo, not yet published to registries; no Node.js SDK</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "competitor" },
+    { feature = "Official SDK Coverage", apex = '<span class="text-brand-600 font-semibold">Six SDKs in active development (Python, Go, TypeScript, PHP, Ruby, Java); source in the monorepo, not yet published to registries</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "competitor" },
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Webhook Signatures", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Sandbox Mode", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }

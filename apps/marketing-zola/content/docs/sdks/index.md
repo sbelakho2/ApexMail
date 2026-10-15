@@ -5,12 +5,12 @@ template = "prose.html"
 weight = 3
 
 [extra]
-last_updated = "2026-07-30"
+last_updated = "2026-10-15"
 +++
 
 ## Status: In Development
 
-ApexMail ships first-party client libraries for five server-side languages. **The SDKs are under active development and are not yet published to public package registries** (npm, PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Until the first stable release, integrate against the [HTTP API](/docs/api/) directly.
+ApexMail ships first-party client libraries for six server-side languages. **The SDKs are under active development and are not yet published to public package registries** (npm, PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Until the first stable release, integrate against the [HTTP API](/docs/api/) directly.
 
 > [Request SDK preview access](mailto:support@apexmail.ee) to evaluate a library before release, or watch this page for registry announcements.
 
@@ -22,11 +22,12 @@ Each SDK is developed inside ApexMail's monorepo; **source is currently private*
 |------------|------------------------------|---------------------------------------------------------------------------------------|---------------|---------------------------------------------------------------|
 | Python     | `apexmail`                   | `packages/sdk-python` | Python 3.9+   | `pip install apexmail`                                        |
 | Go         | `github.com/apexmail/apexmail-go` | `packages/sdk-go`         | Go 1.21+      | `go get github.com/apexmail/apexmail-go`                      |
+| TypeScript | `@apexmail/node`             | `packages/sdk-typescript` | Node.js 20+ | `npm install @apexmail/node`                                  |
 | PHP        | `apexmail/apexmail-php`      | `packages/sdk-php`       | PHP 8.1+      | `composer require apexmail/apexmail-php`                      |
 | Ruby       | `apexmail` (gem)             | `packages/sdk-ruby`     | Ruby 3.0+     | `gem install apexmail`                                        |
 | Java       | `ee.apexmail:apexmail-java`  | `packages/sdk-java`     | Java 17+      | Maven: `ee.apexmail:apexmail-java` (version TBD on release)   |
 
-All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are passed in the `X-API-Key` header. There is no Node.js/JavaScript SDK at this time; Node developers should use the HTTP API or `fetch` directly (see the [API reference](/docs/api/)).
+All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are passed in the `X-API-Key` header. Node.js and TypeScript applications are covered by `@apexmail/node`, which is developed in this monorepo beside the other SDKs (source access as described above until the npm release).
 
 ## Building from Source
 
@@ -162,6 +163,25 @@ public class Example {
 }
 ```
 
+### TypeScript
+
+```ts
+import { ApexMail } from "@apexmail/node";
+
+const client = new ApexMail(process.env.APEXMAIL_API_KEY, {
+  baseUrl: "https://api.apexmail.ee", // optional
+});
+
+const message = await client.emails.send({
+  from: "hello@example.com",
+  to: ["user@example.com"],
+  subject: "Welcome",
+  html: "<h1>Hello from ApexMail</h1>",
+});
+
+console.log(message.id);
+```
+
 ## Planned Capabilities
 
 The first stable release is intended to include:
@@ -182,7 +202,7 @@ These are design goals, not committed guarantees, until the 1.0 release.
 
 ## When Raw HTTP Is Better
 
-- You are integrating from a platform without an SDK (e.g. Node.js, browser, edge runtimes).
+- You are integrating from a platform without an SDK (e.g. browser or edge runtimes).
 - You only need a small subset of endpoints and prefer a thinner dependency surface.
 - You are building infrastructure or gateway code that already owns HTTP request signing and retries.
 

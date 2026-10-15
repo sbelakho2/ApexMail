@@ -221,33 +221,28 @@ Triggered when recipient unsubscribes.
 
 ### Signature Header
 
-Every webhook POST request includes a signature header that carries the timestamp and HMAC digest in a single value:
+Every webhook POST request carries the HMAC digest in the `X-ApexMail-Signature` header:
 
 ```
-X-ApexMail-Signature: t=1705312200,v1=abc123...
+X-ApexMail-Signature: sha256=31d18ff09cab4d0547ab1c518ffc67124406e128598a7ecfa5dbcc520e4996b2
 ```
 
-The signature header uses the `t=` and `v1=` parameter format:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `t` | Unix timestamp (seconds) | When the signature was created |
-| `v1` | Hex-encoded HMAC-SHA256 | The computed signature over the canonical payload |
-
-The timestamp inside the signature header matches the value in the `X-ApexMail-Timestamp` response header (also provided as a standalone header for convenience).
+The value is the literal `sha256=` prefix followed by the lowercase hex HMAC-SHA256 digest over the canonical payload (see below).
 
 ### Timestamp Header
 
-A separate `X-ApexMail-Timestamp` header carries the same Unix timestamp for easy timestamp-only validation without parsing the signature value:
+A separate `X-ApexMail-Timestamp` header carries the signing time in **Unix-epoch milliseconds**:
 
 ```
-X-ApexMail-Timestamp: 1705312200
+X-ApexMail-Timestamp: 1750000000000
 ```
 
 | Header | Type | Description |
 |--------|------|-------------|
-| `X-ApexMail-Signature` | `t=<ts>,v1=<hex>` | Signature with embedded timestamp and HMAC-SHA256 digest |
-| `X-ApexMail-Timestamp` | Unix timestamp (seconds) | Convenience header; always matches `t=` in signature |
+| `X-ApexMail-Signature` | `sha256=<hex>` | HMAC-SHA256 digest over the canonical payload |
+| `X-ApexMail-Timestamp` | Unix timestamp (milliseconds) | When the signature was created |
+
+For backwards compatibility with older integrations, the verification helpers also accept the legacy combined header form `X-ApexMail-Signature: t=<seconds>,v1=<hex>`.
 
 ### Signature Construction
 
@@ -257,24 +252,26 @@ ApexMail computes the signature using **HMAC-SHA256** over the canonical payload
 "{timestamp}.{raw_request_body}"
 ```
 
-where `{timestamp}` is the Unix-epoch seconds value and `{raw_request_body}` is the exact byte sequence of the HTTP request body (before any JSON parsing or charset conversion).
+where `{timestamp}` is the Unix-epoch **milliseconds** value exactly as delivered in the header, and `{raw_request_body}` is the exact byte sequence of the HTTP request body (before any JSON parsing or charset conversion).
 
-The signing key is your **Base64-decoded webhook secret**. Webhook secrets are generated and displayed as Base64 strings in the dashboard. You must Base64-decode the secret before using it as the HMAC key.
+The signing key is your **webhook signing secret exactly as issued** (`whsec_…`, the value shown once at creation or rotation). Use those bytes as the HMAC key; do not decode or transform the secret.
 
 **Steps to verify on your side:**
 
-1. Extract `t` and `v1` from the `X-ApexMail-Signature` header.
-2. Read the raw request body bytes (do not parse or re-serialize JSON).
-3. Construct the canonical payload: `f"{t}.{raw_body_bytes}"`.
-4. Base64-decode your webhook secret to get the raw key bytes.
-5. Compute `HMAC-SHA256(key=decoded_secret, message=canonical_payload)` and hex-encode the result.
-6. Compare the computed hex digest against `v1` using a constant-time comparison.
+1. Read the raw request body bytes (do not parse or re-serialize JSON).
+2. Read the `X-ApexMail-Signature` header and strip the `sha256=` prefix.
+3. Read the `X-ApexMail-Timestamp` header and keep its digits verbatim.
+4. Construct the canonical payload: `f"{timestamp_digits}.{raw_body_bytes}"`.
+5. Compute `HMAC-SHA256(key=secret_bytes, message=canonical_payload)` and hex-encode the result.
+6. Compare the computed hex digest against the header value using a constant-time comparison.
 
 ### Replay Prevention
 
-Verify that the `t` value (from the signature header or the `X-ApexMail-Timestamp` header) is within **5 minutes (300 seconds)** of your current clock. Reject any payload with a stale timestamp.
+Verify that the timestamp is within **5 minutes (300 seconds)** of your current clock. Reject any payload with a stale timestamp.
 
-**Recommended tolerance:** `abs(now - t) > 300` → reject with HTTP 400.
+**Recommended tolerance:** `abs(now - timestamp) > 300_000` when the timestamp is in milliseconds → reject with HTTP 400.
+
+Adjust for clock skew between your servers and ApexMail's signing infrastructure. If your servers drift, increase the tolerance window instead of disabling the check.
 
 Adjust for clock skew between your servers and ApexMail's signing infrastructure. If your servers drift, increase the tolerance window instead of disabling the check.
 
@@ -290,14 +287,11 @@ Any deviation from the exact byte sequence will produce a different signature an
 
 ### Secret Rotation
 
-Webhooks support dual-secret rotation: when you add a new secret, ApexMail continues to accept the previous secret for a configurable transition window, allowing you to rotate without downtime.
-
-During rotation, verify the signature against both the current and previous secrets. Accept the payload if either secret produces a match.
+Rotating a webhook's secret returns the new value exactly once and switches deliveries to it immediately; the previous secret stops matching new deliveries, so update your receiver before (or right after) rotating. During a controlled rollout, a receiver that still holds the old secret can verify against the new one as soon as it is installed, and you can keep a short overlap by accepting either secret in your own code.
 
 ### Manual Verification Reference
 
 ```python
-import base64
 import hashlib
 import hmac
 import time
@@ -306,7 +300,8 @@ import time
 def verify_webhook_signature(
     raw_body: bytes,
     signature_header: str,
-    secret_b64: str,
+    secret: str,
+    timestamp_header: str,
     *,
     tolerance_seconds: int = 300,
 ) -> bool:
@@ -314,59 +309,44 @@ def verify_webhook_signature(
 
     Args:
         raw_body: The raw request body bytes (before JSON parsing).
-        signature_header: The value of the X-ApexMail-Signature header.
-        secret_b64: Your Base64-encoded webhook signing secret.
+        signature_header: The value of the X-ApexMail-Signature header
+            (``sha256=<hex>``; the legacy ``t=<seconds>,v1=<hex>`` form is
+            accepted too).
+        secret: Your webhook signing secret exactly as issued.
+        timestamp_header: The value of the X-ApexMail-Timestamp header
+            (Unix-epoch milliseconds).
         tolerance_seconds: Max allowed clock skew (default 300s = 5 min).
 
     Returns:
         True if the signature is valid and the timestamp is fresh.
     """
-    params = {}
-    for part in signature_header.split(","):
-        key, _, value = part.partition("=")
-        params[key.strip()] = value.strip()
-
-    t = int(params.get("t", "0"))
-    v1 = params.get("v1", "")
-
-    if not t or not v1:
+    digits = timestamp_header.strip()
+    if not digits.isdigit():
+        return False
+    if signature_header.startswith("sha256="):
+        signature = signature_header[len("sha256="):]
+    else:
+        # Legacy combined header: t=<seconds>,v1=<hex>
+        params = dict(part.split("=", 1) for part in signature_header.split(",") if "=" in part)
+        signature = params.get("v1", "")
+        digits = params.get("t", digits)
+    if not signature:
         return False
 
-    if abs(int(time.time()) - t) > tolerance_seconds:
+    is_milliseconds = len(digits) > 11 or int(digits) > 1_000_000_000_000
+    now = time.time() * 1000 if is_milliseconds else time.time()
+    tolerance = tolerance_seconds * (1000 if is_milliseconds else 1)
+    if tolerance_seconds > 0 and abs(now - int(digits)) > tolerance:
         return False
 
-    decoded_key = base64.b64decode(secret_b64)
-    canonical = f"{t}.".encode() + raw_body
-    expected = hmac.new(decoded_key, canonical, hashlib.sha256).hexdigest()
-
-    return hmac.compare_digest(expected, v1)
-
-
-def verify_webhook_signature_with_rotation(
-    raw_body: bytes,
-    signature_header: str,
-    current_secret_b64: str,
-    previous_secret_b64: str | None = None,
-    *,
-    tolerance_seconds: int = 300,
-) -> bool:
-    """Verify with dual-secret fallback for rotation windows."""
-    if verify_webhook_signature(
-        raw_body, signature_header, current_secret_b64,
-        tolerance_seconds=tolerance_seconds,
-    ):
-        return True
-    if previous_secret_b64:
-        return verify_webhook_signature(
-            raw_body, signature_header, previous_secret_b64,
-            tolerance_seconds=tolerance_seconds,
-        )
-    return False
+    canonical = f"{digits}.".encode() + raw_body
+    expected = hmac.new(secret.encode(), canonical, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
 ```
 
 ### SDK Helpers
 
-The first-party SDKs (currently in development) will provide helper functions for signature verification. See the [SDKs](/docs/sdks/) page for status. Until the SDKs ship, verify signatures against the raw request body as shown above.
+Every first-party SDK ships a signature-verification helper in its source (`verify_signature` in Python, `verifySignature` in the TypeScript SDK, and equivalents in Go, PHP, Ruby, and Java); these accept the platform header pair directly. See the [SDKs](/docs/sdks/) page for per-language status and source access.
 
 ---
 

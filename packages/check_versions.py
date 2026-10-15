@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that every SDK's version constant equals its CHANGELOG's latest entry.
 
-Audit SM15 F4 follow-up: the five first-party SDKs once shipped changelogs
+Audit SM15 F4 follow-up: the first-party SDKs once shipped changelogs
 advertising a release their code constants never carried (and vice versa),
 which made User-Agents unreliable for support. packages/README.md states the
 invariant ("Each SDK's version constant ... must equal the head entry of its
@@ -13,7 +13,7 @@ order-independent definition).
 
 Usage: python3 packages/check_versions.py
 
-Exits 0 when all five SDKs are consistent, 1 otherwise.
+Exits 0 when all six SDKs are consistent, 1 otherwise.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-EXPECT_LOCKSTEP = True  # all five SDKs must carry the same version
+EXPECT_LOCKSTEP = True  # all six SDKs must carry the same version
 
 SEMVER = r"\d+\.\d+\.\d+"
 
@@ -60,6 +60,7 @@ def check() -> list[str]:
     rb = ROOT / "sdk-ruby"
     jv = ROOT / "sdk-java"
     php = ROOT / "sdk-php"
+    ts = ROOT / "sdk-typescript"
 
     # go
     vals = [
@@ -100,12 +101,22 @@ def check() -> list[str]:
               first_match((php / "src/Client.php").read_text(), r"SDK_VERSION\s*=\s*'([^']+)'")),
         changelog_latest(php / "CHANGELOG.md") or probe("php", "changelog release heading", None),
     ]
+    # typescript
+    vals += [
+        probe("typescript", "package.json version",
+              json.loads((ts / "package.json").read_text()).get("version")),
+        probe("typescript", "SDK_VERSION constant",
+              first_match((ts / "src/version.ts").read_text(), r'SDK_VERSION\s*=\s*"([^"]+)"')),
+        probe("typescript", "User-Agent constant",
+              first_match((ts / "src/client.ts").read_text(), r'apexmail-node/(\d+\.\d+\.\d+)')),
+        changelog_latest(ts / "CHANGELOG.md") or probe("typescript", "changelog release heading", None),
+    ]
 
     # Name counts MUST equal the number of probes appended per SDK above
-    # (go 2, python 4, ruby 3, java 3, php 3) or zip() silently pairs a
-    # value with the wrong SDK's label (CV-2: a ruby gemspec drift used to
-    # be reported as a python mismatch).
-    names = ["go"] * 2 + ["python"] * 4 + ["ruby"] * 3 + ["java"] * 3 + ["php"] * 3
+    # (go 2, python 4, ruby 3, java 3, php 3, typescript 4) or zip() silently
+    # pairs a value with the wrong SDK's label (CV-2: a ruby gemspec drift
+    # used to be reported as a python mismatch).
+    names = ["go"] * 2 + ["python"] * 4 + ["ruby"] * 3 + ["java"] * 3 + ["php"] * 3 + ["typescript"] * 4
     if len(names) != len(vals):
         errors.append(f"internal: probe name/value count mismatch ({len(names)} names vs {len(vals)} values)")
         return errors

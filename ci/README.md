@@ -43,7 +43,7 @@ GitHub Actions workflows were removed from the tree (2026-09-13); the
    │               sources/licenses), cargo test --workspace           │
    │               (+ephemeral DB/Redis), coverage ratchet             │
    │               (llvm-cov → baseline), PHP suites (required),       │
-   │               five SDK lanes, satellite crates, shellcheck/       │
+   │               six SDK lanes, satellite crates, shellcheck/       │
    │               hadolint/py-compile, dogfood ledger + self-test     │
    │ 04 security   gitleaks, cargo audit (+RUSTSEC ignores), cargo vet,│
    │               semgrep SAST (REQUIRED), fresh-DB migration         │
@@ -452,7 +452,7 @@ checkout has none (one-time ~30 s per package, then cached in the tree).
 
 ### SDK lanes (`CI_SDK_CHECK=required`)
 
-The five first-party SDKs previously had **no CI lane at all**:
+The six first-party SDKs previously had **no CI lane at all**:
 
 | Lane | Command | Notes |
 |---|---|---|

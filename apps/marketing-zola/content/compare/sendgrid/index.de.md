@@ -45,7 +45,7 @@ comparison_sections = [
   ]},
   { title = "ENTWICKLERERFAHRUNG", rows = [
     { feature = "Zeit bis zur ersten E-Mail", apex = '<span class="text-brand-600 font-semibold">&lt;10 Sekunden</span>', comp = '<span class="text-surface-600">~5 Minuten</span>', winner = "none" },
-    { feature = "Offizielle SDK-Abdeckung", apex = '<span class="text-brand-600 font-semibold">Sechs veröffentlichte SDKs</span>', comp = '<span class="text-surface-600">Sieben SDKs</span>', winner = "none" },
+    { feature = "Offizielle SDK-Abdeckung", apex = '<span class="text-brand-600 font-semibold">Sechs SDKs in aktiver Entwicklung (Python, Go, TypeScript, PHP, Ruby, Java); Quellcode im Monorepo, noch nicht in Registries veröffentlicht</span>', comp = '<span class="text-surface-600">Sieben SDKs</span>', winner = "competitor" },
     { feature = "Idempotenzschlüssel", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Webhook-Signaturen", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Sandbox-Modus", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
