@@ -147,6 +147,12 @@ struct LegacyPlanFeaturesPayload {
     api_access: bool,
     webhooks_enabled: bool,
     inbound_email: bool,
+    /// Mailboxes product entitlement (a separate per-seat line; granted by
+    /// an active `product_line_contracts` row or a plan/override). Defaults
+    /// to false so payloads written before the key existed still parse
+    /// (fail-closed, never a deserialization error).
+    #[serde(default)]
+    mailboxes: bool,
     advanced_analytics: bool,
     send_time_optimization: bool,
     ab_testing: bool,
@@ -185,6 +191,7 @@ impl From<PlanFeatures> for LegacyPlanFeaturesPayload {
             api_access: features.api_access,
             webhooks_enabled: features.webhooks_enabled,
             inbound_email: features.inbound_email,
+            mailboxes: features.mailboxes,
             advanced_analytics: features.advanced_analytics,
             send_time_optimization: features.send_time_optimization,
             ab_testing: features.ab_testing,
@@ -225,6 +232,7 @@ impl From<LegacyPlanFeaturesPayload> for PlanFeatures {
             api_access: features.api_access,
             webhooks_enabled: features.webhooks_enabled,
             inbound_email: features.inbound_email,
+            mailboxes: features.mailboxes,
             advanced_analytics: features.advanced_analytics,
             send_time_optimization: features.send_time_optimization,
             ab_testing: features.ab_testing,

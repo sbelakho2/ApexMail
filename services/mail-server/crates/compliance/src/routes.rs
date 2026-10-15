@@ -176,6 +176,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
         .merge(crate::admin_routes::public_trust_router())
+        // A-group / B6: the public claims registry + DORA/NIS2 evidence pack.
+        .merge(crate::admin_routes::public_claims_router())
         // Wave G: the statutory filing operator surface (package build /
         // verify, human tasks, TSD preview, annual-report acts) — the real
         // callers of the filing builders that previously had only tests.
@@ -3497,15 +3499,16 @@ mod tests {
         }
 
         // The F56 conversion: parameterised routes in routes.rs + admin_routes.rs.
-        // 37 = the original 32 + the 7 breach state-machine routes added by the
-        // GDPR governance work - the 2 removed notify-dpa/notify-subjects routes.
+        // 38 = the original 32 + the 7 breach state-machine routes added by the
+        // GDPR governance work - the 2 removed notify-dpa/notify-subjects routes
+        // + `GET /v1/claims/:id` (the served claims registry, plan D4).
         assert_eq!(
-            colon_routes, 37,
-            "expected 37 parameterised routes (16 in admin_routes + 21 here), found {colon_routes}"
+            colon_routes, 38,
+            "expected 38 parameterised routes (17 in admin_routes + 21 here), found {colon_routes}"
         );
         assert_eq!(
-            colon_captures, 39,
-            "expected 39 captures (two 2-param routes), found {colon_captures}"
+            colon_captures, 40,
+            "expected 40 captures (two 2-param routes), found {colon_captures}"
         );
     }
 }

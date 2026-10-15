@@ -1,0 +1,56 @@
+{
+  "generated_by": "tools/generate_public_metrics.py",
+  "generated_at": "2026-10-15T18:33:33+00:00",
+  "window": {
+    "start": "2026-09-15T18:33:33+00:00",
+    "end": "2026-10-15T18:33:33+00:00",
+    "days": 30
+  },
+  "hero_metrics": [
+    "uptime_12mo",
+    "recipient_mx_acceptance_seconds",
+    "deliveries_30d"
+  ],
+  "metrics": [
+    {
+      "id": "uptime_12mo",
+      "label": "uptime · 12mo",
+      "status": "illustrative",
+      "value": null,
+      "unit": "%",
+      "display": null,
+      "source": null,
+      "note": "No production availability series exists in this repository yet: the status host records INCIDENTS, not availability samples. The hero therefore does not present an uptime number as measured; the live status page is authoritative.",
+      "upgrade_path": "wire a real availability series (probe samples) and point this metric at it in tools/generate_public_metrics.py"
+    },
+    {
+      "id": "recipient_mx_acceptance_seconds",
+      "label": "recipient-MX acceptance",
+      "status": "illustrative",
+      "value": null,
+      "unit": "s",
+      "display": null,
+      "source": null,
+      "note": "The metric is defined on the methodology page (1.3) but no production series is exposed to this tool yet; the hero does not present it as measured.",
+      "upgrade_path": "expose the SMTP handoff latency series (Prometheus) and query it here"
+    },
+    {
+      "id": "deliveries_30d",
+      "label": "deliveries · Oct 2026",
+      "status": "unavailable",
+      "value": null,
+      "unit": null,
+      "display": null,
+      "source": {
+        "kind": "clickhouse-http",
+        "host": "127.0.0.1:8123",
+        "table": "events",
+        "query_version": "public-metrics-v1",
+        "window_days": 30
+      },
+      "note": "Count of `sent` events in the delivery event store over the window; rendered as a scaled count (5.2m) and never as a rate.",
+      "unavailable_reason": "clickhouse_unreachable: <urlopen error [Errno 61] Connection refused>"
+    }
+  ],
+  "note": "Every hero number must appear here with its status and source; the template renders a value ONLY for status=measured, so a number can never be presented as measured without a backing artifact."
+}

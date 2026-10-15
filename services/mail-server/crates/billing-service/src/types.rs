@@ -71,6 +71,20 @@ pub struct PlanFeatures {
     pub webhooks_enabled: bool,
     /// RuntimeEnforced — inbound event consumption (webhook `inbound` subscriptions); raw SMTP acceptance is never gated.
     pub inbound_email: bool,
+    /// RuntimeEnforced — mailbox provisioning (`routes/admin/mailboxes.rs`)
+    /// requires this entitlement OR an active Mailboxes product-line
+    /// contract (`product_line_contracts`, migration 256). The Mailboxes
+    /// line is a separate per-seat product (10-seat minimum,
+    /// `platform-catalog` `addon_by_name("mailboxes")`), so no canonical
+    /// plan seed grants it — the contract row is the purchase record the
+    /// monthly seat billing reads.
+    ///
+    /// `#[serde(default)]`: plan rows written before this key existed carry
+    /// no value for it, and a missing entitlement Bool must read as NOT
+    /// entitled (fail-closed) — never a deserialization error on a rolling
+    /// deploy.
+    #[serde(default)]
+    pub mailboxes: bool,
 
     // Analytics
     /// RuntimeEnforced — engagement/deliverability analytics endpoints require this entitlement.
@@ -160,6 +174,7 @@ impl Default for PlanFeatures {
             max_team_members: 1,
             subaccounts: false,
             max_subaccounts: 0,
+            mailboxes: false,
             support_level: SupportLevel::Community,
             dedicated_csm: false,
             priority_onboarding: false,

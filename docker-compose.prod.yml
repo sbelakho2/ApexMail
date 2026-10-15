@@ -421,6 +421,13 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       API_KEY_HASH_SECRET_FILE: /run/secrets/api_key_hash_secret
+      # B3 public receipt verification: the PUBLIC half of the routing-receipt
+      # Ed25519 key (base64 or hex, NOT a secret). Served at
+      # GET /v1/routing/receipts/public-key; unset => that endpoint and the
+      # stateless verify answer a named 503 (fail closed, never a fabricated
+      # key). Publish the value from the signing host with
+      # `RECEIPT_SIGNING_KEY=<seed> receipt-public-key`.
+      RECEIPT_PUBLIC_KEY: ${RECEIPT_PUBLIC_KEY:-}
       WEBHOOK_SIGNING_SECRET_FILE: /run/secrets/webhook_signing_secret
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
@@ -828,6 +835,13 @@ services:
       COMPLIANCE_AUTH_TOKEN_FILE: /run/secrets/compliance_auth_token
       AUDIT_SIGNING_KEY: ""
       AUDIT_SIGNING_KEY_FILE: /run/secrets/audit_signing_key
+      # B3 signed routing receipts: the Ed25519 seed signs one receipt per
+      # accepted message (migration 255). Mounted as a Docker secret like
+      # every other production secret; the worker REFUSES to boot (exit) with
+      # the email processor enabled when it is absent, and a malformed key is
+      # fatal everywhere.
+      RECEIPT_SIGNING_KEY: ""
+      RECEIPT_SIGNING_KEY_FILE: /run/secrets/receipt_signing_key
       SECRETS_ENCRYPTION_KEY: ""
       SECRETS_ENCRYPTION_KEY_FILE: /run/secrets/compliance_secrets_encryption_key
       SECRETS_KDF_SALT: ""
@@ -1562,6 +1576,7 @@ services:
       - tracking_secret_key
       - verp_hmac_secret
       - audit_signing_key
+      - receipt_signing_key
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       # F12 (audit): the worker serves GET /health on the SAME injected
@@ -2051,6 +2066,14 @@ secrets:
   # without it). Generate with: openssl rand -base64 48
   verp_hmac_secret:
     file: ${PROD_VERP_HMAC_SECRET_FILE:?PROD_VERP_HMAC_SECRET_FILE is required in production}
+  # B3 signed routing receipts — the Ed25519 seed the worker signs one receipt
+  # per accepted message with (migration 255). 32 bytes as 64 hex characters
+  # (or base64); generate with: openssl rand -hex 32. The worker refuses to
+  # boot in production without it. The PUBLIC half is published to the
+  # api-server as RECEIPT_PUBLIC_KEY (non-secret) so the API process can
+  # serve GET /v1/routing/receipts/public-key without holding the seed.
+  receipt_signing_key:
+    file: ${PROD_RECEIPT_SIGNING_KEY_FILE:?PROD_RECEIPT_SIGNING_KEY_FILE is required in production}
   internal_service_token:
     file: ${PROD_INTERNAL_SERVICE_TOKEN_FILE:?PROD_INTERNAL_SERVICE_TOKEN_FILE is required in production}
   # F9 (audit) — pdf-renderer's dedicated per-workload credential (P1 #6).

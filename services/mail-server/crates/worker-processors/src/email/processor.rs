@@ -9,8 +9,12 @@ use apexmail_lib::dkim::{
     decrypt_dkim_private_key, dkim_private_key_aad, dkim_public_keys_match,
     public_key_base64_from_private_key_pem,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use mail_common::routing_mode::RoutingMode;
+use mail_common::routing_receipt::{
+    receipt_signer_required_in_production, RoutingReceiptFields, RoutingReceiptSigner,
+    SignedRoutingReceipt,
+};
 use mail_common::warmup::WarmupSchedule;
 use moka::sync::Cache;
 use rand::Rng;
@@ -1053,14 +1057,73 @@ async fn claim_acceptance(
     }
 }
 
-/// Record the transport acceptance on the claimed ledger row. `last_error`
-/// carries a route-contract note when the receipt did not confirm the
-/// requested source IP — an AUDIT anomaly, never a retry signal.
+/// Resolve the routing-receipt signer from the process environment.
+///
+/// * `RECEIPT_SIGNING_KEY` set and valid → that signer.
+/// * set but MALFORMED → hard error, in every environment: a malformed key
+///   must never silently degrade into unsigned (or differently-signed)
+///   behaviour.
+/// * unset in a production process → `Ok(None)`: no signer. The worker
+///   binary refuses to boot in this state (`receipt_signing_gate`), and the
+///   acceptance path refuses to record — an unsigned receipt must not
+///   silently exist.
+/// * unset in a development process → an EPHEMERAL per-process key, warned
+///   loudly. Receipts are still signed (never unsigned); they verify against
+///   the dev process's own published key, not production's.
+fn resolve_receipt_signer() -> ProcessorResult<Option<Arc<RoutingReceiptSigner>>> {
+    match RoutingReceiptSigner::from_env() {
+        Ok(Some(signer)) => {
+            info!(
+                key_id = signer.key_id(),
+                "routing-receipt signing enabled (ed25519)"
+            );
+            Ok(Some(Arc::new(signer)))
+        }
+        Ok(None) => {
+            if receipt_signer_required_in_production() {
+                // Belt and braces behind the boot gate: if a production
+                // process still reaches here, it has NO signer and every
+                // acceptance write will refuse (loudly) rather than write an
+                // unsigned row.
+                warn!(
+                    "RECEIPT_SIGNING_KEY is unset in a production process — the acceptance \
+                     path will REFUSE to record accepted sends (no unsigned receipts)"
+                );
+                Ok(None)
+            } else {
+                let signer = Arc::new(RoutingReceiptSigner::generate());
+                warn!(
+                    key_id = signer.key_id(),
+                    "RECEIPT_SIGNING_KEY is unset — signing routing receipts with an \
+                     EPHEMERAL development key; these receipts verify only against this \
+                     process's public key and must never be treated as production evidence"
+                );
+                Ok(Some(signer))
+            }
+        }
+        Err(error) => Err(ProcessorError::Config(format!(
+            "routing-receipt signing key is unusable: {error}"
+        ))),
+    }
+}
+
+/// Record the transport acceptance on the claimed ledger row.
+///
+/// The Ed25519 receipt (`signed`, migration 255) is REQUIRED: this function
+/// cannot write an `accepted` row without a signature — the caller signs
+/// first ([`EmailProcessor::sign_routing_receipt`]) and fails loudly when no
+/// signer exists. `accepted_at` is the exact value the signature covers, so
+/// the stored row and the signed payload agree by construction.
+///
+/// `last_error` carries a route-contract note when the receipt did not
+/// confirm the requested source IP — an AUDIT anomaly, never a retry signal.
 async fn record_acceptance_accepted(
     db: &PgPool,
     send_unit: &str,
     receipt: &DeliveryReceipt,
     contract_note: Option<&str>,
+    signed: &SignedRoutingReceipt,
+    accepted_at: DateTime<Utc>,
 ) -> ProcessorResult<()> {
     let updated = sqlx::query(
         r#"
@@ -1068,8 +1131,13 @@ async fn record_acceptance_accepted(
         SET state = 'accepted',
             transport_message_id = $2,
             actual_source_ip = $3::text::inet,
-            accepted_at = NOW(),
-            last_error = $4
+            accepted_at = $5,
+            last_error = $4,
+            receipt_payload = $6,
+            receipt_signature = $7,
+            receipt_scheme = $8,
+            receipt_key_id = $9,
+            receipt_signed_at = NOW()
         WHERE send_unit = $1 AND state = 'reserved'
         "#,
     )
@@ -1077,6 +1145,11 @@ async fn record_acceptance_accepted(
     .bind(receipt.transport_message_id.as_deref())
     .bind(receipt.actual_source_ip.map(|ip| ip.to_string()))
     .bind(contract_note)
+    .bind(accepted_at)
+    .bind(&signed.payload)
+    .bind(&signed.signature)
+    .bind(signed.scheme)
+    .bind(&signed.key_id)
     .execute(db)
     .await?;
     if updated.rows_affected() == 0 {
@@ -1772,6 +1845,16 @@ pub struct EmailProcessor {
     /// [`EmailProcessor::tenant_policy`].
     tenant_restriction_cache: Cache<String, String>,
 
+    /// Ed25519 signer for the per-message routing receipt that lands next to
+    /// every `accepted` ledger row (migration 255,
+    /// `mail_common::routing_receipt`). `None` = this process cannot produce
+    /// a signed receipt, and the acceptance write then REFUSES to record
+    /// (fail closed: "no claim without evidence" — an unsigned receipt must
+    /// not silently exist). In production the signer is resolved from
+    /// `RECEIPT_SIGNING_KEY` and the worker refuses to boot without it; in
+    /// dev an ephemeral per-process key signs receipts with a loud warning.
+    receipt_signer: Option<Arc<RoutingReceiptSigner>>,
+
     // Circuit breakers for SMTP endpoints
     smtp_circuit_breaker: CircuitBreaker,
 
@@ -1809,6 +1892,20 @@ impl EmailProcessor {
         config: EmailConfig,
         transport: HybridTransport,
     ) -> ProcessorResult<Self> {
+        let receipt_signer = resolve_receipt_signer()?;
+        Self::with_transport_and_signer(db, redis, config, transport, receipt_signer).await
+    }
+
+    /// [`Self::with_transport`] with an explicit receipt signer — the test
+    /// seam that pins the fail-closed behaviour (`None` refuses to record an
+    /// accepted row) without mutating process env.
+    pub(crate) async fn with_transport_and_signer(
+        db: PgPool,
+        redis: RedisPool,
+        config: EmailConfig,
+        transport: HybridTransport,
+        receipt_signer: Option<Arc<RoutingReceiptSigner>>,
+    ) -> ProcessorResult<Self> {
         let smtp_circuit_breaker = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 10,
             open_duration: Duration::from_secs(60),
@@ -1835,6 +1932,7 @@ impl EmailProcessor {
             fence_gate: crate::fence::FenceGate::from_env(),
             queue_metrics_last_emit_ms: AtomicI64::new(0),
             shutdown: Arc::new(watch::channel(false).0),
+            receipt_signer,
             suppression_cache: Cache::builder()
                 .max_capacity(SUPPRESSION_CACHE_MAX_SIZE)
                 .time_to_live(SUPPRESSION_CACHE_TTL)
@@ -1848,6 +1946,64 @@ impl EmailProcessor {
             error_cooldown_until: AtomicI64::new(0),
             backpressure,
         })
+    }
+
+    /// Sign the per-message routing receipt for an ACCEPTED send.
+    ///
+    /// * The canonical payload carries (message_id, tenant_id, transport,
+    ///   accepted_at, actual_source_ip when the transport reported one).
+    /// * `accepted_at` is generated ONCE by the caller and is the value
+    ///   persisted on the ledger row, so the signature covers exactly what
+    ///   the ledger says.
+    /// * `None` signer → typed refusal. The acceptance write then refuses to
+    ///   record (no unsigned receipt is ever written); the caller alarms.
+    fn sign_routing_receipt(
+        &self,
+        job: &EmailJob,
+        route: &DeliveryRoute,
+        receipt: &DeliveryReceipt,
+        accepted_at: DateTime<Utc>,
+    ) -> ProcessorResult<SignedRoutingReceipt> {
+        let signer = self.receipt_signer.as_ref().ok_or_else(|| {
+            ProcessorError::Config(
+                "REFUSING to record an unsigned routing receipt: no Ed25519 signer is \
+                 configured on this worker (set RECEIPT_SIGNING_KEY; the worker refuses to \
+                 boot in production without it)"
+                    .to_string(),
+            )
+        })?;
+        sign_receipt_with(signer, job, route, receipt, accepted_at)
+    }
+
+    /// Sign, then record, one accepted send: the acceptance path's single
+    /// entry point. `accepted_at` is sampled ONCE here and is both signed and
+    /// persisted, so the ledger row and the signed payload cannot disagree.
+    async fn record_signed_acceptance(
+        &self,
+        send_unit: &str,
+        job: &EmailJob,
+        route: &DeliveryRoute,
+        receipt: &DeliveryReceipt,
+        contract_note: Option<&str>,
+    ) -> ProcessorResult<()> {
+        // Millisecond precision: `timestamptz` stores microseconds and
+        // rounds, so signing a nanosecond-precision instant could disagree
+        // with the stored row by a rounding step. Truncating to ms makes the
+        // signed payload and the ledger row byte-identical in value.
+        let accepted_at = Utc::now().trunc_subsecs(3);
+        // Signing FIRST is what makes the write fail closed: no signer → no
+        // signature → this returns before the UPDATE, so the row is never
+        // marked `accepted` without its proof.
+        let signed = self.sign_routing_receipt(job, route, receipt, accepted_at)?;
+        record_acceptance_accepted(
+            &self.db,
+            send_unit,
+            receipt,
+            contract_note,
+            &signed,
+            accepted_at,
+        )
+        .await
     }
 
     /// Swap the pre-send DLP scanner (chainable, additive to
@@ -3023,16 +3179,21 @@ impl EmailProcessor {
                          the message is not retried"
                     );
                 }
-                if let Err(record_error) = record_acceptance_accepted(
-                    &self.db,
-                    &send_unit,
-                    receipt,
-                    contract_note.as_deref(),
-                )
-                .await
+                if let Err(record_error) = self
+                    .record_signed_acceptance(
+                        &send_unit,
+                        job,
+                        &route,
+                        receipt,
+                        contract_note.as_deref(),
+                    )
+                    .await
                 {
                     // The message is ALREADY accepted externally: this is a
-                    // loud operational failure, not a reason to retry.
+                    // loud operational failure, not a reason to retry. The
+                    // row is NOT marked accepted (fail closed — no unsigned
+                    // receipt exists); the reserved row will be reclaimed
+                    // after the lease, which the alarm below makes visible.
                     metrics::counter!("apexmail_acceptance_record_failed").increment(1);
                     error!(
                         job_id = %job.id,
@@ -5742,6 +5903,47 @@ pub async fn record_sender_event_if_linked(
     .await?;
 
     Ok(id)
+}
+
+/// Build and sign the canonical routing-receipt payload for one accepted
+/// send. Free (not a method) so the test fixtures sign through the EXACT
+/// same field construction the acceptance path uses.
+fn sign_receipt_with(
+    signer: &RoutingReceiptSigner,
+    job: &EmailJob,
+    route: &DeliveryRoute,
+    receipt: &DeliveryReceipt,
+    accepted_at: DateTime<Utc>,
+) -> ProcessorResult<SignedRoutingReceipt> {
+    let accepted_at = accepted_at.to_rfc3339();
+    let actual_source_ip = receipt.actual_source_ip.map(|ip| ip.to_string());
+    let fields = RoutingReceiptFields {
+        message_id: &job.message_id,
+        tenant_id: &job.tenant_id,
+        transport: &transport_kind_for(route).to_string(),
+        accepted_at: &accepted_at,
+        actual_source_ip: actual_source_ip.as_deref(),
+    };
+    signer
+        .sign_fields(&fields)
+        .map_err(|error| ProcessorError::Config(format!("routing receipt payload: {error}")))
+}
+
+/// Test-only: sign an acceptance receipt with a deterministic test key and
+/// return it with the `accepted_at` it covers. The derivation of the public
+/// key from the seed is pinned in `mail-common`'s unit tests; the acceptance
+/// tests here only need a reproducible signature.
+#[cfg(test)]
+fn test_signed_acceptance(
+    job: &EmailJob,
+    route: &DeliveryRoute,
+    receipt: &DeliveryReceipt,
+) -> (SignedRoutingReceipt, DateTime<Utc>) {
+    let signer = RoutingReceiptSigner::from_seed(&[0x5A; 32]).expect("deterministic test signer");
+    let accepted_at = Utc::now().trunc_subsecs(3);
+    let signed = sign_receipt_with(&signer, job, route, receipt, accepted_at)
+        .expect("test receipt must sign");
+    (signed, accepted_at)
 }
 
 #[cfg(test)]
@@ -10802,7 +11004,8 @@ mod acceptance_ledger_db_tests {
             .send(&acceptance_email(), &route)
             .await
             .expect("first submission");
-        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+        let (signed, accepted_at) = test_signed_acceptance(&job, &route, &receipt);
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None, &signed, accepted_at)
             .await
             .expect("record acceptance");
 
@@ -10851,7 +11054,8 @@ mod acceptance_ledger_db_tests {
             .send(&acceptance_email(), &route)
             .await
             .expect("retry submission");
-        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+        let (signed, accepted_at) = test_signed_acceptance(&job, &route, &receipt);
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None, &signed, accepted_at)
             .await
             .expect("record retry acceptance");
 
@@ -10934,7 +11138,8 @@ mod acceptance_ledger_db_tests {
             .send(&acceptance_email(), &route)
             .await
             .expect("reclaimed submission");
-        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+        let (signed, accepted_at) = test_signed_acceptance(&job, &route, &receipt);
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None, &signed, accepted_at)
             .await
             .expect("record reclaimed acceptance");
         assert_eq!(
@@ -11002,13 +11207,194 @@ mod acceptance_ledger_db_tests {
             recipient_provider: None,
             provider_source: None,
         };
-        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+        let (signed, accepted_at) = test_signed_acceptance(&job, &route, &receipt);
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None, &signed, accepted_at)
             .await
             .expect("record acceptance");
         assert_eq!(acceptance_count(&pool, &send_unit).await, 1);
         assert_eq!(
             claim_acceptance(&pool, &job, &route).await.unwrap(),
             AcceptanceClaim::AlreadyAccepted
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Deadpool pools connect lazily; the processor constructors below never
+    /// touch Redis, so no server is required for these assertions.
+    fn acceptance_redis() -> RedisPool {
+        deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool")
+    }
+
+    async fn acceptance_processor(
+        pool: &PgPool,
+        signer: Option<Arc<RoutingReceiptSigner>>,
+    ) -> EmailProcessor {
+        let transport = Arc::new(CountingTransport::default());
+        let hybrid = HybridTransport::new(Some(transport as Arc<dyn EmailTransport>), None);
+        EmailProcessor::with_transport_and_signer(
+            pool.clone(),
+            acceptance_redis(),
+            EmailConfig::default(),
+            hybrid,
+            signer,
+        )
+        .await
+        .expect("processor with an explicit receipt signer")
+    }
+
+    /// B3 "the proof is signed per message": the accepted ledger row carries
+    /// the canonical payload + Ed25519 signature, and a THIRD PARTY holding
+    /// only the published public key can verify it — no database access, no
+    /// secret, no trust in this process. Tampering with the stored payload
+    /// must fail.
+    #[tokio::test]
+    async fn accepted_receipt_is_signed_and_verifiable_without_the_secret(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_signed").await else { return Ok(()) };
+        let job = acceptance_job();
+        let route = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-signed".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+        let send_unit = send_unit_of(&job);
+        let signer = Arc::new(
+            RoutingReceiptSigner::from_seed(&[0x3C; 32]).expect("deterministic test signer"),
+        );
+        let processor = acceptance_processor(&pool, Some(signer.clone())).await;
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed
+        );
+        let transport = CountingTransport::default();
+        let receipt = transport
+            .send(&acceptance_email(), &route)
+            .await
+            .expect("submission");
+        processor
+            .record_signed_acceptance(&send_unit, &job, &route, &receipt, Some("contract ok"))
+            .await
+            .expect("signed acceptance must record");
+
+        /// The signed ledger row as read back (one field per stored column).
+        #[derive(sqlx::FromRow)]
+        struct SignedAcceptanceRow {
+            state: String,
+            receipt_payload: Option<String>,
+            receipt_signature: Option<String>,
+            receipt_scheme: Option<String>,
+            receipt_key_id: Option<String>,
+            accepted_at: Option<DateTime<Utc>>,
+        }
+
+        let row: SignedAcceptanceRow = sqlx::query_as(
+            "SELECT state, receipt_payload, receipt_signature, receipt_scheme, receipt_key_id, accepted_at \
+             FROM sales_delivery_acceptances WHERE send_unit = $1",
+        )
+        .bind(&send_unit)
+        .fetch_one(&pool)
+        .await
+        .expect("read the signed row");
+        assert_eq!(row.state, "accepted");
+        let payload = row
+            .receipt_payload
+            .expect("the canonical payload is stored verbatim");
+        let signature = row.receipt_signature.expect("the signature is stored");
+        assert_eq!(row.receipt_scheme.as_deref(), Some("ed25519"));
+        assert_eq!(row.receipt_key_id.as_deref(), Some(signer.key_id()));
+
+        // The payload is the documented canonical form and covers the exact
+        // accepted_at the row holds (millisecond precision survives the
+        // timestamptz round trip).
+        assert!(payload.starts_with("apexmail-routing-receipt/v1\n"));
+        assert!(payload.contains(&format!("message_id={}", job.message_id)));
+        assert!(payload.contains(&format!("tenant_id={}", job.tenant_id)));
+        assert!(payload.contains("transport=dedicated"));
+        assert!(payload.contains("actual_source_ip=203.0.113.9"));
+        let stored_accepted = row.accepted_at.expect("accepted_at");
+        assert!(
+            payload.contains(&format!("accepted_at={}", stored_accepted.to_rfc3339())),
+            "payload must carry the persisted accepted_at ({}): {payload}",
+            stored_accepted.to_rfc3339(),
+        );
+
+        // External verification: public key only (the served form).
+        let published = mail_common::routing_receipt::parse_public_key(&signer.public_key_base64())
+            .expect("published key");
+        mail_common::routing_receipt::verify_payload(&payload, &signature, &published)
+            .expect("the stored receipt must verify under the published key");
+
+        // Tampering is detected.
+        let tampered = payload.replace(&job.tenant_id, "another-tenant");
+        assert!(
+            mail_common::routing_receipt::verify_payload(&tampered, &signature, &published)
+                .is_err()
+        );
+        let wrong_key = RoutingReceiptSigner::from_seed(&[0x3D; 32]).expect("other signer");
+        assert!(mail_common::routing_receipt::verify_payload(
+            &payload,
+            &signature,
+            &wrong_key.public_key()
+        )
+        .is_err());
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Fail-closed: a process with NO signer REFUSES to record acceptance —
+    /// the row is not marked `accepted` and no signature-less receipt is
+    /// written ("no claim without evidence"). The refusal is a typed error
+    /// the caller alarms on, never a silent downgrade.
+    #[tokio::test]
+    async fn acceptance_without_a_signer_is_refused_and_writes_no_accepted_row(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_no_signer").await else { return Ok(()) };
+        let job = acceptance_job();
+        let route = DeliveryRoute::SesShared;
+        let send_unit = send_unit_of(&job);
+        let processor = acceptance_processor(&pool, None).await;
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed
+        );
+        let transport = CountingTransport::default();
+        let receipt = transport
+            .send(&acceptance_email(), &route)
+            .await
+            .expect("submission");
+        let error = processor
+            .record_signed_acceptance(&send_unit, &job, &route, &receipt, None)
+            .await
+            .expect_err("an unsigned acceptance must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("REFUSING to record an unsigned routing receipt"),
+            "the refusal must name itself: {error}"
+        );
+
+        assert_eq!(
+            acceptance_state(&pool, &send_unit).await,
+            "reserved",
+            "the refused write must leave the row unaccepted"
+        );
+        let signature: Option<String> = sqlx::query_scalar(
+            "SELECT receipt_signature FROM sales_delivery_acceptances WHERE send_unit = $1",
+        )
+        .bind(&send_unit)
+        .fetch_one(&pool)
+        .await
+        .expect("read signature column");
+        assert!(
+            signature.is_none(),
+            "an unsigned receipt must never be stored"
         );
         pool.close().await;
         Ok(())
@@ -13044,7 +13430,16 @@ mod end_to_end_db_tests {
             verp: None,
         };
         let receipt = transport.send(&prepared, &route).await?;
-        record_acceptance_accepted(&pool, &send_unit_of(&job), &receipt, None).await?;
+        let (signed, accepted_at) = test_signed_acceptance(&job, &route, &receipt);
+        record_acceptance_accepted(
+            &pool,
+            &send_unit_of(&job),
+            &receipt,
+            None,
+            &signed,
+            accepted_at,
+        )
+        .await?;
         // DIED. The row is 'processing' under a lease nobody will renew.
         sqlx::query(
             "UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1",
@@ -16498,7 +16893,8 @@ mod residual_arms_db_tests {
             recipient_provider: None,
             provider_source: None,
         };
-        record_acceptance_accepted(&pool, &unit, &receipt, None)
+        let (signed, accepted_at) = test_signed_acceptance(&job, &route, &receipt);
+        record_acceptance_accepted(&pool, &unit, &receipt, None, &signed, accepted_at)
             .await
             .expect("recording is best-effort, never an error");
         let state: String =

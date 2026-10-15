@@ -423,6 +423,42 @@ validate_repo_gates() {
         # `.gitignore` prevents new ones; this proves nothing slipped back.
         ci_check "no generated artifacts tracked" bash -c \
             '! git ls-files | grep -E "\.profraw$|\.profdata$|^apps/ai/training/(output_[0-9]+/|merged_)" | grep -q .'
+        # Subprocessor register (plan B5): the public page, the DPA mirror and
+        # the trust-portal's DB seed are all GENERATED from the deployment
+        # configuration (compose + env) by tools/generate_subprocessors.py —
+        # the same generated-artifact-guard pattern as the repo map. --check
+        # fails on drift; --self-test proves the drift arm reacts to a mutated
+        # file AND that the zero-US refusal (sovereign_chain_zero_us) fires
+        # when the fixture moves SES to us-east-1 (a checker that accepts
+        # everything is not a check).
+        ci_check "subprocessor register derived from deployment config" bash -c '
+            set -eu
+            python3 tools/generate_subprocessors.py --check
+            python3 tools/generate_subprocessors.py --self-test
+        '
+        # Published deliverability report (plan A4): the methodology page's
+        # numbers are rendered from the committed ClickHouse artifact
+        # (apps/marketing-zola/data/deliverability-report.json) by
+        # tools/generate_deliverability_report.py — the generated-artifact
+        # guard proves NO published number exists without its artifact (the
+        # --check re-renders hermetically; --self-test proves a mutated
+        # number FAILS, both directions).
+        ci_check "deliverability report backed by its artifact" bash -c '
+            set -eu
+            python3 tools/generate_deliverability_report.py --check
+            python3 tools/generate_deliverability_report.py --self-test
+        '
+        # Homepage hero metrics (plan A4): the hero band renders numbers from
+        # apps/marketing-zola/data/public_metrics.json — the artifact that
+        # stamps each metric's source + window. The check fails when a metric
+        # is `measured` without a source (a fabricated public number) or when
+        # an unmeasured metric carries a renderable value (an unmeasured
+        # target presented as a measurement); --self-test proves both.
+        ci_check "homepage metrics backed by their artifact" bash -c '
+            set -eu
+            python3 tools/generate_public_metrics.py --check
+            python3 tools/generate_public_metrics.py --self-test
+        '
     fi
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):

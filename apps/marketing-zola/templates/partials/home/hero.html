@@ -85,25 +85,47 @@
       </div>
     </div>
 
-    {# ── Stats band: mono values + point-meters. Every metric links to its
-       methodology (/performance-methodology/) or live history (status
-       host) — an unexplained number is a trust risk, not proof. Numeric
-       values set tabular numerals with zero tracking (review §6). ── #}
+    {# ── Stats band: mono values + point-meters. Plan A4/B5: every number here
+       is sourced from the public-metrics ARTIFACT
+       (data/public_metrics.json, written by tools/generate_public_metrics.py
+       from production data with its source + window stamped). A metric whose
+       status is not `measured` renders NO number — the label stays (linked to
+       the methodology / live status), and the cell says "not measured yet",
+       so an unmeasured target can never be presented as a measurement. ── #}
+    {% set public_metrics = load_data(path="data/public_metrics.json", format="json", required=false) %}
+    {% set hero_uptime = public_metrics["metrics"] | filter(attribute="id", value="uptime_12mo") | first %}
+    {% set hero_mx = public_metrics["metrics"] | filter(attribute="id", value="recipient_mx_acceptance_seconds") | first %}
+    {% set hero_volume = public_metrics["metrics"] | filter(attribute="id", value="deliveries_30d") | first %}
     <div class="stats mt-14 lg:mt-20" aria-label="Platform statistics">
       <div>
         <span class="k-arc-label"><a href="https://status.apexmail.ee" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_uptime_label"] %}{{ i18n_data[l]["home"]["stat_uptime_label"] }}{% else %}uptime · 12mo{% endif %}</a></span>
-        <div class="stats-v">99.9<span class="stats-v-dim">%</span></div>
-        <div class="k-meter k-ok"><i style="width:99%"></i><b style="left:99%"></b></div>
+        {% if hero_uptime and hero_uptime.status == "measured" %}
+        <div class="stats-v">{{ hero_uptime.display }}<span class="stats-v-dim">{{ hero_uptime.unit }}</span></div>
+        <div class="k-meter k-ok"><i style="width:{{ hero_uptime.display | replace(from='%', to='') }}%"></i><b style="left:{{ hero_uptime.display | replace(from='%', to='') }}%"></b></div>
+        {% else %}
+        <div class="stats-v stats-v-unmeasured" style="font-size:0.9rem;letter-spacing:0">not measured yet</div>
+        <div class="k-meter"><i style="width:0"></i><b style="left:0"></b></div>
+        {% endif %}
       </div>
       <div>
         <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_delivery_label"] %}{{ i18n_data[l]["home"]["stat_delivery_label"] }}{% else %}recipient-MX acceptance{% endif %}</a></span>
-        <div class="stats-v">1.8<span class="stats-v-dim">s</span></div>
+        {% if hero_mx and hero_mx.status == "measured" %}
+        <div class="stats-v">{{ hero_mx.display }}<span class="stats-v-dim">{{ hero_mx.unit }}</span></div>
         <div class="k-meter"><i style="width:62%"></i><b style="left:62%"></b></div>
+        {% else %}
+        <div class="stats-v stats-v-unmeasured" style="font-size:0.9rem;letter-spacing:0">not measured yet</div>
+        <div class="k-meter"><i style="width:0"></i><b style="left:0"></b></div>
+        {% endif %}
       </div>
       <div>
-        <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_volume_label"] %}{{ i18n_data[l]["home"]["stat_volume_label"] }}{% else %}deliveries · Aug 2026{% endif %}</a></span>
-        <div class="stats-v">5.2<span class="stats-v-dim">m</span></div>
+        <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_volume_label"] %}{{ i18n_data[l]["home"]["stat_volume_label"] }}{% else %}deliveries · {{ public_metrics["window"]["end"] | truncate(length=7, end='') }}{% endif %}</a></span>
+        {% if hero_volume and hero_volume.status == "measured" %}
+        <div class="stats-v">{{ hero_volume.display }}</div>
         <div class="k-meter"><i style="width:78%"></i><b style="left:78%"></b></div>
+        {% else %}
+        <div class="stats-v stats-v-unmeasured" style="font-size:0.9rem;letter-spacing:0">not measured yet</div>
+        <div class="k-meter"><i style="width:0"></i><b style="left:0"></b></div>
+        {% endif %}
       </div>
     </div>
 

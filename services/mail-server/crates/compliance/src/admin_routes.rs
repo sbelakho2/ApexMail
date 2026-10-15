@@ -127,6 +127,60 @@ pub fn public_trust_router() -> Router<Arc<AppState>> {
         .route("/trust/access-request", post(public_trust_access_request))
 }
 
+/// The PUBLIC claims registry + DORA/NIS2 evidence pack (plan A-group /
+/// B6): the claims the product makes, the evidence pointer behind each one,
+/// and the control mappings — served WITHOUT auth, exactly like the trust
+/// portal's public routes, because a public claim whose proof needs an NDA is
+/// not a public proof.
+///
+/// * `GET /v1/claims` — every claim (id, wording, status, evidence pointer +
+///   kind, review/expiry dates, limitations);
+/// * `GET /v1/claims/frameworks` — the DORA + NIS2 control mappings, every
+///   row pointing at a repository artifact pinned by the crate's tests;
+/// * `GET /v1/claims/:id` — one claim (404 with the id echoed when absent).
+///
+/// The registry is seeded once per process (it is static data).
+pub fn public_claims_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/v1/claims", get(public_claims_list))
+        .route("/v1/claims/frameworks", get(public_claims_frameworks))
+        .route("/v1/claims/:id", get(public_claims_get))
+}
+
+/// The process-wide seeded claims registry (static data; seeding per request
+/// would rebuild 30 structs for nothing).
+fn claims_registry() -> &'static crate::claims_registry::ClaimsRegistry {
+    static REGISTRY: std::sync::OnceLock<crate::claims_registry::ClaimsRegistry> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(crate::claims_registry::seed_claims_registry)
+}
+
+async fn public_claims_list() -> impl IntoResponse {
+    let registry = claims_registry();
+    let claims = registry.public_views();
+    ok_json(serde_json::json!({
+        "claims": claims,
+        "count": claims.len(),
+        "source": "compliance::claims_registry::seed_claims_registry",
+    }))
+}
+
+async fn public_claims_frameworks() -> impl IntoResponse {
+    ok_json(crate::control_mappings::frameworks_view())
+}
+
+async fn public_claims_get(
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    match claims_registry().public_view(&id) {
+        Some(claim) => Ok(ok_json(claim)),
+        None => Err(err_json(
+            StatusCode::NOT_FOUND,
+            &format!("claim `{id}` is not registered"),
+        )),
+    }
+}
+
 // ─── Common types ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -893,6 +947,89 @@ mod db_tests {
 
     fn auth() -> HeaderMap {
         test_support::bearer(TOKEN)
+    }
+
+    /// The public claims surface (A-group / B6) must serve the registry with
+    /// NO credential: every claim, its evidence pointer, the DORA/NIS2
+    /// mapping, and an honest 404 for an unknown id. This is the "make every
+    /// public claim provable" contract at the HTTP layer (the pin that the
+    /// evidence targets actually exist lives in the crate's unit tests, which
+    /// run without a database).
+    #[tokio::test]
+    async fn public_claims_routes_serve_without_auth() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let Some(state) = state("public_claims").await else {
+            return;
+        };
+        let app = crate::routes::create_router(state);
+        let send = |uri: &'static str| {
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+        };
+
+        let response = send("/v1/claims").await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let claims = body["data"]["claims"].as_array().expect("claims array");
+        assert!(
+            claims.len() >= 25,
+            "the registry must serve every claim, got {}",
+            claims.len()
+        );
+        let first = &claims[0];
+        assert!(first["id"].as_str().is_some_and(|id| id.starts_with("CL-")));
+        assert!(first["claim"].as_str().is_some());
+        assert!(first["status"].as_str().is_some());
+        assert!(first["evidence"].is_object());
+
+        // A single claim, by id.
+        let response = send("/v1/claims/CL-028").await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["data"]["id"], "CL-028");
+        assert_eq!(body["data"]["evidence"]["kind"], "runtime_source");
+
+        // Unknown id: an honest 404 naming the id.
+        let response = send("/v1/claims/CL-999").await.expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // The DORA/NIS2 mapping rides the same public surface.
+        let response = send("/v1/claims/frameworks").await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let dora = body["data"]["dora"].as_array().expect("dora rows");
+        let nis2 = body["data"]["nis2"].as_array().expect("nis2 rows");
+        assert!(
+            dora.len() >= 8,
+            "DORA mapping must be substantive: {dora:?}"
+        );
+        assert!(
+            nis2.len() >= 10,
+            "NIS2 mapping must be substantive: {nis2:?}"
+        );
+        for row in dora.iter().chain(nis2.iter()) {
+            assert!(row["evidence"].as_str().is_some_and(|e| !e.is_empty()));
+            assert!(row["evidence_note"].as_str().is_some_and(|n| !n.is_empty()));
+        }
+        assert!(body["data"]["note"]
+            .as_str()
+            .expect("note")
+            .contains("not a certification"));
     }
 
     fn status<R: IntoResponse>(r: Result<R, (StatusCode, Json<serde_json::Value>)>) -> StatusCode {

@@ -111,6 +111,31 @@ impl IncidentRepo {
         .await
     }
 
+    /// Incidents CREATED within the last `window_days` days, newest first,
+    /// bounded by `limit`.
+    ///
+    /// This is the public status history's reader: the window is expressed in
+    /// SQL so an old incident cannot leak into a bounded public report and a
+    /// caller cannot accidentally page the whole table. An EMPTY result is a
+    /// determinate answer ("no incidents recorded in the window") — callers
+    /// must keep it distinguishable from an error, which is an UNKNOWN.
+    pub async fn list_since(
+        pool: &PgPool,
+        window_days: i64,
+        limit: i64,
+    ) -> Result<Vec<StatusPageIncident>, sqlx::Error> {
+        sqlx::query_as::<_, StatusPageIncident>(
+            "SELECT id, title, status, impact, affected_components, created_at, updated_at, resolved_at \
+             FROM status_page_incidents \
+             WHERE created_at >= NOW() - make_interval(days => $1::int) \
+             ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(window_days)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
     /// F86: the ONE typed state transition. `next` alone determines both the
     /// stored status and resolved_at — resolving stamps NOW(), any other
     /// state clears the timestamp (reopening included). There is no separate

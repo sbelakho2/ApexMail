@@ -435,7 +435,10 @@ async fn sweep_subscription_periods(
 /// error, and an exponentially backed-off next-attempt time (capped at
 /// 48h) so a persistently failing period neither blocks its neighbours
 /// nor hammers the failure path every run.
-async fn record_period_sweep_failure(db: &PgPool, period_id: Uuid, error: &str) {
+///
+/// Shared with `crate::product_lines` (the contract-line monthly sweep
+/// uses the same per-period backoff state), hence the neutral log prefix.
+pub(crate) async fn record_period_sweep_failure(db: &PgPool, period_id: Uuid, error: &str) {
     let backoff_minutes: i64 = 60;
     let next_attempt = Utc::now()
         + chrono::Duration::minutes(
@@ -473,14 +476,15 @@ async fn record_period_sweep_failure(db: &PgPool, period_id: Uuid, error: &str) 
         warn!(
             period_id = %period_id,
             error = %record_error,
-            "overage sweep: failed to record period failure state"
+            "period sweep: failed to record period failure state"
         );
     }
 }
 
 /// Clear a period's failure state after a successful pass (audit F31):
 /// the next natural failure starts its backoff ladder from zero again.
-async fn clear_period_sweep_failure(
+/// Shared with `crate::product_lines`.
+pub(crate) async fn clear_period_sweep_failure(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     period_id: Uuid,
 ) -> Result<(), String> {
@@ -497,7 +501,7 @@ async fn clear_period_sweep_failure(
     .bind(period_id)
     .execute(&mut **tx)
     .await
-    .map_err(|e| format!("overage sweep: failure-state reset failed: {e}"))?;
+    .map_err(|e| format!("period sweep: failure-state reset failed: {e}"))?;
     Ok(())
 }
 
@@ -813,6 +817,7 @@ async fn process_subscription_period(
         // currency, never an implicit EUR default.
         currency: Some(period.currency.to_lowercase()),
         overage_period: Some(period.period_start),
+        product_lines_period: None,
     };
 
     // Claim + insert in ONE transaction (audit F29). The insert runs
@@ -883,7 +888,7 @@ async fn process_subscription_period(
                 result.existing_invoice_mismatches += 1;
             }
 
-            mark_period_invoiced(&mut tx, period.id, existing_id, sent).await?;
+            mark_period_invoiced(&mut tx, period.id, existing_id, Some(sent)).await?;
             enqueue_collection(
                 &mut tx,
                 &period.tenant_id,
@@ -912,7 +917,7 @@ async fn process_subscription_period(
         }
     };
 
-    mark_period_invoiced(&mut tx, period.id, invoice.id, sent).await?;
+    mark_period_invoiced(&mut tx, period.id, invoice.id, Some(sent)).await?;
     clear_period_sweep_failure(&mut tx, period.id).await?;
     enqueue_collection(
         &mut tx,
@@ -1189,6 +1194,7 @@ async fn process_payg_month(
         // (persisted on the period record at claim time above).
         currency: Some(PAYG_SNAPSHOT_CURRENCY.to_lowercase()),
         overage_period: Some(month_start),
+        product_lines_period: None,
     };
 
     // SAVEPOINT around the insert (audit F29): a period-identity unique
@@ -1232,7 +1238,7 @@ async fn process_payg_month(
                 ));
             };
 
-            mark_period_invoiced(&mut tx, period_id, existing_id, emails_sent).await?;
+            mark_period_invoiced(&mut tx, period_id, existing_id, Some(emails_sent)).await?;
             enqueue_collection(
                 &mut tx,
                 tenant_id,
@@ -1254,7 +1260,7 @@ async fn process_payg_month(
         }
     };
 
-    mark_period_invoiced(&mut tx, period_id, invoice.id, emails_sent).await?;
+    mark_period_invoiced(&mut tx, period_id, invoice.id, Some(emails_sent)).await?;
     clear_period_sweep_failure(&mut tx, period_id).await?;
     enqueue_collection(
         &mut tx,
@@ -1303,8 +1309,9 @@ async fn process_payg_month(
 }
 
 /// Terminal `skipped` transition for a period (no overage / not billable).
-/// The sweep never revisits it (audit F31).
-async fn mark_period_skipped(
+/// The sweep never revisits it (audit F31). Shared with
+/// `crate::product_lines`.
+pub(crate) async fn mark_period_skipped(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     period_id: Uuid,
 ) -> Result<(), String> {
@@ -1314,15 +1321,16 @@ async fn mark_period_skipped(
     .bind(period_id)
     .execute(&mut **tx)
     .await
-    .map_err(|e| format!("overage sweep: skip transition failed: {e}"))?;
+    .map_err(|e| format!("period sweep: skip transition failed: {e}"))?;
     Ok(())
 }
 
 /// `unbilled -> needs_review` transition (audits F31/F32): a period whose
 /// pricing or usage cannot be resolved from history is surfaced for
 /// reconciliation — visible, retained, never silently priced from today's
-/// plan or dropped with aged-out metering events.
-async fn mark_period_needs_review(
+/// plan or dropped with aged-out metering events. Shared with
+/// `crate::product_lines`.
+pub(crate) async fn mark_period_needs_review(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     period_id: Uuid,
     reason: &str,
@@ -1340,7 +1348,7 @@ async fn mark_period_needs_review(
     .bind(format!("needs review: {reason}"))
     .execute(&mut **tx)
     .await
-    .map_err(|e| format!("overage sweep: needs-review transition failed: {e}"))?;
+    .map_err(|e| format!("period sweep: needs-review transition failed: {e}"))?;
     Ok(())
 }
 
@@ -1412,12 +1420,15 @@ fn payg_pricing_snapshot_json(pricing: &PaygPricing) -> serde_json::Value {
 }
 
 /// `unbilled -> invoiced` transition with the usage watermark and invoice
-/// link.
-async fn mark_period_invoiced(
+/// link. `metered_emails` is the metered volume the charge was computed
+/// from — `None` for a line whose price carries no email watermark (the
+/// Mailboxes seat line in `crate::product_lines`), never a fake zero.
+/// Shared with `crate::product_lines`.
+pub(crate) async fn mark_period_invoiced(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     period_id: Uuid,
     invoice_id: Uuid,
-    metered_emails: i64,
+    metered_emails: Option<i64>,
 ) -> Result<(), String> {
     sqlx::query(
         r#"
@@ -1431,14 +1442,15 @@ async fn mark_period_invoiced(
     .bind(metered_emails)
     .execute(&mut **tx)
     .await
-    .map_err(|e| format!("overage sweep: invoiced transition failed: {e}"))?;
+    .map_err(|e| format!("period sweep: invoiced transition failed: {e}"))?;
     Ok(())
 }
 
 /// Create the invoice's collection-outbox operation in the SAME
 /// transaction as the invoice (audit F33): collection is resumable, a
-/// crash can never strand a draft invoice nothing revisits.
-async fn enqueue_collection(
+/// crash can never strand a draft invoice nothing revisits. Shared with
+/// `crate::product_lines`.
+pub(crate) async fn enqueue_collection(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
     invoice_id: Uuid,
@@ -1465,7 +1477,7 @@ async fn enqueue_collection(
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| format!("overage sweep: outbox enqueue failed: {e}"))?;
+    .map_err(|e| format!("period sweep: outbox enqueue failed: {e}"))?;
     Ok(())
 }
 
@@ -1538,8 +1550,9 @@ where
 
 /// Existence-check SQL for the billing-address gate. Audit F28: it must
 /// select `EXISTS(...)` (bool) — the previous `SELECT 1` bound Postgres
-/// INT4 into an i64 and failed to decode. Pinned by unit test.
-const ADDRESS_EXISTS_SQL: &str =
+/// INT4 into an i64 and failed to decode. Pinned by unit test. Shared with
+/// `crate::product_lines` (same gate, same query).
+pub(crate) const ADDRESS_EXISTS_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM billing_addresses WHERE tenant_id = $1)";
 
 /// Whether the tenant has a billing address on file (mandatory on a VAT
@@ -1560,7 +1573,9 @@ where
 /// The completed calendar months whose end lies within the metering TTL
 /// window (40 days) — at most two (the previous month and, early in a
 /// month, the one before it).
-fn recent_completed_calendar_months(now: DateTime<Utc>) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+pub(crate) fn recent_completed_calendar_months(
+    now: DateTime<Utc>,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
     let mut months = Vec::with_capacity(2);
     let mut cursor = first_of_month(now);
     let cutoff = now - chrono::Duration::days(40);
@@ -1576,7 +1591,7 @@ fn recent_completed_calendar_months(now: DateTime<Utc>) -> Vec<(DateTime<Utc>, D
     months
 }
 
-fn first_of_month(at: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn first_of_month(at: DateTime<Utc>) -> DateTime<Utc> {
     at.with_day(1)
         .and_then(|d| d.with_hour(0))
         .and_then(|d| d.with_minute(0))
@@ -1608,8 +1623,9 @@ fn format_rate_per_thousand_emails(rate_millicents: i64, currency: &str) -> Stri
 /// outbox operation written with the invoice tracks progress under an
 /// owner/lease fence (audit F33). Failures propagate as errors and leave
 /// the outbox retryable — the operation is marked done ONLY after
-/// confirmed settlement or the committed dunning handoff.
-async fn collect_usage_invoice(
+/// confirmed settlement or the committed dunning handoff. Shared with
+/// `crate::product_lines` (one collection ladder, one behavior).
+pub(crate) async fn collect_usage_invoice(
     state: &AppState,
     invoice: &Invoice,
     period_start: DateTime<Utc>,

@@ -100,6 +100,40 @@ pub async fn sweep_overage_once(
     Ok(result)
 }
 
+/// The monthly contract product-line sweep (Platform + Mailboxes), wired
+/// exactly like [`sweep_overage_once`]: the nightly loop calls the SAME
+/// function the one-shot
+/// `--sweep-product-lines-only` CLI trigger runs, so an operator can close a
+/// contract month on demand and the two paths can never drift. Idempotent
+/// per (tenant, line, month) — a replay adopts the existing invoice.
+pub async fn sweep_product_lines_once(
+    state: &AppState,
+) -> Result<crate::product_lines::ProductLineSweepResult, String> {
+    let result = crate::product_lines::sweep_product_line_months(state).await?;
+    if result.invoices_created > 0
+        || result.months_already_invoiced > 0
+        || result.skipped_no_address > 0
+        || result.periods_needs_review > 0
+        || result.failed_months > 0
+    {
+        info!(
+            tenants_checked = result.tenants_checked,
+            tenant_months_checked = result.tenant_months_checked,
+            invoices_created = result.invoices_created,
+            periods_invoiced = result.periods_invoiced,
+            months_already_invoiced = result.months_already_invoiced,
+            periods_already_terminal = result.periods_already_terminal,
+            deferred_no_address = result.skipped_no_address,
+            periods_needs_review = result.periods_needs_review,
+            wallet_paid = result.wallet_paid,
+            pending_dunning = result.pending_dunning,
+            failed_months = result.failed_months,
+            "processed contract product-line invoices"
+        );
+    }
+    Ok(result)
+}
+
 pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let dedicated_ip_state = state.clone();
     tokio::spawn(async move {
@@ -295,6 +329,17 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 Ok(_) => {}
                 Err(error_message) => {
                     error!(error = %error_message, "failed to sweep period overage");
+                }
+            }
+
+            // Contract product-line invoices (Platform + Mailboxes),
+            // idempotent per (tenant, line, month); one invoice per tenant
+            // per month across the lines, collected through the same
+            // ladder as the overage sweep (see product_lines.rs).
+            match sweep_product_lines_once(sla_state.as_ref()).await {
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to sweep contract product lines");
                 }
             }
 
@@ -4181,6 +4226,34 @@ mod tests {
         assert!(
             scheduled.contains("sweep_overage_once(sla_state.as_ref())"),
             "the nightly loop must call the same sweep_overage_once the CLI does"
+        );
+    }
+
+    /// The same one-code-path pin for the contract product-line sweep: the
+    /// binary must expose `--sweep-product-lines-only` and the nightly loop
+    /// must call the very same `sweep_product_lines_once`.
+    #[test]
+    fn the_product_line_sweep_trigger_is_wired_to_the_canonical_sweep() {
+        let binary = include_str!("bin/server.rs");
+        assert!(
+            binary.contains("sweep_product_lines_only"),
+            "bin/server.rs must expose the --sweep-product-lines-only one-shot trigger"
+        );
+        assert!(
+            binary.contains("maintenance::sweep_product_lines_once"),
+            "the trigger must run the canonical sweep_product_lines_once, not a copy"
+        );
+        let production = include_str!("maintenance.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section present");
+        let scheduled = production
+            .split("pub fn start_periodic_jobs")
+            .nth(1)
+            .expect("start_periodic_jobs present");
+        assert!(
+            scheduled.contains("sweep_product_lines_once(sla_state.as_ref())"),
+            "the nightly loop must call the same sweep_product_lines_once the CLI does"
         );
     }
 }

@@ -1,8 +1,12 @@
 # Subprocessors
 
-**Last Updated:** 2026-08-29
+**Last Updated:** 2026-10-15
 
-This page lists the subprocessors engaged by **Bel Consulting OÜ** (trading as **ApexMail**), registry code **16588745**, Sakala 7-2, 10141 Tallinn, Estonia, Republic of Estonia, in the provision of the ApexMail email infrastructure platform. It mirrors the public Subprocessor Register at https://apexmail.ee/subprocessors/, which is the authoritative version.
+<!-- GENERATED FILE — do not edit by hand: `python3 tools/generate_subprocessors.py` renders this mirror from the
+     same deployment-derived register as the public page. The public register at
+     https://apexmail.ee/subprocessors/ is the authoritative version. -->
+
+This page lists the subprocessors engaged by **Bel Consulting OÜ** (trading as **ApexMail**), registry code **16588745**, Sakala 7-2, 10141 Tallinn, Estonia, Republic of Estonia, in the provision of the ApexMail email infrastructure platform.
 
 ## What is a Subprocessor
 
@@ -10,42 +14,23 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 
 ## Current Subprocessors
 
-### Infrastructure
-
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Hetzner Online GmbH** | Primary cloud infrastructure (compute, storage, networking) | Core platform data in the default shared deployment | Configured EU/EEA region | Confirm the active deployment and applicable transfer safeguard |
+| **Hetzner Online GmbH** | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Germany (storage: Germany) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| **Amazon Web Services, Inc.** | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland (storage: Ireland) | EU Standard Contractual Clauses (AWS DPA) |
+| **Adyen N.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands (storage: Netherlands) | Contracting entity is EU-established (Adyen N.V., Amsterdam); card scheme networks process globally under the Adyen Data Processing Agreement; PCI DSS Level 1 certified |
 
-### Email Delivery and Telemetry
+Whether an optional subprocessor (OAuth providers, SES, S3 telemetry) is engaged is controlled by the active deployment configuration. This register is generated from that configuration, with a validate-stage gate that fails on drift and a zero-US check over the active set.
 
-| Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
-|---|---|---|---|---|
-| **Amazon Web Services (AWS SES)** | Email-delivery transport when enabled | Email content (subject, body, headers), recipient email addresses | Configured SES region | Confirm the active deployment and applicable transfer safeguard |
-| **Amazon Web Services, Inc. (AWS S3)** | Telemetry object storage when enabled | Loki logs and Tempo traces may contain operational metadata | Configured S3 region (default: `eu-central-1`) | Confirm the active deployment and applicable transfer safeguard |
-
-Whether AWS SES is enabled, and the delivery provider and region used, are controlled by the active deployment configuration. Confirm these details before relying on a data-location representation.
-
-### Authentication
-
-| Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
-|---|---|---|---|---|
-| **Google LLC** | User sign-in via Google OAuth (only if the customer enables it) | OAuth tokens, email address, name | Global (EU data); EEA-based users: EEA | Standard Contractual Clauses (SCCs) |
-| **GitHub, Inc.** | User sign-in via GitHub OAuth (only if the customer enables it) | OAuth tokens, username, email address | Global (EU data); EEA-based users: EEA | Standard Contractual Clauses (SCCs) |
-
-### Payment Processing
-
-| Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
-|---|---|---|---|---|
-| **Adyen N.V.** | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | USA (primary); India (support) | Standard Contractual Clauses (SCCs) per the Adyen Data Processing Agreement; Adyen is PCI DSS Level 1 certified |
-
-### Self-Hosted Infrastructure (not third-party subprocessors)
+## Self-Hosted Infrastructure (not third-party subprocessors)
 
 The following software is deployed and managed by ApexMail on Hetzner infrastructure. The software publishers do not process customer data.
 
 | Software | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Redis** (open-source) | In-memory caching, rate limiting, session storage | Session tokens, rate limit counters, ephemeral processing state | Configured deployment region | Redis Ltd. does not process customer data; confirm the active deployment and transfer safeguard. |
-| **ClickHouse** (open-source) | Analytics data storage and querying for per-account email analytics | Delivery events, engagement events (opens, clicks), bounce/complaint data, aggregated metrics | Configured deployment region | ClickHouse, Inc. does not process customer data; confirm the active deployment and transfer safeguard. |
+| **Redis** (open-source) | In-memory caching, rate limiting, session storage | Session tokens, rate limit counters, ephemeral processing state | Hetzner deployment region | Redis Ltd. does not process customer data; intra-EEA processing. |
+| **ClickHouse** (open-source) | Analytics data storage and querying for per-account email analytics | Delivery events, engagement events (opens, clicks), bounce/complaint data, aggregated metrics | Hetzner deployment region | ClickHouse, Inc. does not process customer data; intra-EEA processing. |
+| **Grafana / Loki / Tempo / Prometheus** (open-source) | Observability stack: dashboards, logs, traces, metrics | Operational telemetry | Hetzner deployment region | The software publishers do not process customer data; intra-EEA processing. |
 
 ## Subprocessor Changes
 

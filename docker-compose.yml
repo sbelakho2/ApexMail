@@ -367,6 +367,12 @@ services:
       # reports valid:false for rows signed by a differently-defaulted
       # process (2026-10-08 live dogfood E-AUDIT-KEY).
       AUDIT_SIGNING_KEY: ${AUDIT_SIGNING_KEY:-dev-audit-signing-key-change-me-32-bytes}
+      # B3 public receipt verification (dev): the PUBLIC half of the worker's
+      # development RECEIPT_SIGNING_KEY seed ("dev-receipt-signing-key-32bytes!"
+      # → key_id 157a0766b8fa0a38). Production sets RECEIPT_PUBLIC_KEY to the
+      # published half of the real seed (see .env.production.example); when it
+      # is unset the endpoints answer a named 503 rather than fabricating a key.
+      RECEIPT_PUBLIC_KEY: ${RECEIPT_PUBLIC_KEY:-2407c23856a8f06c7cae92a361fa86b72927e51fb2e14f12227c510e5b221624}
       # Comma-separated CIDRs of reverse proxies whose X-Forwarded-For may be
       # trusted for client-IP extraction (empty = headers never trusted, which
       # is only correct when clients connect directly; behind the nginx edge
@@ -710,6 +716,13 @@ services:
       # Same audit key as api-server/compliance (E-AUDIT-KEY): the worker
       # appends chained audit rows too.
       AUDIT_SIGNING_KEY: ${AUDIT_SIGNING_KEY:-dev-audit-signing-key-change-me-32-bytes}
+      # B3 signed routing receipts: the worker signs one Ed25519 receipt per
+      # accepted message (migration 255) and REFUSES to boot in production
+      # without this key. The development default is a VALID 32-byte seed
+      # (hex of "dev-receipt-signing-key-32bytes!") so dev receipts verify
+      # against the api-server's matching development public key below; it
+      # must never be used in production.
+      RECEIPT_SIGNING_KEY: ${RECEIPT_SIGNING_KEY:-6465762d726563656970742d7369676e696e672d6b65792d3332627974657321}
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}

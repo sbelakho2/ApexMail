@@ -4,12 +4,14 @@ description = "ApexMail subprocessor register — third-party vendors processing
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-15"
 +++
+<!-- GENERATED FILE — do not edit by hand: `python3 tools/generate_subprocessors.py` renders this page from the
+     deployment configuration (compose + env). `--check` fails the validate stage on drift. -->
 
 ## Subprocessor Register
 
-This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement.
+This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
 ### Infrastructure Subprocessors
 
@@ -17,12 +19,9 @@ The following third-party entities process customer personal data on behalf of A
 
 | Legal Entity | Brand | Service | Purpose | Data Categories | Processing Country | Storage Country | Corporate Country | Transfer Mechanism | Required |
 |---|---|---|---|---|---|---|---|---|---|
-| Hetzner Online GmbH | Hetzner | Cloud hosting | Compute, storage, networking | Core service data in the default shared deployment | Configured EU/EEA region | Configured EU/EEA region | Germany | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes |
-| Amazon Web Services, Inc. | AWS S3 | Telemetry object storage | Telemetry object storage when enabled | Loki logs and Tempo traces may contain operational metadata | Configured S3 region (default: `eu-central-1`) | Configured S3 region (default: `eu-central-1`) | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses S3 storage |
-| Amazon Web Services, Inc. | AWS SES | Email-delivery transport | Email delivery when enabled | Email content and recipient addresses | Configured SES region | Configured SES region | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses SES |
-| Google LLC | Google | OAuth authentication | User sign-in via Google OAuth | OAuth tokens, email address, name | Global (EU data) | EU/EEA-based users: EEA | USA | Standard Contractual Clauses (SCCs) | No — only if customer enables Google OAuth |
-| GitHub, Inc. | GitHub | OAuth authentication | User sign-in via GitHub OAuth | OAuth tokens, username, email address | Global (EU data) | EU/EEA-based users: EEA | USA | Standard Contractual Clauses (SCCs) | No — only if customer enables GitHub OAuth |
-| Adyen N.V. | Adyen | Payment processing | Subscription billing, invoicing, payment method storage | Payment method tokens, transaction metadata, invoice data | USA (primary); India (support) | USA | USA | Standard Contractual Clauses (SCCs) per Adyen Data Processing Agreement | Yes — required for paid plans |
+| Hetzner Online GmbH | Hetzner | Cloud hosting (compute, storage, networking) | Core service data in the default shared deployment | Germany | Germany | Germany | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes. Hetzner EU locations: Falkenstein/Nuremberg (fsn1/nbg1, DE) and Helsinki (hel1, FI); the active default is fsn1 |
+| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) | Email content and recipient addresses in transit | Ireland | Ireland | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses the SES transport. Active only while EMAIL_TRANSPORT_TYPE=ses; dedicated IP transfers ride ApexMail's own Hetzner MTAs. |
+| Adyen N.V. | Adyen | Payment processing, subscription management, invoicing | Payment card details (tokenized — ApexMail never receives full card numbers), billing address, transaction metadata | Netherlands | Netherlands | Netherlands | Contracting entity is EU-established (Adyen N.V., Amsterdam); card scheme networks process globally under the Adyen Data Processing Agreement; PCI DSS Level 1 certified | Yes — required for paid plans |
 
 ### Self-Hosted Infrastructure (not third-party subprocessors)
 
@@ -30,8 +29,9 @@ The following software is deployed and managed by ApexMail on Hetzner infrastruc
 
 | Software | Purpose | Data Categories | Processing Country | Storage Country | Notes |
 |---|---|---|---|---|---|
-| ClickHouse (open-source) | Analytics database | Delivery events, open/click events, bounce/complaint data | Configured deployment region | Configured deployment region | Self-hosted by ApexMail. ClickHouse, Inc. does not process customer data. |
-| Redis (open-source) | In-memory cache | Session tokens, rate limit counters | Configured deployment region | Configured deployment region | Self-hosted by ApexMail. Redis Ltd. does not process customer data. |
+| ClickHouse (open-source) | Analytics database (delivery events, opens, clicks, bounce/complaint data) | Delivery events, open/click events, bounce/complaint data | Hetzner deployment region | Hetzner deployment region | Self-hosted by ApexMail on Hetzner infrastructure; ClickHouse, Inc. does not process customer data. |
+| Redis (open-source) | In-memory cache (session tokens, rate-limit counters) | Session tokens, rate-limit counters | Hetzner deployment region | Hetzner deployment region | Self-hosted by ApexMail on Hetzner infrastructure; Redis Ltd. does not process customer data. |
+| Grafana / Loki / Tempo / Prometheus (open-source) | Observability stack (dashboards, logs, traces, metrics) | Operational telemetry (logs, traces, metrics) | Hetzner deployment region | Hetzner deployment region | Self-hosted by ApexMail on Hetzner infrastructure; the software publishers do not process customer data. |
 
 ### Notification
 
@@ -46,3 +46,4 @@ If you object to a new subprocessor on reasonable data protection grounds, conta
 | Date | Change | Description |
 |---|---|---|
 | 2026-07-29 | Initial publication | Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Adyen (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |
+| 2026-10-15 | Register generated from deployment configuration | The register is now rendered by tools/generate_subprocessors.py from the compose + env deployment configuration, with a validate-stage gate that fails on drift and a zero-US check (sovereign_chain_zero_us) over the active set. Adyen's location column now names the contracting entity (Adyen N.V., Amsterdam) instead of the card-network processing footprint. |

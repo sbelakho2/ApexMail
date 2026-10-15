@@ -409,6 +409,12 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
         "src/overage.rs",
     ),
     (
+        // Contract product-line pricing (Platform base/tier/subaccounts,
+        // Mailboxes seats/archive) is money computation — gated.
+        "src/product_lines.rs",
+        "src/product_lines.rs",
+    ),
+    (
         // The billing HTTP surface: PAYG/overage estimates, wallet and
         // dunning reads, proration preview, report SQL.
         "src/routes.rs",

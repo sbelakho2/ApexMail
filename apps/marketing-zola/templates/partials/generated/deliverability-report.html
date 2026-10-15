@@ -1,0 +1,34 @@
+{# GENERATED FILE — do not edit by hand. #}
+{# Rendered by tools/generate_deliverability_report.py from #}
+{# apps/marketing-zola/data/deliverability-report.json (ClickHouse query #}
+{# `deliverability-v1`, window 2026-09-15T19:15:25+00:00 → 2026-10-15T19:15:25+00:00). #}
+{# `--check` in the validate stage fails on drift. #}
+
+<section class="py-12 bg-surface-100 border-b border-surface-200" id="deliverability-report">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+    <h2 class="text-xl font-semibold text-surface-950 mb-3">Published Deliverability Report</h2>
+    <p class="text-sm text-surface-600 mb-6"><strong>Insufficient data to publish a rate for the last 30 days.</strong> The counters below are zero because the delivery event store could not be reached at build time — this page therefore makes <strong>no</strong> delivery-rate claim. The query and its definitions are ready (<a class="underline" href="/performance-methodology/#13-recipient-server-acceptance-rate">section 1.3 of the methodology</a>) and the table fills in as events arrive.</p>
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm">
+        <thead>
+          <tr>
+            <th class="py-2 pr-4">Routing mode</th>
+            <th class="py-2 pr-4">Sent</th>
+            <th class="py-2 pr-4">Delivered</th>
+            <th class="py-2 pr-4">Bounced</th>
+            <th class="py-2 pr-4">Complained</th>
+            <th class="py-2 pr-4">Delivery rate</th>
+            <th class="py-2 pr-4">Bounce rate</th>
+            <th class="py-2">Complaint rate</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">insufficient data</td><td class="py-2 pr-4">insufficient data</td><td class="py-2">insufficient data</td></tr>
+          <tr><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">insufficient data</td><td class="py-2 pr-4">insufficient data</td><td class="py-2">insufficient data</td></tr>
+          <tr><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">—</td><td class="py-2 pr-4">insufficient data</td><td class="py-2 pr-4">insufficient data</td><td class="py-2">insufficient data</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs text-surface-500 mt-4">Source: apexmail.events via 127.0.0.1:8123 · window 30 days · artifact: apps/marketing-zola/data/deliverability-report.json</p>
+  </div>
+</section>

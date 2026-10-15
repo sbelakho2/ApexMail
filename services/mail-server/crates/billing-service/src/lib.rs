@@ -28,6 +28,11 @@ pub mod metering_monitor;
 mod money_invariants;
 pub mod overage;
 pub mod plans;
+/// Contract product-line billing: the Platform line (base + per-1K usage
+/// tier + active subaccounts above 100) and the Mailboxes seat line
+/// (10-seat minimum, per-seat, archive add-on), billed monthly through the
+/// shared period + invoice + collection machinery.
+pub mod product_lines;
 pub mod routes;
 pub mod send_admission;
 pub mod subscriptions;

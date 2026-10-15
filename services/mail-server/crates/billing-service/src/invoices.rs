@@ -235,6 +235,15 @@ pub struct CreateInvoiceInput {
     /// for non-sweep writers (Adyen webhook invoice persistence, the
     /// admin invoice writer).
     pub overage_period: Option<DateTime<Utc>>,
+    /// Idempotency marker for the CONTRACT product-line sweep (migration
+    /// 255): the calendar-month start the invoice settles. A separate
+    /// column from `overage_period` on purpose — a PAYG tenant can also
+    /// hold a Platform/Mailboxes contract, and sharing one marker would
+    /// make the second charge collide with (and be swallowed by) the first
+    /// invoice's identity. `invoices.product_lines_period` is written in
+    /// the SAME INSERT as the invoice row and carries its own partial
+    /// unique index. `None` for non-product-line writers.
+    pub product_lines_period: Option<DateTime<Utc>>,
 }
 
 pub struct NewLineItem {
@@ -491,6 +500,7 @@ pub async fn create_invoice_in_tx(
             issued_at, due_at, period_start, period_end,
             billing_country, vat_rate, overage_period, billing_address,
             billing_registry_code, vat_evidence_id,
+            product_lines_period,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
@@ -498,6 +508,7 @@ pub async fn create_invoice_in_tx(
             $10, $11, $12, $13,
             $14, $15, $16, $17,
             $18, $19,
+            $20,
             $10, $10
         )
         "#,
@@ -521,6 +532,7 @@ pub async fn create_invoice_in_tx(
     .bind(address_snapshot)
     .bind(addr.registry_code)
     .bind(vat_evidence_id)
+    .bind(input.product_lines_period)
     .execute(&mut **tx)
     .await
     .map_err(InvoiceError::Db)?;
@@ -2444,6 +2456,7 @@ mod coverage_adversarial {
             due_at: None,
             currency: Some("eur".into()),
             overage_period: None,
+            product_lines_period: None,
         }
     }
 

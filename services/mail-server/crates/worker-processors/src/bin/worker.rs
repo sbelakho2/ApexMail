@@ -289,6 +289,47 @@ fn spawn_liveness_heartbeat(
     })
 }
 
+/// Routing-receipt signing requirement (B3): every `accepted` ledger row
+/// carries an Ed25519 signature over the canonical per-message payload, and
+/// the acceptance path REFUSES to record without a signer (no unsigned
+/// receipt may silently exist). This gate mirrors `verp_secret_gate`: a
+/// production process running the email processor refuses to boot without
+/// `RECEIPT_SIGNING_KEY`, so the refusal can never be discovered only at
+/// send time. A MALFORMED key is fatal in every environment (silently
+/// degrading to unsigned receipts is exactly the failure this forbids).
+fn receipt_signing_gate(run_email: bool) -> Result<()> {
+    match mail_common::routing_receipt::RoutingReceiptSigner::from_env() {
+        Ok(Some(signer)) => {
+            info!(
+                key_id = signer.key_id(),
+                "routing-receipt signing key loaded (ed25519)"
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            if mail_common::routing_receipt::receipt_signer_required_in_production() && run_email {
+                anyhow::bail!(
+                    "{} must be set when running the email processor in production: routing \
+                     receipts are signed per accepted message and the acceptance write REFUSES \
+                     to record an unsigned row (set a 32-byte Ed25519 seed: \
+                     `openssl rand -hex 32`)",
+                    mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV
+                );
+            }
+            warn!(
+                "{} is unset — development sends sign receipts with an EPHEMERAL per-process \
+                 key; they will not verify against the published production key",
+                mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV
+            );
+            Ok(())
+        }
+        Err(error) => anyhow::bail!(
+            "routing-receipt signing key is unusable: {error} — refusing to start (a malformed \
+             key must never degrade into unsigned receipts)"
+        ),
+    }
+}
+
 /// VERP v2 secret requirement (mirrors the MTA's production gate): outbound
 /// mail may only carry an AUTHENTICATED bounce Return-Path. Without the
 /// shared secret the worker emits NO VERP at all — it never falls back to
@@ -520,6 +561,7 @@ async fn run_worker(
     }
 
     verp_secret_gate(settings.run_email)?;
+    receipt_signing_gate(settings.run_email)?;
 
     let mut handles = vec![];
     let mut analytics_processor: Option<Arc<AnalyticsProcessor>> = None;
@@ -1370,6 +1412,79 @@ mod tests {
         );
         assert_ne!(id, unique_worker_id(), "ids are unique per call");
         std::env::remove_var("HOSTNAME");
+    }
+
+    /// B3 fail-closed: a production worker running the email processor
+    /// refuses to BOOT without `RECEIPT_SIGNING_KEY` (so the refusal is not
+    /// discovered at send time), a malformed key is fatal everywhere, and
+    /// dev boots with a warning (ephemeral signing — never unsigned).
+    #[test]
+    fn receipt_gate_refuses_production_email_without_a_signing_key() {
+        let seed = "5a".repeat(32);
+        // Production + email + missing key: hard error naming the variable.
+        with_env(
+            &[
+                ("NODE_ENV", Some("production")),
+                (mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV, None),
+            ],
+            || {
+                let err = receipt_signing_gate(true).expect_err("production must refuse");
+                assert!(
+                    format!("{err:#}").contains("RECEIPT_SIGNING_KEY must be set"),
+                    "{err:#}"
+                );
+            },
+        );
+        // Production but no email processor: warn-only.
+        with_env(
+            &[
+                ("NODE_ENV", Some("production")),
+                (mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV, None),
+            ],
+            || {
+                assert!(
+                    receipt_signing_gate(false).is_ok(),
+                    "no email processor => warn only"
+                );
+            },
+        );
+        // A malformed key is fatal in EVERY environment.
+        with_env(
+            &[
+                ("NODE_ENV", Some("development")),
+                (
+                    mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV,
+                    Some("not-a-key"),
+                ),
+            ],
+            || {
+                let err = receipt_signing_gate(true).expect_err("malformed key must be fatal");
+                assert!(format!("{err:#}").contains("unusable"), "{err:#}");
+            },
+        );
+        // Dev without a key: boots (receipts are ephemeral-signed, warned).
+        with_env(
+            &[
+                ("NODE_ENV", Some("development")),
+                (mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV, None),
+            ],
+            || {
+                assert!(receipt_signing_gate(true).is_ok(), "dev must boot");
+            },
+        );
+        // A valid key passes in production.
+        with_env(
+            &[
+                ("NODE_ENV", Some("production")),
+                (
+                    mail_common::routing_receipt::RECEIPT_SIGNING_KEY_ENV,
+                    Some(&seed),
+                ),
+            ],
+            || {
+                assert!(receipt_signing_gate(true).is_ok(), "valid key passes");
+            },
+        );
     }
 
     #[test]

@@ -5,6 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+# Operator CLI for the routing-receipt key material (print the public half,
+# or verify a presented payload/signature pair offline).
+[[bin]]
+name = "receipt-public-key"
+path = "src/bin/receipt_public_key.rs"
+
 [dependencies]
 serde.workspace = true
 # Typed readers for tenant settings facts (routing_mode: settings.routingMode)
@@ -25,6 +31,12 @@ parking_lot = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
+# Ed25519 for signed routing receipts (routing_receipt.rs). `ring` is the
+# workspace's rustls crypto backend — already in Cargo.lock via rustls 0.23,
+# so this adds no new vendored crate. Deliberately NOT `ed25519-dalek`: one
+# provider, one audited curve implementation across TLS and receipts.
+ring = "0.17"
 # CSPRNG for cryptographic key generation
 rand.workspace = true
 # Lock-free atomic config hot-reload

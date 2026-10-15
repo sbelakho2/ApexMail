@@ -1,0 +1,77 @@
+{
+  "generated_by": "tools/generate_subprocessors.py",
+  "last_updated": "2026-10-15",
+  "check": "sovereign_chain_zero_us",
+  "subprocessors": [
+    {
+      "name": "Hetzner Online GmbH",
+      "purpose": "Cloud hosting (compute, storage, networking) (Hetzner)",
+      "location": "Germany; storage Germany",
+      "data_categories": [
+        "Core service data in the default shared deployment"
+      ],
+      "dpa_url": null,
+      "certifications": [],
+      "public": true
+    },
+    {
+      "name": "Amazon Web Services, Inc.",
+      "purpose": "Email-delivery transport when enabled (EMAIL_TRANSPORT_TYPE=ses) (AWS SES)",
+      "location": "Ireland; storage Ireland",
+      "data_categories": [
+        "Email content and recipient addresses in transit"
+      ],
+      "dpa_url": null,
+      "certifications": [],
+      "public": true
+    },
+    {
+      "name": "Adyen N.V.",
+      "purpose": "Payment processing, subscription management, invoicing (Adyen)",
+      "location": "Netherlands; storage Netherlands",
+      "data_categories": [
+        "Payment card details (tokenized — ApexMail never receives full card numbers)",
+        "billing address",
+        "transaction metadata"
+      ],
+      "dpa_url": null,
+      "certifications": [
+        "PCI DSS Level 1"
+      ],
+      "public": true
+    },
+    {
+      "name": "ClickHouse (open-source) (self-hosted)",
+      "purpose": "Analytics database (delivery events, opens, clicks, bounce/complaint data) — self-hosted by ApexMail; the publisher is not a subprocessor",
+      "location": "Hetzner deployment region",
+      "data_categories": [
+        "Operational telemetry"
+      ],
+      "dpa_url": null,
+      "certifications": [],
+      "public": true
+    },
+    {
+      "name": "Redis (open-source) (self-hosted)",
+      "purpose": "In-memory cache (session tokens, rate-limit counters) — self-hosted by ApexMail; the publisher is not a subprocessor",
+      "location": "Hetzner deployment region",
+      "data_categories": [
+        "Operational telemetry"
+      ],
+      "dpa_url": null,
+      "certifications": [],
+      "public": true
+    },
+    {
+      "name": "Grafana / Loki / Tempo / Prometheus (open-source) (self-hosted)",
+      "purpose": "Observability stack (dashboards, logs, traces, metrics) — self-hosted by ApexMail; the publisher is not a subprocessor",
+      "location": "Hetzner deployment region",
+      "data_categories": [
+        "Operational telemetry"
+      ],
+      "dpa_url": null,
+      "certifications": [],
+      "public": true
+    }
+  ]
+}

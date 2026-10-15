@@ -1574,4 +1574,67 @@ mod db_tests {
         );
         assert_eq!(stored.content_md.len(), content.len());
     }
+
+    /// B5: the trust portal's public subprocessor registry is SERVED from the
+    /// same generated seed the public register page is rendered from
+    /// (`tools/generate_subprocessors.py` writes
+    /// `tools/fixtures/subprocessors/trust_portal_seed.json`). This test is
+    /// the portal half of the "no drift between the page and the registry"
+    /// invariant: the seed must deserialize into `SubprocessorInput` rows,
+    /// carry the zero-US check name, deploy to >0 entries of infrastructure
+    /// processors plus the self-hosted (non-subprocessor) software, and the
+    /// portal must serve exactly that set.
+    #[tokio::test]
+    async fn generated_subprocessor_seed_is_served_by_the_public_registry() {
+        #[derive(serde::Deserialize)]
+        struct Seed {
+            generated_by: String,
+            check: String,
+            subprocessors: Vec<SubprocessorInput>,
+        }
+        let seed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../tools/fixtures/subprocessors/trust_portal_seed.json");
+        let raw = std::fs::read_to_string(&seed_path).unwrap_or_else(|error| {
+            panic!(
+                "the generated subprocessor seed must exist at {} ({error}); run \
+                 `python3 tools/generate_subprocessors.py`",
+                seed_path.display()
+            )
+        });
+        let seed: Seed = serde_json::from_str(&raw).expect("seed must parse");
+        assert_eq!(seed.generated_by, "tools/generate_subprocessors.py");
+        assert_eq!(seed.check, "sovereign_chain_zero_us");
+        assert!(
+            seed.subprocessors.len() >= 3,
+            "the seed must carry the infrastructure subprocessors + self-hosted software: {:?}",
+            seed.subprocessors.len()
+        );
+        assert!(
+            seed.subprocessors.iter().all(|s| s.public),
+            "every generated registry row is public (the page is public)"
+        );
+        assert!(
+            seed.subprocessors
+                .iter()
+                .any(|s| s.name == "Hetzner Online GmbH"),
+            "the infrastructure provider must be present"
+        );
+
+        let Some((_pool, svc)) = service("generated_seed").await else {
+            return;
+        };
+        let mut served = Vec::new();
+        for input in seed.subprocessors {
+            served.push(svc.upsert_subprocessor(input).await.expect("seed row"));
+        }
+        let public = svc.list_subprocessors_public().await.expect("public list");
+        let expected: std::collections::BTreeSet<&str> =
+            served.iter().map(|s| s.name.as_str()).collect();
+        let got: std::collections::BTreeSet<&str> =
+            public.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            got, expected,
+            "the portal must serve exactly the generated registry set"
+        );
+    }
 }

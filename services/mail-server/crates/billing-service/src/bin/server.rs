@@ -53,6 +53,17 @@ struct Cli {
     /// live dogfood 2026-10-08).
     #[arg(long, env = "BILLING_SWEEP_OVERAGE_ONLY", default_value_t = false)]
     sweep_overage_only: bool,
+
+    /// Run the contract product-line sweep (Platform + Mailboxes monthly
+    /// invoices) ONCE against the live database, print the report and exit
+    /// — the SAME function the nightly loop calls (one code path, one
+    /// behavior; idempotent per tenant/line/month).
+    #[arg(
+        long,
+        env = "BILLING_SWEEP_PRODUCT_LINES_ONLY",
+        default_value_t = false
+    )]
+    sweep_product_lines_only: bool,
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -156,6 +167,47 @@ async fn main() -> anyhow::Result<()> {
             result.aged_needs_review,
             result.pricing_needs_review,
             result.existing_invoice_mismatches,
+        );
+        return Ok(());
+    }
+
+    // The same one-shot ops pattern for the contract product lines
+    // (Platform + Mailboxes): deliberately BEFORE the Adyen fail-fast for
+    // the same reason — closing a contract month needs only Postgres plus
+    // the Redis pool. Runs `maintenance::sweep_product_lines_once`, the
+    // exact function the nightly loop calls.
+    if cli.sweep_product_lines_only {
+        let redis =
+            deadpool_redis::Config::from_url(&cli.redis_url).create_pool(Some(Runtime::Tokio1))?;
+        let config = BillingConfig {
+            database_url: cli.database_url,
+            redis_url: cli.redis_url,
+            listen_addr: cli.listen.clone(),
+            service_auth_token: cli.service_auth_token,
+            adyen_hmac_key: cli.adyen_hmac_key,
+            api_base_url: cli.api_base_url,
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(db, redis, config);
+        let result = maintenance::sweep_product_lines_once(state.as_ref())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        println!(
+            "product-lines sweep: tenants_checked={} tenant_months_checked={} \
+             invoices_created={} periods_invoiced={} months_already_invoiced={} \
+             periods_already_terminal={} skipped_no_address={} periods_needs_review={} \
+             wallet_paid={} pending_dunning={} failed_months={}",
+            result.tenants_checked,
+            result.tenant_months_checked,
+            result.invoices_created,
+            result.periods_invoiced,
+            result.months_already_invoiced,
+            result.periods_already_terminal,
+            result.skipped_no_address,
+            result.periods_needs_review,
+            result.wallet_paid,
+            result.pending_dunning,
+            result.failed_months,
         );
         return Ok(());
     }

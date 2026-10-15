@@ -74,6 +74,10 @@ export_from_file VERP_HMAC_SECRET         || true
 # the SAME key api-server/billing/compliance sign with — in production the
 # canonical writer fails CLOSED without it).
 export_from_file AUDIT_SIGNING_KEY        || true
+# B3 signed routing receipts: the worker's Ed25519 seed (migration 255). The
+# acceptance path refuses to record an unsigned receipt, and the production
+# worker refuses to boot without it.
+export_from_file RECEIPT_SIGNING_KEY      || true
 export_from_file INTERNAL_SERVICE_TOKEN   || true
 export_from_file SERVICE_AUTH_TOKEN       || true
 # F9 (audit): per-workload dedicated credential for pdf-renderer. The

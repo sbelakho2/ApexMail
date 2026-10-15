@@ -46,6 +46,61 @@ pub struct MarketingClaim {
     pub updated_at: DateTime<Utc>,
 }
 
+/// How a claim's `evidence_location` is to be read (the served registry must
+/// not imply that a marketing URL is a checkable artifact).
+///
+/// * [`ClaimEvidenceKind::RepoPath`] — a path RELATIVE TO THE REPOSITORY ROOT
+///   that must exist (file or directory). The `claims_registry::tests::
+///   every_repo_path_evidence_target_exists` test is the pin: a claim whose
+///   evidence file is gone fails the suite, so a pointer cannot outlive its
+///   artifact.
+/// * [`ClaimEvidenceKind::RuntimeSource`] — a named runtime evidence source
+///   (`runtime:<name>`), registered in [`RUNTIME_EVIDENCE_SOURCES`] with the
+///   repo path of the code that produces it. Used for numbers that come from
+///   a live system (Prometheus histograms, tenant analytics) rather than a
+///   committed document; the name is validated against the registry, so no
+///   claim can invent a source.
+/// * [`ClaimEvidenceKind::None`] — no evidence (prohibited claims and
+///   illustrative targets that must carry "not yet achieved" limitations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimEvidenceKind {
+    RepoPath,
+    RuntimeSource,
+    None,
+}
+
+/// The named runtime evidence sources claims may cite. `producer` is the
+/// repo path of the wiring that produces the measurement.
+pub const RUNTIME_EVIDENCE_SOURCES: &[(&str, &str, &str)] = &[
+    (
+        "tenant_delivery_analytics",
+        "services/mail-server/crates/analytics/src/clickhouse_engine.rs",
+        "ClickHouse delivery/engagement aggregates queried per tenant (the source of customer-volume numbers once they are measured)",
+    ),
+    (
+        "api_gateway_histogram",
+        "services/mail-server/crates/observability-service",
+        "Prometheus API-gateway request histogram (the P95 ≤ 500ms SLA measurement)",
+    ),
+    (
+        "sandbox_validation_harness",
+        "services/mail-server/crates/sandbox",
+        "Sandbox validation harness metrics (the sandbox latency target)",
+    ),
+];
+
+impl ClaimEvidenceKind {
+    /// Classify an `evidence_location` value.
+    pub fn of(evidence_location: Option<&str>) -> Self {
+        match evidence_location {
+            None => Self::None,
+            Some(value) if value.starts_with("runtime:") => Self::RuntimeSource,
+            Some(_) => Self::RepoPath,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ClaimsRegistry {
     claims: HashMap<String, MarketingClaim>,
@@ -115,6 +170,85 @@ impl ClaimsRegistry {
     }
 }
 
+/// What the registry is allowed to keep in this HashMap.
+impl MarketingClaim {
+    /// Display form of a claim's status (for operator-facing assertion
+    /// messages).
+    pub fn status_string(&self) -> &'static str {
+        match self.status {
+            ClaimStatus::Verified => "verified",
+            ClaimStatus::Qualified => "qualified",
+            ClaimStatus::Beta => "beta",
+            ClaimStatus::Planned => "planned",
+            ClaimStatus::Illustrative => "illustrative",
+            ClaimStatus::Prohibited => "prohibited",
+        }
+    }
+
+    /// The evidence target for the public JSON: the repo path verbatim, or
+    /// the runtime source's producer path (so a consumer sees WHERE the
+    /// number comes from, not only its name).
+    pub fn evidence_target(&self) -> Option<&str> {
+        match self.evidence_location.as_deref() {
+            None => None,
+            Some(value) if value.starts_with("runtime:") => {
+                let name = value.trim_start_matches("runtime:");
+                RUNTIME_EVIDENCE_SOURCES
+                    .iter()
+                    .find(|(source, _, _)| *source == name)
+                    .map(|(_, producer, _)| *producer)
+            }
+            Some(path) => Some(path),
+        }
+    }
+
+    /// The public, stable JSON shape of one claim (the `GET /v1/claims`
+    /// contract): identity, wording, evidence pointer, review/expiry state
+    /// and the binding limitations.
+    pub fn public_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.claim_id,
+            "claim": self.exact_wording,
+            "category": self.category,
+            "owner": self.owner,
+            "approver": self.approver,
+            "status": self.status,
+            "evidence": {
+                "location": self.evidence_location,
+                "kind": ClaimEvidenceKind::of(self.evidence_location.as_deref()),
+                "target": self.evidence_target(),
+                "measurement_method": self.measurement_method,
+                "measurement_period": self.measurement_period,
+                "environment_measured": self.environment_measured,
+            },
+            "plan_applicability": self.plan_applicability,
+            "geographic_scope": self.geographic_scope,
+            "limitations": self.limitations,
+            "approved_pages": self.approved_pages,
+            "reviewed": self.review_date,
+            "expires": self.expiration_date,
+            "updated_at": self.updated_at,
+        })
+    }
+}
+
+impl ClaimsRegistry {
+    /// Every claim as the public view, ordered by id (stable output).
+    pub fn public_views(&self) -> Vec<serde_json::Value> {
+        let mut claims: Vec<&MarketingClaim> = self.claims.values().collect();
+        claims.sort_by(|left, right| left.claim_id.cmp(&right.claim_id));
+        claims
+            .into_iter()
+            .map(MarketingClaim::public_view)
+            .collect()
+    }
+
+    /// One claim's public view.
+    pub fn public_view(&self, id: &str) -> Option<serde_json::Value> {
+        self.get(id).map(MarketingClaim::public_view)
+    }
+}
+
 pub fn seed_claims_registry() -> ClaimsRegistry {
     let mut registry = ClaimsRegistry::new();
     let now = Utc::now();
@@ -154,13 +288,15 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Compliance,
         owner: "Security".into(),
         approver: Some("Legal".into()),
-        evidence_location: Some("docs/compliance/hipaa/".into()),
+        evidence_location: Some("services/mail-server/crates/compliance/src/hipaa.rs".into()),
         measurement_method: Some("BAA review per customer".into()),
         measurement_period: Some("Per-engagement".into()),
         environment_measured: Some("Dedicated".into()),
         plan_applicability: vec!["enterprise".into(), "dedicated_tenant".into()],
         geographic_scope: Some("United States".into()),
-        limitations: Some("BAA eligibility review required; not automatically HIPAA-compliant".into()),
+        limitations: Some(
+            "BAA eligibility review required; not automatically HIPAA-compliant".into(),
+        ),
         approved_pages: vec!["/compliance/hipaa/".into()],
         review_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
         expiration_date: None,
@@ -175,7 +311,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Security,
         owner: "Security".into(),
         approver: Some("Auditor".into()),
-        evidence_location: Some("trust/".into()),
+        evidence_location: Some("services/mail-server/crates/compliance/src/soc2.rs".into()),
         measurement_method: Some("Independent audit".into()),
         measurement_period: Some("Annual".into()),
         environment_measured: Some("Production".into()),
@@ -192,11 +328,12 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
 
     registry.register(MarketingClaim {
         claim_id: "CL-005".into(),
-        exact_wording: "Penetration testing program established with first assessment planned".into(),
+        exact_wording: "Penetration testing program established with first assessment planned"
+            .into(),
         category: ClaimCategory::Security,
         owner: "Security".into(),
         approver: Some("CTO".into()),
-        evidence_location: Some("trust/pentest-summary.pdf".into()),
+        evidence_location: Some("tools/check_security_posture.py".into()),
         measurement_method: Some("External penetration test".into()),
         measurement_period: Some("Annual".into()),
         environment_measured: Some("Production".into()),
@@ -217,7 +354,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Engineering".into(),
         approver: None,
-        evidence_location: Some("api/".into()),
+        evidence_location: Some("services/mail-server/crates/api-server/src/routes".into()),
         measurement_method: Some("API integration tests".into()),
         measurement_period: Some("Continuous".into()),
         environment_measured: Some("Production".into()),
@@ -238,7 +375,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Engineering".into(),
         approver: None,
-        evidence_location: Some("smtp/".into()),
+        evidence_location: Some("services/mail-server/crates/mta".into()),
         measurement_method: Some("SMTP integration tests".into()),
         measurement_period: Some("Continuous".into()),
         environment_measured: Some("Production".into()),
@@ -259,11 +396,17 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Engineering".into(),
         approver: None,
-        evidence_location: Some("webhooks/".into()),
+        evidence_location: Some("services/mail-server/crates/worker-processors/src/webhook".into()),
         measurement_method: Some("Webhook integration tests".into()),
         measurement_period: Some("Continuous".into()),
         environment_measured: Some("Production".into()),
-        plan_applicability: vec!["developer".into(), "pro".into(), "growth".into(), "business".into(), "enterprise".into()],
+        plan_applicability: vec![
+            "developer".into(),
+            "pro".into(),
+            "growth".into(),
+            "business".into(),
+            "enterprise".into(),
+        ],
         geographic_scope: None,
         limitations: Some("Developer plan gets 3 endpoints".into()),
         approved_pages: vec!["/webhooks/".into(), "/docs/".into()],
@@ -280,7 +423,9 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Deliverability".into(),
         approver: Some("Engineering".into()),
-        evidence_location: Some("docs/dedicated-ips/".into()),
+        evidence_location: Some(
+            "services/mail-server/crates/compliance/src/dedicated_ip.rs".into(),
+        ),
         measurement_method: Some("IP assignment audit".into()),
         measurement_period: Some("Per-assignment".into()),
         environment_measured: Some("Production".into()),
@@ -301,7 +446,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Deliverability".into(),
         approver: None,
-        evidence_location: Some("docs/warm-up/".into()),
+        evidence_location: Some("services/mail-server/crates/mail-common/src/warmup.rs".into()),
         measurement_method: Some("Warm-up schedule audit".into()),
         measurement_period: Some("Per-IP".into()),
         environment_measured: Some("Production".into()),
@@ -322,7 +467,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Infrastructure".into(),
         approver: Some("CTO".into()),
-        evidence_location: Some("docs/byoc/".into()),
+        evidence_location: Some("docs/deployment".into()),
         measurement_method: Some("Deployment validation".into()),
         measurement_period: Some("Per-deployment".into()),
         environment_measured: Some("Customer".into()),
@@ -339,11 +484,12 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
 
     registry.register(MarketingClaim {
         claim_id: "CL-012".into(),
-        exact_wording: "Dedicated tenant deployment with private application and data tenancy".into(),
+        exact_wording: "Dedicated tenant deployment with private application and data tenancy"
+            .into(),
         category: ClaimCategory::Product,
         owner: "Infrastructure".into(),
         approver: Some("CTO".into()),
-        evidence_location: Some("docs/dedicated-tenant/".into()),
+        evidence_location: Some("services/mail-server/crates/isolation".into()),
         measurement_method: Some("Deployment validation".into()),
         measurement_period: Some("Per-deployment".into()),
         environment_measured: Some("ApexMail-managed dedicated".into()),
@@ -364,7 +510,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Developer Experience".into(),
         approver: None,
-        evidence_location: Some("sdks/".into()),
+        evidence_location: Some("packages".into()),
         measurement_method: Some("SDK integration tests".into()),
         measurement_period: Some("Continuous".into()),
         environment_measured: Some("Test mode".into()),
@@ -385,11 +531,16 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Deliverability".into(),
         approver: None,
-        evidence_location: Some("docs/inbox-placement/".into()),
+        evidence_location: Some("services/mail-server/crates/inbox-placement".into()),
         measurement_method: Some("Seed-list delivery measurement".into()),
         measurement_period: Some("Per-test".into()),
         environment_measured: Some("Production".into()),
-        plan_applicability: vec!["pro".into(), "growth".into(), "business".into(), "enterprise".into()],
+        plan_applicability: vec![
+            "pro".into(),
+            "growth".into(),
+            "business".into(),
+            "enterprise".into(),
+        ],
         geographic_scope: None,
         limitations: Some("Seed results do not guarantee recipient-wide placement".into()),
         approved_pages: vec!["/inbox-placement/".into()],
@@ -406,11 +557,16 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Deliverability".into(),
         approver: None,
-        evidence_location: Some("docs/email-grader/".into()),
+        evidence_location: Some("services/mail-server/crates/email-grader".into()),
         measurement_method: Some("Grader analysis engine".into()),
         measurement_period: Some("Per-grading".into()),
         environment_measured: Some("Production".into()),
-        plan_applicability: vec!["pro".into(), "growth".into(), "business".into(), "enterprise".into()],
+        plan_applicability: vec![
+            "pro".into(),
+            "growth".into(),
+            "business".into(),
+            "enterprise".into(),
+        ],
         geographic_scope: None,
         limitations: Some("Score is not an inbox-placement guarantee".into()),
         approved_pages: vec!["/email-grader/".into()],
@@ -427,8 +583,10 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::CustomerProof,
         owner: "Marketing".into(),
         approver: Some("Finance".into()),
-        evidence_location: Some("analytics/".into()),
-        measurement_method: Some("Count of organizations with active sending in last 30 days".into()),
+        evidence_location: Some("runtime:tenant_delivery_analytics".into()),
+        measurement_method: Some(
+            "Count of organizations with active sending in last 30 days".into(),
+        ),
         measurement_period: Some("Rolling 30-day".into()),
         environment_measured: Some("Production".into()),
         plan_applicability: vec!["all".into()],
@@ -448,7 +606,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::CustomerProof,
         owner: "Marketing".into(),
         approver: Some("Engineering".into()),
-        evidence_location: Some("analytics/".into()),
+        evidence_location: Some("runtime:tenant_delivery_analytics".into()),
         measurement_method: Some("Sum of accepted recipients across all tenants".into()),
         measurement_period: Some("Monthly".into()),
         environment_measured: Some("Production".into()),
@@ -469,7 +627,9 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Product,
         owner: "Support".into(),
         approver: None,
-        evidence_location: Some("support/sla-metrics/".into()),
+        evidence_location: Some(
+            "services/mail-server/crates/compliance/src/support_promises.rs".into(),
+        ),
         measurement_method: Some("Median time to first human response".into()),
         measurement_period: Some("Monthly".into()),
         environment_measured: Some("Production".into()),
@@ -498,7 +658,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         geographic_scope: None,
         limitations: Some("No organisation can claim 100% GDPR compliance. Prohibited.".into()),
         approved_pages: vec![],
-            review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
+        review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
         status: ClaimStatus::Prohibited,
         created_at: now,
@@ -517,9 +677,12 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         environment_measured: None,
         plan_applicability: vec![],
         geographic_scope: None,
-        limitations: Some("No recognised certification or standard. Prohibited until independently verified.".into()),
+        limitations: Some(
+            "No recognised certification or standard. Prohibited until independently verified."
+                .into(),
+        ),
         approved_pages: vec![],
-            review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
+        review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
         status: ClaimStatus::Prohibited,
         created_at: now,
@@ -561,7 +724,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         geographic_scope: None,
         limitations: Some("Inbox placement cannot be guaranteed. Prohibited.".into()),
         approved_pages: vec![],
-            review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
+        review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
         status: ClaimStatus::Prohibited,
         created_at: now,
@@ -582,7 +745,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         geographic_scope: None,
         limitations: Some("Deliverability depends on many external factors. Prohibited.".into()),
         approved_pages: vec![],
-            review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
+        review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
         status: ClaimStatus::Prohibited,
         created_at: now,
@@ -622,9 +785,11 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         environment_measured: None,
         plan_applicability: vec![],
         geographic_scope: None,
-        limitations: Some("No global edge infrastructure exists. Prohibited until deployed and verified.".into()),
+        limitations: Some(
+            "No global edge infrastructure exists. Prohibited until deployed and verified.".into(),
+        ),
         approved_pages: vec![],
-            review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
+        review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
         status: ClaimStatus::Prohibited,
         created_at: now,
@@ -643,9 +808,11 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         environment_measured: None,
         plan_applicability: vec![],
         geographic_scope: None,
-        limitations: Some("Network egress is never zero in any cloud environment. Prohibited.".into()),
+        limitations: Some(
+            "Network egress is never zero in any cloud environment. Prohibited.".into(),
+        ),
         approved_pages: vec![],
-            review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
+        review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
         status: ClaimStatus::Prohibited,
         created_at: now,
@@ -679,7 +846,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Performance,
         owner: "Engineering".into(),
         approver: Some("CTO".into()),
-        evidence_location: Some("Prometheus API gateway histogram".into()),
+        evidence_location: Some("runtime:api_gateway_histogram".into()),
         measurement_method: Some("Server-side timing from request receipt to response transmission, measured at the API gateway over rolling 30-day windows".into()),
         measurement_period: Some("Rolling 30 days".into()),
         environment_measured: Some("Production — EU (Helsinki)".into()),
@@ -700,7 +867,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         category: ClaimCategory::Performance,
         owner: "Engineering".into(),
         approver: None,
-        evidence_location: Some("Sandbox test harness metrics".into()),
+        evidence_location: Some("runtime:sandbox_validation_harness".into()),
         measurement_method: Some("Internal validation latency only — no email is sent. Measures request validation, authentication, and internal queue acceptance without outbound SMTP interaction. Not an SLA.".into()),
         measurement_period: Some("Per-request measurement".into()),
         environment_measured: Some("Sandbox".into()),
@@ -727,7 +894,7 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
         environment_measured: Some("Customer-specific".into()),
         plan_applicability: vec!["dedicated_tenant".into(), "byoc".into()],
         geographic_scope: Some("Customer-selected region".into()),
-        limitations: Some("Architecture-dependent. No public SLA for Private Cloud latency. Actual figures are illustrative deployment scenarios only. Contractual targets defined in customer agreements.".into()),
+        limitations: Some("Architecture-dependent. No public SLA for Private Cloud latency. Not yet achieved in a customer deployment (the dedicated-tenant and BYOC offerings are Planned, see CL-011/CL-012); actual figures are illustrative deployment scenarios only. Contractual targets defined in customer agreements.".into()),
         approved_pages: vec!["/private-cloud/".into(), "/performance-methodology/".into()],
         review_date: NaiveDate::from_ymd_opt(2027, 6, 1).unwrap(),
         expiration_date: None,
@@ -763,7 +930,10 @@ mod tests {
         let prohibited = r.by_status(ClaimStatus::Prohibited);
         assert_eq!(prohibited.len(), 9, "Expected exactly 9 prohibited claims");
 
-        let wordings: Vec<&str> = prohibited.iter().map(|c| c.exact_wording.as_str()).collect();
+        let wordings: Vec<&str> = prohibited
+            .iter()
+            .map(|c| c.exact_wording.as_str())
+            .collect();
         assert!(wordings.contains(&"100% GDPR compliant"));
         assert!(wordings.contains(&"System Integrity Verified"));
         assert!(wordings.contains(&"99.9% delivery rate"));
@@ -797,7 +967,10 @@ mod tests {
         let r = registry();
         for claim in r.by_status(ClaimStatus::Illustrative) {
             assert!(
-                claim.limitations.as_ref().map_or(false, |l| l.contains("Not yet achieved")),
+                claim
+                    .limitations
+                    .as_ref()
+                    .is_some_and(|l| l.contains("Not yet achieved")),
                 "Illustrative claim {} should note not-yet-achieved status",
                 claim.claim_id
             );
@@ -812,7 +985,11 @@ mod tests {
         assert!(
             overdue.is_empty(),
             "Claims overdue for review: {}",
-            overdue.iter().map(|c| format!("{} ({})", c.claim_id, c.review_date)).collect::<Vec<_>>().join(", ")
+            overdue
+                .iter()
+                .map(|c| format!("{} ({})", c.claim_id, c.review_date))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let _ = today;
     }
@@ -821,19 +998,31 @@ mod tests {
     fn test_categories_assigned() {
         let r = registry();
         for claim in r.all() {
-            assert!(!claim.owner.is_empty(), "Claim {} has no owner", claim.claim_id);
+            assert!(
+                !claim.owner.is_empty(),
+                "Claim {} has no owner",
+                claim.claim_id
+            );
         }
     }
 
     #[test]
     fn test_validate_wording_detects_claims() {
         let r = registry();
-        let hits = r.validate_wording("Our system guarantees 100% GDPR compliant processing with 99.9% delivery rate");
+        let hits = r.validate_wording(
+            "Our system guarantees 100% GDPR compliant processing with 99.9% delivery rate",
+        );
         assert!(hits.len() >= 2);
 
         let hit_ids: Vec<&str> = hits.iter().map(|c| c.claim_id.as_str()).collect();
-        assert!(hit_ids.contains(&"CL-019"), "Should detect 100% GDPR compliant");
-        assert!(hit_ids.contains(&"CL-021"), "Should detect 99.9% delivery rate");
+        assert!(
+            hit_ids.contains(&"CL-019"),
+            "Should detect 100% GDPR compliant"
+        );
+        assert!(
+            hit_ids.contains(&"CL-021"),
+            "Should detect 99.9% delivery rate"
+        );
     }
 
     #[test]
@@ -842,6 +1031,151 @@ mod tests {
         let claim = r.get("CL-002").expect("CL-002 should exist");
         assert_eq!(claim.status, ClaimStatus::Qualified);
         assert_eq!(claim.owner, "Legal");
+    }
+
+    /// The repository root, derived from this crate's manifest location
+    /// (services/mail-server/crates/compliance → four levels up).
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../..")
+            .canonicalize()
+            .expect("the crate must live inside the repository")
+    }
+
+    /// A1/B6 evidence pin: EVERY claim that cites an evidence pointer must
+    /// point at something a reader can actually open. A `RepoPath` whose
+    /// target is gone fails here; a `RuntimeSource` must be a REGISTERED
+    /// named source whose producer path exists (no claim can invent a
+    /// source); `None` is allowed only where the schema demands no evidence
+    /// (prohibited / illustrative claims).
+    #[test]
+    fn every_repo_path_evidence_target_exists() {
+        let root = repo_root();
+        let r = registry();
+        let mut checked = 0usize;
+        for claim in r.all() {
+            let kind = ClaimEvidenceKind::of(claim.evidence_location.as_deref());
+            match (kind, claim.evidence_location.as_deref()) {
+                (ClaimEvidenceKind::None, _) => {
+                    assert!(
+                        matches!(
+                            claim.status,
+                            ClaimStatus::Prohibited | ClaimStatus::Illustrative
+                        ) || claim.evidence_location.is_none(),
+                        "claim {} carries no evidence but is {} — only prohibited/illustrative \
+                         claims may ship without a pointer",
+                        claim.claim_id,
+                        claim.status_string()
+                    );
+                }
+                (ClaimEvidenceKind::RepoPath, Some(path)) => {
+                    let target = root.join(path);
+                    assert!(
+                        target.exists(),
+                        "claim {} (status {:?}) cites `{path}`, which does not exist in the \
+                         repository — fix the pointer or drop the claim",
+                        claim.claim_id,
+                        claim.status
+                    );
+                    checked += 1;
+                }
+                (ClaimEvidenceKind::RuntimeSource, Some(value)) => {
+                    let name = value.trim_start_matches("runtime:");
+                    let source = RUNTIME_EVIDENCE_SOURCES
+                        .iter()
+                        .find(|(source, _, _)| *source == name)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "claim {} cites runtime source `{name}`, which is not registered \
+                                 in RUNTIME_EVIDENCE_SOURCES",
+                                claim.claim_id
+                            )
+                        });
+                    assert!(
+                        root.join(source.1).exists(),
+                        "claim {} runtime source `{name}` names producer `{}`, which does not \
+                         exist",
+                        claim.claim_id,
+                        source.1
+                    );
+                    assert!(
+                        !source.2.is_empty(),
+                        "runtime source `{name}` must describe what it measures"
+                    );
+                    checked += 1;
+                }
+                // Classification is derived FROM the pointer, so a
+                // pointer/kind disagreement is unreachable by construction;
+                // the arms are spelled out so a future kind addition cannot
+                // compile silently.
+                (ClaimEvidenceKind::RepoPath | ClaimEvidenceKind::RuntimeSource, None) => {
+                    panic!(
+                        "claim {} is classified with evidence but has none",
+                        claim.claim_id
+                    )
+                }
+            }
+        }
+        // The pin must cover EVERY claim that carries a pointer (a silently
+        // skipped claim is exactly the hole this test exists to close) and be
+        // substantive overall.
+        let with_evidence = r
+            .all()
+            .iter()
+            .filter(|claim| claim.evidence_location.is_some())
+            .count();
+        assert_eq!(
+            checked, with_evidence,
+            "the evidence pin skipped claims that carry a pointer"
+        );
+        assert!(
+            checked >= 15,
+            "the evidence pin only checked {checked} claims — it would be vacuous"
+        );
+    }
+
+    /// The served JSON is the stable contract: every claim renders with its
+    /// id, wording, status, evidence and review/expiry dates, and the
+    /// registry-wide view covers all claims once (no duplicates).
+    #[test]
+    fn public_views_render_the_served_contract() {
+        let r = registry();
+        let views = r.public_views();
+        assert_eq!(views.len(), r.all().len());
+        let mut ids: Vec<&str> = views.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "ordered by id"
+        );
+        ids.clear();
+        for view in &views {
+            assert!(view["id"].as_str().is_some_and(|id| id.starts_with("CL-")));
+            assert!(view["claim"].as_str().is_some_and(|c| !c.is_empty()));
+            assert!(view["status"].as_str().is_some());
+            assert!(view["reviewed"].as_str().is_some());
+            assert!(view["evidence"].is_object());
+            if let Some(location) = view["evidence"]["location"].as_str() {
+                let kind = view["evidence"]["kind"].as_str().unwrap_or_default();
+                assert!(
+                    ["repo_path", "runtime_source"].contains(&kind),
+                    "evidence kind must be classified: {view}"
+                );
+                if location.starts_with("runtime:") {
+                    assert_eq!(kind, "runtime_source", "{view}");
+                    assert!(
+                        view["evidence"]["target"].as_str().is_some(),
+                        "a runtime source must resolve to its producer path: {view}"
+                    );
+                } else {
+                    assert_eq!(kind, "repo_path", "{view}");
+                }
+            }
+        }
+        // Single-claim lookup follows the same shape.
+        let one = r.public_view("CL-028").expect("CL-028");
+        assert_eq!(one["id"], "CL-028");
+        assert_eq!(one["evidence"]["kind"], "runtime_source");
+        assert!(r.public_view("CL-999").is_none());
     }
 
     /// Audit F10: the data-residency claim must STAY removed. It advertised

@@ -4,7 +4,11 @@ description = "How ApexMail measures and reports performance, delivery, latency,
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-15"
+# Plan A4: renders the generated published-deliverability island
+# (templates/partials/generated/deliverability-report.html) from the ClickHouse
+# artifact apps/marketing-zola/data/deliverability-report.json.
+deliverability_report = true
 +++
 
 This page defines every performance metric published by ApexMail, including how it is measured, the measurement period, geographic coverage, exclusions, and limitations. Every publicly displayed performance number must link to its definition on this page or to the relevant section below.

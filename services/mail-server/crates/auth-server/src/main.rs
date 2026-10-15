@@ -1038,15 +1038,67 @@ async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
         .into_response()
 }
 
-async fn status_history() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "history": [],
-            "updated": chrono::Utc::now().to_rfc3339()
-        })),
-    )
-        .into_response()
+/// How far back the public incident history reports (days). Bounded on
+/// purpose: the endpoint is public and unauthenticated, and a "12 months of
+/// incidents" history page is a promise this window makes concrete.
+const STATUS_HISTORY_WINDOW_DAYS: i64 = 90;
+/// Maximum incidents returned in one response (the endpoint is public; the
+/// newest 50 within the window is the whole page).
+const STATUS_HISTORY_LIMIT: i64 = 50;
+
+/// Public incident history — REAL data from `status_page_incidents`
+/// (migration 198's ledger, written by the incident repo), bounded to the
+/// last [`STATUS_HISTORY_WINDOW_DAYS`] days.
+///
+/// Honesty rules (the old handler returned a hardcoded empty list while the
+/// incident ledger existed — an "unknown" disguised as "none"):
+///
+/// * a successful read that found nothing answers `history: []` with
+///   `"recorded": true` and `count: 0` — a determinate "no incidents were
+///   recorded in this window";
+/// * a failed read answers `503` with `history: null` and a named error —
+///   UNKNOWN, never silently rendered as "no incidents happened";
+/// * the window and the source are always stated, so the reader can tell
+///   what the answer covers.
+async fn status_history(State(state): State<AppState>) -> impl IntoResponse {
+    use apexmail_db::repos::incidents::IncidentRepo;
+
+    match IncidentRepo::list_since(&state.db, STATUS_HISTORY_WINDOW_DAYS, STATUS_HISTORY_LIMIT)
+        .await
+    {
+        Ok(incidents) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "history": incidents,
+                "count": incidents.len(),
+                "recorded": true,
+                "window_days": STATUS_HISTORY_WINDOW_DAYS,
+                "limit": STATUS_HISTORY_LIMIT,
+                "source": "status_page_incidents",
+                "updated": chrono::Utc::now().to_rfc3339()
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            eprintln!(
+                "status history read failed: {error} — answering UNKNOWN (503), never an empty history"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "history": serde_json::Value::Null,
+                    "recorded": false,
+                    "error": "status_history_unavailable",
+                    "detail": "the incident ledger could not be read; this is NOT a statement \
+                               that no incidents occurred",
+                    "window_days": STATUS_HISTORY_WINDOW_DAYS,
+                    "source": "status_page_incidents",
+                    "updated": chrono::Utc::now().to_rfc3339()
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[tokio::main]
@@ -2240,13 +2292,108 @@ mod tests {
         assert!(html.contains("Minor degradation"), "{html}");
     }
 
+    /// The public history used to be a hardcoded `[]` while the
+    /// `status_page_incidents` ledger (migration 198, incident repo) was real
+    /// and unused — an "unknown" served as "no incidents". This test is the
+    /// successor of the old placeholder pin and holds the NEW truth:
+    /// recorded history is served, the window is stated and enforced, and an
+    /// empty read stays a DETERMINATE empty (recorded=true, count=0) rather
+    /// than a disguised unknown.
     #[tokio::test]
-    async fn status_history_is_the_empty_audit_placeholder() {
-        let response = status_history().await.into_response();
+    async fn status_history_serves_the_recorded_incident_window() {
+        use apexmail_db::repos::incidents::IncidentRepo;
+
+        let Some(pool) = canonical_pool("auth_status_history").await else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let recent = IncidentRepo::create(
+            &pool,
+            &format!("inc-{suffix}"),
+            "SMTP delivery delay",
+            "resolved",
+            "minor",
+            &["mail".to_string()],
+        )
+        .await
+        .expect("seed a recent incident");
+        // An incident OUTSIDE the 90-day window must not leak into the
+        // bounded public report (backdated, since create() stamps NOW()).
+        sqlx::query(
+            "INSERT INTO status_page_incidents \
+                 (id, title, status, impact, affected_components, created_at, updated_at) \
+             VALUES ($1, $2, 'resolved', 'minor', '{}', NOW() - INTERVAL '400 days', NOW())",
+        )
+        .bind(format!("inc-old-{suffix}"))
+        .bind("Ancient incident")
+        .execute(&pool)
+        .await
+        .expect("seed a backdated incident");
+
+        let state = AppState {
+            db: pool.clone(),
+            session_secret: "test-secret".into(),
+            throttle: Arc::new(LoginThrottle::in_memory()),
+            probes: Arc::new(ProbeCache::new()),
+            smtp_gate: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SMTP_PROBES)),
+        };
+        let response = status_history(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(
+            json["recorded"], true,
+            "a successful read is a determinate answer"
+        );
+        assert_eq!(json["window_days"], STATUS_HISTORY_WINDOW_DAYS);
+        assert_eq!(json["source"], "status_page_incidents");
+        assert_eq!(
+            json["count"], 1,
+            "the backdated incident must stay outside: {json}"
+        );
+        assert_eq!(json["history"][0]["id"], recent.id);
+        assert_eq!(json["history"][0]["title"], "SMTP delivery delay");
+        assert!(json["updated"].as_str().unwrap().contains('T'));
+
+        // Empty case: distinguishable from unknown (recorded=true, count=0,
+        // history=[]).
+        sqlx::query("DELETE FROM status_page_incidents")
+            .execute(&pool)
+            .await
+            .expect("clear incidents");
+        let response = status_history(State(AppState {
+            db: pool.clone(),
+            session_secret: "test-secret".into(),
+            throttle: Arc::new(LoginThrottle::in_memory()),
+            probes: Arc::new(ProbeCache::new()),
+            smtp_gate: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SMTP_PROBES)),
+        }))
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         assert_eq!(json["history"], serde_json::json!([]));
-        assert!(json["updated"].as_str().unwrap().contains('T'));
+        assert_eq!(json["count"], 0);
+        assert_eq!(
+            json["recorded"], true,
+            "an empty window is RECORDED emptiness — never an unknown: {json}"
+        );
+    }
+
+    /// The failure direction: an unreadable ledger answers UNKNOWN (503,
+    /// `history: null`, a named error, `recorded: false`) — the page must
+    /// never render "no incidents" out of a broken query.
+    #[tokio::test]
+    async fn status_history_answers_unknown_when_the_ledger_is_unreadable() {
+        let response = status_history(State(fake_state())).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = response_json(response).await;
+        assert_eq!(json["history"], serde_json::Value::Null);
+        assert_eq!(json["recorded"], false);
+        assert_eq!(json["error"], "status_history_unavailable");
+        assert!(json["detail"]
+            .as_str()
+            .unwrap()
+            .contains("NOT a statement that no incidents occurred"));
     }
 
     /// The MAIL_PORT knob must move the probe target: a listener on a chosen

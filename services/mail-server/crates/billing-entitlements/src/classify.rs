@@ -69,6 +69,14 @@ pub enum FeatureKey {
     /// `inbound_email` — inbound mailbox provisioning / inbound event
     /// consumption.
     InboundEmail,
+    /// `mailboxes` — the Mailboxes product line (receiving mailboxes on the
+    /// mail plane), sold as a separate per-seat add-on (10-seat minimum,
+    /// `platform-catalog` `addon_by_name("mailboxes")`), not included in any
+    /// self-serve plan. Runtime grant: an ACTIVE
+    /// `product_line_contracts` row (`product_line = 'mailboxes'`, the
+    /// purchase record the monthly seat billing reads) or a plan/override
+    /// grant; the mailbox provisioning path refuses without it.
+    Mailboxes,
     /// `advanced_analytics` — advanced analytics endpoints (engagement,
     /// deliverability).
     AdvancedAnalytics,
@@ -121,6 +129,7 @@ impl FeatureKey {
         Self::ApiAccess,
         Self::Webhooks,
         Self::InboundEmail,
+        Self::Mailboxes,
         Self::AdvancedAnalytics,
         Self::SendTimeOptimization,
         Self::AbTesting,
@@ -152,6 +161,7 @@ impl FeatureKey {
             Self::ApiAccess => "api_access",
             Self::Webhooks => "webhooks_enabled",
             Self::InboundEmail => "inbound_email",
+            Self::Mailboxes => "mailboxes",
             Self::AdvancedAnalytics => "advanced_analytics",
             Self::SendTimeOptimization => "send_time_optimization",
             Self::AbTesting => "ab_testing",
@@ -356,6 +366,21 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::InboundEmail),
         rationale: "Inbound consumption is gated where api-server can see it (inbound event subscriptions); raw MX acceptance must not be gated.",
+    },
+
+    // RuntimeEnforced — mailbox provisioning (`routes/admin/mailboxes.rs`)
+    // requires `FeatureKey::Mailboxes` OR an active Mailboxes product-line
+    // contract before it creates an account, and the archive toggle uses the
+    // same gate. Sold ONLY as the per-seat Mailboxes add-on (10-seat
+    // minimum, `platform-catalog` `mailboxes` / `mailbox_archive_journaling`
+    // rows; docs/pricing.md "Contract and non-subscription lines"), so no
+    // canonical plan seed grants it — the contract row is the purchase act
+    // and the monthly seat invoice bills from the same record.
+    FieldClassification {
+        field: "mailboxes",
+        class: FeatureClass::RuntimeEnforced,
+        gate: Gate::Feature(FeatureKey::Mailboxes),
+        rationale: "Mailbox provisioning is a real operator handler gated on the Mailboxes product entitlement (an active product_line_contracts row or a plan/override grant), so a non-entitled tenant is refused by name instead of receiving unbilled mailboxes.",
     },
 
     // ── Analytics ──────────────────────────────────────────────────

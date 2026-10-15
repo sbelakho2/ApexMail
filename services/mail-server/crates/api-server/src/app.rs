@@ -404,6 +404,14 @@ pub fn build_app(state: AppState) -> Router {
         // anonymous visitors to /login?next=… (same contract as the SSR
         // fallback's auth gate), so they ride the public rate-limit stack.
         .merge(routes::web::detail_router())
+        // B3 public receipt verification: the Ed25519 key + the stateless
+        // verify endpoint. Unauthenticated BY DESIGN (a proof only its issuer
+        // can check is not a proof) — the public rate-limit stack below is
+        // the only guard, and the handler never touches the database.
+        .nest(
+            "/v1/routing/receipts",
+            routes::routing::public_receipts_router(),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,

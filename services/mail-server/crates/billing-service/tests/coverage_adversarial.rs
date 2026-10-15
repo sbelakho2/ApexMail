@@ -5743,6 +5743,7 @@ db_test!(
             due_at: None,
             currency: None,
             overage_period: None,
+            product_lines_period: None,
         };
 
         // No billing address → typed refusal, no invoice row.

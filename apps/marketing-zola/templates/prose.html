@@ -37,5 +37,13 @@
     {# |safe is acceptable because the content author is the site owner, not end users. #}
     {{ page.content | safe }}
   </div>
+  {# Plan A4: the published deliverability report is a GENERATED island (the #}
+  {# status-island pattern) rendered by tools/generate_deliverability_report.py #}
+  {# from apps/marketing-zola/data/deliverability-report.json (ClickHouse #}
+  {# aggregates). Pages opt in with `[extra] deliverability_report = true`; a #}
+  {# page that has not opted in never renders a number whose artifact is absent. #}
+  {% if page.extra.deliverability_report %}
+  {% include "partials/generated/deliverability-report.html" %}
+  {% endif %}
 </div>
 {% endblock content %}
