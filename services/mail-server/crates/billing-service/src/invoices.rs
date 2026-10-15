@@ -448,7 +448,29 @@ pub async fn create_invoice_in_tx(
     );
     let vat_allocations = allocate_vat_across_lines(&line_amounts, vat_rate);
 
-    let mut line_items = Vec::with_capacity(input.line_items.len());
+    // ── US sales tax (plan WP C2) ────────────────────────────────────────
+    // A US customer's invoice in a state the OPERATOR has registered carries
+    // a sales-tax line computed from the committed rate file, stamped with
+    // state + rate + source + retrieved date. The file is loaded lazily —
+    // only once the customer is US and the state is registered — so a
+    // problem in it can never refuse an invoice that would carry no tax.
+    // A registered state with a missing or stale rate row REFUSES the
+    // invoice (a named error): charging a guess, or silently skipping the
+    // tax of a registered state, are both false. EU customers are untouched
+    // (the country gate is step one inside the resolver).
+    let now = Utc::now();
+    let us_sales_tax = crate::us_tax::sales_tax_line_for_invoice(
+        &mut **tx,
+        None,
+        &country,
+        addr.state.as_deref(),
+        subtotal,
+        now.date_naive(),
+    )
+    .await
+    .map_err(|error| InvoiceError::UsSalesTax(error.to_string()))?;
+
+    let mut line_items = Vec::with_capacity(input.line_items.len() + 1);
     let mut vat_total: i64 = 0;
 
     for (item, vat_amount) in input.line_items.iter().zip(vat_allocations) {
@@ -464,8 +486,25 @@ pub async fn create_invoice_in_tx(
         });
     }
 
-    let total = subtotal + vat_total;
-    let now = Utc::now();
+    let (us_sales_tax_cents, us_sales_tax_snapshot) = match &us_sales_tax {
+        Some(tax) => {
+            // The tax is its own line (description carries the whole stamp).
+            // It is NOT a VAT line: `vat_amount`/`vat_rate` stay 0 so the
+            // Estonian KMD ledger never sees US state tax as Estonian VAT.
+            line_items.push(InvoiceLineItem {
+                description: tax.description(),
+                quantity: 1,
+                unit_price: tax.amount_cents,
+                amount: tax.amount_cents,
+                vat_rate: 0.0,
+                vat_amount: 0,
+            });
+            (tax.amount_cents, Some(tax.snapshot_json()))
+        }
+        None => (0, None),
+    };
+
+    let total = subtotal + vat_total + us_sales_tax_cents;
     let due_at = input
         .due_at
         .unwrap_or_else(|| now + chrono::Duration::days(30));
@@ -501,6 +540,7 @@ pub async fn create_invoice_in_tx(
             billing_country, vat_rate, overage_period, billing_address,
             billing_registry_code, vat_evidence_id,
             product_lines_period,
+            us_sales_tax_cents, us_sales_tax_snapshot,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
@@ -509,6 +549,7 @@ pub async fn create_invoice_in_tx(
             $14, $15, $16, $17,
             $18, $19,
             $20,
+            $21, $22::jsonb,
             $10, $10
         )
         "#,
@@ -533,6 +574,12 @@ pub async fn create_invoice_in_tx(
     .bind(addr.registry_code)
     .bind(vat_evidence_id)
     .bind(input.product_lines_period)
+    .bind(us_sales_tax_cents)
+    .bind(
+        us_sales_tax_snapshot
+            .as_ref()
+            .map(serde_json::Value::to_string),
+    )
     .execute(&mut **tx)
     .await
     .map_err(InvoiceError::Db)?;
@@ -568,6 +615,8 @@ pub async fn create_invoice_in_tx(
         currency,
         subtotal,
         vat_total,
+        us_sales_tax_cents,
+        us_sales_tax_snapshot,
         total,
         line_items,
         issued_at: now,
@@ -829,6 +878,14 @@ pub async fn generate_invoice_pdf(
         "period_end": invoice.period_end.format("%Y-%m-%d").to_string(),
         "subtotal": invoice.subtotal,
         "vat_total": invoice.vat_total,
+        // US state sales tax (plan WP C2) rides in its own totals row so the
+        // customer-facing invoice adds up: subtotal + vat + US tax = total.
+        "us_sales_tax": invoice.us_sales_tax_snapshot.as_ref().map(|snapshot| {
+            serde_json::json!({
+                "state": snapshot.get("state").and_then(|v| v.as_str()).unwrap_or_default(),
+                "amount_cents": invoice.us_sales_tax_cents,
+            })
+        }),
         "total": invoice.total,
         "line_items": sanitized_line_items,
         "seller": seller,
@@ -909,7 +966,8 @@ pub async fn list_invoices(
         r#"
         SELECT
             id, tenant_id, adyen_psp_reference, invoice_number,
-            status, currency, subtotal, vat_total, total,
+            status, currency, subtotal, vat_total, us_sales_tax_cents,
+            us_sales_tax_snapshot, total,
             line_items,
             issued_at, due_at, paid_at,
             period_start, period_end,
@@ -945,7 +1003,8 @@ pub async fn get_invoice_by_id(
         r#"
         SELECT
             id, tenant_id, adyen_psp_reference, invoice_number,
-            status, currency, subtotal, vat_total, total,
+            status, currency, subtotal, vat_total, us_sales_tax_cents,
+            us_sales_tax_snapshot, total,
             line_items,
             issued_at, due_at, paid_at,
             period_start, period_end,
@@ -1333,6 +1392,8 @@ struct InvoiceRow {
     currency: String,
     subtotal: i64,
     vat_total: i64,
+    us_sales_tax_cents: i64,
+    us_sales_tax_snapshot: Option<serde_json::Value>,
     total: i64,
     line_items: Option<serde_json::Value>,
     issued_at: DateTime<Utc>,
@@ -1422,6 +1483,8 @@ impl InvoiceRow {
             currency: self.currency,
             subtotal: self.subtotal,
             vat_total: self.vat_total,
+            us_sales_tax_cents: self.us_sales_tax_cents,
+            us_sales_tax_snapshot: self.us_sales_tax_snapshot,
             total: self.total,
             line_items,
             issued_at: self.issued_at,
@@ -1449,6 +1512,11 @@ pub enum InvoiceError {
     PdfGeneration(String),
     #[error("VAT recognition error: {0}")]
     Recognition(String),
+    /// US sales tax refused the invoice (plan WP C2): a registered state
+    /// with a missing/stale rate row, or an unreadable data file. The
+    /// amount is never guessed — the caller's retry surfaces it.
+    #[error("US sales tax refusal: {0}")]
+    UsSalesTax(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     /// Fix #10 sweep: the persisted `line_items` JSONB does not decode, so
@@ -1717,6 +1785,8 @@ mod tests {
             currency: "eur".into(),
             subtotal: 1000,
             vat_total: 240,
+            us_sales_tax_cents: 0,
+            us_sales_tax_snapshot: None,
             total: 1240,
             line_items: None,
             issued_at: Utc::now(),
@@ -1916,6 +1986,8 @@ mod tests {
             currency: "eur".into(),
             subtotal: 1000,
             vat_total: 240,
+            us_sales_tax_cents: 0,
+            us_sales_tax_snapshot: None,
             total: 1240,
             line_items: Some(serde_json::json!([])),
             issued_at: Utc::now(),

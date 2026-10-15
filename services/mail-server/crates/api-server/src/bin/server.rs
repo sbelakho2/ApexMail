@@ -241,6 +241,47 @@ async fn run(config: Config) -> anyhow::Result<()> {
         api_server::routes::notification_drain::drain_interval_log(DRAIN_INTERVAL_SECS);
     }
 
+    // ── Reply auto-send sweep (WP F9) ────────────────────────
+    // LOW-risk reply classes may send WITHOUT a human approval — but only
+    // where the owner has promoted that `(tenant, reply class)` through the
+    // promotion gate (default OFF; the sweep is invisible to a tenant with no
+    // enabled row, and the gate is re-checked inside each send transaction
+    // against the live evidence, the tenant's autonomy mode and the kill
+    // switch). Every released draft rides the same claim → consent →
+    // priority-lane queue → audit path as a human approval, with the
+    // automation attributed on the audit row. A pass failure is logged and
+    // retried on the next tick, never fatal; drafts it does not release stay
+    // pending and human-approvable.
+    {
+        let sweep_state = state.clone();
+        const AUTO_SEND_INTERVAL_SECS: u64 = 15;
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(AUTO_SEND_INTERVAL_SECS));
+            loop {
+                interval.tick().await;
+                match api_server::routes::admin::ai_drafts::auto_send_pending(
+                    &sweep_state,
+                    api_server::routes::admin::ai_drafts::AUTO_SEND_BATCH_SIZE,
+                )
+                .await
+                {
+                    Ok(sweep) if sweep.examined == 0 => {}
+                    Ok(sweep) => tracing::info!(
+                        examined = sweep.examined,
+                        sent = sweep.sent,
+                        held = sweep.held,
+                        "reply auto-send sweep completed"
+                    ),
+                    Err(error) => tracing::error!(
+                        error = %error,
+                        "reply auto-send sweep failed — retrying next interval"
+                    ),
+                }
+            }
+        });
+    }
+
     // The migration only creates a pending platform domain. Provisioning is
     // opt-in so a deployment never invents DNS state, but operators can safely
     // request encrypted per-domain key material during a controlled rollout.

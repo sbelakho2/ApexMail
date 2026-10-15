@@ -240,10 +240,45 @@ fn proration_amounts_are_half_up() {
     }
 }
 
+/// US sales tax (plan WP C2) is integer basis points on integer cents,
+/// rounded half-up ONCE — verified against an exact rational reference, the
+/// same way every other money ladder in this gate is.
+#[test]
+fn us_sales_tax_basis_points_is_half_up_and_integer_only() {
+    use crate::us_tax::{sales_tax_cents, MAX_RATE_BPS};
+
+    // Exhaustive small sweep: every cent amount under $100 at every whole
+    // basis point a US state rate can carry.
+    for base in 0..10_000_i64 {
+        for rate_bps in [0_u32, 5, 50, 100, 400, 500, 625, 700, 725, MAX_RATE_BPS] {
+            assert_eq!(
+                i128::from(sales_tax_cents(base, rate_bps)),
+                half_up(i128::from(base) * i128::from(rate_bps), 10_000),
+                "sales_tax_cents({base}, {rate_bps}) must be exact half-up"
+            );
+        }
+    }
+
+    // Random large amounts: still exact, still integer cents.
+    let mut rng = Rng::new(0x5A1E5);
+    for _ in 0..1_000 {
+        let base = (rng.next_u64() % 10_000_000_000) as i64;
+        let rate_bps = rng.below(u64::from(MAX_RATE_BPS) + 1) as u32;
+        assert_eq!(
+            i128::from(sales_tax_cents(base, rate_bps)),
+            half_up(i128::from(base) * i128::from(rate_bps), 10_000),
+            "base={base} rate_bps={rate_bps}"
+        );
+    }
+
+    // A negative base is never a credit: zero tax, never a negative line.
+    assert_eq!(sales_tax_cents(-1, 725), 0);
+    assert_eq!(sales_tax_cents(i64::MIN, 725), 0);
+}
+
 // ---------------------------------------------------------------------------
 // 3. VAT reconciliation after line allocation
 // ---------------------------------------------------------------------------
-
 #[test]
 fn vat_line_allocation_reconciles_with_headline_for_random_invoices() {
     let mut rng = Rng::new(0xA11CE);
@@ -413,6 +448,13 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
         // Mailboxes seats/archive) is money computation — gated.
         "src/product_lines.rs",
         "src/product_lines.rs",
+    ),
+    (
+        // US sales tax (plan WP C2): the tax on US invoices is money, and the
+        // nexus thresholds are money. Rates travel as integer basis points,
+        // amounts as integer cents — no float is allowed on any line.
+        "src/us_tax.rs",
+        "src/us_tax.rs",
     ),
     (
         // The billing HTTP surface: PAYG/overage estimates, wallet and

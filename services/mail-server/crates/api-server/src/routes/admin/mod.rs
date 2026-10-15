@@ -45,6 +45,7 @@ pub mod mailboxes;
 pub mod operators;
 pub mod predictive_analytics;
 pub mod proxy;
+pub mod reply_autosend;
 pub mod revenue;
 pub mod risk;
 pub mod sales;
@@ -55,6 +56,7 @@ pub mod support_analytics;
 pub mod system_health;
 pub mod system_sender;
 pub mod tenants;
+pub mod us_tax;
 pub mod vat;
 pub mod warmup;
 

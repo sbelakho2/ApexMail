@@ -28,7 +28,11 @@ use crate::{
     config::SalesConfig,
     control,
     crm::CrmBackend,
-    discovery::{default_sources, DiscoveryJobRunner, DiscoveryQuery},
+    discovery::{
+        attempt_solve, default_sources, list_blocked_sources, list_host_health,
+        review_blocked_source, set_host_solver_optin, BlockedReviewAction, DiscoveryJobRunner,
+        DiscoveryQuery, SolverConfig,
+    },
     dispatcher::ProductionCampaignDispatcher,
     enrichment::EnrichmentService,
     inbox::InboxManager,
@@ -174,6 +178,27 @@ pub fn router(state: AppState) -> Router {
         .route("/discovery/jobs", post(create_discovery_job))
         .route("/discovery/jobs/:id", get(get_discovery_job))
         .route("/discovery/jobs/:id/run", post(run_discovery_job))
+        // ── Blocked sources & scraping health (migration 258) ──────────────
+        // The CAPTCHA-ready surface: what got blocked (with the evidence),
+        // what the engine is backing off from, whose host may use the
+        // operator's solver hook, and the audited solve attempt itself.
+        .route(
+            "/discovery/blocked-sources",
+            get(list_scrape_blocked_sources),
+        )
+        .route(
+            "/discovery/blocked-sources/:id/review",
+            post(review_scrape_blocked_source),
+        )
+        .route(
+            "/discovery/blocked-sources/:id/solve",
+            post(solve_scrape_blocked_source),
+        )
+        .route("/discovery/hosts", get(list_scrape_host_health))
+        .route(
+            "/discovery/hosts/:host/solver-optin",
+            post(set_scrape_solver_optin),
+        )
         // ── Control surface ────────────────────────────────────────────────
         // The authenticated read/steer API the ApexMail control plane proxies
         // to. This is the ONLY sales brain; the CP holds no decision logic of
@@ -950,6 +975,233 @@ async fn run_discovery_job(
             "imported": job.imported,
             "costEur": job.cost_eur,
             "error": job.error,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+// -- Blocked sources & scraping health (migration 258) -----------------------
+
+/// Query for the blocked-source review queue.
+#[derive(Debug, Deserialize)]
+struct BlockedSourceQuery {
+    /// `open` | `solved` | `dismissed`; absent lists every state.
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostHealthQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /discovery/blocked-sources` — the persisted blocked-source queue,
+/// newest evidence first. Every row carries the classification, the HTTP
+/// status, the challenge markers that matched and the occurrence count.
+async fn list_scrape_blocked_sources(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Query(q): Query<BlockedSourceQuery>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "list_scrape_blocked_sources",
+        tenant_id = %tenant_id,
+        operation = "list_scrape_blocked_sources"
+    );
+    async move {
+        if let Some(state) = q.state.as_deref() {
+            let known = ["open", "solved", "dismissed"];
+            if !known.contains(&state) {
+                return Err(SalesError::InvalidInput(format!(
+                    "unknown blocked-source state `{state}` (expected one of {})",
+                    known.join(", ")
+                )));
+            }
+        }
+        let sources = list_blocked_sources(
+            &state.db,
+            &tenant_id,
+            q.state.as_deref(),
+            q.limit.unwrap_or(100),
+        )
+        .await?;
+        Ok(Json(serde_json::json!({
+            "tenantId": tenant_id,
+            "count": sources.len(),
+            "blockedSources": sources,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// Body of a review decision.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewBlockedSourceBody {
+    /// `solved` | `dismissed` | `reopen`.
+    action: String,
+    /// Who decided — required, because an unattributed scraping decision is
+    /// not auditable.
+    reviewer: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `POST /discovery/blocked-sources/:id/review` — record an operator's
+/// decision on one blocked source.
+async fn review_scrape_blocked_source(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReviewBlockedSourceBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "review_scrape_blocked_source",
+        tenant_id = %tenant_id,
+        blocked_source_id = %id,
+        operation = "review_scrape_blocked_source"
+    );
+    async move {
+        let action = BlockedReviewAction::parse(&body.action).ok_or_else(|| {
+            SalesError::InvalidInput(format!(
+                "unknown review action `{}` (expected solved, dismissed or reopen)",
+                body.action
+            ))
+        })?;
+        let reviewed = review_blocked_source(
+            &state.db,
+            &tenant_id,
+            id,
+            action,
+            &body.reviewer,
+            body.note.as_deref(),
+        )
+        .await?;
+        Ok(Json(serde_json::json!({
+            "blockedSource": reviewed,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// Optional body of a solve attempt.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SolveBody {
+    #[serde(default)]
+    operator: Option<String>,
+}
+
+/// `POST /discovery/blocked-sources/:id/solve` — attempt the operator-gated
+/// solver hook. Every attempt (including every refusal) is audited; the hook
+/// itself is disabled unless `SCRAPE_CAPTCHA_SOLVER_URL` is configured AND
+/// the host has been opted in through `/discovery/hosts/:host/solver-optin`.
+async fn solve_scrape_blocked_source(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+    body: Option<Json<SolveBody>>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "solve_scrape_blocked_source",
+        tenant_id = %tenant_id,
+        blocked_source_id = %id,
+        operation = "solve_scrape_blocked_source"
+    );
+    async move {
+        // The solve retry goes through the same hardened client as a normal
+        // fetch, hydrated with this tenant's persisted backoff windows so a
+        // restart cannot hand the solver a free pass around the backoff.
+        let client =
+            crate::discovery::ScrapeClient::new(crate::discovery::ScrapeConfig::from_env())
+                .map_err(|error| {
+                    SalesError::ServiceUnavailable(format!(
+                        "the scrape client could not be constructed: {error}"
+                    ))
+                })?;
+        crate::discovery::hydrate_registry(&state.db, &tenant_id, &client.host_health()).await?;
+
+        let solver = SolverConfig::from_env();
+        let operator = body
+            .as_ref()
+            .and_then(|Json(body)| body.operator.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let report = attempt_solve(&state.db, &client, &tenant_id, id, &solver, operator).await?;
+        Ok(Json(serde_json::json!({ "solve": report })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// `GET /discovery/hosts` — persistent per-host scraping health: consecutive
+/// blocks, the backoff window, the last classification/status and the solver
+/// opt-in.
+async fn list_scrape_host_health(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Query(q): Query<HostHealthQuery>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "list_scrape_host_health",
+        tenant_id = %tenant_id,
+        operation = "list_scrape_host_health"
+    );
+    async move {
+        let hosts = list_host_health(&state.db, &tenant_id, q.limit.unwrap_or(100)).await?;
+        Ok(Json(serde_json::json!({
+            "tenantId": tenant_id,
+            "count": hosts.len(),
+            "hosts": hosts,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// Body of a solver opt-in change.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SolverOptInBody {
+    enabled: bool,
+    /// Who enabled it — required (the opt-in is a deliberate operator act and
+    /// is stored with the host).
+    operator: String,
+}
+
+/// `POST /discovery/hosts/:host/solver-optin` — enable or revoke this host's
+/// eligibility for the solver hook. Disabling never deletes the audit trail.
+async fn set_scrape_solver_optin(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(host): Path<String>,
+    Json(body): Json<SolverOptInBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "set_scrape_solver_optin",
+        tenant_id = %tenant_id,
+        host = %host,
+        operation = "set_scrape_solver_optin"
+    );
+    async move {
+        let row = set_host_solver_optin(&state.db, &tenant_id, &host, body.enabled, &body.operator)
+            .await?;
+        Ok(Json(serde_json::json!({
+            "host": row.host,
+            "solverEnabled": row.solver_enabled,
+            "solverEnabledAt": row.solver_enabled_at,
+            "solverEnabledBy": row.solver_enabled_by,
         })))
     }
     .instrument(span)
@@ -3115,6 +3367,113 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(get_reached.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The blocked-source/health routes exist, require the service token, and
+    /// validate their bodies before touching the database.
+    #[tokio::test]
+    async fn test_scrape_blocked_source_routes_require_auth_and_exist() {
+        let app = lazy_test_app();
+
+        // No token → 401 on every new route.
+        for request in [
+            Request::get("/discovery/blocked-sources"),
+            Request::get("/discovery/hosts"),
+            Request::post(format!(
+                "/discovery/blocked-sources/{}/review",
+                Uuid::new_v4()
+            )),
+            Request::post(format!(
+                "/discovery/blocked-sources/{}/solve",
+                Uuid::new_v4()
+            )),
+            Request::post("/discovery/hosts/example.com/solver-optin"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // Authenticated + tenant-scoped: the database is lazy, so a 5xx (or a
+        // body-validation 4xx) proves the handler was reached — never 404.
+        let list = app
+            .clone()
+            .oneshot(
+                Request::get("/discovery/blocked-sources?state=open")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(list.status(), StatusCode::NOT_FOUND);
+
+        let bad_state = app
+            .clone()
+            .oneshot(
+                Request::get("/discovery/blocked-sources?state=nonsense")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_state.status(), StatusCode::BAD_REQUEST);
+
+        // The solver opt-in demands an operator identity (a missing field is
+        // the extractor's 422; an empty one is the handler's 400).
+        let optin = app
+            .clone()
+            .oneshot(
+                Request::post("/discovery/hosts/example.com/solver-optin")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            optin.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        ));
+
+        let empty_operator = app
+            .clone()
+            .oneshot(
+                Request::post("/discovery/hosts/example.com/solver-optin")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true,"operator":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_operator.status(), StatusCode::BAD_REQUEST);
+
+        // A solve attempt against an unknown id is refused as invalid input.
+        let solve = app
+            .oneshot(
+                Request::post(format!(
+                    "/discovery/blocked-sources/{}/solve",
+                    Uuid::new_v4()
+                ))
+                .header("x-api-key", "test-key")
+                .header("x-tenant-id", config::SYSTEM_TENANT_ID)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"operator":"operator@apexmail.ee"}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(solve.status(), StatusCode::NOT_FOUND);
     }
 
     /// `POST /discovery/jobs/:id/run` exists and validates the tenant before

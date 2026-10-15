@@ -319,6 +319,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoice_renders_the_us_sales_tax_totals_row_only_when_present() {
+        // Every invoice payload that does NOT carry the field must render
+        // exactly as before (no stray row).
+        let plain = render_pdf("invoice", &invoice_payload("EUR", 12078))
+            .await
+            .expect("invoice renders");
+        let plain_text = crate::test_extract::extract_text(&plain);
+        assert!(
+            !plain_text.contains("US sales tax"),
+            "a payload without us_sales_tax must not render the row: {plain_text}"
+        );
+
+        // US state sales tax (billing-service `us_tax`, plan WP C2): its own
+        // totals row, so subtotal + VAT + US tax = total adds up on the
+        // customer-facing document.
+        // subtotal 10900 + VAT 0 + US tax 790 = total 11690.
+        let mut payload = invoice_payload("USD", 11690);
+        payload["subtotal"] = serde_json::json!(10900);
+        payload["vat_total"] = serde_json::json!(0);
+        payload["us_sales_tax"] = serde_json::json!({ "state": "CA", "amount_cents": 790 });
+        payload["line_items"] = serde_json::json!([
+            { "description": "Platform base", "quantity": 1, "unit_price": 10900,
+              "amount": 10900, "vat_rate": 0, "vat_amount": 0 },
+            { "description": "US sales tax (CA) — 7.25 % state rate", "quantity": 1,
+              "unit_price": 790, "amount": 790, "vat_rate": 0, "vat_amount": 0 }
+        ]);
+        let pdf = render_pdf("invoice", &payload)
+            .await
+            .expect("US tax invoice renders");
+        assert_pdf(&pdf);
+        let text = crate::test_extract::extract_text(&pdf);
+        assert!(text.contains("US sales tax (CA)"), "{text}");
+        assert!(text.contains("7.90"), "the tax amount renders: {text}");
+    }
+
+    #[tokio::test]
     async fn invoice_handles_negative_and_missing_optional_data() {
         let mut payload = invoice_payload("EUR", -500000);
         payload["line_items"] = serde_json::json!([

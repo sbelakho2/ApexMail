@@ -5,15 +5,22 @@
 //! ```text
 //! DiscoveryJobRunner (job.rs)
 //!   → sales_discovery_jobs      (one row per command)
-//!   → DiscoverySource::discover (provider.rs; HTTP gateway / first-party / fixture)
+//!   → DiscoverySource::discover (provider.rs; HTTP gateway / public web /
+//!                                first-party / fixture)
 //!   → sales_source_runs         (one row per source per run)
 //!   → sales_discovery_candidates (upsert on the (tenant, source, source_url)
 //!                                 partial unique index)
 //!   → promote_candidate          (sales_accounts, immutable on conflict)
 //! ```
 //!
-//! No scraping is implemented here: every source is an approved provider API,
-//! ApexMail's own first-party data, or an explicitly labelled test fixture.
+//! Fetching a public page happens ONLY through [`fetch::ScrapeClient`]: one
+//! hardened client (timeouts, bounded retries, size/content-type caps,
+//! same-host redirects, per-host politeness, robots.txt) that classifies
+//! every response and NEVER hands a challenge/CAPTCHA page to a parser. A
+//! blocked fetch is stored in the blocked-source queue
+//! ([`blocked`]) with its evidence and its host's backoff; the audited
+//! solver hook there is disabled by default and opt-in per host.
+//!
 //! Every source declares the jurisdictions it may lawfully return data for and
 //! the job runner enforces that declaration.
 //!
@@ -24,11 +31,26 @@
 //! is [`SalesError::InvalidInput`](crate::types::SalesError) — there is no
 //! fallback to running every configured (possibly paid) provider.
 
+pub mod blocked;
+pub mod fetch;
 pub mod first_party;
 pub mod http;
 pub mod job;
 pub mod provider;
+pub mod public_web;
 
+pub use blocked::{
+    attempt_solve, get_blocked_source, get_host_health, hydrate_registry, list_blocked_sources,
+    list_host_health, record_blocked_fetch, record_host_block, record_host_success,
+    review_blocked_source, set_host_solver_optin, BlockedReviewAction, BlockedSource,
+    HostHealthRow, LeaseFence, SolveReport, SolverConfig, SolverOutcome, BLOCKED_STATE_DISMISSED,
+    BLOCKED_STATE_OPEN, BLOCKED_STATE_SOLVED,
+};
+pub use fetch::{
+    classify_response, detect_challenge, BlockedEvidence, ChallengeEvidence, ChallengeKind,
+    FetchClassification, FetchError, HostHealthRegistry, HostState, RobotsRules, RobotsState,
+    ScrapeClient, ScrapeConfig, ScrapedPage, MAX_RETRY_AFTER_SECONDS,
+};
 pub use first_party::FirstPartySource;
 pub use http::HttpDiscoverySource;
 pub use job::{
@@ -40,6 +62,7 @@ pub use provider::{
     candidate_allowed_by_jurisdiction, DiscoveredCandidate, DiscoveryError, DiscoveryPage,
     DiscoveryQuery, DiscoverySource, FixtureSource,
 };
+pub use public_web::PublicWebSource;
 
 use std::sync::OnceLock;
 
@@ -51,6 +74,10 @@ use std::sync::OnceLock;
 ///   `SALES_DISCOVERY_API_KEY` override them when a separate discovery
 ///   endpoint exists. The provider API is only included when a base URL is
 ///   configured.
+/// * `public_web` — operator-approved public pages (`SALES_SCRAPE_PUBLIC_URLS`,
+///   comma-separated). Only listed URLs are fetched, only through the
+///   hardened [`fetch::ScrapeClient`], and the source is not registered at
+///   all when the allowlist is unset — there is no default crawler.
 /// * `first_party` — ApexMail's own accounts for the tenant (no external
 ///   call; no jurisdiction restriction, it is our own data).
 ///
@@ -91,6 +118,19 @@ pub fn default_sources(
                  constructed — discovery degrades to the first-party source only (PERF #24)"
             ),
         }
+    }
+
+    // The public-web source exists only when an operator has named the URLs
+    // it may fetch. A misconfigured allowlist (bad URL, client failure) is an
+    // alert-grade skip: the source is NOT registered, and no page is fetched
+    // on a guess.
+    match PublicWebSource::from_env(db.clone(), tenant_id, ScrapeConfig::from_env()) {
+        Ok(Some(source)) => sources.push(std::sync::Arc::new(source)),
+        Ok(None) => {}
+        Err(error) => tracing::error!(
+            error = %error,
+            "public-web discovery source is UNAVAILABLE: it was configured but could not be registered — no public page will be fetched"
+        ),
     }
 
     sources.push(std::sync::Arc::new(FirstPartySource::new(

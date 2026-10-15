@@ -69,6 +69,12 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "sales_discovery_jobs",
     "sales_discovery_candidates",
     "sales_source_runs",
+    // Scrape challenge readiness (migration 258): the blocked-source review
+    // queue, persistent per-host health/backoff with the solver opt-in, and
+    // the solver audit trail.
+    "sales_scrape_blocked_sources",
+    "sales_scrape_host_health",
+    "sales_scrape_solver_audit",
     // Legal gate.
     "sales_jurisdiction_policies",
     "sales_contact_policy_decisions",
@@ -91,6 +97,8 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[
     ("sales_leads", "contact_id"),
     ("sales_leads", "snoozed_until"),
     ("sales_leads", "last_reply_at"),
+    ("sales_discovery_candidates", "contact_email"),
+    ("sales_discovery_candidates", "fetched_at"),
     ("sales_settings", "scoring_weights"),
     ("sales_settings", "schedule"),
     ("sales_settings", "notifications"),

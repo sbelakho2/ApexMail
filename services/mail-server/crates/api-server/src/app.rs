@@ -601,12 +601,20 @@ pub fn build_app(state: AppState) -> Router {
         // P0: ApexMail's sales brain is OWNER-ONLY — a system admin or a
         // machine credential is not the owner. The gate is structural (a
         // layer around the whole router), not a per-handler check.
+        //
+        // WP F12/F9: the reply auto-send PROMOTION surface rides the same
+        // owner layer (merged into this router, so it is structurally
+        // unreachable for anything but the human owner): "promoting autonomy"
+        // is an owner act, and the gate function re-verifies the live role
+        // inside its write transaction as defense in depth.
         .nest(
             "/v1/admin/autopilot",
-            routes::admin::autopilot::router().route_layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::middleware::sales_owner::require_sales_owner,
-            )),
+            routes::admin::autopilot::router()
+                .merge(routes::admin::reply_autosend::router())
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::sales_owner::require_sales_owner,
+                )),
         )
         // Demos are OWNER-run: the presenter API executes real machinery and
         // mints viewer links, so it sits behind the same structural owner
@@ -656,6 +664,11 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::system_sender::router(),
         )
         .nest("/v1/admin/vat", routes::admin::vat::router())
+        // US sales-tax nexus administration (plan WP C2): the rate-file view
+        // plus the operator registration surface. Registration is the ONLY
+        // thing that makes sales tax compute on new invoices — the sweep
+        // tracks thresholds and alerts, and never charges.
+        .nest("/v1/admin/billing/us-tax", routes::admin::us_tax::router())
         // Billing abuse review (wave G): the operator surface for the
         // billing-service abuse-report/restriction machinery (audit F09),
         // which previously had no production caller or route.

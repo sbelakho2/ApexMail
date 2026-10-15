@@ -9,7 +9,10 @@
 //! "unrestricted"; a non-empty list is enforced by
 //! [`crate::discovery::job`] before a candidate is persisted.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use super::fetch::{BlockedEvidence, FetchError};
 
 /// Query handed to every source.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -53,18 +56,32 @@ pub struct DiscoveryPage {
 }
 
 /// One discovered company with full provenance.
+///
+/// Provenance is not optional decoration: `source_url` names the document,
+/// `fetched_at` says when the evidence was fetched (distinct from
+/// `discovered_at`, the row's insert time), `raw_snapshot_hash` is the
+/// content hash of the exact bytes the values were read from, and
+/// `contact_email` (when a source yields one) is normalized before it
+/// reaches the database.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoveredCandidate {
     pub source: String,
     pub source_url: Option<String>,
     pub company_name: Option<String>,
     pub domain: Option<String>,
+    /// Normalized contact email, when the source yielded one.
+    #[serde(default)]
+    pub contact_email: Option<String>,
     pub jurisdiction: Option<String>,
     #[serde(default)]
     pub jurisdiction_confidence: f32,
     #[serde(default)]
     pub confidence: f32,
     pub raw_snapshot_hash: Option<String>,
+    /// When the evidence was fetched. `None` means the source does not know;
+    /// the job runner then stamps its own fetch/discovery time.
+    #[serde(default)]
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 /// Errors a discovery source may return.
@@ -78,16 +95,66 @@ pub enum DiscoveryError {
     RateLimited(String),
     #[error("discovery source returned invalid data: {0}")]
     InvalidResponse(String),
+    #[error("discovery source input is invalid: {0}")]
+    InvalidInput(String),
+    /// A fetch was blocked by a challenge/policy or by transient server
+    /// state. The evidence is structured (status, markers, host, url) so the
+    /// job runner can persist it in the blocked-source queue; a blocked
+    /// fetch NEVER yields candidates.
+    #[error(transparent)]
+    Blocked(Box<BlockedEvidence>),
     #[error("discovery source failed: {0}")]
     Internal(String),
 }
 
 impl DiscoveryError {
-    /// `sales_source_runs.status` value for this error.
+    /// `sales_source_runs.status` value for this error. A blocked fetch keeps
+    /// its classification in the run ledger (migration 258 widened the
+    /// constraint) instead of being flattened into `failed`.
     pub fn run_status(&self) -> &'static str {
         match self {
             DiscoveryError::RateLimited(_) => "rate_limited",
+            DiscoveryError::Blocked(evidence) => evidence.classification.as_str(),
             _ => "failed",
+        }
+    }
+
+    /// The blocked evidence, when this error is a block.
+    pub fn blocked_evidence(&self) -> Option<&BlockedEvidence> {
+        match self {
+            DiscoveryError::Blocked(evidence) => Some(evidence),
+            _ => None,
+        }
+    }
+
+    /// Map a hardened-fetch failure onto the discovery vocabulary. A block
+    /// keeps its structured evidence; every other fetch failure is a plain
+    /// unavailability/invalid-response error that also yields no data.
+    pub fn from_fetch_error(error: FetchError) -> Self {
+        if let Some(evidence) = BlockedEvidence::from_fetch_error(&error) {
+            return DiscoveryError::Blocked(Box::new(evidence));
+        }
+        match error {
+            FetchError::HttpStatus { url, status } => {
+                DiscoveryError::Unavailable(format!("{url} returned HTTP {status}"))
+            }
+            FetchError::RedirectRefused { url, detail } => {
+                DiscoveryError::Unavailable(format!("redirect refused for {url}: {detail}"))
+            }
+            FetchError::ContentTypeRejected { url, content_type } => {
+                DiscoveryError::InvalidResponse(format!(
+                    "{url} declared content type {content_type:?}, which is outside the scrape content-type allowlist"
+                ))
+            }
+            FetchError::BodyTooLarge { url, limit_bytes } => DiscoveryError::InvalidResponse(
+                format!("{url} exceeds the {limit_bytes} byte response cap"),
+            ),
+            FetchError::InvalidUrl { url, detail } => {
+                DiscoveryError::InvalidInput(format!("invalid fetch URL {url}: {detail}"))
+            }
+            FetchError::InvalidSolveMaterial { detail } => DiscoveryError::Internal(detail),
+            FetchError::Transport { detail } => DiscoveryError::Unavailable(detail),
+            FetchError::Blocked(evidence) => DiscoveryError::Unavailable(evidence.detail),
         }
     }
 }
@@ -205,10 +272,12 @@ impl FixtureSource {
             source_url: None,
             company_name: Some(company_name.to_string()),
             domain: None,
+            contact_email: None,
             jurisdiction: None,
             jurisdiction_confidence: 0.0,
             confidence: 0.5,
             raw_snapshot_hash: None,
+            fetched_at: None,
         }
     }
 }

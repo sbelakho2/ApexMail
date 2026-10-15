@@ -63,9 +63,19 @@ Because it is CUSTOMER automation, it runs in the worker fleet — not here. `wo
 - The calendar models working hours in the entity's time zone with UTC storage (`sales_calendar_events`), 30-minute slots, and overlap rejection.
 - Inbox triage persists to `sales_inbox_messages`.
 
-### Scraper utilities
+### Public-page fetching and CAPTCHA readiness
 
-`WebScraper` provides deterministic prospecting helpers (email extraction, company-info derivation, URL validation, conservative `robots.txt` evaluation). These are text-processing helpers; the crate embeds no browser and no autonomous crawler.
+Every public page fetch goes through one hardened client, `discovery::fetch::ScrapeClient`. It bounds each request with a total timeout, a connect timeout and a response size cap. It allows only the declared content types, follows at most a few same-host redirects, and refuses a downgrade to plain HTTP. A server-provided `Retry-After` sets a floor on the backoff window. Transient statuses are retried a bounded number of times with exponential backoff plus jitter.
+
+Per-host politeness applies: a minimum interval between requests, an optional `robots.txt` `Crawl-delay`, and `robots.txt` evaluation in the RFC 9309 shape. A `robots.txt` that cannot be fetched counts as a disallow, so an unknown policy is not read as permission. There is no switch that disables this.
+
+`classify_response` turns each response into one of four outcomes: `ok`, `blocked_captcha`, `blocked_policy` and `blocked_transient`. The marker table covers reCAPTCHA, hCaptcha, Turnstile, Cloudflare (including the `cf-mitigated` header), Imperva, Akamai, DataDome, PerimeterX and vendor-neutral JavaScript shells. A blocked body is never handed to a parser: `ScrapedPage` is built only for an `ok` outcome, so a challenge page cannot become a candidate row or an empty result. `tests/scrape_challenges.rs` pins each family against a loopback fixture that embeds a schema.org organization, which proves the blocked body was not read as data.
+
+Blocked fetches land in `sales_scrape_blocked_sources` with the evidence: classification, HTTP status, matched markers, retry window and occurrence count. `sales_scrape_host_health` keeps the per-host backoff window and block counters, so the penalty survives a restart. The admin routes below list the queue, record a review decision (solved, dismissed, reopen), list host health, and set the per-host solver opt-in.
+
+The solver hook is a seam for an operator-run challenge service. It is disabled unless `SCRAPE_CAPTCHA_SOLVER_URL` is set, it acts only for hosts an operator has opted in through the admin route, and it refuses to run while the host is inside its backoff window. A successful solve is followed by exactly one retry, which passes through the same politeness and robots gates. Every attempt, including each refusal, writes a `sales_scrape_solver_audit` row. Cookie and token material is never persisted or logged. The crate ships no solver, no browser and no autonomous crawler.
+
+Discovery sources that read public pages are opt-in as well: `public_web` fetches only the URLs named in `SALES_SCRAPE_PUBLIC_URLS`, and it is not registered at all when that list is empty. It reads schema.org `Organization` nodes from the page's `application/ld+json` blocks and its `mailto:` links, and stores the fetch provenance on every row: the source URL, the fetch time and the body's SHA-256 digest.
 
 ## HTTP Surface
 
@@ -80,6 +90,8 @@ Because it is CUSTOMER automation, it runs in the worker fleet — not here. `wo
 | `/calendar/slots` | `GET` | Available slots |
 | `/inbox`, `/inbox/:id/reply` | `GET`, `POST` | Reply triage and handling |
 | `/discovery/jobs`, `/discovery/jobs/:id`, `/discovery/jobs/:id/run` | `GET`, `POST` | Leased discovery jobs |
+| `/discovery/blocked-sources`, `/discovery/blocked-sources/:id/review`, `/discovery/blocked-sources/:id/solve` | `GET`, `POST` | Blocked-source review queue and the audited solve attempt |
+| `/discovery/hosts`, `/discovery/hosts/:host/solver-optin` | `GET`, `POST` | Per-host scraping health, backoff and the solver opt-in |
 | `/control/{overview,decisions,actions,actions/:id/replay,exceptions,mode,pause,resume,kill-switch}` | `GET`, `POST` | The autonomous control surface: mode, kill switch, decision/action inspection, exception queue, replay |
 | `/u/:token` | `GET`, `POST` | Public unsubscribe (token-scoped; no PII in the token) |
 
@@ -97,6 +109,12 @@ Because it is CUSTOMER automation, it runs in the worker fleet — not here. `wo
 | `SALES_DISPATCH_BATCH_SIZE`, `SALES_DISPATCH_CONCURRENCY`, `SALES_DISPATCH_INTERVAL_SECS` | — | Sequence dispatcher pacing |
 | `SALES_CAMPAIGN_FROM_EMAIL`, `SALES_CAMPAIGN_FROM_NAME` | — | Campaign sender identity defaults |
 | `SALES_PUBLIC_BASE_URL`, `SALES_UNSUBSCRIBE_REDIRECT_URL` | — | Public URLs used in footers and unsubscribe links |
+| `SALES_SCRAPE_PUBLIC_URLS` | empty (source disabled) | Operator allowlist of public pages the `public_web` source may fetch |
+| `SCRAPE_USER_AGENT`, `SCRAPE_TIMEOUT_MS`, `SCRAPE_CONNECT_TIMEOUT_MS`, `SCRAPE_MAX_REDIRECTS` | `ApexMail/1.0 …`, `20000`, `5000`, `5` | Scrape client identity and request bounds |
+| `SCRAPE_MAX_RETRIES`, `SCRAPE_BACKOFF_BASE_MS`, `SCRAPE_MAX_HOST_BLOCK_BACKOFF_MS` | `2`, `250`, `3600000` | Bounded retries and the per-host backoff ceiling |
+| `SCRAPE_MAX_BODY_BYTES`, `SCRAPE_ALLOWED_CONTENT_TYPES` | `2097152`, `text/html,application/xhtml+xml,application/json,text/plain,application/xml,text/xml` | Response size cap and content-type allowlist |
+| `SCRAPE_HOST_MIN_INTERVAL_MS`, `SCRAPE_ROBOTS_TTL_MS` | `1000`, `3600000` | Per-host politeness interval and the `robots.txt` cache lifetime |
+| `SCRAPE_CAPTCHA_SOLVER_URL`, `SCRAPE_CAPTCHA_SOLVER_TOKEN`, `SCRAPE_CAPTCHA_SOLVER_TIMEOUT_MS` | empty (hook disabled), empty, `30000` | Operator solver hook; disabled by default, opt-in per host, audited |
 | `SALES_ALLOWED_TENANTS` | — | MUST be exactly `system` (the service serves the system tenant only; production refuses to start without it, and any other value refuses in every environment) |
 | `LEAD_SCORE_{ENGAGEMENT,COMPANY_SIZE,RECENCY}_WEIGHT` | compile-time defaults | Legacy lead-score weights (canonical scoring is the explainable `OpportunityScore`) |
 | `EMAIL_TRANSPORT_TYPE` | — | Transport selection for local runs |

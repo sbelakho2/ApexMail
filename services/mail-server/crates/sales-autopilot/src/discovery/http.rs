@@ -115,6 +115,8 @@ struct ResponseCandidate {
     #[serde(default)]
     domain: Option<String>,
     #[serde(default)]
+    contact_email: Option<String>,
+    #[serde(default)]
     jurisdiction: Option<String>,
     #[serde(default)]
     jurisdiction_confidence: f32,
@@ -180,10 +182,12 @@ impl DiscoverySource for HttpDiscoverySource {
                         source_url: candidate.source_url,
                         company_name: candidate.company_name,
                         domain: candidate.domain,
+                        contact_email: candidate.contact_email,
                         jurisdiction: candidate.jurisdiction,
                         jurisdiction_confidence: candidate.jurisdiction_confidence,
                         confidence: candidate.confidence,
                         raw_snapshot_hash: candidate.raw_snapshot_hash,
+                        fetched_at: None,
                     })
                     .collect();
                 let cost = parsed

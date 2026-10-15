@@ -101,10 +101,12 @@ impl DiscoverySource for FirstPartySource {
                     source_url: Some(format!("first-party://account/{id}")),
                     company_name: Some(company),
                     domain: Some(domain),
+                    contact_email: None,
                     jurisdiction: country.clone(),
                     jurisdiction_confidence: if country.is_some() { 0.6 } else { 0.0 },
                     confidence: 0.8,
                     raw_snapshot_hash: Some(row_hash(&id, industry.as_deref())),
+                    fetched_at: None,
                 },
             )
             .collect();

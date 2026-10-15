@@ -54,6 +54,8 @@
 #let line-items = data.at("line_items", default: ())
 #let subtotal = data.at("subtotal", default: 0)
 #let vat-total = data.at("vat_total", default: 0)
+// US state sales tax (billing-service `us_tax`), when the invoice carries it.
+#let us-sales-tax = data.at("us_sales_tax", default: none)
 #let total = data.at("total", default: 0)
 #let currency-symbol = if currency == "EUR" { "€" } else if currency == "USD" { "$" } else if currency == "GBP" { "£" } else if currency == "CHF" { "CHF " } else if currency == "SEK" { "SEK " } else if currency == "NOK" { "NOK " } else if currency == "DKK" { "DKK " } else if currency == "PLN" { "PLN " } else if currency != "" { currency + " " } else { "" }
 
@@ -227,6 +229,12 @@
       [Subtotal], [#fmt-money(subtotal)],
       [VAT (#{ let seen = (); for item in line-items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
       [#fmt-money(vat-total)],
+      // US state sales tax (billing-service `us_tax`, plan WP C2): rendered
+      // only when the invoice carries it, so subtotal + VAT + US tax = total.
+      ..if us-sales-tax == none { () } else { (
+        [US sales tax (#us-sales-tax.state)],
+        [#fmt-money(us-sales-tax.amount_cents)],
+      ) },
     )
     #line(length: 100%, stroke: 1.5pt + rgb("#000000"))
     #table(

@@ -262,6 +262,46 @@ pub(crate) async fn approve_draft_core(
     let subject = subject.unwrap_or_default();
     let reply = reply.unwrap_or_default();
 
+    // WP F9: the approval records the draft's risk class alongside the
+    // decision. The class comes from the SAME deterministic classifier the
+    // auto-send sweep runs (`sales_autopilot::reply_autosend`), so a class's
+    // promotion evidence counts exactly the approvals of that class — and a
+    // HIGH verdict is recorded as `high:<reason>`, which can never be
+    // mistaken for a promotable class by the evidence query.
+    let approval_class: Option<sales_autopilot::reply_autosend::ReplyRiskVerdict> = {
+        let evidence_row: Option<(Option<String>, Option<f64>, Option<serde_json::Value>)> =
+            sqlx::query_as(
+                "SELECT classification, classification_confidence, suggested_action \
+                 FROM inbound_messages WHERE id = $1",
+            )
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        // The owner-flagged recipient list rides the tenant's autonomy rules;
+        // an approval of a flagged recipient is recorded as HIGH, exactly as
+        // the sweep would classify it (so it never counts as class evidence).
+        // An unreadable rules column yields no flags — never a panic.
+        let flagged = sales_autopilot::reply_autosend::flagged_recipients(&mut tx, &tenant_id)
+            .await
+            .unwrap_or_default();
+        evidence_row.map(|(classification, confidence, suggestion)| {
+            sales_autopilot::reply_autosend::classify_draft(
+                &sales_autopilot::reply_autosend::DraftRiskInput {
+                    draft_text: &reply,
+                    intent_class: classification.as_deref(),
+                    intent_confidence: confidence,
+                    suggestion: suggestion.as_ref(),
+                    recipient_owner_flagged: sales_autopilot::reply_autosend::recipient_is_flagged(
+                        &flagged,
+                        &from_email,
+                    ),
+                    first_message_of_new_sequence:
+                        sales_autopilot::reply_autosend::first_touch_marker(suggestion.as_ref()),
+                },
+            )
+        })
+    };
+
     if tenant_id.is_empty() || from_email.is_empty() {
         // Cannot route the reply — the uncommitted claim rolls back with
         // the transaction, so the draft stays pending and visible. The
@@ -479,6 +519,16 @@ pub(crate) async fn approve_draft_core(
             "routedTenantId": tenant_id.clone(),
             "recipient": from_email.clone(),
             "queuedMessageId": message_uuid.to_string(),
+            // WP F9 — the promotion evidence reads this field: an approval of
+            // a LOW class counts toward that class's evidence bar.
+            "replyClass": approval_class
+                .as_ref()
+                .map(sales_autopilot::reply_autosend::ReplyRiskVerdict::class_string)
+                .unwrap_or_else(|| "high:empty_draft".to_string()),
+            "groundingFailures": approval_class
+                .as_ref()
+                .map(|verdict| verdict.grounding_failures.clone())
+                .unwrap_or_default(),
         }),
     )
     .await?;
@@ -588,6 +638,391 @@ pub(crate) async fn reject_draft_core(
 // Keep StatusCode import used uniformly.
 #[allow(dead_code)]
 fn _status_guard(_s: StatusCode) {}
+
+// ─── WP F9: gated auto-send for LOW-risk reply classes ─────────────
+//
+// A draft of a LOW-risk class may be released WITHOUT a human approval — but
+// only when the promotion gate (`sales_autopilot::reply_autosend`) allows it,
+// and the gate is re-evaluated INSIDE the same transaction that claims the
+// draft, checks consent, and enqueues the reply. Every refusal rolls back, so
+// the draft stays pending and human-approvable: the fail-closed direction.
+//
+// The sweep is the automation actor. It attributes its audit row to the
+// system tenant with no human user id (`automation: "reply_autosend"`), and it
+// rides the SAME priority lane and the SAME consent gate as the human
+// approval — the only differences are the actor and the audit action.
+
+/// The intents a LOW class can map from (the classifier's LOW-eligible
+/// dispositions). The candidate query pre-filters on them so a HIGH draft is
+/// never claimed by the sweep; the authoritative classification still runs
+/// inside the transaction on the claimed row.
+const AUTO_SEND_CANDIDATE_INTENTS: [&str; 4] =
+    ["meeting_request", "question", "ooo", "unsubscribe"];
+
+/// How many candidates one sweep pass considers.
+pub const AUTO_SEND_BATCH_SIZE: usize = 10;
+
+/// Cheap candidate filter: pending drafts of a LOW-eligible intent with a
+/// usable confidence, for tenants that have at least one enabled promotion
+/// row. A tenant with no enablement (the default) is invisible to the sweep —
+/// the "default OFF" invariant holds even before the full gate runs.
+const AUTO_SEND_CANDIDATES_SQL: &str = r#"
+    SELECT inbound.id
+    FROM inbound_messages inbound
+    WHERE inbound.pending_approval = true
+      AND inbound.ai_response IS NOT NULL
+      AND inbound.classification = ANY($1)
+      AND inbound.classification_confidence >= $2
+      AND EXISTS (
+          SELECT 1 FROM reply_autosend_grants grant_row
+          WHERE grant_row.tenant_id = inbound.tenant_id
+            AND grant_row.enabled
+      )
+    ORDER BY inbound.received_at ASC, inbound.id ASC
+    LIMIT $3
+"#;
+
+/// The auto-send claim: the SAME atomic, conditional claim the approval path
+/// uses (`pending_approval = true` makes exactly one consumer the winner),
+/// returning the risk-classification inputs as well. The id is bound as the
+/// canonical VARCHAR identifier — never cast to UUID (audit F11).
+const CLAIM_DRAFT_FOR_AUTO_SEND_SQL: &str = r#"
+    UPDATE inbound_messages
+    SET pending_approval = false, processed_at = NOW()
+    WHERE id = $1
+      AND pending_approval = true
+      AND ai_response IS NOT NULL
+    RETURNING tenant_id, from_email, subject, ai_response,
+              classification, classification_confidence, suggested_action,
+              (suggested_action->>'first_response') = 'true',
+              received_at,
+              suggested_action->>'first_response_request_id'
+"#;
+
+/// One claimed draft, as the auto-send read it.
+type ClaimedDraftRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<serde_json::Value>,
+    Option<bool>,
+    chrono::DateTime<chrono::Utc>,
+    Option<String>,
+);
+
+/// What one auto-send attempt did.
+#[derive(Debug)]
+pub enum AutoSendOutcome {
+    /// The reply is queued (the audit row committed with it).
+    Sent {
+        draft_id: String,
+        reply_class: String,
+        queued_message_id: String,
+    },
+    /// The gate (or the classifier) refused; the draft is untouched and stays
+    /// pending for human approval.
+    Held { draft_id: String, reason: String },
+    /// The draft was already handled by someone else.
+    NotAvailable { draft_id: String },
+}
+
+impl AutoSendOutcome {
+    pub fn draft_id(&self) -> &str {
+        match self {
+            Self::Sent { draft_id, .. }
+            | Self::Held { draft_id, .. }
+            | Self::NotAvailable { draft_id } => draft_id,
+        }
+    }
+}
+
+/// The result of one sweep pass.
+#[derive(Debug, Default)]
+pub struct AutoSendSweep {
+    pub examined: usize,
+    pub sent: usize,
+    pub held: usize,
+}
+
+/// One sweep pass: release every pending LOW-class draft the gate admits.
+/// Never fails the whole pass for one draft — a per-draft error is logged and
+/// the draft stays pending.
+pub async fn auto_send_pending(state: &AppState, limit: usize) -> Result<AutoSendSweep, ApiError> {
+    let candidates: Vec<(String,)> = sqlx::query_as(AUTO_SEND_CANDIDATES_SQL)
+        .bind(&AUTO_SEND_CANDIDATE_INTENTS[..])
+        .bind(sales_autopilot::reply_autosend::MIN_REPLY_CONFIDENCE)
+        .bind(limit as i64)
+        .fetch_all(&state.db)
+        .await?;
+
+    let mut sweep = AutoSendSweep::default();
+    for (id,) in candidates {
+        sweep.examined += 1;
+        match auto_send_one(state, &id).await {
+            Ok(AutoSendOutcome::Sent { .. }) => sweep.sent += 1,
+            Ok(AutoSendOutcome::Held { .. }) | Ok(AutoSendOutcome::NotAvailable { .. }) => {
+                sweep.held += 1
+            }
+            Err(error) => {
+                // The draft stays pending: nothing was committed.
+                sweep.held += 1;
+                tracing::warn!(
+                    error = %error,
+                    draft_id = %id,
+                    "reply auto-send attempt failed; draft stays pending"
+                );
+            }
+        }
+    }
+    Ok(sweep)
+}
+
+/// Release ONE draft through the gate, or leave it untouched. The whole
+/// decision — classification, gate, consent, enqueue, audit — is one
+/// transaction: any refusal or failure rolls everything back.
+pub async fn auto_send_one(state: &AppState, id: &str) -> Result<AutoSendOutcome, ApiError> {
+    use sales_autopilot::reply_autosend as autosend;
+
+    let mut tx = state.db.begin().await?;
+
+    let row: Option<ClaimedDraftRow> = sqlx::query_as(CLAIM_DRAFT_FOR_AUTO_SEND_SQL)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((
+        tenant,
+        from_email,
+        subject,
+        reply,
+        classification,
+        classification_confidence,
+        suggested_action,
+        is_first_response,
+        accepted_at,
+        first_response_request_id,
+    )) = row
+    else {
+        tx.rollback().await?;
+        return Ok(AutoSendOutcome::NotAvailable {
+            draft_id: id.to_string(),
+        });
+    };
+    let tenant_id = tenant.unwrap_or_default();
+    let from_email = from_email.unwrap_or_default();
+    let subject = subject.unwrap_or_default();
+    let reply = reply.unwrap_or_default();
+    let held = |draft_id: &str, reason: String| AutoSendOutcome::Held {
+        draft_id: draft_id.to_string(),
+        reason,
+    };
+
+    if tenant_id.is_empty() || from_email.is_empty() {
+        tx.rollback().await?;
+        return Ok(held(
+            id,
+            "unroutable draft: missing tenant or sender".into(),
+        ));
+    }
+
+    // 1. The deterministic classifier. Fail closed: anything not provably LOW
+    //    rolls the claim back and the draft stays pending.
+    let flagged = match autosend::flagged_recipients(&mut tx, &tenant_id).await {
+        Ok(flagged) => flagged,
+        Err(error) => {
+            tx.rollback().await?;
+            tracing::error!(error = %error, draft_id = %id, "auto-send: flagged-recipient lookup failed");
+            return Err(ApiError::Internal(
+                "could not read the tenant's reply auto-send policy".into(),
+            ));
+        }
+    };
+    let risk_input = autosend::DraftRiskInput {
+        draft_text: &reply,
+        intent_class: classification.as_deref(),
+        intent_confidence: classification_confidence,
+        suggestion: suggested_action.as_ref(),
+        // The owner-flagged contract-tier decision-maker list lives on the
+        // tenant's autonomy rules (see
+        // `reply_autosend::FLAGGED_RECIPIENTS_RULE_KEY`): a draft to a flagged
+        // recipient is HIGH by construction.
+        recipient_owner_flagged: autosend::recipient_is_flagged(&flagged, &from_email),
+        first_message_of_new_sequence: autosend::first_touch_marker(suggested_action.as_ref()),
+    };
+    let verdict = autosend::classify_draft(&risk_input);
+    let Some(class) = verdict.risk.low_class() else {
+        tx.rollback().await?;
+        return Ok(held(id, format!("classifier: {}", verdict.class_string())));
+    };
+
+    // 2. The promotion gate — re-checked HERE, inside the send transaction
+    //    (grant row, live evidence, tenant autonomy mode, kill switch).
+    let gate = match autosend::evaluate_for_send(&mut tx, &tenant_id, class).await {
+        Ok(gate) => gate,
+        Err(error) => {
+            tx.rollback().await?;
+            tracing::error!(error = %error, draft_id = %id, "auto-send gate evaluation failed");
+            return Err(ApiError::Internal(
+                "could not evaluate the reply auto-send gate".into(),
+            ));
+        }
+    };
+    if !gate.allowed {
+        tx.rollback().await?;
+        return Ok(held(id, format!("gate: {}", gate.reasons.join("; "))));
+    }
+
+    // 3. The SAME consent gate the human approval runs (F4), inside the same
+    //    transaction: a refusal rolls the claim back and the draft stays
+    //    pending.
+    let admission =
+        billing_service::send_admission::SendAdmissionService::new(std::sync::Arc::new(
+            billing_service::send_admission::PostgresAdmissionBackend::new(
+                state.db.clone(),
+                state.redis.clone(),
+            ),
+        ));
+    let category = apexmail_lib::email_headers::message_category::MARKETING;
+    match admission
+        .enforce_consent(&tenant_id, std::slice::from_ref(&from_email), category)
+        .await
+    {
+        Ok(()) => {}
+        Err(billing_service::send_admission::SendAdmissionError::ConsentRefused {
+            email,
+            reason,
+        }) => {
+            tx.rollback().await?;
+            return Ok(held(id, format!("consent refused for {email}: {reason}")));
+        }
+        Err(error) => {
+            // Fail closed: an unreadable consent store is never permission.
+            tx.rollback().await?;
+            tracing::error!(error = %error, draft_id = %id, "auto-send: consent lookup failed");
+            return Err(ApiError::Internal(
+                "could not verify the recipient's marketing consent; draft still pending".into(),
+            ));
+        }
+    }
+
+    // 4. The SAME queue path as the approval: the platform's verified system
+    //    sender on the first-response priority lane.
+    let priority = if is_first_response.unwrap_or(false) {
+        crate::routes::system_sender::QUEUE_PRIORITY_FIRST_RESPONSE
+    } else {
+        crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT
+    };
+    let heading = if subject.trim().is_empty() {
+        "A message from the ApexMail sales team".to_string()
+    } else {
+        subject.clone()
+    };
+    let reply_html: String = crate::routes::helpers::html_escape(&reply)
+        .split("\n\n")
+        .map(|paragraph| format!("<p>{}</p>", paragraph.replace('\n', "<br/>")))
+        .collect();
+    let html_body = crate::routes::system_sender::render_transactional_email(
+        &crate::routes::system_sender::TransactionalEmail {
+            document_title: &heading,
+            heading: &heading,
+            body_html: &reply_html,
+            actions: &[],
+            footer_link: true,
+        },
+    );
+    let text_body = reply.clone();
+    let message_uuid = match crate::routes::system_sender::queue_system_email_in_transaction(
+        &mut tx,
+        &from_email,
+        &subject,
+        &html_body,
+        &text_body,
+        vec!["ai-draft-auto-send".to_string()],
+        priority,
+    )
+    .await
+    {
+        Ok(message_uuid) => message_uuid,
+        Err(e) => {
+            tx.rollback().await?;
+            tracing::error!(error = %e, draft_id = %id, "auto-send: queue insert failed");
+            return Err(ApiError::Internal(
+                "could not queue the reply; draft still pending".into(),
+            ));
+        }
+    };
+
+    if is_first_response.unwrap_or(false) {
+        let latency = (chrono::Utc::now() - accepted_at).num_seconds().max(0) as f64;
+        metrics::histogram!("first_response_latency_seconds").record(latency);
+        if let Some(request_id) = first_response_request_id.as_deref() {
+            let _ = sqlx::query(
+                "UPDATE first_response_requests \
+                 SET updated_at = NOW(), queued_at = NOW() \
+                 WHERE id = $1 AND queued_at IS NULL",
+            )
+            .bind(request_id)
+            .execute(&mut *tx)
+            .await;
+        }
+    }
+
+    // 5. The audit row: who (the automation, system tenant, no human user),
+    //    what (the class + the queued message), why (the grounding evidence
+    //    and the gate row that admitted it). Written INSIDE the transaction —
+    //    the reply can never be durably queued without its record.
+    crate::audit_log::insert_audit_log_in_tx_with_env(
+        &mut tx,
+        state.config.environment.is_production(),
+        Some(crate::routes::system_sender::SYSTEM_TENANT_ID),
+        None,
+        autosend::AUTO_SENT_AUDIT_ACTION,
+        "ai_draft",
+        Some(id),
+        serde_json::json!({
+            "automation": "reply_autosend",
+            "replyClass": verdict.class_string(),
+            "riskClass": "low",
+            "grounding": {
+                "hasFactualClaims": verdict.has_factual_claims,
+                "failures": verdict.grounding_failures,
+            },
+            "gate": {
+                "tenantId": gate.tenant_id,
+                "replyClass": gate.reply_class.as_str(),
+                "enabledBy": gate.enabled_by,
+                "enabledAt": gate.enabled_at.map(|at| at.to_rfc3339()),
+                "evidence": gate.evidence,
+                "autonomyMode": gate.autonomy_mode.as_str(),
+                "killSwitch": gate.kill_switch,
+            },
+            "routedTenantId": tenant_id,
+            "recipient": from_email,
+            "queuedMessageId": message_uuid.to_string(),
+            "subject": subject,
+        }),
+        None,
+        None,
+        chrono::Utc::now(),
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    tracing::info!(
+        draft_id = %id,
+        tenant_id = %tenant_id,
+        reply_class = class.as_str(),
+        "AI reply draft AUTO-SENT under an enabled reply-class promotion"
+    );
+    Ok(AutoSendOutcome::Sent {
+        draft_id: id.to_string(),
+        reply_class: class.as_str().to_string(),
+        queued_message_id: message_uuid.to_string(),
+    })
+}
 
 // ─── F11 database tests ────────────────────────────────────────
 //
@@ -1741,5 +2176,730 @@ mod approval_http_tests {
         assert_eq!(row.2["note"], "nope");
 
         pool.close().await;
+    }
+}
+
+/// WP F9 — gated reply auto-send, exercised against the canonical schema and
+/// the real system-sender machinery.
+///
+/// The fail-closed table the brief pins:
+///   * LOW class + gate ON  → released WITHOUT approval, same priority lane,
+///     audited with class + evidence + gate row;
+///   * LOW class + gate OFF (default) → still requires approval;
+///   * HIGH class (by intent or by content) + gate ON → still requires
+///     approval;
+///   * unclassifiable (no class / unknown class / low confidence) → HIGH;
+///   * revocation / kill switch / mode lapse → back to approval, re-checked
+///     inside the send transaction.
+#[cfg(test)]
+mod auto_send_tests {
+    use super::*;
+    use crate::app::test_support::adv::AdvEnv;
+    use crate::app::test_support::test_state_over;
+    use crate::routes::system_sender::{SYSTEM_DOMAIN, SYSTEM_DOMAIN_ID, SYSTEM_TENANT_ID};
+    use sales_autopilot::reply_autosend::LowRiskClass;
+    use sqlx::PgPool;
+
+    /// Seed the system sender domain exactly as the approval fixtures do.
+    async fn seed_system_sender(db: &PgPool) {
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(SYSTEM_TENANT_ID, SYSTEM_DOMAIN_ID);
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'testsel',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(uuid::Uuid::parse_str(SYSTEM_DOMAIN_ID).expect("system domain id"))
+        .bind(SYSTEM_TENANT_ID)
+        .bind(SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("seed system sender");
+    }
+
+    async fn grant_marketing_consent(pool: &PgPool, tenant: &str, recipient: &str) {
+        sqlx::query(
+            "INSERT INTO consent_records \
+                 (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source) \
+             VALUES ($1, $2, $3, $4, 'marketing', true, NOW(), 'f9-test') \
+             ON CONFLICT (tenant_id, subscriber_id, consent_type) DO UPDATE SET \
+                 granted = true, granted_at = NOW(), revoked_at = NULL, email = EXCLUDED.email",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .bind(format!(
+            "sub-{tenant}-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ))
+        .bind(recipient)
+        .execute(pool)
+        .await
+        .expect("grant marketing consent");
+    }
+
+    fn draft_id() -> String {
+        format!("inb_{}", &uuid::Uuid::new_v4().simple().to_string()[..22])
+    }
+
+    fn new_tenant(label: &str) -> String {
+        format!(
+            "{}-{}",
+            &label[..label.len().min(13)],
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )
+    }
+
+    /// A LOW-eligible draft: the mailbot's shape (`ai_response` +
+    /// `pending_approval = true`) with the worker's classification fields.
+    struct DraftSeed<'a> {
+        tenant: &'a str,
+        recipient: &'a str,
+        classification: Option<&'a str>,
+        confidence: f64,
+        reply: &'a str,
+        first_response_request_id: Option<&'a str>,
+    }
+
+    async fn seed_draft(pool: &PgPool, id: &str, seed: DraftSeed<'_>) {
+        let suggestion = match seed.first_response_request_id {
+            Some(request_id) => serde_json::json!({
+                "first_response": true,
+                "first_response_request_id": request_id,
+            }),
+            None => serde_json::json!({}),
+        };
+        sqlx::query(
+            "INSERT INTO inbound_messages
+                 (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                  is_verp_reply, received_at, classification, classification_confidence,
+                  suggested_action, processed, processed_at)
+             VALUES ($1, $2, $3, 'Re: your question', $4, true, false, NOW(), $5, $6, $7::jsonb,
+                     true, NOW())",
+        )
+        .bind(id)
+        .bind(seed.tenant)
+        .bind(seed.recipient)
+        .bind(seed.reply)
+        .bind(seed.classification)
+        .bind(seed.confidence)
+        .bind(suggestion)
+        .execute(pool)
+        .await
+        .expect("seed draft");
+    }
+
+    /// Grant autonomy to the routed tenant (the F12 outer ring) — autonomy is
+    /// never on by default; tests must grant it deliberately.
+    async fn seed_autonomy(pool: &PgPool, tenant: &str, mode: &str, kill_switch: bool) {
+        sqlx::query(
+            "INSERT INTO sales_autonomy_state (tenant_id, mode, kill_switch) VALUES ($1, $2, $3) \
+             ON CONFLICT (tenant_id) DO UPDATE SET mode = $2, kill_switch = $3, updated_at = NOW()",
+        )
+        .bind(tenant)
+        .bind(mode)
+        .bind(kill_switch)
+        .execute(pool)
+        .await
+        .expect("seed autonomy state");
+    }
+
+    /// Owner-promoted enablement row. The promotion ROUTE (owner scope,
+    /// evidence bar) is exercised in `routes::admin::reply_autosend`; here the
+    /// post-promotion state is what the sweep reads.
+    async fn promote(pool: &PgPool, tenant: &str, class: LowRiskClass, required: i64, window: i64) {
+        sqlx::query(
+            "INSERT INTO reply_autosend_grants \
+                 (tenant_id, reply_class, enabled, enabled_by, enabled_at, \
+                  evidence_required_approvals, evidence_window_days, evidence_snapshot) \
+             VALUES ($1, $2, TRUE, 'f9-owner-user', NOW(), $3, $4, '{}'::jsonb) \
+             ON CONFLICT (tenant_id, reply_class) DO UPDATE SET \
+                 enabled = TRUE, enabled_by = 'f9-owner-user', enabled_at = NOW(), \
+                 evidence_required_approvals = $3, evidence_window_days = $4, updated_at = NOW()",
+        )
+        .bind(tenant)
+        .bind(class.as_str())
+        .bind(required as i32)
+        .bind(window as i32)
+        .execute(pool)
+        .await
+        .expect("promote class");
+    }
+
+    async fn pending_and_queued(pool: &PgPool, id: &str, recipient: &str) -> (bool, i64) {
+        let pending: bool =
+            sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("draft row");
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE lower(\"to\") = lower($1)")
+                .bind(recipient)
+                .fetch_one(pool)
+                .await
+                .expect("queue count");
+        (pending, queued)
+    }
+
+    /// LOW class + the gate ON: the draft is released WITHOUT an approval,
+    /// on the same priority-100 first-response lane, and the audit row carries
+    /// the class, the grounding evidence and the gate row that admitted it.
+    #[test]
+    fn low_class_with_the_gate_on_sends_without_approval_and_audits_the_path() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("f9_autosend_on").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let tenant = new_tenant("ten_f9on");
+            let recipient = format!(
+                "lead-{}@corp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            grant_marketing_consent(&pool, &tenant, &recipient).await;
+            seed_autonomy(&pool, &tenant, "autonomous_guarded", false).await;
+            promote(&pool, &tenant, LowRiskClass::Scheduling, 10, 30).await;
+
+            // The promotion evidence: ten REAL human approvals of this class,
+            // driven through the actual endpoint. The gate is satisfied only
+            // by those records — the sweep below re-derives them live.
+            for _ in 0..10 {
+                let approved = draft_id();
+                seed_draft(
+                    &pool,
+                    &approved,
+                    DraftSeed {
+                        tenant: &tenant,
+                        recipient: &recipient,
+                        classification: Some("meeting_request"),
+                        confidence: 0.95,
+                        reply: "Thursday 10:00 works for us — shall I send an invite?",
+                        first_response_request_id: None,
+                    },
+                )
+                .await;
+                let (status, body) = env
+                    .post(&format!("/v1/admin/ai/drafts/{approved}/approve"), "{}")
+                    .await;
+                assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            }
+
+            // The request this first-response draft answers (the mailbot's
+            // 'drafted' state).
+            let request_id = format!("frr_{}", &uuid::Uuid::new_v4().simple().to_string()[..22]);
+            sqlx::query(
+                "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload, state) \
+                 VALUES ($1, 'system', 'contact_form', $2, '{}'::jsonb, 'drafted')",
+            )
+            .bind(&request_id)
+            .bind(format!("lead-{}", &request_id[..10]))
+            .execute(&pool)
+            .await
+            .expect("request row");
+
+            let id = draft_id();
+            seed_draft(
+                &pool,
+                &id,
+                DraftSeed {
+                    tenant: &tenant,
+                    recipient: &recipient,
+                    classification: Some("meeting_request"),
+                    confidence: 0.95,
+                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    first_response_request_id: Some(&request_id),
+                },
+            )
+            .await;
+
+            let state = test_state_over(pool.clone()).await;
+            let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
+                .await
+                .expect("sweep");
+            assert_eq!(sweep.examined, 1, "{sweep:?}");
+            assert_eq!(sweep.sent, 1, "{sweep:?}");
+
+            // No human approval happened for THIS draft: the claim is consumed
+            // with the automation's audit action, and the approval action's
+            // rows are exactly the ten evidence approvals above.
+            let (pending, _) = pending_and_queued(&pool, &id, &recipient).await;
+            assert!(!pending, "the auto-sent draft's claim is consumed");
+            let approvals: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs WHERE resource = 'ai_draft' \
+                 AND action = 'control_plane.ai_draft.approved'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("approval count");
+            assert_eq!(approvals, 10, "only the evidence approvals were recorded");
+            let approvals_for_this_draft: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs WHERE resource = 'ai_draft' \
+                 AND action = 'control_plane.ai_draft.approved' AND resource_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("approval count for the draft");
+            assert_eq!(
+                approvals_for_this_draft, 0,
+                "the auto-released draft was never approved by a human"
+            );
+
+            // The EXACT path: the platform's verified system sender on the
+            // first-response priority lane, and the request closed.
+            let priority: i32 = sqlx::query_scalar(
+                "SELECT priority FROM email_queue WHERE lower(\"to\") = lower($1) \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&recipient)
+            .fetch_one(&pool)
+            .await
+            .expect("queue row");
+            assert_eq!(
+                priority,
+                crate::routes::system_sender::QUEUE_PRIORITY_FIRST_RESPONSE,
+                "an auto-sent first response rides the same priority lane as an approved one"
+            );
+            let queued_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT queued_at FROM first_response_requests WHERE id = $1",
+            )
+            .bind(&request_id)
+            .fetch_one(&pool)
+            .await
+            .expect("request");
+            assert!(queued_at.is_some(), "the request's queued_at is stamped");
+
+            // The audit row: who/what/why — class, grounding, gate row.
+            let row: (
+                Option<String>,
+                String,
+                String,
+                serde_json::Value,
+                Option<String>,
+                Option<String>,
+            ) = sqlx::query_as(
+                "SELECT user_id, action, resource, details, hash, signature \
+                 FROM audit_logs WHERE resource = 'ai_draft' AND resource_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("auto-send audit row");
+            assert_eq!(row.0, None, "the automation has no human actor");
+            assert_eq!(row.1, sales_autopilot::reply_autosend::AUTO_SENT_AUDIT_ACTION);
+            assert_eq!(row.2, "ai_draft");
+            assert_eq!(row.3["automation"], "reply_autosend");
+            assert_eq!(row.3["replyClass"], "scheduling");
+            assert_eq!(row.3["riskClass"], "low");
+            assert_eq!(row.3["routedTenantId"], tenant.as_str());
+            assert_eq!(row.3["recipient"], recipient.as_str());
+            assert_eq!(row.3["gate"]["replyClass"], "scheduling");
+            assert_eq!(row.3["gate"]["enabledBy"], "f9-owner-user");
+            assert_eq!(row.3["gate"]["autonomyMode"], "autonomous_guarded");
+            assert_eq!(row.3["gate"]["killSwitch"], false);
+            assert!(
+                row.3["gate"]["evidence"]["approved_and_sent"].as_i64().is_some(),
+                "the gate evidence rides the audit row: {}",
+                row.3
+            );
+            assert!(row.4.is_some() && row.5.is_some(), "hash chain intact");
+
+            pool.close().await;
+        });
+    }
+
+    /// LOW class with the gate OFF (the default) is untouched by the sweep —
+    /// and the human approval still releases it.
+    #[test]
+    fn low_class_with_the_gate_off_still_requires_approval() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("f9_autosend_off").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let tenant = new_tenant("ten_f9off");
+            let recipient = format!(
+                "lead-{}@corp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            grant_marketing_consent(&pool, &tenant, &recipient).await;
+            // Deliberately NO grant row and NO autonomy state: the default.
+            let id = draft_id();
+            seed_draft(
+                &pool,
+                &id,
+                DraftSeed {
+                    tenant: &tenant,
+                    recipient: &recipient,
+                    classification: Some("meeting_request"),
+                    confidence: 0.95,
+                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    first_response_request_id: None,
+                },
+            )
+            .await;
+
+            let state = test_state_over(pool.clone()).await;
+            let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
+                .await
+                .expect("sweep");
+            assert_eq!(sweep.examined, 0, "default OFF: invisible to the sweep");
+            let (pending, queued) = pending_and_queued(&pool, &id, &recipient).await;
+            assert!(pending, "gate OFF must leave the draft pending");
+            assert_eq!(queued, 0, "gate OFF must queue nothing");
+
+            // The human path is unchanged: approval releases the same draft.
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            let (pending, queued) = pending_and_queued(&pool, &id, &recipient).await;
+            assert!(!pending);
+            assert_eq!(queued, 1, "the human approval released the reply");
+            // …and the approval recorded the class the promotion evidence reads.
+            let details: serde_json::Value = sqlx::query_scalar(
+                "SELECT details FROM audit_logs WHERE resource = 'ai_draft' \
+                 AND action = 'control_plane.ai_draft.approved' AND resource_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("approval audit row");
+            assert_eq!(details["replyClass"], "scheduling");
+
+            pool.close().await;
+        });
+    }
+
+    /// HIGH by content and HIGH by intent stay pending even with every class
+    /// promoted; unclassifiable drafts never even become candidates.
+    #[test]
+    fn high_and_unclassifiable_drafts_never_auto_send_even_with_the_gate_on() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("f9_autosend_high").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let tenant = new_tenant("ten_f9hi");
+            seed_autonomy(&pool, &tenant, "autonomous_guarded", false).await;
+            for class in LowRiskClass::ALL {
+                promote(&pool, &tenant, class, 10, 30).await;
+            }
+
+            let mut cases: Vec<(String, String, String)> = Vec::new();
+            for (label, classification, confidence, reply) in [
+                (
+                    // HIGH by content: pricing language in a LOW-eligible intent.
+                    "pricing",
+                    Some("meeting_request"),
+                    0.95,
+                    "Our pricing is per seat per month — shall we book a call?",
+                ),
+                (
+                    // HIGH by content: an unbacked claim (SSO with no fact).
+                    "unbacked",
+                    Some("question"),
+                    0.95,
+                    "We support SSO for enterprise accounts.",
+                ),
+                (
+                    // HIGH by intent: a complaint is never low-risk, whatever
+                    // the content.
+                    "complaint",
+                    Some("complaint"),
+                    0.99,
+                    "Thanks — noted.",
+                ),
+                (
+                    // Unclassifiable: no intent class at all.
+                    "no_class",
+                    None,
+                    0.95,
+                    "Thanks — noted.",
+                ),
+                (
+                    // Unclassifiable: an intent class outside the canonical 11.
+                    "unknown_class",
+                    Some("maybe_interested"),
+                    0.95,
+                    "Thanks — noted.",
+                ),
+                (
+                    // Unclassifiable: below the worker's 0.7 confidence gate.
+                    "low_confidence",
+                    Some("meeting_request"),
+                    0.5,
+                    "Thursday 10:00 works for us.",
+                ),
+            ] {
+                let recipient = format!(
+                    "{label}-{}@corp.example",
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                );
+                let id = draft_id();
+                seed_draft(
+                    &pool,
+                    &id,
+                    DraftSeed {
+                        tenant: &tenant,
+                        recipient: &recipient,
+                        classification,
+                        confidence,
+                        reply,
+                        first_response_request_id: None,
+                    },
+                )
+                .await;
+                cases.push((label.to_string(), recipient, id));
+            }
+
+            let state = test_state_over(pool.clone()).await;
+            let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
+                .await
+                .expect("sweep");
+            // Only the two content-HIGH drafts pass the candidate filter (their
+            // intent is LOW-eligible); the classifier refuses them inside the
+            // transaction. Everything else never becomes a candidate.
+            assert_eq!(sweep.examined, 2, "{sweep:?}");
+            assert_eq!(sweep.sent, 0, "{sweep:?}");
+            assert_eq!(sweep.held, 2, "{sweep:?}");
+
+            for (label, recipient, id) in &cases {
+                let pending: bool = sqlx::query_scalar(
+                    "SELECT pending_approval FROM inbound_messages WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("draft");
+                assert!(pending, "{label} must stay pending");
+                let queued: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM email_queue WHERE lower(\"to\") = lower($1)",
+                )
+                .bind(recipient)
+                .fetch_one(&pool)
+                .await
+                .expect("queue count");
+                assert_eq!(queued, 0, "{label} must never be queued");
+            }
+            let auto_sent: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs \
+                 WHERE action = 'control_plane.ai_draft.auto_sent'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("auto-send count");
+            assert_eq!(auto_sent, 0, "nothing was auto-sent");
+
+            pool.close().await;
+        });
+    }
+
+    /// The owner-flagged contract-tier decision-maker rule reaches the sweep:
+    /// a LOW-class draft to a flagged recipient is HIGH by construction, held
+    /// before the gate is even consulted, and never queued.
+    #[test]
+    fn owner_flagged_recipient_is_held_even_with_the_gate_on() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("f9_flagged").await else {
+                return;
+            };
+            let tenant = new_tenant("ten_f9flag");
+            let flagged = format!(
+                "ceo-{}@bigcorp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            // Ahead of the flags: a class grant in its enabled state.
+            promote(&pool, &tenant, LowRiskClass::Scheduling, 10, 30).await;
+            sqlx::query(
+                "INSERT INTO sales_autonomy_state (tenant_id, mode, rules) \
+                 VALUES ($1, 'autonomous_guarded', jsonb_build_object($2, \
+                     jsonb_build_array($3::text)))",
+            )
+            .bind(&tenant)
+            .bind(sales_autopilot::reply_autosend::FLAGGED_RECIPIENTS_RULE_KEY)
+            .bind(flagged.to_lowercase())
+            .execute(&pool)
+            .await
+            .expect("seed autonomy rules");
+
+            let id = draft_id();
+            seed_draft(
+                &pool,
+                &id,
+                DraftSeed {
+                    tenant: &tenant,
+                    recipient: &flagged,
+                    classification: Some("meeting_request"),
+                    confidence: 0.95,
+                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    first_response_request_id: None,
+                },
+            )
+            .await;
+
+            let state = test_state_over(pool.clone()).await;
+            let outcome = auto_send_one(&state, &id).await.expect("auto-send attempt");
+            match outcome {
+                AutoSendOutcome::Held { reason, .. } => assert!(
+                    reason.contains("high:flagged_decision_maker"),
+                    "the hold must name the flagged-decision-maker rule: {reason}"
+                ),
+                other => panic!("a flagged recipient must be held, got {other:?}"),
+            }
+            let (pending, queued) = pending_and_queued(&pool, &id, &flagged).await;
+            assert!(pending, "the draft stays pending for the human");
+            assert_eq!(queued, 0, "nothing is queued for a flagged recipient");
+
+            pool.close().await;
+        });
+    }
+
+    /// The kill switch and a mode lapse are re-checked INSIDE the send
+    /// transaction: the same draft that would send is held and stays pending.
+    #[test]
+    fn kill_switch_and_mode_lapse_hold_the_draft_at_send_time() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("f9_autosend_kill").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let tenant = new_tenant("ten_f9kill");
+            let recipient = format!(
+                "lead-{}@corp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            grant_marketing_consent(&pool, &tenant, &recipient).await;
+            promote(&pool, &tenant, LowRiskClass::Scheduling, 10, 30).await;
+
+            // Kill switch engaged: the candidate filter still matches (the
+            // grant is enabled), the gate refuses inside the transaction.
+            seed_autonomy(&pool, &tenant, "autonomous_guarded", true).await;
+            let id = draft_id();
+            seed_draft(
+                &pool,
+                &id,
+                DraftSeed {
+                    tenant: &tenant,
+                    recipient: &recipient,
+                    classification: Some("meeting_request"),
+                    confidence: 0.95,
+                    reply: "Thursday 10:00 works for us — shall I send an invite?",
+                    first_response_request_id: None,
+                },
+            )
+            .await;
+
+            let state = test_state_over(pool.clone()).await;
+            let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
+                .await
+                .expect("sweep");
+            assert_eq!(sweep.examined, 1, "{sweep:?}");
+            assert_eq!(sweep.sent, 0, "{sweep:?}");
+            let (pending, queued) = pending_and_queued(&pool, &id, &recipient).await;
+            assert!(pending, "the kill switch must leave the draft pending");
+            assert_eq!(queued, 0);
+
+            // Mode lapse: autonomy withdrawn after the class was promoted.
+            seed_autonomy(&pool, &tenant, "shadow", false).await;
+            let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
+                .await
+                .expect("sweep");
+            assert_eq!(sweep.sent, 0, "{sweep:?}");
+
+            // Revocation: the per-class kill switch.
+            sqlx::query(
+                "UPDATE reply_autosend_grants SET enabled = FALSE, disabled_at = NOW() \
+                 WHERE tenant_id = $1 AND reply_class = 'scheduling'",
+            )
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("revoke");
+            seed_autonomy(&pool, &tenant, "autonomous_guarded", false).await;
+            let sweep = auto_send_pending(&state, AUTO_SEND_BATCH_SIZE)
+                .await
+                .expect("sweep");
+            assert_eq!(sweep.examined, 0, "a revoked class is not a candidate");
+            let (pending, queued) = pending_and_queued(&pool, &id, &recipient).await;
+            assert!(pending, "revocation reverts the draft to human approval");
+            assert_eq!(queued, 0);
+
+            // And the human approval still works on the very same draft.
+            let env = AdvEnv::admin(pool.clone()).await;
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            let (pending, queued) = pending_and_queued(&pool, &id, &recipient).await;
+            assert!(!pending);
+            assert_eq!(queued, 1);
+
+            pool.close().await;
+        });
     }
 }

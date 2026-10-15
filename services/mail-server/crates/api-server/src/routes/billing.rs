@@ -4386,6 +4386,46 @@ async fn admin_create_invoice(
         email: address.email,
     };
 
+    // US sales tax (plan WP C2): this legacy manual writer keeps its own SQL
+    // and its own response contract, so it deliberately does NOT compute the
+    // stamped US sales-tax line (the operator typing line items chooses their
+    // amounts). What it must never do is SILENTLY issue a US invoice in a
+    // state the operator has REGISTERED: that is an under-collection with
+    // legal exposure. Refuse by name — the operator can add an explicit tax
+    // line, and the product invoicing path (billing-service) applies the
+    // stamped line automatically.
+    if billing_address.country.trim().eq_ignore_ascii_case("US") {
+        if let Some(state) =
+            billing_service::us_tax::normalize_state_code(billing_address.state.as_deref())
+        {
+            let registered: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM us_tax_nexus_states \
+                 WHERE state_code = $1 AND status = 'registered')",
+            )
+            .bind(&state)
+            .fetch_one(&mut *tx)
+            .await?;
+            if registered {
+                // The route's own validation style (a 400 with a named
+                // `error`), not an ApiError — this handler reports every
+                // validation problem the same way.
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "US sales tax: {state} is a registered state — this manual writer \
+                             does not compute the stamped sales-tax line, so it refuses rather \
+                             than issue an invoice that silently omits the state's tax. Add the \
+                             tax as an explicit line item, or let the product invoicing path \
+                             issue the invoice."
+                        ),
+                    })),
+                )
+                    .into_response());
+            }
+        }
+    }
+
     // Audit F08 — the admin writer snapshots the SAME versioned address
     // contract billing-service writers use: snapshotVersion + the
     // export-relevant registry identity frozen at issue time. Null/empty
@@ -10064,6 +10104,130 @@ mod adversarial_tests {
         // The generic operation-failure response is an honest 500.
         let failed = billing_operation_failed_response();
         assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// US sales tax (plan WP C2): the legacy manual admin invoice writer keeps
+    /// its own SQL and response contract, so it has no stamped tax line — but
+    /// it must never SILENTLY issue a US invoice in a state the operator has
+    /// registered (an under-collection with legal exposure). It refuses by
+    /// name, and stays untouched for every other tenant.
+    #[tokio::test]
+    async fn admin_create_invoice_refuses_registered_us_states_but_not_others() {
+        let Some(pool) = pool_for("admin_invoice_us_tax").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let admin = auth_user(&["*"], crate::routes::system_sender::SYSTEM_TENANT_ID);
+
+        let us_tenant = unique_id();
+        let eu_tenant = unique_id();
+        for (tenant, country, address_state) in
+            [(&us_tenant, "US", Some("CA")), (&eu_tenant, "EE", None)]
+        {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, plan, status)
+                 VALUES ($1, 'US tax admin fixture', 'growth', 'active')",
+            )
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+            // A COMPLETE address: the admin writer's row decode requires the
+            // non-null columns (address_line1 / city / postal_code) — the
+            // signup flow always writes them.
+            sqlx::query(
+                "INSERT INTO billing_addresses
+                     (tenant_id, company_name, address_line1, city, postal_code, country, state)
+                 VALUES ($1, 'Fixture OÜ', 'Sakala 7-2', 'Tallinn', '10141', $2, $3)",
+            )
+            .bind(tenant)
+            .bind(country)
+            .bind(address_state)
+            .execute(&pool)
+            .await
+            .expect("seed address");
+        }
+
+        // The route refuses a second invoice for the SAME period (409), so
+        // each attempt names its own period.
+        let body = |start: &str, end: &str| {
+            Json(AdminCreateInvoiceBody {
+                period_start: start.to_string(),
+                period_end: end.to_string(),
+                line_items: vec![AdminInvoiceLineItemInput {
+                    description: "Manual charge".into(),
+                    quantity: 1,
+                    unit_price: 10_000,
+                }],
+                notes: None,
+            })
+        };
+
+        // No registration row yet: the manual writer issues the invoice (its
+        // historical behavior — nothing US-tax related is registered).
+        let created = admin_create_invoice(
+            State(state.clone()),
+            admin.clone(),
+            Path(us_tenant.clone()),
+            body("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+        )
+        .await
+        .expect("response");
+        assert_eq!(
+            created.status(),
+            StatusCode::CREATED,
+            "an unregistered US state is not this writer's business"
+        );
+
+        // The operator registers CA: the manual writer refuses by name.
+        sqlx::query(
+            "INSERT INTO us_tax_nexus_states (state_code, status, nexus_window, \
+             threshold_cents, observed_cents, window_start, window_end, registered_at, \
+             last_evaluated_at) \
+             VALUES ('CA', 'registered', 'calendar', 10000000, 0, NOW(), \
+                     NOW() + INTERVAL '1 year', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("registered state");
+
+        let refused = admin_create_invoice(
+            State(state.clone()),
+            admin.clone(),
+            Path(us_tenant.clone()),
+            body("2026-03-01T00:00:00Z", "2026-04-01T00:00:00Z"),
+        )
+        .await
+        .expect("response");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = axum::body::to_bytes(refused.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("json error body");
+        let message = payload["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("CA") && message.contains("registered state"),
+            "the refusal names the state boundary: {payload}"
+        );
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM invoices WHERE tenant_id = $1")
+                .bind(&us_tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(invoices, 1, "the refusal wrote no second invoice");
+
+        // An EU tenant is untouched by the whole US tax path.
+        let eu_created = admin_create_invoice(
+            State(state.clone()),
+            admin.clone(),
+            Path(eu_tenant.clone()),
+            body("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+        )
+        .await
+        .expect("response");
+        assert_eq!(eu_created.status(), StatusCode::CREATED);
     }
 
     /// Every admin billing handler refuses a customer-tenant caller with

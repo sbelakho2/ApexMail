@@ -134,6 +134,38 @@ pub async fn sweep_product_lines_once(
     Ok(result)
 }
 
+/// The US sales-tax nexus sweep (plan WP C2), wired exactly like
+/// [`sweep_product_lines_once`]: the nightly loop calls the SAME function the
+/// one-shot `--sweep-us-tax-nexus-only` CLI trigger runs. It only TRACKS and
+/// ALERTS (once per state per window): registration is an owner/accounting
+/// act through the admin surface, and the sweep never charges tax.
+pub async fn sweep_us_tax_nexus_once(
+    state: &AppState,
+) -> Result<crate::us_tax::UsTaxSweepResult, String> {
+    let result = crate::us_tax::sweep_us_tax_nexus(state).await?;
+    if result.alerts_raised > 0
+        || !result.states_without_threshold_data.is_empty()
+        || result.unknown_state_invoices > 0
+        || !result.non_usd_invoices.is_empty()
+        || result.failed_states > 0
+    {
+        info!(
+            states_evaluated = result.states_evaluated,
+            states_below = result.states_below,
+            states_crossed = result.states_crossed,
+            states_registered = result.states_registered,
+            alerts_raised = result.alerts_raised,
+            without_threshold_data = ?result.states_without_threshold_data,
+            unknown_state_invoices = result.unknown_state_invoices,
+            unknown_state_cents = result.unknown_state_cents,
+            non_usd_invoices = ?result.non_usd_invoices,
+            failed_states = result.failed_states,
+            "processed US sales-tax nexus thresholds"
+        );
+    }
+    Ok(result)
+}
+
 pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let dedicated_ip_state = state.clone();
     tokio::spawn(async move {
@@ -340,6 +372,17 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 Ok(_) => {}
                 Err(error_message) => {
                     error!(error = %error_message, "failed to sweep contract product lines");
+                }
+            }
+
+            // US sales-tax economic-nexus thresholds (plan WP C2): tracks
+            // taxable US sales per state and raises ONE operator alert per
+            // crossing. Never registers, never charges — registration is an
+            // owner/accounting action (see us_tax.rs).
+            match sweep_us_tax_nexus_once(sla_state.as_ref()).await {
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to sweep US sales-tax nexus");
                 }
             }
 

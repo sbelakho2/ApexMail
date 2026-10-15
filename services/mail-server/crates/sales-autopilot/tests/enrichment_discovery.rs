@@ -111,10 +111,12 @@ fn candidate(source_url: &str) -> DiscoveredCandidate {
         source_url: Some(source_url.into()),
         company_name: Some("Fixture Co".into()),
         domain: Some("fixture.example".into()),
+        contact_email: None,
         jurisdiction: Some("EE".into()),
         jurisdiction_confidence: 0.9,
         confidence: 0.7,
         raw_snapshot_hash: Some("abc123".into()),
+        fetched_at: None,
     }
 }
 

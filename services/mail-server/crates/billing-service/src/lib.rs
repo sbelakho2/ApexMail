@@ -41,6 +41,12 @@ pub mod subscriptions;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod types;
+/// US sales tax (plan WP C2): economic-nexus threshold tracking plus the
+/// provenance-stamped sales-tax line on US invoices for operator-registered
+/// states only. Rates/thresholds come from the committed
+/// `data/us_sales_tax.json` (validated, fail-closed on staleness); the module
+/// never registers a state and never charges tax on its own.
+pub mod us_tax;
 pub mod usage;
 pub mod usage_ingest;
 pub mod vat_emta;

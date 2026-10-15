@@ -7,7 +7,8 @@
 //! |------|-------|---------|
 //! | command | `sales_discovery_jobs` | query, sources, status, cursor, discovered, imported, cost_eur, error, timestamps |
 //! | per source per run | `sales_source_runs` | source, status, http_status, items, cost_eur, latency_ms, error |
-//! | per candidate | `sales_discovery_candidates` | source, source_url, company_name, account_domain, jurisdiction, jurisdiction_confidence, raw_snapshot_hash, confidence, refresh_expires_at, discovered_at |
+//! | per candidate | `sales_discovery_candidates` | source, source_url, company_name, account_domain, contact_email, jurisdiction, jurisdiction_confidence, raw_snapshot_hash, confidence, fetched_at, refresh_expires_at, discovered_at |
+//! | blocked fetch | `sales_scrape_blocked_sources` | source, url, host, classification, http_status, markers, detail, retry_after, state (migration 258; see [`super::blocked`]) |
 //!
 //! Candidates are upserted against the partial unique index
 //! `idx_sales_discovery_candidates_source_url` on
@@ -61,6 +62,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::blocked::{record_blocked_fetch, LeaseFence};
 use super::provider::{
     candidate_allowed_by_jurisdiction, DiscoveredCandidate, DiscoveryQuery, DiscoverySource,
 };
@@ -732,6 +734,7 @@ impl DiscoveryJobRunner {
         let mut items = 0i64;
         let mut new_candidates = 0i64;
         let mut dropped_jurisdiction = 0i64;
+        let mut merged_duplicates = 0i64;
         let mut cost_eur = 0.0f64;
         let mut error: Option<String> = None;
         let mut status: &'static str = "succeeded";
@@ -764,6 +767,12 @@ impl DiscoveryJobRunner {
                             dropped_jurisdiction += 1;
                         }
                     }
+                    // Data quality: normalize and de-duplicate what the
+                    // source yielded BEFORE anything is persisted, so the
+                    // database never sees a 4 KB name, an unnormalized email,
+                    // or the same entity twice from one page.
+                    let (candidates, dropped_duplicates) = dedupe_candidates(candidates);
+                    merged_duplicates += dropped_duplicates as i64;
 
                     for candidate in &candidates {
                         match upsert_candidate(
@@ -805,8 +814,50 @@ impl DiscoveryJobRunner {
                     }
                 }
                 Err(discovery_error) => {
+                    // A blocked fetch is persisted in the review queue, in
+                    // the same lease-fenced write discipline as candidate and
+                    // run rows. The error already carries the structured
+                    // evidence, and the source returned NO candidates for it
+                    // — a blocked page must never become a data row.
+                    let mut queue_note: Option<String> = None;
+                    if let Some(evidence) = discovery_error.blocked_evidence() {
+                        tracing::warn!(
+                            tenant_id = %tenant_id,
+                            source = source.id(),
+                            url = %evidence.url,
+                            classification = %evidence.classification,
+                            http_status = ?evidence.http_status,
+                            markers = ?evidence.markers,
+                            "discovery source is blocked; evidence queued for review"
+                        );
+                        match record_blocked_fetch(
+                            &self.db,
+                            tenant_id,
+                            source.id(),
+                            Some(LeaseFence {
+                                job_id,
+                                lease_token,
+                            }),
+                            evidence,
+                        )
+                        .await
+                        {
+                            Ok(Some(_)) => {}
+                            // The lease no longer owns the job: stop without
+                            // further writes (same protocol as candidates).
+                            Ok(None) => return Err(lease_lost_error(job_id)),
+                            Err(db_error) => {
+                                queue_note =
+                                    Some(format!("blocked-source queue write failed: {db_error}"));
+                            }
+                        }
+                    }
                     status = discovery_error.run_status();
-                    error = Some(discovery_error.to_string());
+                    let mut message = discovery_error.to_string();
+                    if let Some(note) = queue_note {
+                        message = format!("{message}; {note}");
+                    }
+                    error = Some(message);
                     break;
                 }
             }
@@ -830,6 +881,15 @@ impl DiscoveryJobRunner {
             let note = format!(
                 "jurisdiction_filter: dropped {dropped_jurisdiction} candidate(s) outside permitted jurisdictions [{}]",
                 source.allowed_jurisdictions().join(", ")
+            );
+            error = match error {
+                Some(existing) => Some(format!("{existing}; {note}")),
+                None => Some(note),
+            };
+        }
+        if merged_duplicates > 0 {
+            let note = format!(
+                "dedupe: merged {merged_duplicates} duplicate candidate(s) within this page"
             );
             error = match error {
                 Some(existing) => Some(format!("{existing}; {note}")),
@@ -914,27 +974,33 @@ async fn upsert_candidate(
     let domain = sanitize_domain(candidate.domain.as_deref());
     let source_url = sanitize_source_url(candidate.source_url.as_deref());
     let company_name = sanitize_company_name(candidate.company_name.as_deref());
+    let contact_email = candidate.contact_email.as_deref().and_then(normalize_email);
     let jurisdiction = sanitize_jurisdiction(candidate.jurisdiction.as_deref());
     let hash = sanitize_snapshot_hash(candidate.raw_snapshot_hash.as_deref());
     let confidence = clamp_confidence(candidate.confidence);
     let jurisdiction_confidence = clamp_confidence(candidate.jurisdiction_confidence);
     let refresh_expires_at = Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS);
+    // Provenance: the source's own fetch time when it knows one, otherwise
+    // the discovery time — never NULL, so every row states when its evidence
+    // was fetched.
+    let fetched_at = candidate.fetched_at.unwrap_or_else(Utc::now);
 
     let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO sales_discovery_candidates (
             id, tenant_id, job_id, source, source_url, company_name, account_domain,
-            jurisdiction, jurisdiction_confidence, raw_snapshot_hash, confidence,
-            refresh_expires_at, discovered_at, created_at
+            contact_email, jurisdiction, jurisdiction_confidence, raw_snapshot_hash,
+            confidence, fetched_at, refresh_expires_at, discovered_at, created_at
          )
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW()
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW()
          WHERE EXISTS (
              SELECT 1 FROM sales_discovery_jobs
-             WHERE id = $3 AND tenant_id = $2 AND lease_token = $13
+             WHERE id = $3 AND tenant_id = $2 AND lease_token = $15
          )
          ON CONFLICT (tenant_id, source, source_url) WHERE source_url IS NOT NULL
          DO UPDATE SET
             company_name = COALESCE(EXCLUDED.company_name, sales_discovery_candidates.company_name),
             account_domain = COALESCE(EXCLUDED.account_domain, sales_discovery_candidates.account_domain),
+            contact_email = COALESCE(EXCLUDED.contact_email, sales_discovery_candidates.contact_email),
             jurisdiction = COALESCE(EXCLUDED.jurisdiction, sales_discovery_candidates.jurisdiction),
             jurisdiction_confidence = GREATEST(
                 sales_discovery_candidates.jurisdiction_confidence,
@@ -942,6 +1008,7 @@ async fn upsert_candidate(
             ),
             raw_snapshot_hash = EXCLUDED.raw_snapshot_hash,
             confidence = GREATEST(sales_discovery_candidates.confidence, EXCLUDED.confidence),
+            fetched_at = GREATEST(sales_discovery_candidates.fetched_at, EXCLUDED.fetched_at),
             refresh_expires_at = EXCLUDED.refresh_expires_at
          RETURNING (xmax = 0) AS inserted",
     )
@@ -952,10 +1019,12 @@ async fn upsert_candidate(
     .bind(&source_url)
     .bind(&company_name)
     .bind(&domain)
+    .bind(&contact_email)
     .bind(&jurisdiction)
     .bind(jurisdiction_confidence)
     .bind(&hash)
     .bind(confidence)
+    .bind(fetched_at)
     .bind(refresh_expires_at)
     .bind(lease_token)
     .fetch_optional(db)
@@ -1180,17 +1249,33 @@ pub fn sanitize_jurisdiction(raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// Normalize a company name, truncating absurd values at a char boundary.
+/// Normalize a company name: control characters dropped and every run of
+/// whitespace collapsed to one space (so "Acme  OÜ" and "Acme\nOÜ" are one
+/// name), truncating absurd values at a char boundary. Case and legal-form
+/// wording are preserved — that is the source's data, not ours to rewrite.
 pub fn sanitize_company_name(raw: Option<&str>) -> Option<String> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
     }
-    let mut out: String = raw
-        .chars()
-        .filter(|c| !c.is_control() || *c == ' ')
-        .take(MAX_COMPANY_NAME_CHARS)
-        .collect();
+    let mut out = String::new();
+    let mut last_was_space = false;
+    let mut written = 0usize;
+    for c in raw.chars() {
+        if written >= MAX_COMPANY_NAME_CHARS {
+            break;
+        }
+        if c.is_control() || c.is_whitespace() {
+            if !last_was_space && !out.is_empty() {
+                out.push(' ');
+                last_was_space = true;
+            }
+            continue;
+        }
+        last_was_space = false;
+        out.push(c);
+        written += 1;
+    }
     while out.ends_with(' ') {
         out.pop();
     }
@@ -1199,6 +1284,126 @@ pub fn sanitize_company_name(raw: Option<&str>) -> Option<String> {
     } else {
         Some(out)
     }
+}
+
+/// Normalize a contact email, or `None` when it is not a usable address.
+///
+/// Strips a `mailto:` prefix, a query/fragment and wrapping punctuation,
+/// lowercases the whole address (industry-standard normalization — these
+/// addresses are outreach targets, never credentials), requires an ASCII
+/// local part and a real multi-label domain, and rejects control characters,
+/// whitespace and oversized values.
+pub fn normalize_email(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let raw = match raw.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("mailto:") => raw[7..].trim(),
+        _ => raw,
+    };
+    let raw = raw
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_matches(|c| matches!(c, '<' | '>' | '"' | '\'' | '(' | ')'))
+        .trim();
+    if raw.is_empty() || raw.len() > 254 {
+        return None;
+    }
+    if raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let (local, domain) = raw.split_once('@')?;
+    if local.is_empty() || local.len() > 64 || domain.contains('@') {
+        return None;
+    }
+    if !local
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~.".contains(c))
+    {
+        return None;
+    }
+    let domain = sanitize_domain(Some(domain))?;
+    Some(format!("{local}@{domain}").to_ascii_lowercase())
+}
+
+/// The de-duplication key for one candidate, in priority order: the exact
+/// source URL, then (domain, case-folded name), then domain alone, then the
+/// normalized email. A candidate with none of those has no identity and is
+/// kept as-is.
+fn dedupe_key(candidate: &DiscoveredCandidate) -> Option<String> {
+    if let Some(url) = &candidate.source_url {
+        return Some(format!("url:{url}"));
+    }
+    match (&candidate.domain, &candidate.company_name) {
+        (Some(domain), Some(name)) => Some(format!("name:{domain}|{}", name.to_ascii_lowercase())),
+        (Some(domain), None) => Some(format!("domain:{domain}")),
+        (None, Some(name)) => Some(format!("name:{}", name.to_ascii_lowercase())),
+        (None, None) => candidate
+            .contact_email
+            .as_deref()
+            .map(|email| format!("email:{email}")),
+    }
+}
+
+fn merge_candidate(into: &mut DiscoveredCandidate, from: DiscoveredCandidate) {
+    if into.company_name.is_none() {
+        into.company_name = from.company_name;
+    }
+    if into.domain.is_none() {
+        into.domain = from.domain;
+    }
+    if into.contact_email.is_none() {
+        into.contact_email = from.contact_email;
+    }
+    if into.jurisdiction.is_none() {
+        into.jurisdiction = from.jurisdiction;
+    }
+    if into.raw_snapshot_hash.is_none() {
+        into.raw_snapshot_hash = from.raw_snapshot_hash;
+    }
+    if into.fetched_at.is_none() {
+        into.fetched_at = from.fetched_at;
+    }
+    into.confidence = into.confidence.max(from.confidence);
+    into.jurisdiction_confidence = into
+        .jurisdiction_confidence
+        .max(from.jurisdiction_confidence);
+}
+
+/// Normalize and de-duplicate one page's candidates.
+///
+/// Returns the kept candidates (first occurrence wins, later duplicates only
+/// fill gaps and raise confidence) and how many duplicates were merged. This
+/// runs before persistence, so `sales_discovery_candidates` never receives
+/// two rows for one entity from the same page and never receives a
+/// non-normalized name, domain or email.
+pub fn dedupe_candidates(
+    candidates: Vec<DiscoveredCandidate>,
+) -> (Vec<DiscoveredCandidate>, usize) {
+    let mut kept: Vec<DiscoveredCandidate> = Vec::new();
+    let mut keys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut merged = 0usize;
+
+    for mut candidate in candidates {
+        candidate.company_name = sanitize_company_name(candidate.company_name.as_deref());
+        candidate.domain = sanitize_domain(candidate.domain.as_deref());
+        candidate.contact_email = candidate.contact_email.as_deref().and_then(normalize_email);
+        candidate.source_url = sanitize_source_url(candidate.source_url.as_deref());
+
+        match dedupe_key(&candidate).and_then(|key| keys.get(&key).copied()) {
+            Some(index) => {
+                merge_candidate(&mut kept[index], candidate);
+                merged += 1;
+            }
+            None => {
+                if let Some(key) = dedupe_key(&candidate) {
+                    keys.insert(key, kept.len());
+                }
+                kept.push(candidate);
+            }
+        }
+    }
+    (kept, merged)
 }
 
 /// Clamp a provider-reported confidence into `[0, 1]` (`NaN → 0`).
@@ -1416,11 +1621,156 @@ mod tests {
             source_url: Some(url.to_string()),
             company_name: Some(format!("Recording {domain}")),
             domain: Some(domain.to_string()),
+            contact_email: None,
             jurisdiction: Some("US".to_string()),
             jurisdiction_confidence: 0.9,
             confidence: 0.9,
             raw_snapshot_hash: None,
+            fetched_at: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Data quality: normalization and de-duplication (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_company_name_collapses_whitespace_runs() {
+        assert_eq!(
+            sanitize_company_name(Some("Acme  OÜ\n Holdings")),
+            Some("Acme OÜ Holdings".to_string())
+        );
+        assert_eq!(
+            sanitize_company_name(Some("  Acme   OÜ  ")),
+            Some("Acme OÜ".to_string())
+        );
+        // Legal-form casing and wording are the source's data, not ours.
+        assert_eq!(
+            sanitize_company_name(Some("acme oü")),
+            Some("acme oü".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_email_accepts_real_values_and_rejects_hostile_ones() {
+        assert_eq!(
+            normalize_email("  Info@ACME.ee "),
+            Some("info@acme.ee".to_string())
+        );
+        assert_eq!(
+            normalize_email("mailto:Sales@Acme.EE?subject=hi#frag"),
+            Some("sales@acme.ee".to_string())
+        );
+        assert_eq!(
+            normalize_email("<info@acme.ee>"),
+            Some("info@acme.ee".to_string())
+        );
+        // Rejections: no domain, single-label host, whitespace/control,
+        // two @, oversized, empty local part.
+        assert_eq!(normalize_email("not-an-email"), None);
+        assert_eq!(normalize_email("a@localhost"), None);
+        assert_eq!(normalize_email("a b@acme.ee"), None);
+        assert_eq!(normalize_email("a@acme.ee\u{7}"), None);
+        assert_eq!(normalize_email("a@b@acme.ee"), None);
+        assert_eq!(normalize_email(""), None);
+        assert_eq!(
+            normalize_email(&format!("{}@acme.ee", "a".repeat(65))),
+            None
+        );
+        assert_eq!(normalize_email(&format!("a@{}", "b".repeat(300))), None);
+    }
+
+    fn candidate(
+        url: Option<&str>,
+        name: Option<&str>,
+        domain: Option<&str>,
+    ) -> DiscoveredCandidate {
+        DiscoveredCandidate {
+            source: "fixture".to_string(),
+            source_url: url.map(str::to_string),
+            company_name: name.map(str::to_string),
+            domain: domain.map(str::to_string),
+            ..DiscoveredCandidate::default()
+        }
+    }
+
+    #[test]
+    fn dedupe_merges_same_entity_and_normalizes_every_field() {
+        let mut first = candidate(
+            Some("https://x.example/1"),
+            Some("  Acme  OÜ "),
+            Some("ACME.EE"),
+        );
+        first.contact_email = Some("Info@ACME.ee".to_string());
+        first.confidence = 0.4;
+        let mut duplicate = candidate(
+            Some("https://x.example/1"),
+            Some("Acme OÜ"),
+            Some("acme.ee"),
+        );
+        duplicate.confidence = 0.9;
+        duplicate.jurisdiction = Some("EE".to_string());
+        let other = candidate(Some("https://x.example/2"), Some("Other"), Some("other.ee"));
+
+        let (kept, merged) = dedupe_candidates(vec![first, duplicate, other]);
+        assert_eq!(merged, 1);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].company_name.as_deref(), Some("Acme OÜ"));
+        assert_eq!(kept[0].domain.as_deref(), Some("acme.ee"));
+        assert_eq!(kept[0].contact_email.as_deref(), Some("info@acme.ee"));
+        assert_eq!(kept[0].confidence, 0.9, "the stronger signal wins");
+        assert_eq!(
+            kept[0].jurisdiction.as_deref(),
+            Some("EE"),
+            "a duplicate fills the gap"
+        );
+    }
+
+    #[test]
+    fn dedupe_falls_back_to_name_domain_and_email_keys() {
+        // No URLs: the (domain, name) pair is the identity.
+        let (kept, merged) = dedupe_candidates(vec![
+            candidate(None, Some("Acme"), Some("acme.ee")),
+            candidate(None, Some("acme"), Some("acme.ee")),
+        ]);
+        assert_eq!((kept.len(), merged), (1, 1));
+
+        // Email-only rows dedupe on the address.
+        let left = DiscoveredCandidate {
+            contact_email: Some("SALES@acme.ee".to_string()),
+            ..DiscoveredCandidate::default()
+        };
+        let right = DiscoveredCandidate {
+            contact_email: Some("sales@acme.ee".to_string()),
+            ..DiscoveredCandidate::default()
+        };
+        let (kept, merged) = dedupe_candidates(vec![left, right]);
+        assert_eq!((kept.len(), merged), (1, 1));
+
+        // A row with no identity at all is kept (nothing to merge it into).
+        let (kept, merged) = dedupe_candidates(vec![
+            DiscoveredCandidate::default(),
+            DiscoveredCandidate::default(),
+        ]);
+        assert_eq!((kept.len(), merged), (2, 0));
+    }
+
+    #[test]
+    fn dedupe_drops_hostile_values_before_persistence() {
+        let hostile = DiscoveredCandidate {
+            source: "fixture".to_string(),
+            source_url: Some("javascript:alert(1)".to_string()),
+            company_name: Some("X".to_string()),
+            domain: Some("not a domain".to_string()),
+            contact_email: Some("bad email".to_string()),
+            ..DiscoveredCandidate::default()
+        };
+        let (kept, _) = dedupe_candidates(vec![hostile]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source_url, None);
+        assert_eq!(kept[0].domain, None);
+        assert_eq!(kept[0].contact_email, None);
+        assert_eq!(kept[0].company_name.as_deref(), Some("X"));
     }
 
     fn lazy_pool() -> PgPool {
@@ -1447,6 +1797,138 @@ mod tests {
         }
     }
 
+    /// Duplicate candidates on one page are merged before persistence, and
+    /// the merge is visible in the run record (nothing is silently dropped).
+    #[tokio::test]
+    async fn duplicate_candidates_on_one_page_are_merged_and_noted() {
+        let Some(pool) = live_pool("dedupe_merge").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dedupe");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut first = recording_candidate("https://dup.example.com/1", "dup.example.com");
+        first.contact_email = Some("Info@Dup.example.com".to_string());
+        first.confidence = 0.4;
+        let mut duplicate = recording_candidate("https://dup.example.com/1", "dup.example.com");
+        duplicate.company_name = Some("  Recording dup.example.com  ".to_string());
+        duplicate.confidence = 0.9;
+        let source: Arc<dyn DiscoverySource> = Arc::new(RecordingSource::with_candidates(
+            "dedupe_fixture",
+            calls,
+            vec![first, duplicate],
+        ));
+        let runner = DiscoveryJobRunner::new(pool.clone(), vec![source]);
+        let job = runner
+            .create_job(&tenant, &DiscoveryQuery::default(), &[])
+            .await
+            .expect("create job");
+        let job = runner.run_to_completion(&tenant, job.id).await.unwrap();
+        assert_eq!(job.status, "completed");
+        assert_eq!(job.discovered, 1, "one entity, one row");
+
+        let (rows, email, confidence): (i64, Option<String>, f64) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, MAX(contact_email), MAX(confidence) \
+             FROM sales_discovery_candidates WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(email.as_deref(), Some("info@dup.example.com"));
+        assert!(confidence >= 0.899, "the stronger signal won: {confidence}");
+
+        let note: Option<String> =
+            sqlx::query_scalar("SELECT error FROM sales_source_runs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(note
+            .unwrap_or_default()
+            .contains("dedupe: merged 1 duplicate candidate(s)"));
+
+        cleanup_discovery(&pool, &tenant).await;
+    }
+
+    /// A blocked fetch from ANY source: the runner persists the evidence in
+    /// the review queue, records the classification as the run status, and
+    /// writes zero candidates (the error carries no page at all).
+    #[tokio::test]
+    async fn blocked_fetch_is_queued_and_never_becomes_data() {
+        use crate::discovery::fetch::{BlockedEvidence, FetchClassification};
+
+        let Some(pool) = live_pool("blocked_queue").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("blocked");
+        let evidence = BlockedEvidence {
+            classification: FetchClassification::BlockedCaptcha,
+            url: "https://challenge.example/register".to_string(),
+            host: "challenge.example".to_string(),
+            http_status: Some(403),
+            markers: vec!["cloudflare:__cf_chl_opt".to_string()],
+            detail: "fixture".to_string(),
+            retry_after_seconds: None,
+            fetched_at: Utc::now(),
+        };
+        let source: Arc<dyn DiscoverySource> = Arc::new(FailingSource {
+            id: "blocked_fixture",
+            error: DiscoveryError::Blocked(Box::new(evidence)),
+        });
+        let runner = DiscoveryJobRunner::new(pool.clone(), vec![source]);
+        let job = runner
+            .create_job(&tenant, &DiscoveryQuery::default(), &[])
+            .await
+            .expect("create job");
+        let job = runner.run_to_completion(&tenant, job.id).await.unwrap();
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.discovered, 0);
+
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error FROM sales_source_runs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "blocked_captcha",
+            "the run ledger carries the classification"
+        );
+        assert!(error.unwrap_or_default().contains("blocked_captcha"));
+
+        let candidates: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_discovery_candidates WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(candidates, 0, "a blocked fetch writes no data");
+
+        let (source_id, classification, markers, state): (String, String, Vec<String>, String) =
+            sqlx::query_as(
+                "SELECT source, classification, markers, state FROM sales_scrape_blocked_sources \
+             WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(source_id, "blocked_fixture");
+        assert_eq!(classification, "blocked_captcha");
+        assert!(markers.contains(&"cloudflare:__cf_chl_opt".to_string()));
+        assert_eq!(state, crate::discovery::BLOCKED_STATE_OPEN);
+
+        sqlx::query("DELETE FROM sales_scrape_blocked_sources WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup_discovery(&pool, &tenant).await;
+    }
+
+    /// A failing hook backs the host off, and the NEXT solve attempt is refused
     #[tokio::test]
     async fn select_sources_rejects_unknown_names_without_falling_back() {
         let calls = Arc::new(AtomicUsize::new(0));

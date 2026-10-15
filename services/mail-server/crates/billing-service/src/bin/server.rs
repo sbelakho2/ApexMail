@@ -64,6 +64,21 @@ struct Cli {
         default_value_t = false
     )]
     sweep_product_lines_only: bool,
+
+    /// Run the US sales-tax economic-nexus sweep ONCE against the live
+    /// database, print the report and exit — the SAME function the nightly
+    /// loop calls (one code path). Tracking and alerting only: it never
+    /// registers a state and never charges tax.
+    #[arg(long, env = "BILLING_SWEEP_US_TAX_NEXUS_ONLY", default_value_t = false)]
+    sweep_us_tax_nexus_only: bool,
+
+    /// Validate the committed US sales-tax rate/threshold data file
+    /// (`data/us_sales_tax.json`, or the `US_TAX_DATA_FILE` override),
+    /// print the per-state freshness report and exit. Validation errors exit
+    /// non-zero; no database is touched — this is the check to run after
+    /// editing the file.
+    #[arg(long, env = "BILLING_CHECK_US_TAX_DATA_ONLY", default_value_t = false)]
+    check_us_tax_data_only: bool,
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -97,6 +112,25 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     tracing::info!(listen = %cli.listen, "starting billing-service");
+
+    // US sales-tax data-file check (plan WP C2): a pure, DB-free ops
+    // entrypoint — the operator runs it after editing
+    // `data/us_sales_tax.json` (or a `US_TAX_DATA_FILE` override), before
+    // deploying. Deliberately BEFORE any database or Redis connection so it
+    // works anywhere the binary runs.
+    if cli.check_us_tax_data_only {
+        let today = chrono::Utc::now().date_naive();
+        match billing_service::us_tax::check_data_file(today) {
+            Ok(report) => {
+                print!("{}", report.render());
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("US sales tax data file INVALID: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Database pool.
     let db = PgPoolOptions::new()
@@ -208,6 +242,45 @@ async fn main() -> anyhow::Result<()> {
             result.wallet_paid,
             result.pending_dunning,
             result.failed_months,
+        );
+        return Ok(());
+    }
+
+    // The same one-shot ops pattern for the US sales-tax nexus sweep (plan
+    // WP C2): tracking + alerting only (registration is an owner action and
+    // no tax is charged here). Runs `maintenance::sweep_us_tax_nexus_once`,
+    // the exact function the nightly loop calls.
+    if cli.sweep_us_tax_nexus_only {
+        let redis =
+            deadpool_redis::Config::from_url(&cli.redis_url).create_pool(Some(Runtime::Tokio1))?;
+        let config = BillingConfig {
+            database_url: cli.database_url,
+            redis_url: cli.redis_url,
+            listen_addr: cli.listen.clone(),
+            service_auth_token: cli.service_auth_token,
+            adyen_hmac_key: cli.adyen_hmac_key,
+            api_base_url: cli.api_base_url,
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(db, redis, config);
+        let result = maintenance::sweep_us_tax_nexus_once(state.as_ref())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        println!(
+            "us-tax nexus sweep: states_evaluated={} states_below={} states_crossed={} \
+             states_registered={} alerts_raised={} without_threshold_data={:?} \
+             unknown_state_invoices={} unknown_state_cents={} non_usd_invoices={:?} \
+             failed_states={}",
+            result.states_evaluated,
+            result.states_below,
+            result.states_crossed,
+            result.states_registered,
+            result.alerts_raised,
+            result.states_without_threshold_data,
+            result.unknown_state_invoices,
+            result.unknown_state_cents,
+            result.non_usd_invoices,
+            result.failed_states,
         );
         return Ok(());
     }

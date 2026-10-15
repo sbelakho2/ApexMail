@@ -48,6 +48,7 @@ pub mod knowledge;
 pub mod legal_policy;
 pub mod outcome_projector;
 pub mod personalization;
+pub mod reply_autosend;
 pub mod research;
 pub mod routes;
 pub mod scheduler;

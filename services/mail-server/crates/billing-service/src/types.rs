@@ -377,6 +377,18 @@ pub struct Invoice {
     /// Subtotal in cents.
     pub subtotal: i64,
     pub vat_total: i64,
+    /// US state sales tax in cents (the `us_tax` module, plan WP C2): `0`
+    /// unless the customer is a US customer in a state the operator has
+    /// REGISTERED and the rate row used was fresh. Included in `total`;
+    /// deliberately NOT folded into `vat_total`, which feeds the Estonian
+    /// KMD return.
+    #[serde(default)]
+    pub us_sales_tax_cents: i64,
+    /// The provenance stamp of `us_sales_tax_cents` (state, rate in basis
+    /// points, source URL, retrieved date). `None` iff the amount is 0 — the
+    /// pair is a CHECK constraint on `invoices`.
+    #[serde(default)]
+    pub us_sales_tax_snapshot: Option<serde_json::Value>,
     pub total: i64,
     pub line_items: Vec<InvoiceLineItem>,
     pub issued_at: DateTime<Utc>,
