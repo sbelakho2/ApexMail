@@ -47,6 +47,10 @@ Les entrées Dedicated Tenant et BYOC ci-dessous décrivent un modèle uniquemen
 | Dedicated Tenant | Région convenue avec le client | Single-tenant, géré par ApexMail |
 | BYOC (Bring Your Own Cloud) | Fournisseur et région choisis par le client | Infrastructure gérée par le client, couche applicative gérée par ApexMail |
 
+## Routage EU-only
+
+La matrice ci-dessus couvre le stockage. Le transport de livraison est régi par le mode de routage du locataire : en routage EU-only (`eu_only`), chaque envoi ne part que par les MTA européens propres d'ApexMail et le transport tiers partagé (AWS SES dans sa région UE) est interdit — une route MTA propre indisponible retient le message au lieu de basculer. L'argument complet sur le transport, chaque point lié à sa preuve, se trouve sur la [page de souveraineté européenne](/fr/eu-sovereign/).
+
 ## Contact
 
 Pour les questions relatives à l'emplacement des données : **privacy@apexmail.ee**

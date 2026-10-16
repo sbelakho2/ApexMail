@@ -121,10 +121,28 @@
         <loc>https://apexmail.ee/de/enterprise/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/de/eu-sovereign/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/de/features/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/migrate/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/migrate/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/migrate/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/migrate/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/migrate/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/pricing/</loc>
@@ -277,10 +295,28 @@
         <loc>https://apexmail.ee/es/enterprise/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/es/eu-sovereign/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/es/features/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/migrate/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/migrate/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/migrate/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/migrate/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/migrate/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/pricing/</loc>
@@ -338,6 +374,9 @@
     </url>
     <url>
         <loc>https://apexmail.ee/es/terms/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/eu-sovereign/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/features/</loc>
@@ -403,10 +442,28 @@
         <loc>https://apexmail.ee/fr/enterprise/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/fr/eu-sovereign/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/fr/features/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/migrate/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/migrate/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/migrate/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/migrate/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/migrate/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/pricing/</loc>
@@ -467,6 +524,21 @@
     </url>
     <url>
         <loc>https://apexmail.ee/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/migrate/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/migrate/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/migrate/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/migrate/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/migrate/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/performance-methodology/</loc>

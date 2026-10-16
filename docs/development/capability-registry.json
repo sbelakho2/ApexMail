@@ -932,6 +932,23 @@
         "first-response SLO",
         "first response latency"
       ]
+    },
+    {
+      "capability": "eu-only-routing",
+      "crate": "crates/mail-common + crates/worker-processors",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "worker",
+        "compose_service": "worker",
+        "env_gate": null,
+        "call_path": "crates/mail-common/src/routing_mode.rs (the typed reader of tenants.settings.routingMode; unrecognized values resolve to EuOnly) -> crates/worker-processors/src/email/processor.rs (tenant_routing_mode -> plan_delivery_route -> EuOnlyHold with a named reason, plus the eu_only_route_guard_violation structural guard; SES is unreachable under eu_only) + crates/api-server/src/routes/routing.rs (entitlement-gated activation + the public receipt endpoints)",
+        "metrics": null,
+        "explanation": "Per-tenant EU-only routing is enforced on the production worker's dispatch path: under eu_only the resolved route must be ApexMail's own relay MTA or the message is HELD (named reason, audited) - never failed over to the shared third-party transport. Added to the registry 2026-10-16 in the same change that names the mode on the marketing claim surfaces (the EU sovereignty page and the compare-page rows), per the scan.context_rule."
+      },
+      "scan_aliases": [
+        "EU-only routing",
+        "EU-only mode"
+      ]
     }
   ],
   "stale_marker_exceptions": {

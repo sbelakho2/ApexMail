@@ -1,8 +1,15 @@
-{# Hero — 2026-09-08 positioning round: "built for control" (review §1/§3).
-   Geography (EEA storage) stays as a SUPPORTING pillar, not the headline —
-   the product proposition (send, inspect, control delivery and
-   infrastructure) applies worldwide. The terminal shows the REAL public
-   HTTP contract (curl against /v1/messages); the fictional
+{# Hero — 2026-10-16 sovereignty round (owner directive): the EU-sovereign
+   promise is THE headline. Supersedes the 2026-09-08 "built for control"
+   positioning, which kept EEA storage a SUPPORTING pillar; the pre-dating
+   plan's EU-sovereign position is the differentiator, so the hero now leads
+   with it — built in Europe, sovereign by choice — while staying TRUE:
+   the subtitle names the EU company (Bel Consulting OÜ, Tallinn), the EU
+   data centres (Germany/Finland), the one-setting EU-only routing mode and
+   the Ed25519-signed routing receipts. The honest Global-vs-EU-only scope
+   (the Global default delivers through AWS SES in its EU region) is stated
+   on /eu-sovereign/ and in the home sovereignty section directly below —
+   never as a blanket "no US provider" claim. The terminal shows the REAL
+   public HTTP contract (curl against /v1/messages); the fictional
    @apexmail/node import stays out until the SDK actually ships. The
    "Run live API request" button POSTs the shown payload to the Rust
    sandbox executor — the request really queues and delivery is really
@@ -18,18 +25,18 @@
     <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-16 items-center">
       <div class="min-w-0">
         <p class="k-arc-label mb-4">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_eyebrow"] %}{{ i18n_data[l]["home"]["hero_eyebrow"] }}{% else %}Transactional email infrastructure{% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_eyebrow"] %}{{ i18n_data[l]["home"]["hero_eyebrow"] }}{% else %}Built in Europe. Sovereign by choice.{% endif %}
         </p>
         <h1 class="text-surface-950 leading-[1.02] text-balance text-[44px] sm:text-[52px] lg:text-[64px] font-bold tracking-[-0.03em]">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}
             {{ i18n_data[l]["home"]["hero_line1"] }}
-            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}control.{% endif %}</em>
+            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Sovereign by choice.{% endif %}</em>
           {% else %}
-            The email API built for <em class="not-italic text-brand-500">control.</em>
+            Email infrastructure built in Europe. <em class="not-italic text-brand-500">Sovereign by choice.</em>
           {% endif %}
         </h1>
         <p class="text-surface-600 text-base lg:text-lg max-w-[48ch] mt-5 mb-6">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Send transactional and lifecycle email through a fast API or SMTP relay, inspect every delivery attempt, and manage deliverability from one operational platform.{% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Built and operated by Bel Consulting OÜ in Tallinn, Estonia, on EU data centres in Germany and Finland. EU-only routing is a real, one-setting mode: sends leave only through ApexMail's own EU MTAs, and every accepted message carries an Ed25519-signed routing receipt you can verify yourself.{% endif %}
         </p>
         <div class="flex flex-col sm:flex-row flex-wrap gap-3 mb-5">
           <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg">

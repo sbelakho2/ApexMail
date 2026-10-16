@@ -37,6 +37,10 @@ Qualifizierte Käufer können die aktuelle AVV, Unterauftragsverarbeiter-Informa
 - HIPAA-Verfügbarkeit und eine BAA werden **derzeit nicht angeboten**.
 - Jede SLA, jeder Datenresidenz-Umfang, jede Antwort auf Sicherheitsfragebögen und jede Zusage privater Bereitstellungen wird durch die unterzeichnete Vereinbarung geregelt.
 
+## EU-Souveränität
+
+Enterprise Cloud enthält EU-only-Routing: Jede Nachricht verlässt das System über die eigenen EU-MTAs von ApexMail, mit einem fail-closed-Anhalten statt eines Drittanbieter-Fallbacks, und jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg. Das vollständige Argument — EU-Unternehmen, EU-Rechenzentren, der Routing-Modus und die Belege, jeweils mit ihrer Evidenz verlinkt — steht auf der [EU-Souveränitätsseite](/de/eu-sovereign/).
+
 ## Abrechnungslebenszyklus
 
 Enterprise ist nicht über den generischen öffentlichen Checkout kaufbar. Der Vertrag oder die genehmigte Abrechnungsregelung ist die maßgebliche Berechtigungsgrundlage. Für die öffentlichen Self-Service-Tarife sind Adyen Checkout und der verifizierte Adyen-Subscription-Webhook erforderlich, bevor ein kostenpflichtiger Tarif freigeschaltet wird.

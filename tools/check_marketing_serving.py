@@ -426,10 +426,15 @@ def self_test(root: Path) -> int:
             failures += 1
 
         # 8. A 10%-discount-style annual number is caught.
+        #    2026-10-16: the needle follows the current catalog again. The
+        #    2026-10-15 price table cut Developer to €20/mo, retiring the old
+        #    29→24.1667 annual this mutation keyed on; the replace then
+        #    matched nothing and the self-test lost its proof. Pin Pro's
+        #    current annual (89 → 74.1666666667).
         mutant = clone()
         pricing = mutant / "apps/marketing-zola/data/pricing.json"
-        src = read(pricing).replace('"annual_price_per_month": 24.1666666667',
-                                    '"annual_price_per_month": 26.1', 1)
+        src = read(pricing).replace('"annual_price_per_month": 74.1666666667',
+                                    '"annual_price_per_month": 80.0', 1)
         pricing.write_text(src)
         errs = run_checks(mutant)
         if not any("annual_price_per_month" in e for e in errs):

@@ -21,7 +21,10 @@
   <section class="bg-surface-50 pt-24 pb-4 lg:pt-28">
     <div class="mx-auto max-w-3xl px-6">
       {% if "<h1" not in section.content %}
-      <h1 class="text-surface-950 mb-6 text-[40px] sm:text-[48px] tracking-normal">{{ section.title }}</h1>
+      {# [overflow-wrap:anywhere] matches prose-section.html: a long compound
+         heading (e.g. the German "Migrationsleitfäden") spilled its 327px
+         mobile box by 5px and failed the F52 layout gate. #}
+      <h1 class="text-surface-950 mb-6 text-[40px] sm:text-[48px] tracking-normal [overflow-wrap:anywhere]">{{ section.title }}</h1>
       {% endif %}
       <div class="prose max-w-none">
         {{ section.content | safe }}
@@ -31,7 +34,7 @@
   {% elif section.title %}
   <section class="bg-surface-50 pt-24 pb-4 lg:pt-28">
     <div class="mx-auto max-w-3xl px-6">
-      <h1 class="text-surface-950 text-[40px] sm:text-[48px] tracking-normal">{{ section.title }}</h1>
+      <h1 class="text-surface-950 text-[40px] sm:text-[48px] tracking-normal [overflow-wrap:anywhere]">{{ section.title }}</h1>
       {% if section.description %}<p class="mt-4 text-lg text-surface-600">{{ section.description }}</p>{% endif %}
     </div>
   </section>

@@ -527,13 +527,18 @@ fn migration_control_plane_pages_have_titles() {
 
 #[test]
 fn migration_marketing_pages_have_content() {
+    // 2026-10-16 (sovereignty round): the home hero's keyword follows the
+    // owner-directive positioning — "Email infrastructure built in Europe"
+    // replaces the retired "The email API" line — and the new EU-sovereign
+    // page is covered here so a build that drops it fails loudly.
     let pages: Vec<(&str, &str)> = vec![
-        ("/", "The email API"),
+        ("/", "Email infrastructure built in Europe"),
         ("/pricing", "pricing"),
         ("/features", "Features"),
         ("/compliance", "Compliance"),
         ("/private-cloud", "Private Cloud"),
         ("/status", "System Status"),
+        ("/eu-sovereign", "EU-only routing"),
     ];
 
     for (path, keyword) in &pages {

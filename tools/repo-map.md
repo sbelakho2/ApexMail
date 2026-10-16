@@ -62,6 +62,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | data-loss-prevention | runtime-wired | WORKER_DLP_ENABLED |
 | ddos-middleware | runtime-wired | — |
 | email-draft-agent | runtime-wired | AI_EMAIL_AGENT_ENABLED |
+| eu-only-routing | runtime-wired | — |
 | fingerprint-library | runtime-wired | — |
 | first-response | runtime-wired | — |
 | inbound-reply-mirroring | runtime-wired | — |

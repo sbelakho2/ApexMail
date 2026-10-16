@@ -27,7 +27,8 @@
       "main_nav": "Hauptnavigation",
       "mobile_nav": "Mobile Navigation",
       "product_mobile": "Produkt",
-      "enterprise_desc": "Dedizierte Infrastruktur & Support"
+      "enterprise_desc": "Dedizierte Infrastruktur & Support",
+      "sovereignty": "Souveränität"
     },
     "footer": {
       "product": "Produkt",
@@ -89,7 +90,8 @@
       "status_disruption": "Dienstunterbrechung",
       "status_unavailable": "Statusdaten nicht verfügbar",
       "status_link": "Systemstatus",
-      "faq": "Häufige Fragen"
+      "faq": "Häufige Fragen",
+      "sovereignty": "Souveränität"
     },
     "cta": {
       "heading_1": "Bereit für",
@@ -400,14 +402,15 @@
       "questions_body": "Sprechen Sie mit unserem Team über Beschaffung, Jahresverträge, Migration oder den passenden Tarif für Ihr Volumen.",
       "talk_to_sales": "Vertrieb kontaktieren",
       "calculator_hint": "Verwenden Sie den Rechner oben",
-      "per_month": "pro Monat"
+      "per_month": "pro Monat",
+      "eu_only_details": "So funktioniert EU-only-Routing"
     },
     "home": {
       "hero_badge": "Jetzt mit Private-Cloud-Bereitstellungen",
-      "hero_line1": "Die E-Mail-API",
+      "hero_line1": "E-Mail-Infrastruktur, gebaut in Europa.",
       "hero_line2": "Gebaut für",
-      "hero_highlight": "Kontrolle.",
-      "hero_subtitle": "Senden Sie transaktionale und Lifecycle-E-Mails über eine schnelle API oder einen SMTP-Relay, prüfen Sie jeden Zustellversuch und verwalten Sie Zustellbarkeit auf einer operativen Plattform.",
+      "hero_highlight": "Souverän aus Überzeugung.",
+      "hero_subtitle": "Entwickelt und betrieben von der Bel Consulting OÜ in Tallinn, Estland, auf EU-Rechenzentren in Deutschland und Finnland. EU-only-Routing ist ein echter Modus mit einer Einstellung: Nachrichten verlassen das System nur über die eigenen EU-MTAs von ApexMail, und jede angenommene Nachricht trägt einen Ed25519-signierten Routing-Beleg zur eigenen Prüfung.",
       "hero_benefit_1": "Zustellbarkeits-Tooling",
       "hero_benefit_2": "DSGVO- und Audit-Workflow-Unterstützung",
       "hero_benefit_3": "Zustellereignis-Tracking",
@@ -438,7 +441,7 @@
       "email_grader_field": "Domain",
       "email_grader_submit": "Domain bewerten",
       "email_grader_note": "Live-DNS-Prüfungen · SPF / DKIM / DMARC / MX",
-      "hero_eyebrow": "Transaktionale E-Mail-Infrastruktur",
+      "hero_eyebrow": "In Europa gebaut. Souverän aus Überzeugung.",
       "hero_proof_line": "Keine Kreditkarte &middot; 3.000 E-Mails/Monat &middot; 30.000-Nachrichten-Startguthaben &middot; <a href=\"/de/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Standardmäßig im EWR gespeichert</a>",
       "teaser_emails_per_month": "E-Mails/Monat",
       "teaser_launch_allowance": "Startguthaben",
@@ -608,7 +611,8 @@
       "cta_subtitle": "ApexMail bietet E-Mail-Infrastruktur mit DSGVO-orientierten Workflows, auditfähigen Tarifen und einem faktenbasierten Security-Review-Prozess. HIPAA-Verfügbarkeit wird derzeit nicht angeboten.",
       "cta_button": "Compliance-Optionen prüfen",
       "cta_title": "Bereit für ruhigeren Schlaf?",
-      "cta_contact": "Compliance-Team kontaktieren"
+      "cta_contact": "Compliance-Team kontaktieren",
+      "sovereignty_link": "EU-Souveränität: die Architektur und ihre Belege lesen"
     },
     "compare": {
       "hero_badge": "Marktvergleich",
@@ -734,6 +738,26 @@
       "a5": "HIPAA-Verfügbarkeit wird derzeit nicht angeboten. Enterprise kann Compliance-Workflow-Gespräche unterstützen, aber ein regulierter Anwendungsfall darf erst nach schriftlicher Bestätigung und gegebenenfalls erforderlicher Vereinbarung mit unseren Security- und Legal-Teams fortgesetzt werden.",
       "q6": "Kann ich den Tarif jederzeit wechseln?",
       "a6": "Wechsel bezahlter Tarife erfolgen über sicheres Adyen Checkout oder das Adyen-Abrechnungsportal. Ein Tarif ändert sich erst, wenn Adyen das Abrechnungsereignis bestätigt und ApexMail den verifizierten Adyen-Webhook verarbeitet hat. Jährliche Enterprise-Verträge folgen dem unterzeichneten Bestellformular und den Servicebedingungen."
+    },
+    "home_sovereignty": {
+      "eyebrow": "Souveränität",
+      "heading_1": "Europäisch aus Konstruktion.",
+      "heading_2": "Souverän aus Überzeugung.",
+      "subtitle": "ApexMail ist in Europa gebaut, und seine Souveränitätsfunktionen sind mit Belegen verlinkt statt mit Adjektiven beschrieben. Die globale Zustellung ist der Standard; EU-only-Routing ist die Einstellung, die den Drittanbieter-Transport entfernt.",
+      "point_1_title": "Ein EU-Unternehmen, unter EU-Recht",
+      "point_1_desc": "Bel Consulting OÜ, Tallinn (Registrierung 16588745): estnisches Recht, Harju County Court.",
+      "point_1_link": "Verträge und AVV",
+      "point_2_title": "EU-Rechenzentren",
+      "point_2_desc": "Primär Deutschland, Backup Finnland; Kern-Servicedaten werden innerhalb des EWR verarbeitet und repliziert.",
+      "point_2_link": "Matrix der Datenstandorte",
+      "point_3_title": "EU-only-Routing, fail-closed",
+      "point_3_desc": "Eine Einstellung: Nachrichten verlassen das System ausschließlich über die eigenen EU-MTAs von ApexMail. Kein Drittanbieter-Transport — ein Versand ohne eigene MTA-Route wird angehalten, nicht umgeleitet.",
+      "point_3_link": "Preise und Verfügbarkeit",
+      "point_4_title": "Signierte Routing-Belege",
+      "point_4_desc": "Jede angenommene Nachricht trägt eine Ed25519-Signatur über ihre Routing-Daten, prüfbar von jeder dritten Partei mit dem veröffentlichten öffentlichen Schlüssel.",
+      "point_4_link": "So funktioniert die Prüfung",
+      "note": "Offener Umfang: Die globale Standardzustellung läuft über AWS SES in dessen EU-Region (Irland) — eine EU-Region eines US-Unternehmens. EU-only-Routing entfernt sie; der vollständige Vergleich steht auf <a href=\"/de/eu-sovereign/\" class=\"text-brand-500 font-semibold hover:underline\">der Souveränitätsseite</a>.",
+      "see_all": "Souveränitäts-Dossier lesen"
     }
   },
   "fr": {
@@ -764,7 +788,8 @@
       "mobile_nav": "Navigation mobile",
       "product_mobile": "Produit",
       "compliance_desc": "Traitement orienté RGPD et DPA à examiner",
-      "enterprise_desc": "Infrastructure dédiée et support"
+      "enterprise_desc": "Infrastructure dédiée et support",
+      "sovereignty": "Souveraineté"
     },
     "footer": {
       "product": "Produit",
@@ -826,7 +851,8 @@
       "tagline": "Infrastructure email de niveau entreprise, opérée depuis l'UE.",
       "use_cases": "Cas d'usage",
       "status_link": "État du service",
-      "faq": "Questions fréquentes"
+      "faq": "Questions fréquentes",
+      "sovereignty": "Souveraineté"
     },
     "cta": {
       "heading_1": "Prêt à envoyer",
@@ -1137,14 +1163,15 @@
       "questions_body": "Parlez à notre équipe de l'approvisionnement, des contrats annuels, de la migration ou du forfait adapté à votre volume.",
       "talk_to_sales": "Parler aux ventes",
       "calculator_hint": "Utilisez le calculateur ci-dessus",
-      "per_month": "par mois"
+      "per_month": "par mois",
+      "eu_only_details": "Comment fonctionne le routage EU-only"
     },
     "home": {
       "hero_badge": "Maintenant avec déploiements Cloud Privé",
-      "hero_line1": "L'API email pensée pour",
+      "hero_line1": "Une infrastructure email conçue en Europe.",
       "hero_line2": "Conçu pour",
-      "hero_highlight": "le contrôle.",
-      "hero_subtitle": "Envoyez des emails transactionnels et lifecycle via une API rapide ou un relais SMTP, inspectez chaque tentative de livraison et pilotez la délivrabilité depuis une plateforme opérationnelle.",
+      "hero_highlight": "Souveraine par choix.",
+      "hero_subtitle": "Développée et exploitée par Bel Consulting OÜ à Tallinn (Estonie), sur des centres de données européens en Allemagne et en Finlande. Le routage EU-only est un mode réel, activable en un seul réglage : les envois ne partent que par les MTA européens d’ApexMail, et chaque message accepté porte un reçu de routage signé Ed25519 que vous pouvez vérifier vous-même.",
       "hero_benefit_1": "Outils de délivrabilité",
       "hero_benefit_2": "Support des workflows RGPD et d'audit",
       "hero_benefit_3": "Suivi des événements de livraison",
@@ -1175,7 +1202,7 @@
       "email_grader_field": "Domaine",
       "email_grader_submit": "Évaluer mon domaine",
       "email_grader_note": "vérifications DNS en direct · SPF / DKIM / DMARC / MX",
-      "hero_eyebrow": "Infrastructure email transactionnelle",
+      "hero_eyebrow": "Conçu en Europe. Souverain par choix.",
       "hero_proof_line": "Sans carte bancaire &middot; 3 000 emails/mois &middot; allocation de lancement de 30 000 messages &middot; <a href=\"/fr/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">stocké dans l’EEE par défaut</a>",
       "teaser_emails_per_month": "emails/mois",
       "teaser_launch_allowance": "allocation de lancement",
@@ -1308,7 +1335,8 @@
       "hero_subtitle": "Des workflows RGPD, des pistes d'audit et une documentation de conformité actuelle pour la plateforme email.",
       "hero_title": "Une conformité qui résiste aux audits.",
       "cta_title": "Prêt à dormir plus sereinement ?",
-      "cta_contact": "Parler à l'équipe conformité"
+      "cta_contact": "Parler à l'équipe conformité",
+      "sovereignty_link": "Lire l’architecture souveraine de l’UE et ses preuves"
     },
     "forensic": {
       "cta_button": "Tester les outils",
@@ -1471,6 +1499,26 @@
       "a5": "La disponibilité HIPAA n'est pas proposée actuellement. Enterprise peut accompagner les discussions sur les flux de conformité, mais un cas d'usage réglementé ne peut avancer qu'après confirmation écrite et tout accord requis avec nos équipes sécurité et juridique.",
       "q6": "Puis-je changer de forfait à tout moment ?",
       "a6": "Les changements de forfait payant passent par Adyen Checkout sécurisé ou le portail de facturation Adyen. Un forfait ne change qu'une fois que Adyen a confirmé l'événement de facturation et qu'ApexMail a réconcilié le webhook Adyen vérifié. Les contrats annuels Enterprise suivent le bon de commande signé et les conditions de service."
+    },
+    "home_sovereignty": {
+      "eyebrow": "Souveraineté",
+      "heading_1": "Européen par construction.",
+      "heading_2": "Souverain par choix.",
+      "subtitle": "ApexMail est conçu en Europe et ses fonctions de souveraineté sont liées à leurs preuves, pas à des adjectifs. La livraison globale est le mode par défaut ; le routage EU-only est le réglage qui retire le transport tiers.",
+      "point_1_title": "Une société de l’UE, sous droit de l’UE",
+      "point_1_desc": "Bel Consulting OÜ, Tallinn (registre 16588745) : droit estonien, Harju County Court.",
+      "point_1_link": "Contrats et DPA",
+      "point_2_title": "Centres de données européens",
+      "point_2_desc": "Allemagne en primaire, Finlande en secours ; les données de service essentielles sont traitées et répliquées dans l’EEE.",
+      "point_2_link": "Matrice des emplacements",
+      "point_3_title": "Routage EU-only, fail-closed",
+      "point_3_desc": "Un seul réglage : les envois ne partent que par les MTA européens d’ApexMail. Aucun transport tiers — un envoi sans route MTA propre est retenu, pas réacheminé.",
+      "point_3_link": "Tarifs et disponibilité",
+      "point_4_title": "Reçus de routage signés",
+      "point_4_desc": "Chaque message accepté porte une signature Ed25519 sur ses données de routage, vérifiable par tout tiers avec la clé publique publiée.",
+      "point_4_link": "Comment vérifier",
+      "note": "Périmètre honnête : la livraison globale par défaut passe par AWS SES dans sa région UE (Irlande) — une région UE d’une société américaine. Le routage EU-only la retire ; la comparaison complète figure sur <a href=\"/fr/eu-sovereign/\" class=\"text-brand-500 font-semibold hover:underline\">la page souveraineté</a>.",
+      "see_all": "Lire le dossier souveraineté"
     }
   },
   "es": {
@@ -1501,7 +1549,8 @@
       "mobile_nav": "Navegación móvil",
       "product_mobile": "Producto",
       "compliance_desc": "Procesamiento orientado al RGPD y DPA para revisión",
-      "enterprise_desc": "Infraestructura dedicada y soporte"
+      "enterprise_desc": "Infraestructura dedicada y soporte",
+      "sovereignty": "Soberanía"
     },
     "footer": {
       "product": "Producto",
@@ -1563,7 +1612,8 @@
       "tagline": "Infraestructura de email de nivel empresarial, operada desde la UE.",
       "use_cases": "Casos de uso",
       "status_link": "Estado del servicio",
-      "faq": "Preguntas frecuentes"
+      "faq": "Preguntas frecuentes",
+      "sovereignty": "Soberanía"
     },
     "cta": {
       "heading_1": "¿Listo para enviar",
@@ -1874,14 +1924,15 @@
       "questions_body": "Hable con nuestro equipo sobre contratación, contratos anuales, migración o el plan adecuado para su volumen.",
       "talk_to_sales": "Hablar con ventas",
       "calculator_hint": "Use la calculadora de arriba",
-      "per_month": "al mes"
+      "per_month": "al mes",
+      "eu_only_details": "Cómo funciona el enrutamiento EU-only"
     },
     "home": {
       "hero_badge": "Ahora con implementaciones de Nube Privada",
-      "hero_line1": "La API de email hecha para",
+      "hero_line1": "Infraestructura de email creada en Europa.",
       "hero_line2": "Construido para",
-      "hero_highlight": "el control.",
-      "hero_subtitle": "Envía email transaccional y de ciclo de vida por API o SMTP, inspecciona cada intento de entrega y gestiona la entregabilidad desde una plataforma operativa.",
+      "hero_highlight": "Soberana por decisión.",
+      "hero_subtitle": "Desarrollada y operada por Bel Consulting OÜ en Tallin (Estonia), sobre centros de datos de la UE en Alemania y Finlandia. El enrutamiento EU-only es un modo real que se activa con un solo ajuste: los envíos salen únicamente por los MTA europeos de ApexMail, y cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519 que puedes verificar tú mismo.",
       "hero_benefit_1": "Herramientas de entregabilidad",
       "hero_benefit_2": "Soporte de flujos de trabajo RGPD y de auditoría",
       "hero_benefit_3": "Seguimiento de eventos de entrega",
@@ -1912,7 +1963,7 @@
       "email_grader_field": "Dominio",
       "email_grader_submit": "Evaluar mi dominio",
       "email_grader_note": "comprobaciones DNS en vivo · SPF / DKIM / DMARC / MX",
-      "hero_eyebrow": "Infraestructura de email transaccional",
+      "hero_eyebrow": "Creado en Europa. Soberano por decisión.",
       "hero_proof_line": "Sin tarjeta &middot; 3.000 emails/mes &middot; asignación de lanzamiento de 30.000 mensajes &middot; <a href=\"/es/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">almacenado en el EEE por defecto</a>",
       "teaser_emails_per_month": "emails/mes",
       "teaser_launch_allowance": "asignación de lanzamiento",
@@ -2045,7 +2096,8 @@
       "hero_subtitle": "Flujos de trabajo RGPD, registros de auditoría y documentación de cumplimiento actual para la plataforma de email.",
       "hero_title": "Un cumplimiento que supera las auditorías.",
       "cta_title": "¿Listo para dormir más tranquilo?",
-      "cta_contact": "Hablar con el equipo de cumplimiento"
+      "cta_contact": "Hablar con el equipo de cumplimiento",
+      "sovereignty_link": "Leer la arquitectura soberana de la UE y su evidencia"
     },
     "forensic": {
       "cta_button": "Probar las herramientas",
@@ -2208,6 +2260,26 @@
       "a5": "La disponibilidad HIPAA no se ofrece actualmente. Enterprise puede apoyar conversaciones sobre flujos de cumplimiento, pero un caso de uso regulado solo puede avanzar tras confirmación por escrito y cualquier acuerdo requerido con nuestros equipos de seguridad y legal.",
       "q6": "¿Puedo cambiar de plan en cualquier momento?",
       "a6": "Los cambios de plan de pago utilizan Adyen Checkout seguro o el portal de facturación de Adyen. Un plan no cambia hasta que Adyen confirma el evento de facturación y ApexMail concilia el webhook verificado de Adyen. Los contratos anuales Enterprise siguen el formulario de pedido firmado y los términos del servicio."
+    },
+    "home_sovereignty": {
+      "eyebrow": "Soberanía",
+      "heading_1": "Europea por construcción.",
+      "heading_2": "Soberana por decisión.",
+      "subtitle": "ApexMail está creada en Europa y sus funciones de soberanía enlazan con su evidencia, no con adjetivos. La entrega global es el modo predeterminado; el enrutamiento EU-only es el ajuste que elimina el transporte de terceros.",
+      "point_1_title": "Una empresa de la UE, bajo derecho de la UE",
+      "point_1_desc": "Bel Consulting OÜ, Tallin (registro 16588745): derecho estonio, Harju County Court.",
+      "point_1_link": "Contratos y DPA",
+      "point_2_title": "Centros de datos de la UE",
+      "point_2_desc": "Alemania principal, Finlandia de respaldo; los datos esenciales del servicio se procesan y replican dentro del EEE.",
+      "point_2_link": "Matriz de ubicaciones",
+      "point_3_title": "Enrutamiento EU-only, fail-closed",
+      "point_3_desc": "Un solo ajuste: los envíos salen exclusivamente por los MTA europeos de ApexMail. Sin transporte de terceros: un envío sin ruta MTA propia se retiene, no se redirige.",
+      "point_3_link": "Precios y disponibilidad",
+      "point_4_title": "Recibos de enrutamiento firmados",
+      "point_4_desc": "Cada mensaje aceptado lleva una firma Ed25519 sobre sus datos de enrutamiento, verificable por cualquier tercero con la clave pública publicada.",
+      "point_4_link": "Cómo funciona la verificación",
+      "note": "Alcance honesto: la entrega global predeterminada pasa por AWS SES en su región de la UE (Irlanda), una región de la UE de una empresa estadounidense. El enrutamiento EU-only la elimina; la comparación completa está en <a href=\"/es/eu-sovereign/\" class=\"text-brand-500 font-semibold hover:underline\">la página de soberanía</a>.",
+      "see_all": "Leer el caso de soberanía"
     }
   }
 }

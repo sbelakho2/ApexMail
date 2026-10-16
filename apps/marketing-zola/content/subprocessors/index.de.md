@@ -10,6 +10,8 @@ last_updated = "2026-07-29"
 
 Diese Seite listet Drittanbieter auf, die von der Bel Consulting OÜ (handelnd als ApexMail) beauftragt werden und im Rahmen der Erbringung des ApexMail-Dienstes personenbezogene Daten von Kunden verarbeiten können. Dieses Register wird gemäß Artikel 28 der DSGVO und Abschnitt 5 der ApexMail-Auftragsverarbeitungsvereinbarung geführt.
 
+Unter EU-only-Routing trägt der AWS-SES-Eintrag keine Mail eines Mandanten: Nachrichten verlassen das System ausschließlich über die eigenen MTAs von ApexMail auf Hetzner-Infrastruktur. EU-only-Routing und seine Belege — samt der Unterscheidung zum globalen Standard, der AWS SES in dessen EU-Region nutzt — sind auf der [EU-Souveränitätsseite](/de/eu-sovereign/) dargelegt.
+
 ### Infrastruktur-Unterauftragsverarbeiter
 
 Die folgenden Drittunternehmen verarbeiten personenbezogene Daten von Kunden im Auftrag von ApexMail.

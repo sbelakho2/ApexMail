@@ -37,6 +37,10 @@ Un comprador cualificado puede solicitar la DPA vigente, información sobre subp
 - La disponibilidad HIPAA y un BAA **no se ofrecen actualmente**.
 - Cualquier SLA, alcance de residencia de datos, respuesta a cuestionarios de seguridad o compromiso de despliegue privado se rige por el acuerdo firmado.
 
+## Soberanía de la UE
+
+Enterprise Cloud incluye el enrutamiento EU-only: cada envío sale por los MTA europeos propios de ApexMail, con una retención fail-closed en lugar de un respaldo de terceros, y cada mensaje aceptado lleva un recibo de enrutamiento firmado con Ed25519. El argumento completo — empresa de la UE, centros de datos de la UE, el modo de enrutamiento y los recibos, cada uno enlazado con su evidencia — está en la [página de soberanía de la UE](/es/eu-sovereign/).
+
 ## Ciclo de vida de facturación
 
 Enterprise no puede adquirirse a través del Checkout público genérico. El contrato o la disposición de facturación aprobada constituyen la autoridad del derecho. Para los planes públicos de autoservicio, se requieren Adyen Checkout y el webhook verificado de suscripción de Adyen antes de conceder un plan de pago.

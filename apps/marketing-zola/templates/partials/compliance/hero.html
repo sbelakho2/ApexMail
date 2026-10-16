@@ -48,6 +48,13 @@
             Compliance Review
           </a>
         </div>
+
+        {# EU-sovereign argument: linked from the compliance page (owner
+           directive 2026-10-16) so the contractual layer and the sovereign
+           position read as one story. #}
+        <p class="mt-8">
+          <a href="{{ lp }}/eu-sovereign/" class="text-sm font-bold text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["compliance"] and i18n_data[l]["compliance"]["sovereignty_link"] %}{{ i18n_data[l]["compliance"]["sovereignty_link"] }}{% else %}Read the EU-sovereign architecture and its evidence{% endif %} &rarr;</a>
+        </p>
       </div>
 
       {# Right Column — Compliance Controls #}

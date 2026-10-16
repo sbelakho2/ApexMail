@@ -37,6 +37,10 @@ A qualified buyer can request the current DPA, subprocessor information, securit
 - HIPAA availability and a BAA are **not currently offered**.
 - Any SLA, data-residency scope, security questionnaire response, or private-deployment commitment is controlled by the signed agreement.
 
+## EU Sovereignty
+
+Enterprise Cloud includes EU-only routing: every send leaves through ApexMail's own EU MTAs, with a fail-closed hold instead of a third-party fallback, and every accepted message carries an Ed25519-signed routing receipt. The full argument — EU company, EU data centres, the routing mode and the receipts, each linked to its evidence — is on the [EU sovereignty page](/eu-sovereign/).
+
 ## Billing Lifecycle
 
 Enterprise is not purchasable through generic public Checkout. The contract or approved billing arrangement is the entitlement authority. For the public self-service plans, Adyen Checkout and the verified Adyen subscription webhook are required before a paid plan is granted.

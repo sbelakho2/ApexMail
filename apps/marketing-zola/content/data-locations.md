@@ -47,6 +47,10 @@ Dedicated Tenant and BYOC entries below describe a model only where a separate w
 | Dedicated Tenant | EU region agreed with customer (default: Finland or Germany) | Single-tenant, ApexMail-managed |
 | BYOC (Bring Your Own Cloud) | Customer-chosen provider and region | Customer-managed infrastructure, ApexMail-managed application layer |
 
+## EU-Only Routing
+
+The matrix above covers storage. Delivery transport is governed by the tenant routing mode: under EU-only routing (`eu_only`), every send leaves through ApexMail's own EU MTAs and the shared third-party transport (AWS SES in its EU region) is forbidden — an unavailable own-MTA route holds the message instead of failing over. The full transport argument, each point linked to its evidence, is on the [EU sovereignty page](/eu-sovereign/).
+
 ## Contact
 
 For data residency inquiries: **privacy@apexmail.ee**

@@ -1,0 +1,60 @@
+{# ── Home — Sovereignty band (2026-10-16 owner directive) ──────────────
+   Sits DIRECTLY under the hero so the sovereignty argument is visible
+   without scrolling deep: four evidence-linked points, each one line, plus
+   the honest Global-vs-EU-only scope note (the Global default delivers
+   through AWS SES in its EU region; EU-only routing removes that
+   transport). Every string is localized via data/i18n.json
+   (home_sovereignty.*), with the English default inline.
+
+   Panel colours: bg-surface-950/900/800 are PERMANENTLY dark in both
+   themes (static/css/input.css pins the muted/brand text inside them), so
+   text-surface-400 / text-brand-500 children here clear AA in light AND
+   dark — the same pinned pattern the pricing calculator island uses. ── #}
+<section id="sovereignty" class="bg-surface-950 border-y border-surface-800" aria-label="Sovereignty">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-20">
+    <div class="max-w-3xl mb-10 lg:mb-12">
+      <span class="k-arc-label text-surface-400">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["eyebrow"] %}{{ i18n_data[l]["home_sovereignty"]["eyebrow"] }}{% else %}Sovereignty{% endif %}</span>
+      <h2 class="text-white mt-4 mb-5 tracking-tighter text-3xl lg:text-5xl">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["heading_1"] %}{{ i18n_data[l]["home_sovereignty"]["heading_1"] }}{% else %}European by construction.{% endif %}
+        <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["heading_2"] %}{{ i18n_data[l]["home_sovereignty"]["heading_2"] }}{% else %}Sovereign by choice.{% endif %}</span>
+      </h2>
+      <p class="text-surface-400 text-base lg:text-lg leading-[1.5]">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["subtitle"] %}{{ i18n_data[l]["home_sovereignty"]["subtitle"] }}{% else %}ApexMail is built in Europe and its sovereignty features are evidence-linked, not adjectives. Global delivery is the default; EU-only routing is the setting that removes the third-party transport.{% endif %}
+      </p>
+    </div>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div class="p-6 bg-surface-900 border border-surface-800 rounded-sm flex flex-col">
+        <span class="k-arc-label text-surface-400 mb-4">01</span>
+        <h3 class="text-base font-bold text-white mb-3 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_1_title"] %}{{ i18n_data[l]["home_sovereignty"]["point_1_title"] }}{% else %}An EU company, under EU law{% endif %}</h3>
+        <p class="text-surface-400 text-[13px] leading-[1.6] flex-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_1_desc"] %}{{ i18n_data[l]["home_sovereignty"]["point_1_desc"] }}{% else %}Bel Consulting OÜ, Tallinn (registry 16588745): Estonian governing law, Harju County Court.{% endif %}</p>
+        <a href="{{ lp }}/dpa/" class="text-brand-500 font-semibold text-xs tracking-wide mt-4 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_1_link"] %}{{ i18n_data[l]["home_sovereignty"]["point_1_link"] }}{% else %}Contracts and DPA{% endif %} &rarr;</a>
+      </div>
+      <div class="p-6 bg-surface-900 border border-surface-800 rounded-sm flex flex-col">
+        <span class="k-arc-label text-surface-400 mb-4">02</span>
+        <h3 class="text-base font-bold text-white mb-3 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_title"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_title"] }}{% else %}EU data centres{% endif %}</h3>
+        <p class="text-surface-400 text-[13px] leading-[1.6] flex-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_desc"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_desc"] }}{% else %}Germany primary, Finland backup; core service data is processed and replicated inside the EEA.{% endif %}</p>
+        <a href="{{ lp }}/data-locations/" class="text-brand-500 font-semibold text-xs tracking-wide mt-4 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_2_link"] %}{{ i18n_data[l]["home_sovereignty"]["point_2_link"] }}{% else %}Data location matrix{% endif %} &rarr;</a>
+      </div>
+      <div class="p-6 bg-surface-900 border border-surface-800 rounded-sm flex flex-col">
+        <span class="k-arc-label text-surface-400 mb-4">03</span>
+        <h3 class="text-base font-bold text-white mb-3 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_3_title"] %}{{ i18n_data[l]["home_sovereignty"]["point_3_title"] }}{% else %}EU-only routing, fail-closed{% endif %}</h3>
+        <p class="text-surface-400 text-[13px] leading-[1.6] flex-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_3_desc"] %}{{ i18n_data[l]["home_sovereignty"]["point_3_desc"] }}{% else %}One setting sends exclusively through ApexMail's own EU MTAs; no third-party transport, and a send with no own-MTA route is held, not rerouted.{% endif %}</p>
+        <a href="{{ lp }}/pricing/" class="text-brand-500 font-semibold text-xs tracking-wide mt-4 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_3_link"] %}{{ i18n_data[l]["home_sovereignty"]["point_3_link"] }}{% else %}Pricing and availability{% endif %} &rarr;</a>
+      </div>
+      <div class="p-6 bg-surface-900 border border-surface-800 rounded-sm flex flex-col">
+        <span class="k-arc-label text-surface-400 mb-4">04</span>
+        <h3 class="text-base font-bold text-white mb-3 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_4_title"] %}{{ i18n_data[l]["home_sovereignty"]["point_4_title"] }}{% else %}Signed routing receipts{% endif %}</h3>
+        <p class="text-surface-400 text-[13px] leading-[1.6] flex-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_4_desc"] %}{{ i18n_data[l]["home_sovereignty"]["point_4_desc"] }}{% else %}Every accepted message carries an Ed25519 signature over its routing payload, verifiable by any third party with the published public key.{% endif %}</p>
+        <a href="{{ lp }}/eu-sovereign/" class="text-brand-500 font-semibold text-xs tracking-wide mt-4 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["point_4_link"] %}{{ i18n_data[l]["home_sovereignty"]["point_4_link"] }}{% else %}How verification works{% endif %} &rarr;</a>
+      </div>
+    </div>
+    {# Honest scope note — the contrast that makes EU-only the promise. The
+       i18n value carries its own localized link to the sovereignty page. #}
+    <p class="mt-8 p-5 bg-surface-900 border border-surface-800 rounded-sm text-surface-400 text-sm leading-[1.6]">
+      {% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["note"] %}{{ i18n_data[l]["home_sovereignty"]["note"] | safe }}{% else %}Honest scope: the Global default delivers through AWS SES in its EU (Ireland) region — an EU region of a US company. EU-only routing removes it; the full comparison is on <a href="/eu-sovereign/" class="text-brand-500 font-semibold hover:underline">the sovereignty page</a>.{% endif %}
+    </p>
+    <div class="mt-10">
+      <a href="{{ lp }}/eu-sovereign/" class="text-brand-500 font-bold text-sm tracking-wide hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_sovereignty"] and i18n_data[l]["home_sovereignty"]["see_all"] %}{{ i18n_data[l]["home_sovereignty"]["see_all"] }}{% else %}Read the sovereignty case{% endif %} &rarr;</a>
+    </div>
+  </div>
+</section>

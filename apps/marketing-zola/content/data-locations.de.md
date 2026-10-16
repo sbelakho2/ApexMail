@@ -47,6 +47,10 @@ Die unten genannten Einträge zu Dedicated Tenant und BYOC beschreiben ein Model
 | Dedicated Tenant | Mit dem Kunden vereinbarte Region | Single-Tenant, ApexMail-verwaltet |
 | BYOC (Bring Your Own Cloud) | Vom Kunden gewählter Anbieter und Region | Kundenverwaltete Infrastruktur, ApexMail-verwaltete Anwendungsschicht |
 
+## EU-only-Routing
+
+Die obige Matrix betrifft die Speicherung. Der Zustelltransport wird durch den Routing-Modus des Mandanten bestimmt: Unter EU-only-Routing (`eu_only`) verlässt jede Nachricht das System über die eigenen EU-MTAs von ApexMail, und der gemeinsame Drittanbieter-Transport (AWS SES in dessen EU-Region) ist ausgeschlossen — eine nicht verfügbare eigene MTA-Route hält die Nachricht zurück, statt umzuleiten. Das vollständige Transport-Argument, jeder Punkt mit seiner Evidenz verlinkt, steht auf der [EU-Souveränitätsseite](/de/eu-sovereign/).
+
 ## Kontakt
 
 Für Anfragen zum Datenstandort: **privacy@apexmail.ee**

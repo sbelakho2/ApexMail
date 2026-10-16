@@ -434,6 +434,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/enterprise/index.html"
         ),)),
+        "/de/eu-sovereign" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/eu-sovereign/index.html"
+        ),)),
         "/de/features" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/de/features/index.html"
@@ -578,6 +582,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/enterprise/index.html"
         ),)),
+        "/eu-sovereign" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/eu-sovereign/index.html"
+        ),)),
         "/es" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/index.html"
@@ -657,6 +665,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         "/es/enterprise" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/es/enterprise/index.html"
+        ),)),
+        "/es/eu-sovereign" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/eu-sovereign/index.html"
         ),)),
         "/es/features" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -849,6 +861,10 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         "/fr/enterprise" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/fr/enterprise/index.html"
+        ),)),
+        "/fr/eu-sovereign" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/eu-sovereign/index.html"
         ),)),
         "/fr/features" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),

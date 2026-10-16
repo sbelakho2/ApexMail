@@ -3,11 +3,17 @@
    grader strip → pricing teaser → CTA. The full detail lives on its own
    pages (/features/, /compare/, /security/, /pricing/) — linked, not
    inlined. This halves the mobile scroll and gives each subpage a reason
-   to exist. #}
+   to exist.
+   2026-10-16 (sovereignty round): the hero leads with the EU-sovereign
+   promise and a sovereignty band sits DIRECTLY under it (four
+   evidence-linked points + the honest Global-vs-EU-only scope note)
+   before any other section, so the argument is visible without scrolling
+   deep. #}
 {% extends "base.html" %}
 
 {% block content %}
 {% include "partials/home/hero.html" %}
+{% include "partials/home/sovereignty.html" %}
 {% include "partials/home/features.html" %}
 
 {# ── Grader strip: one compact differentiator, not a full section ── #}

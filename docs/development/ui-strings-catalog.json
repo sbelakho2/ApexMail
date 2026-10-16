@@ -3631,7 +3631,7 @@
     ],
     "flash": [
       {
-        "id": "services/mail-server/crates/api-server/src/middleware/auth.rs:1648",
+        "id": "services/mail-server/crates/api-server/src/middleware/auth.rs:1667",
         "text": "Control-plane access is restricted to ApexMail operators."
       },
       {

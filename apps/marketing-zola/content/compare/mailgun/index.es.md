@@ -27,6 +27,7 @@ verdict_points = ["Configuración de despliegue orientada a la UE/EEE", "Catálo
 comparison_sections = [
   { title = "PROCESAMIENTO DE DATOS EN EL EEE", rows = [
     { feature = "Región principal de alojamiento", apex = 'Configuración orientada a la UE/EEE por defecto; confirmar el despliegue activo', comp = 'EE. UU. (por defecto); región UE seleccionable por dominio de envío (misma cuenta y plan)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Enrutamiento EU-only", apex = 'Sí — un solo ajuste: cada envío sale por los MTA europeos propios de ApexMail; el transporte de terceros desaparece y una ruta MTA propia no disponible retiene el mensaje (<a href="/es/eu-sovereign/">cómo funciona</a>)', comp = 'No ofrecido: región de la UE seleccionable por dominio de envío; la entrega sigue pasando por la infraestructura de Mailgun<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Procesamiento de datos en el EEE por defecto", apex = 'Configuración orientada a la UE/EEE por defecto; las ubicaciones activas dependen del acuerdo', comp = 'No — en EE. UU. por defecto; región UE configurada por dominio de envío<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Disponibilidad de la DPA", apex = 'Disponible en el acuerdo de ApexMail aplicable', comp = 'Disponible — la DPA de Sinch cubre los servicios de Mailgun<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},

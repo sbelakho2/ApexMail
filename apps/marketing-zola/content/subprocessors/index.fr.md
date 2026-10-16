@@ -10,6 +10,8 @@ last_updated = "2026-07-29"
 
 Cette page énumère les prestataires tiers engagés par Bel Consulting OÜ (exerçant sous le nom d'ApexMail) susceptibles de traiter des données personnelles de clients dans le cadre de la fourniture du service ApexMail. Ce registre est tenu conformément à l'article 28 du RGPD et à la section 5 de l'accord de traitement des données ApexMail.
 
+En routage EU-only, l'entrée AWS SES ne transporte le courrier d'aucun locataire : les messages ne sortent que par les MTA propres d'ApexMail sur infrastructure Hetzner. Le routage EU-only et ses preuves — y compris la distinction avec le mode global par défaut, qui utilise AWS SES dans sa région UE — sont exposés sur la [page de souveraineté européenne](/fr/eu-sovereign/).
+
 ### Sous-traitants d'infrastructure
 
 Les entités tierces suivantes traitent des données personnelles de clients pour le compte d'ApexMail.

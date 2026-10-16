@@ -195,6 +195,10 @@ Sender Application
              └─ Available via REST API
 ```
 
+## Delivery Routing Modes
+
+The delivery attempt step above is governed by the tenant routing mode. The default is Global: dedicated-IP sends ride ApexMail's own relay MTAs, everything else the shared pool (AWS SES in its configured EU region). Under **EU-only routing** (`eu_only`), every send must leave through ApexMail's own relay MTAs; the shared third-party transport is forbidden, and an unavailable own-MTA route holds the message in queue with a named reason instead of failing over. The mode, its entitlements and its signed routing receipts are argued with evidence on the [EU sovereignty page](/eu-sovereign/).
+
 ## Network Architecture
 
 ```
@@ -250,6 +254,7 @@ Internet
 
 ## Related
 
+- [EU Sovereignty](/eu-sovereign)
 - [Security Overview](/security)
 - [Compliance Center](/compliance)
 - [Privacy Policy](/privacy)

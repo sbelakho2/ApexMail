@@ -13,6 +13,8 @@ last_updated = "2026-10-15"
 
 This page lists third-party vendors engaged by Bel Consulting OÜ (trading as ApexMail) that may process customer personal data in the course of providing the ApexMail service. This register is maintained in accordance with Article 28 of the GDPR and Section 5 of the ApexMail Data Processing Agreement. It is generated from the deployment's own configuration, so the listed set and locations cannot drift from what the deployment actually runs.
 
+Under EU-only routing the AWS SES entry carries no tenant's mail: messages leave exclusively through ApexMail's own MTAs on Hetzner infrastructure. EU-only routing and its evidence — including the distinction from the Global default, which uses AWS SES in its EU region — are set out on the [EU sovereignty page](/eu-sovereign/).
+
 ### Infrastructure Subprocessors
 
 The following third-party entities process customer personal data on behalf of ApexMail.

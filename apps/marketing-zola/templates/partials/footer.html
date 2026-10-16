@@ -44,6 +44,8 @@
           <li><a href="{{ lp }}/pricing/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["pricing"] %}{{ i18n_data[l]["footer"]["pricing"] }}{% else %}Pricing{% endif %}</a></li>
           <li><a href="{{ lp }}/security/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["security"] %}{{ i18n_data[l]["footer"]["security"] }}{% else %}Security{% endif %}</a></li>
           <li><a href="{{ lp }}/solutions/enterprise/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["enterprise"] %}{{ i18n_data[l]["footer"]["enterprise"] }}{% else %}Enterprise{% endif %}</a></li>
+          {# EU-sovereign argument: footer-linked on every page (2026-10-16). #}
+          <li><a href="{{ lp }}/eu-sovereign/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sovereignty"] %}{{ i18n_data[l]["footer"]["sovereignty"] }}{% else %}Sovereignty{% endif %}</a></li>
           {# email-logs/ exists in EN only (no de/fr/es content pages yet) —
              link it un-prefixed exactly like the other English-only targets
              above (/docs/, /api-explorer/); {{ lp }}/email-logs/ was a 404

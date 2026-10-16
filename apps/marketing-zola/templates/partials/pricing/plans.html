@@ -193,6 +193,12 @@
         <div class="p-5 bg-surface-50 rounded-lg border border-surface-200">
           <span class="block font-bold text-surface-950 mb-1">{{ addon.name }}</span>
           <span class="block text-sm text-surface-500 font-medium">{{ addon.display }} <span class="text-surface-400">({{ addon.usd_display }})</span> — {{ addon.unit }}, {{ addon.availability | lower }}</span>
+          {# The sovereignty argument sits next to the EU-only add-on (owner
+             directive 2026-10-16): the row states the price; the linked page
+             argues the mode, its fail-closed behaviour and the receipts. #}
+          {% if addon.id == "eu_only_routing" %}
+          <a href="{{ lp }}/eu-sovereign/" class="inline-block mt-3 text-xs font-bold tracking-wide text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["eu_only_details"] %}{{ i18n_data[l]["pricing"]["eu_only_details"] }}{% else %}How EU-only routing works{% endif %} &rarr;</a>
+          {% endif %}
         </div>
         {% endfor %}
       </div>

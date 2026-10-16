@@ -37,6 +37,10 @@ Un acheteur qualifié peut demander la DPA actuelle, les informations sur les so
 - La disponibilité HIPAA et une BAA ne sont **pas proposées actuellement**.
 - Tout SLA, périmètre de résidence des données, réponse à un questionnaire de sécurité ou engagement de déploiement privé est régi par l'accord signé.
 
+## Souveraineté européenne
+
+Enterprise Cloud inclut le routage EU-only : chaque envoi ne part que par les MTA européens propres d'ApexMail, avec une retenue fail-closed au lieu d'un repli tiers, et chaque message accepté porte un reçu de routage signé Ed25519. L'argument complet — société de l'UE, centres de données européens, le mode de routage et les reçus, chacun lié à sa preuve — se trouve sur la [page de souveraineté européenne](/fr/eu-sovereign/).
+
 ## Cycle de facturation
 
 Enterprise n'est pas achetable via le Checkout public générique. Le contrat ou l'arrangement de facturation approuvé fait foi pour les droits. Pour les forfaits self-service publics, Adyen Checkout et le webhook d'abonnement Adyen vérifié sont requis avant l'octroi d'un forfait payant.
