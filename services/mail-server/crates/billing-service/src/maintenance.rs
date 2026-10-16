@@ -143,19 +143,18 @@ pub async fn sweep_us_tax_nexus_once(
     state: &AppState,
 ) -> Result<crate::us_tax::UsTaxSweepResult, String> {
     let result = crate::us_tax::sweep_us_tax_nexus(state).await?;
-    if result.alerts_raised > 0
-        || !result.states_without_threshold_data.is_empty()
-        || result.unknown_state_invoices > 0
-        || !result.non_usd_invoices.is_empty()
-        || result.failed_states > 0
-    {
+    if result.needs_attention() {
         info!(
             states_evaluated = result.states_evaluated,
             states_below = result.states_below,
             states_crossed = result.states_crossed,
             states_registered = result.states_registered,
+            states_not_taxable = ?result.states_not_taxable,
             alerts_raised = result.alerts_raised,
+            warnings_raised = result.warnings_raised,
+            states_warned = result.states_warned,
             without_threshold_data = ?result.states_without_threshold_data,
+            invalid_nexus_declarations = ?result.states_invalid_nexus,
             unknown_state_invoices = result.unknown_state_invoices,
             unknown_state_cents = result.unknown_state_cents,
             non_usd_invoices = ?result.non_usd_invoices,

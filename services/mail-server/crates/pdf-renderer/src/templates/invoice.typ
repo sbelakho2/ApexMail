@@ -231,7 +231,15 @@
       [#fmt-money(vat-total)],
       // US state sales tax (billing-service `us_tax`, plan WP C2): rendered
       // only when the invoice carries it, so subtotal + VAT + US tax = total.
-      ..if us-sales-tax == none { () } else { (
+      // An exempt sale (customer certificate) says so — a silent $0.00 row
+      // would not tell the reader why no tax was charged.
+      ..if us-sales-tax == none { () } else if us-sales-tax.at("exempt", default: false) { (
+        [US sales tax (#us-sales-tax.state) — exempt#{
+          let cert = us-sales-tax.at("certificate_id", default: none)
+          if cert == none { "" } else { " (certificate " + cert + ")" }
+        }],
+        [#fmt-money(0)],
+      ) } else { (
         [US sales tax (#us-sales-tax.state)],
         [#fmt-money(us-sales-tax.amount_cents)],
       ) },

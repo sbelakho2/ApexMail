@@ -74,11 +74,22 @@ struct Cli {
 
     /// Validate the committed US sales-tax rate/threshold data file
     /// (`data/us_sales_tax.json`, or the `US_TAX_DATA_FILE` override),
-    /// print the per-state freshness report and exit. Validation errors exit
-    /// non-zero; no database is touched — this is the check to run after
-    /// editing the file.
+    /// print the per-state freshness report and exit. Validation errors (and
+    /// per-state nexus-declaration data errors) exit non-zero; no database is
+    /// touched — this is the check to run after editing the file.
     #[arg(long, env = "BILLING_CHECK_US_TAX_DATA_ONLY", default_value_t = false)]
     check_us_tax_data_only: bool,
+
+    /// Generate the filing-ready per-state US sales-tax report for one
+    /// calendar month (`YYYY-MM`), print it and exit — the artifact the
+    /// accountant consumes. The same generator the admin read
+    /// (`GET /v1/admin/billing/us-tax/report?period=…`) serves.
+    #[arg(long, env = "BILLING_US_TAX_REPORT")]
+    us_tax_report: Option<String>,
+
+    /// Output format of `--us-tax-report`: `json` (default) or `csv`.
+    #[arg(long, env = "BILLING_US_TAX_REPORT_FORMAT", default_value = "json")]
+    us_tax_report_format: String,
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -123,6 +134,12 @@ async fn main() -> anyhow::Result<()> {
         match billing_service::us_tax::check_data_file(today) {
             Ok(report) => {
                 print!("{}", report.render());
+                // A per-state nexus-declaration data error is a file defect
+                // the operator must fix: the state is refused at evaluation
+                // time, so the check exits non-zero for it too.
+                if !report.declaration_errors.is_empty() {
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             Err(error) => {
@@ -268,20 +285,52 @@ async fn main() -> anyhow::Result<()> {
             .map_err(anyhow::Error::msg)?;
         println!(
             "us-tax nexus sweep: states_evaluated={} states_below={} states_crossed={} \
-             states_registered={} alerts_raised={} without_threshold_data={:?} \
+             states_registered={} states_not_taxable={:?} alerts_raised={} warnings_raised={} \
+             states_warned={} without_threshold_data={:?} invalid_nexus_declarations={:?} \
              unknown_state_invoices={} unknown_state_cents={} non_usd_invoices={:?} \
              failed_states={}",
             result.states_evaluated,
             result.states_below,
             result.states_crossed,
             result.states_registered,
+            result.states_not_taxable,
             result.alerts_raised,
+            result.warnings_raised,
+            result.states_warned,
             result.states_without_threshold_data,
+            result.states_invalid_nexus,
             result.unknown_state_invoices,
             result.unknown_state_cents,
             result.non_usd_invoices,
             result.failed_states,
         );
+        return Ok(());
+    }
+
+    // The filing-ready per-state US sales-tax report (plan WP C2): the
+    // generator the accountant consumes, printed as JSON (default) or CSV.
+    // Reads the database plus the rate file; it never writes anything.
+    if let Some(period_raw) = cli.us_tax_report.as_deref() {
+        let period = billing_service::us_tax::UsTaxReportPeriod::parse(period_raw)
+            .map_err(anyhow::Error::msg)?;
+        let format = cli.us_tax_report_format.trim().to_ascii_lowercase();
+        if format != "json" && format != "csv" {
+            anyhow::bail!(
+                "--us-tax-report-format must be \"json\" or \"csv\", got {:?}",
+                cli.us_tax_report_format
+            );
+        }
+        let report = billing_service::us_tax::us_tax_report(&db, period, chrono::Utc::now())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if format == "csv" {
+            print!("{}", report.to_csv());
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report.to_json()).map_err(anyhow::Error::msg)?
+            );
+        }
         return Ok(());
     }
 

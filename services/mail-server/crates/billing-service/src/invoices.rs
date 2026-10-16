@@ -448,20 +448,27 @@ pub async fn create_invoice_in_tx(
     );
     let vat_allocations = allocate_vat_across_lines(&line_amounts, vat_rate);
 
-    // ── US sales tax (plan WP C2) ────────────────────────────────────────
+    // ── US sales tax (plan WP C2, SaaS-grade) ────────────────────────────
     // A US customer's invoice in a state the OPERATOR has registered carries
-    // a sales-tax line computed from the committed rate file, stamped with
-    // state + rate + source + retrieved date. The file is loaded lazily —
-    // only once the customer is US and the state is registered — so a
-    // problem in it can never refuse an invoice that would carry no tax.
-    // A registered state with a missing or stale rate row REFUSES the
-    // invoice (a named error): charging a guess, or silently skipping the
-    // tax of a registered state, are both false. EU customers are untouched
-    // (the country gate is step one inside the resolver).
+    // a sales-tax line computed from the committed rate file (the combined
+    // rate when the row carries one), stamped with state + rate + source +
+    // retrieved date — OR, when the customer holds a valid exemption
+    // certificate for the state, no tax line and an exemption record on the
+    // snapshot. The file is loaded lazily — only once the customer is US and
+    // the state is registered — so a problem in it can never refuse an
+    // invoice that would carry no tax. A registered state with a missing or
+    // stale rate row REFUSES the invoice (a named error): charging a guess,
+    // or silently skipping the tax of a registered state, are both false.
+    // A `not_taxable` state charges nothing, ever. EU customers are
+    // untouched (the country gate is step one inside the resolver). Every
+    // invoice kind (subscription overage, PAYG usage, product lines and
+    // add-on lines) shares THIS writer, so the tax lands on the whole
+    // subtotal wherever the invoice is created.
     let now = Utc::now();
-    let us_sales_tax = crate::us_tax::sales_tax_line_for_invoice(
+    let us_tax = crate::us_tax::tax_decision_for_invoice(
         &mut **tx,
         None,
+        &input.tenant_id,
         &country,
         addr.state.as_deref(),
         subtotal,
@@ -486,8 +493,8 @@ pub async fn create_invoice_in_tx(
         });
     }
 
-    let (us_sales_tax_cents, us_sales_tax_snapshot) = match &us_sales_tax {
-        Some(tax) => {
+    let (us_sales_tax_cents, us_sales_tax_snapshot) = match &us_tax {
+        crate::us_tax::UsTaxDecision::Taxed(tax) => {
             // The tax is its own line (description carries the whole stamp).
             // It is NOT a VAT line: `vat_amount`/`vat_rate` stay 0 so the
             // Estonian KMD ledger never sees US state tax as Estonian VAT.
@@ -501,7 +508,11 @@ pub async fn create_invoice_in_tx(
             });
             (tax.amount_cents, Some(tax.snapshot_json()))
         }
-        None => (0, None),
+        // An exempt sale adds NO tax line but DOES record the certificate:
+        // a zero-tax US invoice whose exemption substantiation existed must
+        // stay distinguishable from one with no US tax context at all.
+        crate::us_tax::UsTaxDecision::Exempt(exemption) => (0, Some(exemption.snapshot_json())),
+        crate::us_tax::UsTaxDecision::None => (0, None),
     };
 
     let total = subtotal + vat_total + us_sales_tax_cents;
@@ -880,10 +891,19 @@ pub async fn generate_invoice_pdf(
         "vat_total": invoice.vat_total,
         // US state sales tax (plan WP C2) rides in its own totals row so the
         // customer-facing invoice adds up: subtotal + vat + US tax = total.
+        // An EXEMPT sale renders the same row labelled "exempt" with the
+        // certificate id instead of a silent zero.
         "us_sales_tax": invoice.us_sales_tax_snapshot.as_ref().map(|snapshot| {
             serde_json::json!({
                 "state": snapshot.get("state").and_then(|v| v.as_str()).unwrap_or_default(),
                 "amount_cents": invoice.us_sales_tax_cents,
+                "exempt": snapshot
+                    .get("exempt")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                "certificate_id": snapshot
+                    .get("certificateId")
+                    .and_then(|value| value.as_str()),
             })
         }),
         "total": invoice.total,

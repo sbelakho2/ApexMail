@@ -352,6 +352,30 @@ mod tests {
         let text = crate::test_extract::extract_text(&pdf);
         assert!(text.contains("US sales tax (CA)"), "{text}");
         assert!(text.contains("7.90"), "the tax amount renders: {text}");
+
+        // An EXEMPT sale (customer certificate) says so — a silent $0.00 US
+        // tax row would not tell the reader why no tax was charged.
+        // subtotal 10900 + VAT 0 + tax 0 = total 10900.
+        let mut exempt_payload = invoice_payload("USD", 10900);
+        exempt_payload["subtotal"] = serde_json::json!(10900);
+        exempt_payload["vat_total"] = serde_json::json!(0);
+        exempt_payload["us_sales_tax"] = serde_json::json!({
+            "state": "CA", "amount_cents": 0, "exempt": true, "certificate_id": "MTC-777"
+        });
+        exempt_payload["line_items"] = serde_json::json!([
+            { "description": "Platform base", "quantity": 1, "unit_price": 10900,
+              "amount": 10900, "vat_rate": 0, "vat_amount": 0 }
+        ]);
+        let pdf = render_pdf("invoice", &exempt_payload)
+            .await
+            .expect("exempt US invoice renders");
+        assert_pdf(&pdf);
+        let text = crate::test_extract::extract_text(&pdf);
+        assert!(text.contains("US sales tax (CA) — exempt"), "{text}");
+        assert!(
+            text.contains("MTC-777"),
+            "the certificate names itself: {text}"
+        );
     }
 
     #[tokio::test]
