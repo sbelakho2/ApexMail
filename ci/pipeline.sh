@@ -63,6 +63,9 @@ Commands:
   status       latest run manifest, failure marker, live containers
   list         stage table (timeout + advisory flags)
   selftest     contract tests + full dry-run (safe: no infrastructure)
+  push-blessing <ssh-target>
+               copy this machine's .gate-blessing.json to the deploy host
+               (the split CI model: gates run here, the host deploys)
 
 run options:
   --stages a,b,c      run only these stages (in CI_STAGES order)
@@ -431,6 +434,37 @@ cmd_run() {
                     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                     >"$RUNS_DIR/.last-good-sha"
             fi
+            # Gate-side line (the CI machine — the split CI model, 2026-10-16):
+            # also record the .gate-blessing.json the deploy host's fetch
+            # requires. Every stage of THIS line's actual status is recorded;
+            # the deploy host refuses the sha unless validate/docs/ui/test/
+            # security all read ok under the current pipeline config.
+            case ",${CI_STAGES:-}," in
+                *,test,*)
+                    _gb_statuses=''
+                    for _gb_st in $_run_list; do
+                        _gb_val='not-run'
+                        # shellcheck disable=SC2086  # stage=status word list
+                        for _gb_pair in $_statuses; do
+                            case $_gb_pair in
+                                "$_gb_st="*) _gb_val=${_gb_pair#"$_gb_st="} ;;
+                            esac
+                        done
+                        if [ -n "$_gb_statuses" ]; then
+                            _gb_statuses="$_gb_statuses,$_gb_st=$_gb_val"
+                        else
+                            _gb_statuses="$_gb_st=$_gb_val"
+                        fi
+                    done
+                    printf '{"sha":"%s","pipelineConfigHash":"%s","gateStagesStatuses":"%s","machine":"%s","completedAt":"%s"}\n' \
+                        "$CI_SHA" "$_pipeline_hash" "$_gb_statuses" \
+                        "$(hostname 2>/dev/null || printf 'ci-machine')" \
+                        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        >"$RUNS_DIR/.gate-blessing.json"
+                    ci_info "gate blessing recorded: $RUNS_DIR/.gate-blessing.json ($_gb_statuses)"
+                    ci_info "push it to the deploy host with: ci/pipeline.sh push-blessing <ssh-target>"
+                    ;;
+            esac
         fi
     fi
     cleanup
@@ -695,19 +729,59 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
     [ "$_bl_json" = '["validate","test","security"]' ] \
         || { ci_err "blessing contract: passedStages must only list ACTUAL ok stages, got: $_bl_json"; _sf_fail=1; }
 
-    # Membership (audit P1): a gates-only / --skip-deploy run must be refused
-    # a blessing because the deploy path never ran; the full line must be
-    # accepted. Proved both directions against the REAL CI_STAGES.
+    # Membership (audit P1, re-scoped by the split CI model 2026-10-16): the
+    # DEPLOY line must be fully exercised before it can write .last-good-sha,
+    # so a gates-only run must report the deploy stages missing; both the
+    # deploy line and the gate line must accept their own full runs.
+    _bl_saved_stages=$CI_STAGES
+    CI_STAGES='fetch,images,migrate,deploy,verify,notify'
     _bl_gates_only=$(blessing_membership_missing "validate ui test security" || true)
     for _bl_need in images migrate deploy verify; do
         printf '%s\n' "$_bl_gates_only" | grep -qx "$_bl_need" \
-            || { ci_err "blessing membership: a gates-only run did NOT report '$_bl_need' as missing — it could still bless an undeployed sha"; _sf_fail=1; }
+            || { ci_err "blessing membership: a gates-only run did NOT report '$_bl_need' as missing on the deploy line"; _sf_fail=1; }
     done
     _bl_full=$(printf '%s' "$CI_STAGES" | tr ',' ' ')
     if blessing_membership_missing "$_bl_full" >/dev/null; then
-        ci_err "blessing membership: the FULL stage line was reported incomplete"
+        ci_err "blessing membership: the FULL deploy line was reported incomplete"
         _sf_fail=1
     fi
+    CI_STAGES=$_bl_saved_stages
+    _bl_full=$(printf '%s' "$CI_STAGES" | tr ',' ' ')
+    if blessing_membership_missing "$_bl_full" >/dev/null; then
+        ci_err "blessing membership: the full gate line was reported incomplete"
+        _sf_fail=1
+    fi
+
+    # Gate-blessing contract (the split model): an empty runs dir, a blessing
+    # for another sha, a stale pipeline-config hash and a non-ok gate stage
+    # must all refuse; a fresh, complete blessing for HEAD under the CURRENT
+    # config must allow. Exercised against the real gate_blessing_refusal.
+    _gbb_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-gate-bless.XXXXXX")
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: an EMPTY runs dir was accepted"
+        _sf_fail=1
+    fi
+    _gbb_hash=$(ci_pipeline_config_hash)
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"}\n' "$_gbb_hash" >"$_gbb_tmp/.gate-blessing.json"
+    if gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a fresh, complete blessing for HEAD was refused"
+        _sf_fail=1
+    fi
+    if ! gate_blessing_refusal "$_gbb_tmp" cafebabe >/dev/null; then
+        ci_err "gate blessing: a blessing for ANOTHER sha was accepted for HEAD"
+        _sf_fail=1
+    fi
+    printf '{"sha":"deadbeef","pipelineConfigHash":"stale","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=ok,security=ok"}\n' >"$_gbb_tmp/.gate-blessing.json"
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a blessing under a STALE pipeline config was accepted"
+        _sf_fail=1
+    fi
+    printf '{"sha":"deadbeef","pipelineConfigHash":"%s","gateStagesStatuses":"fetch=ok,validate=ok,docs=ok,ui=ok,test=advisory-fail,security=ok"}\n' "$_gbb_hash" >"$_gbb_tmp/.gate-blessing.json"
+    if ! gate_blessing_refusal "$_gbb_tmp" deadbeef >/dev/null; then
+        ci_err "gate blessing: a blessing with test=advisory-fail was accepted"
+        _sf_fail=1
+    fi
+    rm -rf "$_gbb_tmp"
 
     # Synthetic-repository / runtime-policy fixtures (ci/tests/*.selftest.sh):
     # each one extracts the REAL functions from the stage under test and runs
@@ -734,12 +808,37 @@ list vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT lockstep"
     exit "$CI_EXIT_FAIL"
 }
 
+# --- push-blessing (the split CI model, 2026-10-16) ---------------------------------
+# cmd_push_blessing <ssh-target> — copy this machine's .gate-blessing.json to
+# the deploy host's runs dir, where the deploy-side fetch stage reads it.
+# Nothing is deployed by this command; it only delivers the gate evidence.
+cmd_push_blessing() {
+    _pb_target=${1:-}
+    if [ -z "$_pb_target" ]; then
+        ci_err "usage: ci/pipeline.sh push-blessing <ssh-target>  (e.g. root@95.216.226.51)"
+        exit "$CI_EXIT_FAIL"
+    fi
+    _pb_file=$RUNS_DIR/.gate-blessing.json
+    if [ ! -f "$_pb_file" ]; then
+        ci_err "no $_pb_file — run the gate line green on this machine first (ci/pipeline.sh run)"
+        exit "$CI_EXIT_FAIL"
+    fi
+    _pb_sha=$(sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' "$_pb_file" | head -n1)
+    _pb_dest="${CI_DEPLOY_DIR:-/opt/apexmail}/ci/runs/.gate-blessing.json"
+    ci_info "pushing gate blessing for ${_pb_sha:-?} to $_pb_target:$_pb_dest"
+    scp -q "$_pb_file" "$_pb_target:$_pb_dest" \
+        || { ci_err "scp failed ($_pb_target) — is ssh reachable from this machine?"; exit "$CI_EXIT_FAIL"; }
+    ci_info "gate blessing delivered — the deploy host's next timer tick deploys $_pb_sha"
+    exit "$CI_EXIT_OK"
+}
+
 # --- entry -------------------------------------------------------------------------
 case "${1:-}" in
     run)      shift; cmd_run "$@" ;;
     status)   shift; cmd_status "$@" ;;
     list)     shift; cmd_list "$@" ;;
     selftest) shift; cmd_selftest "$@" ;;
+    push-blessing) shift; cmd_push_blessing "$@" ;;
     -h|--help|help|'') usage 0 ;;
     *)        usage 1 ;;
 esac

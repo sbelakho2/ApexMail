@@ -366,6 +366,53 @@ ci_pipeline_config_hash() {
         | sha256sum | cut -d' ' -f1
 }
 
+# --- the split CI model (2026-10-16) --------------------------------------------------
+# The heavy gates (validate/docs/ui/test/security) run on the CI MACHINE, never
+# on the production host (WP A1: the test battery is too much for the server).
+# A DEPLOY-SIDE line (CI_STAGES includes `deploy`, without `test`) may only
+# proceed for a sha that a GATE-SIDE run blessed under the same pipeline-config
+# hash; the blessing travels as .gate-blessing.json in the runs dir
+# (`ci/pipeline.sh push-blessing <ssh-target>` copies it to the deploy host).
+#
+# gate_blessing_refusal <runs_dir> <head_sha> — print the refusal reason when
+# the deploy host has no valid gate blessing for <head_sha> under the CURRENT
+# pipeline configuration, or nothing when the blessing is valid.
+# Exit status: 0 = refusal found, 1 = blessing valid.
+gate_blessing_refusal() {
+    _gbr_runs=$1
+    _gbr_head=$2
+    _gbr_file=$_gbr_runs/.gate-blessing.json
+    if [ ! -f "$_gbr_file" ]; then
+        printf '%s' "no gate blessing on this host — the CI machine must run the gate line and push it (ci/pipeline.sh push-blessing <host>)"
+        return 0
+    fi
+    _gbr_sha=$(sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    _gbr_config=$(sed -n 's/.*"pipelineConfigHash":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    _gbr_stages=$(sed -n 's/.*"gateStagesStatuses":"\([^"]*\)".*/\1/p' "$_gbr_file" | head -n1)
+    if [ -z "$_gbr_sha" ] || [ -z "$_gbr_stages" ]; then
+        printf '%s' "the gate blessing is unreadable (expected sha / pipelineConfigHash / gateStagesStatuses) — the CI machine must re-run the gate line and re-push"
+        return 0
+    fi
+    if [ "$_gbr_sha" != "$_gbr_head" ]; then
+        printf '%s' "the gate blessing is for $_gbr_sha, HEAD is $_gbr_head — waiting for the CI machine's blessing of this sha"
+        return 0
+    fi
+    if [ "$_gbr_config" != "$(ci_pipeline_config_hash)" ]; then
+        printf '%s' "the gate blessing predates the current pipeline configuration — the CI machine must re-run the gate line for $_gbr_head"
+        return 0
+    fi
+    for _gbr_req in validate docs ui test security; do
+        case ",$_gbr_stages," in
+            *",$_gbr_req=ok,"*) ;;
+            *)
+                printf 'gate stage %s did not pass on the CI machine (recorded: %s)' "$_gbr_req" "$_gbr_stages"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 # --- docker / ephemeral services ------------------------------------------------------
 ci_docker_ok() {
     [ "${CI_DRY_RUN:-0}" = "1" ] && return "$CI_EXIT_OK"

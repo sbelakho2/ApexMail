@@ -185,6 +185,29 @@ stage_main() {
         fi
     fi
 
+    # --- the split CI model (2026-10-16): the heavy gates run on the CI
+    # machine (the Mac), never on the production host. A deploy-side line
+    # (contains `deploy`, without `test`) proceeds only for a sha the CI
+    # machine blessed under the current pipeline config; anything else ends
+    # this run as `unchanged` (exit 75) so the timer keeps ticking cheaply
+    # until `ci/pipeline.sh push-blessing <host>` delivers the blessing.
+    case ",${CI_STAGES:-}," in
+        *,deploy,*)
+            case ",${CI_STAGES:-}," in
+                *,test,*) ;;   # a single-machine full line — nothing to gate
+                *)
+                    # shellcheck disable=SC2086  # statuses are single words
+                    _gb_refusal=$(gate_blessing_refusal "$RUNS_DIR" "$_head" || true)
+                    if [ -n "$_gb_refusal" ]; then
+                        ci_info "deploy-side line: NOT deploying $_head — $_gb_refusal"
+                        exit "$CI_EXIT_UNCHANGED"
+                    fi
+                    ci_info "PASS: gate blessing for $_head under the current pipeline config"
+                    ;;
+            esac
+            ;;
+    esac
+
     if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -20)" ]; then
         ci_warn "working tree is dirty — deployed artifacts may not match the recorded sha"
         git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -20 >>"$CI_STAGE_LOG" || true
