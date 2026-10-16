@@ -394,7 +394,9 @@ install_etc_conf() {
 # line only — the heavy gates run on the CI MACHINE and bless the sha first
 # (run the gate line there, then push-blessing to this host). The host's
 # The host's fetch stage refuses any sha without a fresh gate blessing.
-: "\${CI_STAGES:=fetch,images,migrate,deploy,verify,notify}"
+# PLAIN assignment (not :=): the repo pipeline.conf sets CI_STAGES first,
+# so an override must reassign it outright.
+CI_STAGES=fetch,images,migrate,deploy,verify,notify
 # REQUIRED for the fetch stage's branch-protection release gate (the stage
 # fails closed on the deploy host without it — ci/README.md §13): a
 # fine-grained PAT with "Administration: read" on this repository (or a
