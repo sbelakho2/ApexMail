@@ -10,27 +10,35 @@ pub struct PrivateDeployService {
     db: PgPool,
 }
 
+/// Row shape of `ent_private_deployments`. `pub(crate)` because the
+/// dedicated-tenant lifecycle service (`dedicated_tenant.rs`) reads and
+/// CAS-updates the same rows through this decode.
 #[derive(Debug, Clone, sqlx::FromRow)]
-struct PrivateDeploymentDbRow {
-    id: Uuid,
+pub(crate) struct PrivateDeploymentDbRow {
+    pub(crate) id: Uuid,
     // The chain (migration 064) types every tenant id VARCHAR(26).
-    tenant_id: String,
-    name: String,
-    deployment_type: String,
-    status: String,
-    region: Option<String>,
-    availability_zones: Option<Vec<String>>,
-    vpc_id: Option<String>,
-    instance_type: Option<String>,
-    instance_count: Option<i32>,
-    storage_gb: Option<i32>,
-    config: Option<serde_json::Value>,
-    custom_domain: Option<String>,
-    health_check_url: Option<String>,
-    health_status: Option<String>,
-    last_health_check_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
-    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) tenant_id: String,
+    pub(crate) name: String,
+    pub(crate) deployment_type: String,
+    pub(crate) status: String,
+    pub(crate) region: Option<String>,
+    pub(crate) availability_zones: Option<Vec<String>>,
+    pub(crate) vpc_id: Option<String>,
+    pub(crate) instance_type: Option<String>,
+    pub(crate) instance_count: Option<i32>,
+    pub(crate) storage_gb: Option<i32>,
+    pub(crate) config: Option<serde_json::Value>,
+    pub(crate) custom_domain: Option<String>,
+    pub(crate) health_check_url: Option<String>,
+    pub(crate) health_status: Option<String>,
+    pub(crate) last_health_check_at: Option<chrono::DateTime<chrono::Utc>>,
+    // Dedicated-tenant bundle artifact (migration 261).
+    pub(crate) bundle_path: Option<String>,
+    pub(crate) bundle_sha256: Option<String>,
+    pub(crate) validated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) validation_report: Option<serde_json::Value>,
+    pub(crate) created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl From<PrivateDeploymentDbRow> for PrivateDeployment {
@@ -52,6 +60,10 @@ impl From<PrivateDeploymentDbRow> for PrivateDeployment {
             health_check_url: row.health_check_url,
             health_status: row.health_status,
             last_health_check_at: row.last_health_check_at,
+            bundle_path: row.bundle_path,
+            bundle_sha256: row.bundle_sha256,
+            validated_at: row.validated_at,
+            validation_report: row.validation_report,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -139,6 +151,14 @@ impl From<BYOIPRangeDbRow> for BYOIPRange {
 impl PrivateDeployService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
+    }
+
+    /// The pool the service was built with. `pub(crate)`: the
+    /// dedicated-tenant lifecycle extension (`dedicated_tenant.rs`)
+    /// implements further methods on this service and reads/writes the same
+    /// `ent_private_deployments` rows.
+    pub(crate) fn db(&self) -> &PgPool {
+        &self.db
     }
 
     /// Create a new deployment
@@ -910,12 +930,17 @@ mod tests {
             health_check_url: Some("https://mail.example.com/health".into()),
             health_status: Some("healthy".into()),
             last_health_check_at: Some(Utc::now()),
+            bundle_path: Some("/var/lib/apexmail/dedicated-tenants/t/1".into()),
+            bundle_sha256: Some("ab".repeat(32)),
+            validated_at: Some(Utc::now()),
+            validation_report: Some(serde_json::json!({"passed": true})),
             created_at: Some(Utc::now()),
             updated_at: Some(Utc::now()),
         };
         let json = serde_json::to_value(&d).unwrap();
         assert_eq!(json["name"], "Production");
         assert_eq!(json["deployment_type"], "dedicated");
+        assert_eq!(json["bundle_sha256"], "ab".repeat(32));
     }
 
     #[test]

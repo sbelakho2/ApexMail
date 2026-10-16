@@ -543,7 +543,10 @@ pub fn validate_private_cloud_operations() -> PrivateCloudOperationsValidation {
         && !ops.restore_testing.frequency.is_empty()
         && !ops.capacity_planning.review_frequency.is_empty()
         && !ops.security_updates.critical_patch_window.is_empty()
-        && !ops.configuration_changes.standard_request_lead_time.is_empty()
+        && !ops
+            .configuration_changes
+            .standard_request_lead_time
+            .is_empty()
         && !ops.access_approvals.access_request_process.is_empty()
         && !ops.log_access.customer_accessible_logs.is_empty()
         && !ops.termination_and_export.data_export_format.is_empty();
@@ -559,7 +562,10 @@ pub fn validate_private_cloud_operations() -> PrivateCloudOperationsValidation {
         has_restore_testing: !ops.restore_testing.frequency.is_empty(),
         has_capacity_planning: !ops.capacity_planning.review_frequency.is_empty(),
         has_security_updates: !ops.security_updates.critical_patch_window.is_empty(),
-        has_configuration_changes: !ops.configuration_changes.standard_request_lead_time.is_empty(),
+        has_configuration_changes: !ops
+            .configuration_changes
+            .standard_request_lead_time
+            .is_empty(),
         has_access_approvals: !ops.access_approvals.access_request_process.is_empty(),
         has_log_access: !ops.log_access.customer_accessible_logs.is_empty(),
         has_termination_and_export: !ops.termination_and_export.data_export_format.is_empty(),

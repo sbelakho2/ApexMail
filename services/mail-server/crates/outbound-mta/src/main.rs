@@ -20,11 +20,12 @@
 //! | `OUTBOUND_MTA_POLL_SECS` | `5` | queue sweep interval |
 //! | `OUTBOUND_MTA_BATCH_SIZE` | `100` | rows claimed per sweep |
 //! | `OUTBOUND_MTA_MAX_ATTEMPTS` | `12` | retry ceiling |
+//! | `OUTBOUND_MTA_ALLOWED_SOURCE_IPS` | unset (unrestricted) | comma-separated recipient-facing source addresses this relay may bind; a dedicated tenant's host group sets it to the tenant's managed IPs |
 //!
 //! SIGINT and SIGTERM both trigger the graceful drain (container runtimes
 //! stop daemons with SIGTERM).
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,9 +79,15 @@ impl DaemonConfig {
         if max_attempts == 0 {
             anyhow::bail!("OUTBOUND_MTA_MAX_ATTEMPTS must be greater than zero");
         }
+        let allowed_source_ips = match std::env::var("OUTBOUND_MTA_ALLOWED_SOURCE_IPS") {
+            Ok(raw) => parse_allowed_source_ips(&raw)
+                .map_err(|error| anyhow::anyhow!("OUTBOUND_MTA_ALLOWED_SOURCE_IPS: {error}"))?,
+            Err(_) => None,
+        };
         let mut relay = RelayConfig {
             helo_domain,
             reporting_mta,
+            allowed_source_ips,
             ..RelayConfig::default()
         };
         relay.retry.max_attempts = max_attempts;
@@ -103,6 +110,36 @@ where
     raw.trim()
         .parse::<T>()
         .with_context(|| format!("{name}='{raw}' is not valid"))
+}
+
+/// Parse `OUTBOUND_MTA_ALLOWED_SOURCE_IPS`: a comma-separated list of
+/// recipient-facing source addresses this relay instance may bind. Unset or
+/// blank = `None` (unrestricted, the shared relay's behavior). A dedicated
+/// tenant's host group sets it to the tenant's managed IPs — and a typo in
+/// that list must stop the daemon at startup, not silently send from the
+/// wrong address, so every entry is validated.
+fn parse_allowed_source_ips(raw: &str) -> Result<Option<Vec<IpAddr>>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut ips = Vec::new();
+    for entry in trimmed.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(format!(
+                "an entry is empty in {raw:?}; give a comma-separated list of IP addresses"
+            ));
+        }
+        let ip: IpAddr = entry
+            .parse()
+            .map_err(|_| format!("{entry:?} is not an IP address"))?;
+        if ips.contains(&ip) {
+            return Err(format!("{entry:?} is listed twice"));
+        }
+        ips.push(ip);
+    }
+    Ok(Some(ips))
 }
 
 #[derive(Default)]
@@ -518,6 +555,7 @@ mod tests {
             "OUTBOUND_MTA_POLL_SECS",
             "OUTBOUND_MTA_BATCH_SIZE",
             "OUTBOUND_MTA_MAX_ATTEMPTS",
+            "OUTBOUND_MTA_ALLOWED_SOURCE_IPS",
         ] {
             std::env::remove_var(name);
         }
@@ -656,6 +694,34 @@ mod tests {
             let error = DaemonConfig::from_env().expect_err("blank DATABASE_URL is refused");
             assert!(error.to_string().contains("must not be empty"));
         });
+        // A typo in the tenant's managed-IP allowlist must stop the daemon,
+        // never silently widen or empty the set.
+        with_env(
+            &[
+                ("DATABASE_URL", "postgres://localhost/db"),
+                ("OUTBOUND_MTA_ALLOWED_SOURCE_IPS", "203.0.113.10,not-an-ip"),
+            ],
+            || {
+                let error = DaemonConfig::from_env().expect_err("garbage allowlist");
+                let text = error.to_string();
+                assert!(
+                    text.contains("OUTBOUND_MTA_ALLOWED_SOURCE_IPS") && text.contains("not-an-ip"),
+                    "error must name the variable and the bad entry: {text}"
+                );
+            },
+        );
+        // The env parser itself: blank = unrestricted, whitespace tolerated,
+        // duplicates refused.
+        assert_eq!(parse_allowed_source_ips("   ").unwrap(), None);
+        assert_eq!(
+            parse_allowed_source_ips(" 203.0.113.10 , 2001:db8::1 ")
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(parse_allowed_source_ips("203.0.113.10,").is_err());
+        assert!(parse_allowed_source_ips("203.0.113.10,203.0.113.10").is_err());
         let valid = &[("DATABASE_URL", "postgres://localhost/db")];
         with_env(valid, || {
             let config = DaemonConfig::from_env().expect("defaults");
@@ -668,7 +734,30 @@ mod tests {
                 config.relay.reporting_mta, config.relay.helo_domain,
                 "Reporting-MTA defaults to the HELO domain"
             );
+            assert_eq!(
+                config.relay.allowed_source_ips, None,
+                "the shared relay is unrestricted; only a dedicated host group pins its IPs"
+            );
         });
+        // A dedicated tenant's host group: the two managed IPs become the
+        // relay's only bindable source addresses (the bundle's tenant.env
+        // renders exactly this variable).
+        with_env(
+            &[
+                ("DATABASE_URL", "postgres://localhost/db"),
+                (
+                    "OUTBOUND_MTA_ALLOWED_SOURCE_IPS",
+                    "203.0.113.10,203.0.113.11",
+                ),
+            ],
+            || {
+                let config = DaemonConfig::from_env().expect("dedicated tenant config");
+                let allowed = config.relay.allowed_source_ips.expect("allowlist set");
+                assert_eq!(allowed.len(), 2);
+                assert!(allowed.contains(&"203.0.113.10".parse().unwrap()));
+                assert!(allowed.contains(&"203.0.113.11".parse().unwrap()));
+            },
+        );
         with_env(
             &[
                 ("DATABASE_URL", "postgres://localhost/db"),

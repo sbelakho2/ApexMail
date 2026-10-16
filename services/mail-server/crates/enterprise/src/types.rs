@@ -594,6 +594,14 @@ pub struct PrivateDeployment {
     pub health_check_url: Option<String>,
     pub health_status: Option<String>,
     pub last_health_check_at: Option<DateTime<Utc>>,
+    /// The dedicated-tenant deployment bundle artifact (migration 261):
+    /// where the validated bundle was written, its sha256 (the identity the
+    /// lifecycle transitions read), when validation passed, and the full
+    /// fail-closed validation report.
+    pub bundle_path: Option<String>,
+    pub bundle_sha256: Option<String>,
+    pub validated_at: Option<DateTime<Utc>>,
+    pub validation_report: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }

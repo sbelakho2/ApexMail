@@ -10,6 +10,7 @@ pub mod config;
 pub mod consent_enforcement;
 pub mod content_scanner;
 pub mod control_mappings;
+pub mod deployment_products;
 pub mod dsar_rate_limit;
 pub mod dsr_outbox_flush;
 pub mod entitlements;

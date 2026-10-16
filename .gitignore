@@ -19,6 +19,13 @@ build/
 target/
 **/target/
 
+# ─── Generated operator artifacts ─────────────────────────────────────────────
+# Dedicated Tenant deployment bundles (DEDICATED_TENANT_BUNDLE_DIR default):
+# rendered per tenant/deployment, recorded on the deployment row by
+# path + sha256 — never committed. See
+# services/mail-server/crates/enterprise/src/dedicated_tenant.rs.
+/var/
+
 # ─── Python ───────────────────────────────────────────────────────────────────
 .venv/
 venv/

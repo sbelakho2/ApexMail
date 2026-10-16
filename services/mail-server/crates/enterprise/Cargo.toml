@@ -9,6 +9,15 @@ license.workspace = true
 name = "enterprise-server"
 path = "src/bin/server.rs"
 
+# Operator CLI for the Dedicated Tenant workflow (bundle render/validate +
+# monthly review packet). Thin wrapper over the `dedicated_tenant` module;
+# argv is parsed by hand like the repo's other operator CLIs
+# (mail-common/src/bin/receipt_public_key.rs), so no clap dependency is
+# added for two subcommands.
+[[bin]]
+name = "dedicated-tenant"
+path = "src/bin/dedicated_tenant.rs"
+
 [dependencies]
 tokio      = { workspace = true }
 sqlx       = { workspace = true }
@@ -49,6 +58,14 @@ apexmail-dns-resolver = { path = "../dns-resolver" }
 # enterprise crate — no cycle.
 billing-service = { path = "../billing-service" }
 billing-entitlements = { path = "../billing-entitlements" }
+# Dedicated Tenant provisioning: the canonical plan catalog (fees, minimum
+# term, setup range — zero-dependency crate) and the structured product
+# (`compliance::deployment_products::DedicatedTenant`: 5M recipients,
+# 2 managed IPs, EEA default). Both are the plan's truth; the validation in
+# `dedicated_tenant.rs` refuses any deployment record that contradicts them.
+# Neither crate depends on enterprise — no cycle.
+platform-catalog = { path = "../platform-catalog" }
+compliance = { path = "../compliance" }
 urlencoding = { workspace = true }
 flate2 = "1.1"
 jsonwebtoken = "9.3"

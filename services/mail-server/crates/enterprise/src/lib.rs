@@ -2,6 +2,7 @@
 pub mod compliance;
 pub mod config;
 pub mod contracts;
+pub mod dedicated_tenant;
 pub mod field_encryption;
 pub mod log_streaming;
 pub mod private_deploy;

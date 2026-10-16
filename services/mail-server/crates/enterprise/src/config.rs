@@ -324,6 +324,11 @@ pub struct Config {
     pub sub_account: SubAccountConfig,
     pub log_stream: LogStreamEnvConfig,
     pub template: TemplateConfig,
+    /// Where Dedicated Tenant deployment bundles are written
+    /// (`DEDICATED_TENANT_BUNDLE_DIR`). The output is a generated,
+    /// gitignored artifact tree (`<dir>/<tenant_id>/<deployment_id>/`); each
+    /// bundle's concrete path + sha256 is recorded on the deployment row.
+    pub dedicated_tenant_bundle_dir: String,
 }
 
 impl Config {
@@ -497,6 +502,11 @@ impl Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(50),
             },
+            dedicated_tenant_bundle_dir: env::var("DEDICATED_TENANT_BUNDLE_DIR")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "var/dedicated-tenants".to_string()),
         })
     }
 

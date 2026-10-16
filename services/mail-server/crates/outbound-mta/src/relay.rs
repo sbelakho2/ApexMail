@@ -92,6 +92,14 @@ pub struct RelayConfig {
     /// Operator override for the TLS policy; `None` derives it from the
     /// destination port (25 opportunistic, 465 implicit, 587/2525 required).
     pub tls_policy_override: Option<TlsPolicy>,
+    /// The recipient-facing source addresses THIS relay instance may bind
+    /// (`OUTBOUND_MTA_ALLOWED_SOURCE_IPS`). A dedicated tenant's host group
+    /// sets it to the tenant's managed IPs, so a relay can only ever send
+    /// from them; a submission naming any other source IP is refused before
+    /// a connection is attempted. `None` = unrestricted: the shared relay's
+    /// behavior, where the per-submission `requested_source_ip` (verified by
+    /// [`crate::source_ip::connect_bound`]) is the only constraint.
+    pub allowed_source_ips: Option<Vec<IpAddr>>,
 }
 
 impl Default for RelayConfig {
@@ -105,6 +113,7 @@ impl Default for RelayConfig {
             max_recipients: 100,
             max_message_bytes: 50 * 1024 * 1024,
             tls_policy_override: None,
+            allowed_source_ips: None,
         }
     }
 }
@@ -1613,6 +1622,22 @@ fn validate_request(request: &SubmitRequest, config: &RelayConfig) -> Result<(),
             config.max_message_bytes
         )));
     }
+    // The source-IP allowlist: a dedicated tenant's relay may bind ONLY the
+    // tenant's managed addresses. Refusing here — before a connection, not
+    // at bind time — makes the restriction a configuration fact rather than
+    // a kernel error, and keeps the refusal pre-DATA like every other
+    // source-IP failure.
+    if let (Some(allowed), Some(requested)) =
+        (&config.allowed_source_ips, request.requested_source_ip)
+    {
+        if !allowed.contains(&requested) {
+            return Err(RelayError::InvalidRequest(format!(
+                "requested source IP {requested} is not one of this relay's {} configured \
+                 source address(es) (OUTBOUND_MTA_ALLOWED_SOURCE_IPS); refusing before any connection",
+                allowed.len()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -2050,6 +2075,101 @@ mod tests {
 
         let row = ledger_row(&harness, "email_queue:unit-1:user@example.com").await;
         assert_eq!(row.state, "pending", "the pre-DATA refusal stays retryable");
+    }
+
+    #[tokio::test]
+    async fn source_ip_outside_the_configured_allowlist_is_refused_before_any_connection() {
+        // The dedicated-tenant host group pins the relay to the tenant's
+        // managed IPs via OUTBOUND_MTA_ALLOWED_SOURCE_IPS. A submission
+        // naming any other address must be refused at validation — before
+        // DNS, before a socket, before DATA.
+        let mut config = relay_config();
+        config.allowed_source_ips = Some(vec![
+            "203.0.113.10".parse().expect("ip"),
+            "203.0.113.11".parse().expect("ip"),
+        ]);
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+        let mut request = request();
+        request.requested_source_ip = Some("198.51.100.7".parse().expect("ip"));
+
+        let error = harness
+            .relay
+            .submit(request)
+            .await
+            .expect_err("a source IP outside the allowlist must refuse");
+        match &error {
+            RelayError::InvalidRequest(message) => {
+                assert!(
+                    message.contains("198.51.100.7"),
+                    "the refusal names the requested IP: {message}"
+                );
+                assert!(
+                    message.contains("OUTBOUND_MTA_ALLOWED_SOURCE_IPS"),
+                    "the refusal names the configuration knob: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+        assert_eq!(
+            harness.server.connections(),
+            0,
+            "no connection was attempted"
+        );
+        assert!(
+            harness
+                .ledger
+                .get("email_queue:unit-1:user@example.com")
+                .await
+                .expect("ledger get")
+                .is_none(),
+            "a misconfigured route never enters the ledger"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_ip_inside_the_allowlist_is_admitted_by_validation() {
+        let mut config = relay_config();
+        config.allowed_source_ips = Some(vec!["203.0.113.7".parse().expect("ip")]);
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+        let mut request = request();
+        // Inside the allowlist, but not assigned locally: it must get PAST
+        // validation and fail at the bind (a different, retryable outcome),
+        // which proves the allowlist admitted it.
+        request.requested_source_ip = Some("203.0.113.7".parse().expect("ip"));
+        let error = harness
+            .relay
+            .submit(request)
+            .await
+            .expect_err("unbindable but allowlisted");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("source IP"), "reason: {reason}");
+            }
+            other => panic!("expected the bind refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unrestricted_relay_ignores_the_allowlist_check() {
+        // None = the shared relay: requested_source_ip is constrained only
+        // by whether the kernel can bind it.
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        let mut request = request();
+        request.requested_source_ip = Some("203.0.113.7".parse().expect("ip"));
+        let error = harness
+            .relay
+            .submit(request)
+            .await
+            .expect_err("unbindable source IP");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(
+                    !reason.contains("OUTBOUND_MTA_ALLOWED_SOURCE_IPS"),
+                    "no allowlist is configured: {reason}"
+                );
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
     }
 
     #[tokio::test]

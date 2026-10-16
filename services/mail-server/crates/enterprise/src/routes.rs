@@ -130,6 +130,9 @@ pub const SCOPE_WHITELABEL_WRITE: &str = "whitelabel:write";
 pub const SCOPE_LOG_STREAMS_WRITE: &str = "log-streams:write";
 /// Dedicated IP allocation.
 pub const SCOPE_DEDICATED_IPS_WRITE: &str = "dedicated-ips:write";
+/// Dedicated Tenant provisioning control plane: bundle render/validate and
+/// the lifecycle transitions on a dedicated deployment record.
+pub const SCOPE_DEDICATED_TENANTS_WRITE: &str = "dedicated-tenants:write";
 
 #[derive(Debug, Clone)]
 struct AuthContext {
@@ -524,6 +527,32 @@ pub struct BYOIPVerifyBody {
     pub verification_token: String,
 }
 
+/// Render + validate the dedicated-tenant deployment bundle. The release SHA
+/// is the caller's INPUT (the approved build's commit id) — never invented
+/// by the server.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployBundleBody {
+    pub release_sha: String,
+}
+
+/// One dedicated-tenant lifecycle transition. `reason` is mandatory for the
+/// decommissioning steps (enforced by the service) and recorded in the audit
+/// trail for every transition.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployTransitionBody {
+    pub to: String,
+    pub reason: Option<String>,
+}
+
+/// The monthly review packet query (`?month=YYYY-MM`; defaults to the
+/// current UTC month).
+#[derive(Deserialize)]
+pub struct MonthlyReviewQuery {
+    pub month: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubAccountCreateBody {
@@ -810,6 +839,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/deployments/tenant/:tenant_id", get(deploy_list))
         .route("/deployments/:id/provision", post(deploy_provision))
         .route("/deployments/:id/health", get(deploy_health))
+        // Dedicated Tenant provisioning (the plan's code-side half)
+        .route("/deployments/:id/bundle", post(deploy_bundle))
+        .route("/deployments/:id/transition", post(deploy_transition))
+        .route(
+            "/deployments/tenant/:tenant_id/monthly-review",
+            get(deploy_monthly_review),
+        )
         .route("/ips/allocate", post(ip_allocate))
         .route("/ips/:id", get(ip_get))
         .route("/ips/tenant/:tenant_id", get(ip_list))
@@ -3201,6 +3237,151 @@ async fn deploy_health(
         return e;
     }
     service_result(state.private_deploy.health_check(id).await)
+}
+
+/// Render + validate the dedicated-tenant deployment bundle and record the
+/// artifact on the deployment (`requested` → `validated`). Fail closed: a
+/// failed validation writes nothing and changes no state; the refusal is
+/// `code: VALIDATION` and the recorded operator overrides end up in the
+/// validation report either way.
+async fn deploy_bundle(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DeployBundleBody>,
+) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the dedicated-tenants scope.
+    if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_TENANTS_WRITE) {
+        return e;
+    }
+    let existing = state.private_deploy.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
+    let tenant_id = match existing.as_ref().ok().and_then(|r| r.data.as_ref()) {
+        Some(record) => record.tenant_id.clone(),
+        None => String::new(),
+    };
+    let output_base = std::path::PathBuf::from(&state.config.dedicated_tenant_bundle_dir);
+    let result = state
+        .private_deploy
+        .render_dedicated_bundle(id, &body.release_sha, &output_base)
+        .await;
+    // Audit F7: recording the validated bundle is the act that unlocks
+    // `provisioned`/`active` — it belongs in the tamper-evident trail.
+    if let Some(outcome) = result.as_ref().ok().and_then(|r| r.data.as_ref()) {
+        if let Err(error) = audit_server_action(
+            &state,
+            &tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "dedicated_tenant.bundle_validated",
+            "private_deployment",
+            Some(&id.to_string()),
+            serde_json::json!({
+                "release_sha": body.release_sha,
+                "bundle_path": outcome.bundle_path,
+                "bundle_sha256": outcome.bundle_sha256,
+                "host_group": outcome.host_group,
+                "overrides": outcome.validation_report.overrides,
+            }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, "failed to audit dedicated_tenant.bundle_validated");
+        }
+    }
+    service_result(result)
+}
+
+/// One dedicated-tenant lifecycle transition (`validated` → `provisioned` →
+/// `active` → `decommissioning` → `decommissioned`). `active` is refused
+/// without the validated-bundle artifact on the row.
+async fn deploy_transition(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DeployTransitionBody>,
+) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the dedicated-tenants scope.
+    if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_TENANTS_WRITE) {
+        return e;
+    }
+    let existing = state.private_deploy.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
+    let (tenant_id, from) = match existing.as_ref().ok().and_then(|r| r.data.as_ref()) {
+        Some(record) => (record.tenant_id.clone(), record.status.clone()),
+        None => (String::new(), String::new()),
+    };
+    let result = state
+        .private_deploy
+        .transition_dedicated(id, &body.to, body.reason.as_deref())
+        .await;
+    // Audit F7: every lifecycle move is recorded with its reason.
+    if let Some(record) = result.as_ref().ok().and_then(|r| r.data.as_ref()) {
+        if let Err(error) = audit_server_action(
+            &state,
+            &tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "dedicated_tenant.transition",
+            "private_deployment",
+            Some(&id.to_string()),
+            serde_json::json!({
+                "from": from,
+                "to": record.status,
+                "reason": body.reason,
+            }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, "failed to audit dedicated_tenant.transition");
+        }
+    }
+    service_result(result)
+}
+
+/// The per-tenant monthly review packet (JSON; the markdown render is in the
+/// CLI). Read-only; tenant members and operators may read it.
+async fn deploy_monthly_review(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(tenant_id): Path<String>,
+    Query(query): Query<MonthlyReviewQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
+    let period = match query.month.as_deref() {
+        Some(label) => match crate::dedicated_tenant::ReviewPeriod::parse(label) {
+            Some(period) => period,
+            None => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "month must be YYYY-MM (e.g. 2026-09)",
+                )
+            }
+        },
+        None => crate::dedicated_tenant::ReviewPeriod::current(chrono::Utc::now()),
+    };
+    service_result(
+        crate::dedicated_tenant::collect_monthly_review(
+            &state.db,
+            &tenant_id,
+            period,
+            chrono::Utc::now(),
+        )
+        .await
+        .map(ApiResult::ok),
+    )
 }
 
 async fn ip_allocate(
@@ -6665,6 +6846,8 @@ mod rbac_scope_guards {
             ("log_stream_pause", "SCOPE_LOG_STREAMS_WRITE"),
             ("log_stream_resume", "SCOPE_LOG_STREAMS_WRITE"),
             ("ip_allocate", "SCOPE_DEDICATED_IPS_WRITE"),
+            ("deploy_bundle", "SCOPE_DEDICATED_TENANTS_WRITE"),
+            ("deploy_transition", "SCOPE_DEDICATED_TENANTS_WRITE"),
         ]
     }
 
