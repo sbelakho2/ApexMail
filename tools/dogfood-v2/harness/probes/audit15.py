@@ -165,7 +165,10 @@ def cancellation_self_service(ctx):
         surface="api:POST /v1/billing/cancel",
     )
 
-    if ctx.db is None or not tenant:
+    # The self-test fixture data plane is read-mostly and has no SQL runner;
+    # the DB arms run in live/mutation modes (real Postgres). The no-portal-lie
+    # check above still runs in every mode.
+    if ctx.db is None or not tenant or not hasattr(ctx.db, "rows"):
         return checks.obs
 
     # Seed (or reuse) a subscription for the fixture tenant so the state
