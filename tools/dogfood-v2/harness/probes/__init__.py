@@ -17,6 +17,7 @@ from . import state             # noqa: F401  replay / races / transitions
 from . import errors            # noqa: F401  error taxonomy
 from . import mail              # noqa: F401  delivery / templates / DKIM / consent
 from . import money             # noqa: F401  billing math
+from . import audit15           # noqa: F401  external audit 15 Oct blockers (H1/H2/H3)
 from . import tracking          # noqa: F401  tracking abuse + real click
 from . import bots              # noqa: F401  grader / placement / explorer
 from . import marketing         # noqa: F401  marketing pages / links
