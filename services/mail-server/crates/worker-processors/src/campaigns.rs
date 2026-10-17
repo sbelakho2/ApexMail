@@ -63,7 +63,7 @@ use billing_service::send_admission::{
     AdmissionMeter, SendAdmissionError, SendAdmissionRequest, SendAdmissionService,
 };
 
-use crate::automations::{fetch_template, TemplateContent};
+use crate::automations::TemplateContent;
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -440,6 +440,18 @@ impl CampaignExecutor {
         .await?;
 
         let mut report = TickReport::default();
+        // P3: conclude every ready campaign first, then promote the whole
+        // batch with ONE `UPDATE ... FROM (VALUES/UNNEST ...)` statement —
+        // the legacy loop issued one promotion UPDATE per campaign.
+        struct AbDecision {
+            campaign_id: Uuid,
+            tenant_id: String,
+            metric: String,
+            winner: i32,
+            winner_z: f64,
+        }
+        let mut decisions: Vec<AbDecision> = Vec::new();
+
         for (campaign_id, tenant_id, config) in candidates {
             let metric_event = match config.get("metric").and_then(|v| v.as_str()) {
                 Some("click") => "clicked",
@@ -515,70 +527,108 @@ impl CampaignExecutor {
                     continue;
                 }
             };
+            decisions.push(AbDecision {
+                campaign_id,
+                tenant_id,
+                metric: metric_event.to_string(),
+                winner,
+                winner_z,
+            });
+        }
 
-            let promoted = sqlx::query(
+        if !decisions.is_empty() {
+            let campaign_ids: Vec<Uuid> = decisions
+                .iter()
+                .map(|decision| decision.campaign_id)
+                .collect();
+            let winner_arms: Vec<i32> = decisions.iter().map(|decision| decision.winner).collect();
+
+            // Promote every campaign's holdout in one statement. Only
+            // `phase = 'holdout'` rows move, so the promotion is idempotent.
+            let promoted_rows: Vec<(Uuid,)> = sqlx::query_as(
                 "UPDATE campaign_recipients \
-                 SET phase = 'winner', arm_index = $2, updated_at = NOW() \
-                 WHERE campaign_id = $1 AND phase = 'holdout'",
+                 SET phase = 'winner', arm_index = v.arm_index, updated_at = NOW() \
+                 FROM UNNEST($1::uuid[], $2::int[]) AS v(campaign_id, arm_index) \
+                 WHERE campaign_recipients.campaign_id = v.campaign_id \
+                   AND campaign_recipients.phase = 'holdout' \
+                 RETURNING campaign_recipients.campaign_id",
             )
-            .bind(campaign_id)
-            .bind(winner)
-            .execute(&self.db)
-            .await?
-            .rows_affected();
+            .bind(&campaign_ids)
+            .bind(&winner_arms)
+            .fetch_all(&self.db)
+            .await?;
+            let mut promoted_by_campaign: HashMap<Uuid, u64> = HashMap::new();
+            for (campaign_id,) in promoted_rows {
+                *promoted_by_campaign.entry(campaign_id).or_insert(0) += 1;
+            }
 
             // The decision is persisted with its provenance: which rule ran
-            // (auto), on which metric, with which z — so the results API and
-            // the audit trail can explain the promotion after the facts.
+            // (auto), on which metric, with which z — one statement for the
+            // whole batch.
+            let metrics: Vec<String> = decisions
+                .iter()
+                .map(|decision| decision.metric.clone())
+                .collect();
+            let z_scores: Vec<f64> = decisions.iter().map(|decision| decision.winner_z).collect();
+            let winner_at = Utc::now().to_rfc3339();
+            let winner_ats: Vec<String> = vec![winner_at; decisions.len()];
             sqlx::query(
                 "UPDATE campaigns \
                  SET ab_config = ab_config || jsonb_build_object( \
-                         'winnerArm', $2::int, \
+                         'winnerArm', v.arm_index, \
                          'winnerSource', 'auto', \
-                         'winnerMetric', $3::text, \
-                         'winnerZ', $4::float8, \
-                         'winnerAt', $5::text \
+                         'winnerMetric', v.metric, \
+                         'winnerZ', v.z, \
+                         'winnerAt', v.at \
                      ), \
                      updated_at = NOW() \
-                 WHERE id = $1",
+                 FROM UNNEST($1::uuid[], $2::int[], $3::text[], $4::float8[], $5::text[]) \
+                      AS v(id, arm_index, metric, z, at) \
+                 WHERE campaigns.id = v.id",
             )
-            .bind(campaign_id)
-            .bind(winner)
-            .bind(metric_event)
-            .bind(winner_z)
-            .bind(Utc::now().to_rfc3339())
+            .bind(&campaign_ids)
+            .bind(&winner_arms)
+            .bind(&metrics)
+            .bind(&z_scores)
+            .bind(&winner_ats)
             .execute(&self.db)
             .await?;
 
-            enqueue_campaign_event_webhooks(
-                &self.db,
-                &tenant_id,
-                "campaign.ab_winner_selected",
-                serde_json::json!({
-                    "id": format!("evt_{}", Uuid::new_v4().simple()),
-                    "type": "campaign.ab_winner_selected",
-                    "tenantId": tenant_id,
-                    "timestamp": Utc::now().to_rfc3339(),
-                    "data": {
-                        "campaign_id": campaign_id.to_string(),
-                        "winner_arm": winner,
-                        "metric": metric_event,
-                        "z": winner_z,
-                        "rule": "two_proportion_z_95",
-                        "source": "auto",
-                        "holdout_promoted": promoted,
-                    },
-                }),
-            )
-            .await;
-            tracing::info!(
-                campaign_id = %campaign_id,
-                winner_arm = winner,
-                winner_z,
-                holdout_promoted = promoted,
-                "A/B test concluded; winner promoted onto the holdout"
-            );
-            report.campaigns_started += 1;
+            for decision in decisions {
+                let promoted = promoted_by_campaign
+                    .get(&decision.campaign_id)
+                    .copied()
+                    .unwrap_or(0);
+                enqueue_campaign_event_webhooks(
+                    &self.db,
+                    &decision.tenant_id,
+                    "campaign.ab_winner_selected",
+                    serde_json::json!({
+                        "id": format!("evt_{}", Uuid::new_v4().simple()),
+                        "type": "campaign.ab_winner_selected",
+                        "tenantId": decision.tenant_id,
+                        "timestamp": Utc::now().to_rfc3339(),
+                        "data": {
+                            "campaign_id": decision.campaign_id.to_string(),
+                            "winner_arm": decision.winner,
+                            "metric": decision.metric,
+                            "z": decision.winner_z,
+                            "rule": "two_proportion_z_95",
+                            "source": "auto",
+                            "holdout_promoted": promoted,
+                        },
+                    }),
+                )
+                .await;
+                tracing::info!(
+                    campaign_id = %decision.campaign_id,
+                    winner_arm = decision.winner,
+                    winner_z = decision.winner_z,
+                    holdout_promoted = promoted,
+                    "A/B test concluded; winner promoted onto the holdout"
+                );
+                report.campaigns_started += 1;
+            }
         }
         Ok(report)
     }
@@ -863,9 +913,13 @@ impl CampaignExecutor {
         }
 
         // Resolve per-campaign send context once (sender + content + settings
-        // + A/B arms).
+        // + A/B arms). P3: ONE context query per page — the per-campaign
+        // "sent in the last hour" throttle input is folded into it as a
+        // grouped LEFT JOIN, and templates shared by several campaigns are
+        // loaded ONCE per page (deduped by tenant + template reference).
         let campaign_ids: Vec<Uuid> = claimed.iter().map(|row| row.campaign_id).collect();
         let mut contexts: HashMap<Uuid, CampaignSendContext> = HashMap::new();
+        let mut sent_last_hour: HashMap<Uuid, i64> = HashMap::new();
         {
             #[allow(clippy::type_complexity)]
             let rows: Vec<(
@@ -884,18 +938,126 @@ impl CampaignExecutor {
                 serde_json::Value,
                 bool,
                 bool,
+                i64,
             )> = sqlx::query_as(
                 "SELECT id, tenant_id, COALESCE(subject, ''), from_email, from_name, \
                         reply_to, preview_text, html_body, text_body, template_id, \
                         COALESCE(variables, '{}'::jsonb), \
                         COALESCE(utm_params, '{}'::jsonb), \
                         COALESCE(settings, '{}'::jsonb), \
-                        track_opens, track_clicks \
-                 FROM campaigns WHERE id = ANY($1)",
+                        track_opens, track_clicks, \
+                        COALESCE(throttled.sent_last_hour, 0)::bigint \
+                 FROM campaigns \
+                 LEFT JOIN ( \
+                     SELECT campaign_id, COUNT(*) AS sent_last_hour \
+                     FROM campaign_recipients \
+                     WHERE campaign_id = ANY($1) \
+                       AND status = 'sent' \
+                       AND updated_at > NOW() - INTERVAL '1 hour' \
+                     GROUP BY campaign_id \
+                 ) throttled ON throttled.campaign_id = campaigns.id \
+                 WHERE campaigns.id = ANY($1)",
             )
             .bind(&campaign_ids)
             .fetch_all(&self.db)
             .await?;
+
+            // All A/B arms for the page in one query, grouped per campaign.
+            let arm_rows: Vec<(Uuid, i32, String, Option<String>)> = sqlx::query_as(
+                "SELECT campaign_id, arm_index, template_id, subject \
+                 FROM campaign_ab_arms WHERE campaign_id = ANY($1) \
+                 ORDER BY campaign_id, arm_index",
+            )
+            .bind(&campaign_ids)
+            .fetch_all(&self.db)
+            .await?;
+            let mut arms_by_campaign: HashMap<Uuid, Vec<(i32, String, Option<String>)>> =
+                HashMap::new();
+            for (campaign_id, arm_index, template_id, subject) in arm_rows {
+                arms_by_campaign.entry(campaign_id).or_default().push((
+                    arm_index,
+                    template_id,
+                    subject,
+                ));
+            }
+
+            // Every DISTINCT (tenant, template reference) for the page, in
+            // one query. A reference may be an id or a slug, and the highest
+            // version wins — exactly the single-row lookup's contract.
+            let mut distinct_refs: Vec<(String, String)> = Vec::new();
+            let mut seen_refs: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
+            for (_, tenant_id, _, _, _, _, _, _, _, template_id, _, _, _, _, _, _) in &rows {
+                if let Some(template_id) = template_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                {
+                    let key = (tenant_id.clone(), template_id.to_string());
+                    if seen_refs.insert(key.clone()) {
+                        distinct_refs.push(key);
+                    }
+                }
+            }
+            // Arm template references are paired with each owning campaign's
+            // tenant (one tenant per campaign, by construction).
+            let tenant_by_campaign: HashMap<Uuid, String> =
+                rows.iter().map(|row| (row.0, row.1.clone())).collect();
+            for (campaign_id, arms) in &arms_by_campaign {
+                let Some(tenant_id) = tenant_by_campaign.get(campaign_id) else {
+                    continue;
+                };
+                for (_, arm_template_id, _) in arms {
+                    if arm_template_id.trim().is_empty() {
+                        continue;
+                    }
+                    let key = (tenant_id.clone(), arm_template_id.clone());
+                    if seen_refs.insert(key.clone()) {
+                        distinct_refs.push(key);
+                    }
+                }
+            }
+
+            let mut templates: HashMap<(String, String), TemplateContent> = HashMap::new();
+            if !distinct_refs.is_empty() {
+                let tenants: Vec<String> = distinct_refs
+                    .iter()
+                    .map(|(tenant_id, _)| tenant_id.clone())
+                    .collect();
+                let refs: Vec<String> = distinct_refs
+                    .iter()
+                    .map(|(_, template_ref)| template_ref.clone())
+                    .collect();
+                type TemplateRow = (String, String, String, Option<String>, Option<String>);
+                let template_rows: Vec<TemplateRow> = sqlx::query_as(
+                    "SELECT DISTINCT ON (r.tenant_id, r.template_ref) \
+                                r.tenant_id, r.template_ref, t.subject, t.html_body, t.text_body \
+                         FROM templates t \
+                         JOIN UNNEST($1::text[], $2::text[]) \
+                              AS r(tenant_id, template_ref) \
+                           ON t.tenant_id = r.tenant_id \
+                          AND (t.id = r.template_ref OR t.slug = r.template_ref) \
+                         ORDER BY r.tenant_id, r.template_ref, t.version DESC",
+                )
+                .bind(&tenants)
+                .bind(&refs)
+                .fetch_all(&self.db)
+                .await
+                // A template-store outage is infrastructure and defers
+                // the tick, exactly like the per-campaign fetch did.
+                .map_err(|error| CampaignError::Database(error.to_string()))?;
+                for (tenant_id, template_ref, subject, html_body, text_body) in template_rows {
+                    templates.insert(
+                        (tenant_id, template_ref),
+                        TemplateContent {
+                            subject,
+                            html_body,
+                            text_body,
+                        },
+                    );
+                }
+            }
+
             for (
                 id,
                 tenant_id,
@@ -912,49 +1074,30 @@ impl CampaignExecutor {
                 settings,
                 track_opens,
                 track_clicks,
+                sent_in_last_hour,
             ) in rows
             {
-                let template = match template_id.as_deref().filter(|id| !id.trim().is_empty()) {
-                    None => None,
-                    Some(template_id) => match fetch_template(&self.db, &tenant_id, template_id)
-                        .await
-                    {
-                        Ok(template) => Some(template),
-                        Err(error) => {
-                            // A missing template is a campaign misconfiguration
-                            // (rows fail honestly below); a template-store
-                            // outage is infrastructure and defers the tick.
-                            if matches!(error, crate::automations::AutomationError::Database(_)) {
-                                return Err(CampaignError::Database(error.to_string()));
-                            }
-                            None
-                        }
-                    },
-                };
+                sent_last_hour.insert(id, sent_in_last_hour);
+                let template = template_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .and_then(|template_id| {
+                        templates
+                            .get(&(tenant_id.clone(), template_id.to_string()))
+                            .cloned()
+                    });
 
                 // Per-arm content for A/B campaigns (holdout sends use the
                 // winner arm's content; test sends use their own).
                 let mut arms: std::collections::HashMap<i32, ArmContent> =
                     std::collections::HashMap::new();
-                let arm_rows: Vec<(i32, String, Option<String>)> = sqlx::query_as(
-                    "SELECT arm_index, template_id, subject \
-                     FROM campaign_ab_arms WHERE campaign_id = $1 ORDER BY arm_index",
-                )
-                .bind(id)
-                .fetch_all(&self.db)
-                .await?;
-                for (arm_index, arm_template_id, arm_subject) in arm_rows {
-                    let arm_template = match fetch_template(&self.db, &tenant_id, &arm_template_id)
-                        .await
-                    {
-                        Ok(template) => Some(template),
-                        Err(error) => {
-                            if matches!(error, crate::automations::AutomationError::Database(_)) {
-                                return Err(CampaignError::Database(error.to_string()));
-                            }
-                            None
-                        }
-                    };
+                for (arm_index, arm_template_id, arm_subject) in
+                    arms_by_campaign.remove(&id).unwrap_or_default()
+                {
+                    let arm_template = templates
+                        .get(&(tenant_id.clone(), arm_template_id))
+                        .cloned();
                     arms.insert(
                         arm_index,
                         ArmContent {
@@ -1016,19 +1159,13 @@ impl CampaignExecutor {
 
         // Throttle budgets: `settings.throttleRate` caps sends per hour per
         // campaign. Recipients beyond the budget are REQUEUED (not failed) —
-        // the next tick continues where this one stopped.
+        // the next tick continues where this one stopped. The sent count
+        // arrived with the context query above (no per-campaign COUNT).
         let mut budgets: HashMap<Uuid, i64> = HashMap::new();
         for (id, context) in &contexts {
             if let Some(rate) = context.throttle_rate.filter(|r| *r > 0) {
-                let sent_last_hour: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM campaign_recipients \
-                     WHERE campaign_id = $1 AND status = 'sent' \
-                       AND updated_at > NOW() - INTERVAL '1 hour'",
-                )
-                .bind(id)
-                .fetch_one(&self.db)
-                .await?;
-                budgets.insert(*id, (rate - sent_last_hour).max(0));
+                let sent = sent_last_hour.get(id).copied().unwrap_or(0);
+                budgets.insert(*id, (rate - sent).max(0));
             }
         }
 
@@ -2133,6 +2270,83 @@ mod tests {
     // One fresh canonical database per test so claims cannot race other suites.
     async fn fresh_pool(test_name: &str, suffix: &str) -> Option<PgPool> {
         crate::test_support::canonical_pool(test_name, suffix).await
+    }
+
+    /// Thread-local SQL capture for the batching regression tests (the pool
+    /// is rebuilt with `log_statements(Debug)`).
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
     }
 
     /// A unique per-run tenant id, capped at 26 chars (`VARCHAR(26)`).
@@ -3626,6 +3840,208 @@ mod tests {
                 .all(|(phase, arm)| phase == "winner" && *arm == 0),
             "the holdout is promoted onto the winning arm: {promoted:?}"
         );
+        pool.close().await;
+    }
+
+    /// P3: two campaigns conclude in the SAME tick and both holdouts are
+    /// promoted by ONE `UPDATE ... FROM (VALUES ...)` statement (the legacy
+    /// path issued one promotion UPDATE per campaign).
+    #[tokio::test]
+    async fn ab_winner_promotion_is_one_statement_per_batch() {
+        let Some(base) = fresh_pool("campaigns_ab_batch", "ab_batch").await else {
+            return;
+        };
+        let pool = logging_pool(&base).await;
+        let tenant = fresh_tenant("camp-ab-batch");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let mut campaigns = Vec::new();
+        for (index, (label, successes)) in
+            [("batch-a", 30usize), ("batch-b", 28)].iter().enumerate()
+        {
+            let campaign = insert_ready_campaign(&pool, &tenant, "sending", None).await;
+            attach_ab_experiment(&pool, &tenant, campaign, 0.2, 2).await;
+            seed_arm_outcome(
+                &pool,
+                &tenant,
+                campaign,
+                0,
+                &format!("{label}-winner"),
+                100,
+                *successes,
+            )
+            .await;
+            seed_arm_outcome(
+                &pool,
+                &tenant,
+                campaign,
+                1,
+                &format!("{label}-loser"),
+                100,
+                10,
+            )
+            .await;
+            seed_holdout_recipients(
+                &pool,
+                &tenant,
+                campaign,
+                &format!("{label}-holdout"),
+                4 + index,
+            )
+            .await;
+            backdate_ab_window(&pool, campaign).await;
+            campaigns.push(campaign);
+        }
+
+        let (capture, guard) = capture_sql();
+        exec.evaluate_ab_tests().await.expect("evaluate");
+        drop(guard);
+
+        assert_eq!(
+            capture.count_starting_with("UPDATE campaign_recipients SET phase"),
+            1,
+            "both campaigns promote in one statement: {:?}",
+            capture.statements()
+        );
+        // Provenance is persisted for both campaigns in one UPDATE as well.
+        assert_eq!(
+            capture.count_starting_with("UPDATE campaigns SET ab_config"),
+            1,
+            "both winner decisions persist in one statement: {:?}",
+            capture.statements()
+        );
+
+        for (index, campaign) in campaigns.iter().enumerate() {
+            let config: Value = sqlx::query_scalar("SELECT ab_config FROM campaigns WHERE id = $1")
+                .bind(campaign)
+                .fetch_one(&pool)
+                .await
+                .expect("ab config");
+            assert_eq!(config["winnerArm"], 0, "campaign {index} winner: {config}");
+            assert_eq!(config["winnerSource"], "auto");
+            let held: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM campaign_recipients \
+                 WHERE campaign_id = $1 AND phase = 'holdout'",
+            )
+            .bind(campaign)
+            .fetch_one(&pool)
+            .await
+            .expect("holdout count");
+            assert_eq!(held, 0, "campaign {index} holdout fully promoted");
+            let promoted: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM campaign_recipients \
+                 WHERE campaign_id = $1 AND phase = 'winner' AND arm_index = 0",
+            )
+            .bind(campaign)
+            .fetch_one(&pool)
+            .await
+            .expect("winner count");
+            assert_eq!(promoted, (4 + index) as i64);
+        }
+
+        pool.close().await;
+    }
+
+    /// P3: one context query serves the whole page — the throttling budget is
+    /// folded into it (no per-campaign sent-in-the-last-hour COUNT), and a
+    /// template shared by three campaigns is loaded once.
+    #[tokio::test]
+    async fn campaign_context_is_one_query_and_templates_are_deduplicated() {
+        let Some(base) = fresh_pool("campaigns_context_batch", "context_batch").await else {
+            return;
+        };
+        let pool = logging_pool(&base).await;
+        let tenant = fresh_tenant("camp-context");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let from = format!("news@{domain}");
+        let mut campaigns = Vec::new();
+        for index in 0..3 {
+            let campaign = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, template_id, from_email, \
+                 status, sent_count, list_ids, settings) \
+                 VALUES ($1, $2, $3, 'Hello {{first_name}}', $4, $5, 'sending', 0, \
+                         '[]'::jsonb, '{\"throttleRate\": 1000}'::jsonb)",
+            )
+            .bind(campaign)
+            .bind(&tenant)
+            .bind(format!("Context {index}"))
+            .bind(&template)
+            .bind(&from)
+            .execute(&pool)
+            .await
+            .expect("insert context campaign");
+            let contact = insert_contact(
+                &pool,
+                &tenant,
+                &format!("context-{index}@example.test"),
+                "active",
+            )
+            .await;
+            sqlx::query(
+                "INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id, email, status) \
+                 VALUES ($1, $2, $3, $4, 'queued')",
+            )
+            .bind(&tenant)
+            .bind(campaign)
+            .bind(contact)
+            .bind(format!("context-{index}@example.test"))
+            .execute(&pool)
+            .await
+            .expect("queue context recipient");
+            campaigns.push(campaign);
+        }
+
+        let (capture, guard) = capture_sql();
+        let report = exec
+            .drain_queued_recipients()
+            .await
+            .expect("drain queued recipients");
+        drop(guard);
+
+        assert_eq!(report.recipients_sent, 3, "all three campaigns send");
+        assert_eq!(
+            capture.count_starting_with("SELECT id, tenant_id, COALESCE(subject"),
+            1,
+            "one context query per page: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with(
+                "SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = $1 AND status = 'sent'"
+            ),
+            0,
+            "the sent-last-hour COUNT is folded into the context query: {:?}",
+            capture.statements()
+        );
+        let template_queries = capture.count_starting_with("SELECT subject, html_body, text_body")
+            + capture.count_starting_with("SELECT DISTINCT ON");
+        assert_eq!(
+            template_queries,
+            1,
+            "the shared template loads once for the whole page: {:?}",
+            capture.statements()
+        );
+
+        for campaign in campaigns {
+            let sent: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM campaign_recipients \
+                 WHERE campaign_id = $1 AND status = 'sent'",
+            )
+            .bind(campaign)
+            .fetch_one(&pool)
+            .await
+            .expect("sent count");
+            assert_eq!(sent, 1);
+        }
+
         pool.close().await;
     }
 

@@ -1364,6 +1364,10 @@ pub async fn enforced_counter_key(
 /// maintenance.rs recovers events whose `event_type` arrives as an
 /// untyped string). Identical anchoring math; the event-type string is
 /// embedded verbatim so unknown/custom types keep their counter identity.
+/// Legacy per-event key resolver: production now uses the batched resolver in
+/// `maintenance::drain_pending_metering_events`; this remains the independent
+/// oracle for the equivalence test.
+#[cfg(test)]
 pub(crate) async fn enforced_counter_key_for_event_type(
     pool: &PgPool,
     tenant_id: &str,

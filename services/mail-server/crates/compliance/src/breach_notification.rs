@@ -44,6 +44,20 @@ use crate::types::*;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Hard cap on the recipients accepted by ONE Art. 34 queueing request.
+///
+/// The HTTP body carries an unbounded `Vec<String>`; without a cap a single
+/// request could schedule an arbitrarily large outbox write. The cap is
+/// enforced here (the canonical service entry point) so every transport gets
+/// the same named refusal. It matches the access-export ceiling
+/// (`GdprConfig::access_request_max_messages`).
+pub const MAX_SUBJECT_NOTIFICATION_RECIPIENTS: usize = 10_000;
+
+/// Rows per multi-row outbox INSERT. One request therefore costs
+/// `ceil(recipients / 500)` statements instead of one per recipient, while a
+/// single statement's bind array stays bounded.
+const SUBJECT_NOTIFICATION_INSERT_CHUNK: usize = 500;
+
 /// The state machine, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -871,6 +885,22 @@ impl BreachNotifier {
         if recipients.is_empty() {
             return Err("subject notification requires at least one recipient".into());
         }
+        // The route body is otherwise unbounded: refuse an over-cap request
+        // by name BEFORE any row is written.
+        if recipients.len() > MAX_SUBJECT_NOTIFICATION_RECIPIENTS {
+            return Err(format!(
+                "subject notification recipient cap exceeded: at most \
+                 {MAX_SUBJECT_NOTIFICATION_RECIPIENTS} recipients per request (got {})",
+                recipients.len()
+            ));
+        }
+        // Validate the whole list first so a bad entry mid-list cannot leave
+        // a partially written outbox behind.
+        for recipient in recipients {
+            if recipient.trim().is_empty() {
+                return Err("recipient email must not be empty".into());
+            }
+        }
         let body = build_subject_notification(&report);
         let body_sha256 = sha256_hex(&body);
         let subject_line = format!(
@@ -879,24 +909,23 @@ impl BreachNotifier {
         );
 
         let mut queued = 0usize;
-        for recipient in recipients {
-            if recipient.trim().is_empty() {
-                return Err("recipient email must not be empty".into());
-            }
+        for chunk in recipients.chunks(SUBJECT_NOTIFICATION_INSERT_CHUNK) {
+            let ids: Vec<String> = chunk.iter().map(|_| Uuid::new_v4().to_string()).collect();
             let rows = sqlx::query(
                 "INSERT INTO breach_subject_notification_outbox
                    (id, breach_id, tenant_id, recipient_email, subject, body_text, body_sha256,
                     status, attempts, queued_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',0,NOW())
+                 SELECT id, $2, $3, recipient_email, $4, $5, $6, 'pending', 0, NOW()
+                 FROM UNNEST($1::text[], $7::text[]) AS u(id, recipient_email)
                  ON CONFLICT (breach_id, lower(recipient_email)) DO NOTHING",
             )
-            .bind(Uuid::new_v4().to_string())
+            .bind(&ids)
             .bind(breach_id)
             .bind(&report.tenant_id)
-            .bind(recipient)
             .bind(&subject_line)
             .bind(&body)
             .bind(&body_sha256)
+            .bind(chunk)
             .execute(&self.db)
             .await
             .map_err(|e| format!("DB error queueing subject notification: {e}"))?
@@ -1400,6 +1429,126 @@ pub fn build_subject_notification(report: &BreachReport) -> String {
 mod tests {
     use super::*;
 
+    /// Thread-local SQL capture for the batched-outbox regression test.
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
+    }
+
+    async fn notifier_fixture(suffix: &str) -> Option<(PgPool, BreachNotifier, BreachReport)> {
+        let base = crate::test_support::canonical_pool(
+            &format!("breach_{suffix}"),
+            &format!("breach_{suffix}"),
+        )
+        .await?;
+        let pool = logging_pool(&base).await;
+        let audit = crate::test_support::audit_logger(&pool);
+        audit.initialize().await.expect("audit init");
+        let notifier = BreachNotifier::new(
+            pool.clone(),
+            audit,
+            vec!["dpo@apexmail.ee".into()],
+            b"unit-breach-key".to_vec(),
+        );
+        let report = notifier
+            .report_breach(
+                BreachReportInput {
+                    tenant_id: crate::test_support::unique_tenant(),
+                    affected_records: 500,
+                    data_types: vec!["email".into()],
+                    description: "Batched outbox test breach".into(),
+                    severity: "high".into(),
+                    dpo_contact: Some("dpo@apexmail.ee".into()),
+                    likely_consequences: Some("identity theft".into()),
+                    measures_taken: Some("keys rotated".into()),
+                },
+                "unit-test",
+            )
+            .await
+            .expect("report breach");
+        notifier
+            .triage(
+                &report.id,
+                true,
+                true,
+                "high risk to data subjects",
+                "unit-test",
+            )
+            .await
+            .expect("triage high risk");
+        Some((pool, notifier, report))
+    }
+
     fn report(status: BreachStatus) -> BreachReport {
         BreachReport {
             id: "br-1".into(),
@@ -1520,5 +1669,91 @@ mod tests {
         assert!(body.contains("passwords reset"));
         assert!(body.contains("dpo@apexmail.ee"));
         assert!(body.contains("br-1"));
+    }
+
+    /// P3: three recipients queue in ONE bounded multi-row INSERT (the legacy
+    /// path issued one INSERT per recipient), and re-queueing is idempotent
+    /// on the `(breach_id, lower(recipient_email))` conflict key.
+    #[tokio::test]
+    async fn subject_notification_outbox_is_one_insert_per_chunk() {
+        let Some((pool, notifier, report)) = notifier_fixture("outbox_batch").await else {
+            return;
+        };
+        let recipients = vec![
+            "one@example.com".to_string(),
+            "two@example.com".to_string(),
+            "three@example.com".to_string(),
+        ];
+
+        let (capture, guard) = capture_sql();
+        let queued = notifier
+            .queue_subject_notifications(&report.id, &recipients, "unit-test")
+            .await
+            .expect("queue notifications");
+        drop(guard);
+        assert_eq!(queued, 3);
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO breach_subject_notification_outbox"),
+            1,
+            "three recipients must be one INSERT statement: {:?}",
+            capture.statements()
+        );
+
+        // Replaying the same recipients is a no-op and still one statement.
+        let (capture, guard) = capture_sql();
+        let replayed = notifier
+            .queue_subject_notifications(&report.id, &recipients, "unit-test")
+            .await
+            .expect("replay queue notifications");
+        drop(guard);
+        assert_eq!(replayed, 0, "idempotent re-queue inserts nothing");
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO breach_subject_notification_outbox"),
+            1,
+            "the idempotent replay is still one statement: {:?}",
+            capture.statements()
+        );
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM breach_subject_notification_outbox WHERE breach_id = $1",
+        )
+        .bind(&report.id)
+        .fetch_one(&pool)
+        .await
+        .expect("outbox rows");
+        assert_eq!(rows, 3);
+
+        pool.close().await;
+    }
+
+    /// P3: an over-cap request is refused by name BEFORE any insert; the
+    /// route body must not be able to construct an unbounded outbox write.
+    #[tokio::test]
+    async fn subject_notification_recipient_cap_is_named_and_pre_insert() {
+        let Some((pool, notifier, report)) = notifier_fixture("outbox_cap").await else {
+            return;
+        };
+        // The documented cap is 10_000 recipients per request.
+        let recipients: Vec<String> = (0..10_001)
+            .map(|index| format!("cap-{index}@example.com"))
+            .collect();
+        let error = notifier
+            .queue_subject_notifications(&report.id, &recipients, "unit-test")
+            .await
+            .expect_err("over-cap request must be refused");
+        assert!(
+            error.contains("cap"),
+            "the refusal names the recipient cap: {error}"
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM breach_subject_notification_outbox WHERE breach_id = $1",
+        )
+        .bind(&report.id)
+        .fetch_one(&pool)
+        .await
+        .expect("outbox rows");
+        assert_eq!(rows, 0, "an over-cap request writes nothing");
+
+        pool.close().await;
     }
 }

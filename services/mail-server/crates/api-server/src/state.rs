@@ -60,6 +60,9 @@ impl AppStateInner {
     ) -> Result<AppState, ddos_protection::DdosError> {
         let ddos_protector = Arc::new(DdosProtector::new(ProtectorConfig::default()).await?);
 
+        // ONE blocklist instance shared by the grader and the feed loader,
+        // regardless of whether the grader is enabled.
+        let threat_blocklist = Arc::new(DomainBlocklist::new(1000));
         let grader_state = if config.grader_enabled {
             let grader_cfg = GraderConfig {
                 enabled: true,
@@ -69,8 +72,7 @@ impl AppStateInner {
                 max_body_size: config.grader_max_body_size as u32,
                 ..Default::default()
             };
-            let blocklist = DomainBlocklist::new(1000);
-            match GraderEngine::new(grader_cfg.clone(), Some(Arc::new(blocklist))) {
+            match GraderEngine::new(grader_cfg.clone(), Some(threat_blocklist.clone())) {
                 Ok(engine) => match GraderState::new(Arc::new(engine), grader_cfg, db.clone()) {
                     Ok(gs) => Some(Arc::new(gs)),
                     Err(e) => {
@@ -131,19 +133,24 @@ impl AppStateInner {
 
         let resilient = ResilientClient::new_from_config(&config);
 
-        Ok(Self::with_ddos_protector(
+        let state = Self::with_ddos_protector(
             db,
             pools,
             redis,
             config,
-            http_client,
+            http_client.clone(),
             ses_provider,
             ip_provider,
             ddos_protector,
             grader_state,
             placement_state,
             resilient,
-        ))
+        );
+        // Use-all audit: the grader's blocklist was constructed empty and no
+        // refresh task existed. Spawn the feed loop only when feeds are
+        // configured (no-op otherwise).
+        crate::threat_feeds::spawn_if_configured(http_client, threat_blocklist);
+        Ok(state)
     }
 
     pub fn with_ddos_protector(

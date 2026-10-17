@@ -460,6 +460,20 @@ validate_repo_gates() {
             python3 tools/check_prod_billing_wiring.py
             python3 tools/check_prod_billing_wiring.py --self-test
         '
+        # Production env forwarding (F1 feature-inventory audit): every key
+        # documented in .env.production.example that a Rust binary reads must
+        # be forwarded by docker-compose.prod.yml (directly or through its
+        # _FILE bridge), and every remaining key needs an explicit allowlist
+        # entry with a reason. The gate pins the capability wiring for the
+        # dedicated-IP/Hetzner, MFA at-rest, tracking host, SNS allow-list,
+        # SSO encryption, mailstore encryption-at-rest, AI flags and invoice
+        # auto-pay settings; --self-test proves it rejects a removed
+        # forwarding and an un-listed allowlisted-only key.
+        ci_check "production env forwarding (F1 capability wiring)" bash -c '
+            set -eu
+            python3 tools/check_prod_env_forwarding.py
+            python3 tools/check_prod_env_forwarding.py --self-test
+        '
         # Published deliverability report (plan A4): the methodology page's
         # numbers are rendered from the committed ClickHouse artifact
         # (apps/marketing-zola/data/deliverability-report.json) by
@@ -483,6 +497,14 @@ validate_repo_gates() {
             python3 tools/generate_public_metrics.py --check
             python3 tools/generate_public_metrics.py --self-test
         '
+        # Backup retention: docker-compose.prod.yml promises day/week/month
+        # pruning (BACKUP_KEEP_DAYS/WEEKS/MONTHS). The dogfood env-surface
+        # probe caught the two retirement variables declared but never read —
+        # config theater. The script now implements the grandfather-father-son
+        # planner and this gate pins it with a pinned-clock self-test.
+        ci_check "postgres backup retention self-test" \
+            sh "$REPO_ROOT/deploy/hardening/scripts/postgres-backup-encrypt.sh" \
+            --self-test-retention
     fi
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):

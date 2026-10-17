@@ -90,7 +90,9 @@ async fn connect(database_url: &str) -> Result<sqlx::PgPool, String> {
 }
 
 fn main() -> ExitCode {
-    let raw: Vec<String> = std::env::args().skip(1).collect();
+    // CLI argument parsing for an operator tool; no security decision
+    // depends on argv[0].
+    let raw: Vec<String> = std::env::args().skip(1).collect(); // nosemgrep: rust.lang.security.args.args
     if raw.iter().any(|arg| arg == "--help" || arg == "-h") || raw.is_empty() {
         return usage();
     }

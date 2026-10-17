@@ -35,13 +35,14 @@
 //! add-on bills, and `archive_enabled_at` is the retention MARKER the flag
 //! starts. Enabling it also ensures the account's `Archive` folder exists
 //! in the same transaction (the mail plane's storage target for retained
-//! messages — mailstore COPY/move already work against it). What is NOT
-//! built: a journaling destination (nothing copies inbound/outbound mail to
-//! a journal mailbox or a third-party archive) and a retrieval UI (archived
-//! messages are reachable through IMAP like any other folder — there is no
-//! tenant-facing archive browse/search). Disabling the flag clears the
-//! marker but NEVER deletes the folder or its messages: retention ending is
-//! not a data-loss trigger.
+//! messages — mailstore COPY/move already work against it). Journaling is
+//! built (`mail_journal`, migration 264): the worker copies outbound raw MIME
+//! and the mailstore copies inbound messages at persist time for add-on
+//! tenants, and `/settings/journal` + `GET /v1/journal` provide the
+//! tenant-facing browse/download surface. Disabling the flag clears the
+//! marker but NEVER deletes the folder or its messages (and historical
+//! journal rows remain readable): retention ending is not a data-loss
+//! trigger.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;

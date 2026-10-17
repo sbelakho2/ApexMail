@@ -72,7 +72,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | screen-share-demos | runtime-wired | — |
 | smtp-starttls | runtime-wired | — |
 | spam-phishing-filtering | runtime-wired | MTA_SPAM_FILTER_ENABLED |
-| threat-intelligence-feeds | runtime-wired | — |
+| threat-intelligence-feeds | runtime-wired | THREAT_INTEL_FEED_URLS |
 | web-application-firewall | runtime-wired | — |
 | account-takeover-protection | deployed | ATO_PROTECTION_ENABLED |
 | high-availability-failover-service | deployed | — |
@@ -99,7 +99,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **234 `*.sql` files**, latest `262_perf_indexes.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **237 `*.sql` files**, latest `265_product_line_entitlements.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 
@@ -109,9 +109,9 @@ Source of truth: `docs/development/ui-baseline-manifest.json` (the pinned counts
 
 | Surface | routeCount | Routes listed |
 |---|---|---|
-| web | 40 | 40 |
+| web | 41 | 41 |
 | control-plane | 34 | 34 |
 | marketing | 19 | 19 |
 | marketing-zola | 38 | 38 |
 
-**Total: 131 routes.**
+**Total: 132 routes.**

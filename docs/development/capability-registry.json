@@ -230,9 +230,14 @@
       "evidence": {
         "docker_target": "api-server",
         "compose_service": "api-server",
-        "call_path": "services/mail-server/crates/api-server/src/state.rs:12,72 (DomainBlocklist::new constructed and handed to the GraderEngine)",
+        "call_path": "api-server/src/state.rs -> threat_feeds.rs (THREAT_INTEL_FEED_URLS refresh loop + 60s expiry purge) -> shared DomainBlocklist -> email-grader reputation; STIX/TAXII transports remain unimplemented",
         "metrics": null,
-        "explanation": "Only wired as a support library INSIDE the deliverability grader; the blocklist is constructed empty and no feed ingestion is wired at runtime, so 'threat intelligence' is not an active network-defense control. Feed ingestion and reputation scoring are roadmap."
+        "explanation": "Runtime-wired: the grader's blocklist is shared with the feed loader; configured plaintext/URL feeds are refreshed (default hourly), expire by TTL, and are purged. With THREAT_INTEL_FEED_URLS unset the blocklist stays empty.",
+        "env_gate": {
+          "name": "THREAT_INTEL_FEED_URLS",
+          "crate": "crates/api-server",
+          "default": ""
+        }
       },
       "scan_aliases": [
         "threat intelligence",
@@ -445,9 +450,9 @@
       "evidence": {
         "docker_target": null,
         "compose_service": null,
-        "call_path": "consumed by functional-tests and integration-tests only",
+        "call_path": "library consumed by the deployed status server (auth-server/src/main.rs) and the api-server rate-limit middleware",
         "metrics": null,
-        "explanation": "Stage implemented as a library: the api-server enforces rate limiting through its own middleware (api-server/src/middleware/rate_limiter.rs, the separate rate-limiting entry below), so this crate is consumed by functional-tests and integration-tests only \u2014 crates/rate-limiter/README.md carries the matching library-only status line. The RATE LIMITING capability is real and advertised via api-server's own middleware. No scan aliases: the crate name never appears in claim surfaces."
+        "explanation": "Library capability: the limiter is compiled into the status server and api-server; it has no standalone service (hence 'implemented', not 'deployed')."
       },
       "scan_aliases": []
     },
@@ -575,7 +580,7 @@
       "evidence": {
         "docker_target": null,
         "compose_service": "tracking",
-        "call_path": "services/mail-server/crates/tracking-service/src/codec.rs (HMAC signing of event payloads)",
+        "call_path": "worker-processors/src/webhook/processor.rs (HMAC signing via WEBHOOK_SIGNING_SECRET) -> outbound deliveries",
         "metrics": null,
         "explanation": "Webhook payloads are HMAC-signed. Genuinely deployed \u2014 marketing naming is honest."
       },

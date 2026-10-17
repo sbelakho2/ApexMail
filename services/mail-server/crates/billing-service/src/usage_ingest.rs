@@ -39,9 +39,9 @@
 //! keeps the per-day half-up SQL `ROUND` (lifecycle-interval overlap in
 //! hours).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -50,7 +50,6 @@ use uuid::Uuid;
 
 use crate::routes::append_audit_log;
 use crate::types::MeterEventType;
-use crate::usage::record_usage;
 
 /// Maximum number of events accepted by one ingest batch call.
 pub const INGEST_BATCH_LIMIT: usize = 1_000;
@@ -97,48 +96,864 @@ pub struct IngestBatchResult {
     pub errors: Vec<String>,
 }
 
-/// Record a batch of metering events through the standard idempotent
-/// [`record_usage`] path (Redis dedup + DB `ON CONFLICT (id) DO NOTHING` +
-/// audit trail). Used by the `POST /usage/ingest` route; the edge/worker
-/// calls this for event types that have no derivable platform source table
-/// (today: `api_calls`).
+/// Record a batch of metering events through the same idempotency contract
+/// as [`crate::usage::record_usage`] (durable `usage_operations` claim +
+/// Redis dedup + DB `ON CONFLICT (id, timestamp) DO NOTHING` + audit trail),
+/// but in a bounded, batched number of statements (P2).
+///
+/// Batched path, one call:
+/// 1. ONE preload query for the distinct tenants' subscription contexts
+///    (matched-cycle row, falling back to the newest active row) and ONE
+///    query for their billing-cycle anchors.
+/// 2. ONE transaction containing the multi-row `usage_operations` claim, ONE
+///    conflict/replay lookup, chunked multi-row `metering_events` inserts and
+///    chunked multi-row audit inserts (the global audit chain head advances
+///    ONCE per batch; entries are chained in input order in memory).
+/// 3. ONE pipelined Redis round trip per 500 dedup+counter EVALs.
+///
+/// Ordering and results match the serial path: events are processed in input
+/// order, duplicates count as `duplicates`, invalid quantities and
+/// conflicting operation-id reuse count as `rejected`.
+///
+/// Two honest limitations are documented rather than hidden:
+/// * A batch-level DB failure rejects every not-yet-committed event (the
+///   single transaction is the point of the batched path; per-event
+///   savepoints would restore the per-event statement count).
+/// * A Redis pipeline reports ONE error for the whole chunk, so per-command
+///   outcomes cannot be attributed. On pipeline failure every event in the
+///   chunk is compensated (counter decrement + dedup delete, the same
+///   compensation `record_usage` performs) and reported rejected. This is
+///   the only sub-path that cannot be fully batched while preserving
+///   per-event error results.
 pub async fn ingest_usage_batch(
     pool: &PgPool,
     redis: &deadpool_redis::Pool,
     events: &[IngestEvent],
 ) -> IngestBatchResult {
-    let mut result = IngestBatchResult::default();
-    let error_display_limit = 5;
+    const ERROR_DISPLAY_LIMIT: usize = 5;
 
-    for event in events {
-        match record_usage(
-            pool,
-            redis,
+    let mut result = IngestBatchResult::default();
+    if events.is_empty() {
+        return result;
+    }
+
+    // One batch-wide instant: enrichment, the cycle anchor and the counter
+    // period are functions of "now"; using one instant keeps every event in
+    // the batch on the same side of a cycle boundary (the serial path read
+    // the clock per event).
+    let now = Utc::now();
+
+    // 1. Reject invalid quantities before any I/O — identical error text to
+    //    `UsageError::InvalidQuantity`.
+    let mut candidates: Vec<usize> = Vec::with_capacity(events.len());
+    for (index, event) in events.iter().enumerate() {
+        if event.quantity <= 0 {
+            push_ingest_error(
+                &mut result,
+                event,
+                &format!("quantity must be positive, got {}", event.quantity),
+                ERROR_DISPLAY_LIMIT,
+            );
+        } else {
+            candidates.push(index);
+        }
+    }
+    if candidates.is_empty() {
+        return result;
+    }
+
+    // 2. Preload subscription state for ALL distinct tenants in one statement
+    //    each. Pre-fix these were 2 SELECTs per event.
+    let mut tenant_ids: Vec<String> = candidates
+        .iter()
+        .map(|index| events[*index].tenant_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    tenant_ids.sort();
+
+    let contexts = match load_ingest_subscription_contexts(pool, &tenant_ids, now).await {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            reject_ingest_candidates(
+                &mut result,
+                &candidates,
+                ERROR_DISPLAY_LIMIT,
+                format!("usage ingest subscription preload failed: {error}"),
+            );
+            return result;
+        }
+    };
+    let cycle_anchors = match load_ingest_cycle_anchors(pool, &tenant_ids, now).await {
+        Ok(anchors) => anchors,
+        Err(error) => {
+            reject_ingest_candidates(
+                &mut result,
+                &candidates,
+                ERROR_DISPLAY_LIMIT,
+                format!("usage ingest cycle-anchor preload failed: {error}"),
+            );
+            return result;
+        }
+    };
+
+    // 3. Prepare every candidate in memory: id, enriched metadata, canonical
+    //    payload hash, operation key and the enforced counter key.
+    let mut prepared: Vec<PreparedIngestEvent> = Vec::with_capacity(candidates.len());
+    for index in &candidates {
+        let event = &events[*index];
+        let id = event.event_id.unwrap_or_else(Uuid::new_v4);
+        let event_type_str = crate::usage::meter_event_type_str(event.event_type);
+        let metadata =
+            enrich_ingest_metadata(event.metadata.clone(), contexts.get(&event.tenant_id));
+        let payload_hash = crate::usage::usage_payload_hash(
+            &event.tenant_id,
+            event_type_str,
+            event.quantity,
+            id,
+            event.metadata.as_ref(),
+        );
+        let operation_key = format!("{}:{}:{}", event.tenant_id, event_type_str, id);
+        let counter_key = ingest_counter_key(
             &event.tenant_id,
             event.event_type,
-            event.quantity,
-            event.event_id,
-            event.metadata.clone(),
-        )
-        .await
-        {
-            Ok(true) => result.accepted += 1,
-            Ok(false) => result.duplicates += 1,
+            now,
+            cycle_anchors.get(&event.tenant_id).copied(),
+        );
+        prepared.push(PreparedIngestEvent {
+            index: *index,
+            id,
+            tenant_id: event.tenant_id.clone(),
+            event_type_str,
+            quantity: event.quantity,
+            metadata,
+            operation_key,
+            payload_hash,
+            counter_key,
+            original_timestamp: None,
+            claim: IngestClaimState::Conflict,
+        });
+    }
+
+    // 4. ONE transaction: bulk claim → bulk metering → bulk audit.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            reject_ingest_candidates(
+                &mut result,
+                &candidates,
+                ERROR_DISPLAY_LIMIT,
+                format!("usage ingest transaction failed: {error}"),
+            );
+            return result;
+        }
+    };
+
+    if let Err(error) = claim_usage_operations_bulk(&mut tx, &mut prepared, now).await {
+        reject_ingest_candidates(
+            &mut result,
+            &candidates,
+            ERROR_DISPLAY_LIMIT,
+            format!("usage ingest claim failed: {error}"),
+        );
+        return result;
+    }
+
+    let claimed: Vec<&PreparedIngestEvent> = prepared
+        .iter()
+        .filter(|event| event.claim == IngestClaimState::Claimed)
+        .collect();
+
+    if let Err(error) = insert_metering_events_bulk(&mut tx, &claimed).await {
+        reject_ingest_candidates(
+            &mut result,
+            &candidates,
+            ERROR_DISPLAY_LIMIT,
+            format!("usage ingest metering insert failed: {error}"),
+        );
+        return result;
+    }
+
+    if let Err(error) = append_metering_audit_bulk(&mut tx, &claimed, now).await {
+        reject_ingest_candidates(
+            &mut result,
+            &candidates,
+            ERROR_DISPLAY_LIMIT,
+            format!("usage ingest audit append failed: {error}"),
+        );
+        return result;
+    }
+
+    if let Err(error) = tx.commit().await {
+        reject_ingest_candidates(
+            &mut result,
+            &candidates,
+            ERROR_DISPLAY_LIMIT,
+            format!("usage ingest commit failed: {error}"),
+        );
+        return result;
+    }
+
+    // 5. Conflicts are rejected WITHOUT touching Redis (the serial path
+    //    returned before its EVAL).
+    for event in prepared
+        .iter()
+        .filter(|event| event.claim == IngestClaimState::Conflict)
+    {
+        push_ingest_error(
+            &mut result,
+            &events[event.index],
+            &format!(
+                "usage operation {} conflict: usage operation id reused with different tenant/kind/payload",
+                event.id
+            ),
+            ERROR_DISPLAY_LIMIT,
+        );
+    }
+
+    // 6. Pipelined dedup + counter EVALs (one atomic EVAL per event, one
+    //    round trip per chunk).
+    let redis_events: Vec<&PreparedIngestEvent> = prepared
+        .iter()
+        .filter(|event| event.claim != IngestClaimState::Conflict)
+        .collect();
+    let mut conn = match redis.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            for event in &redis_events {
+                push_ingest_error(
+                    &mut result,
+                    &events[event.index],
+                    &format!("redis pool error: {error}"),
+                    ERROR_DISPLAY_LIMIT,
+                );
+            }
+            return result;
+        }
+    };
+
+    for chunk in redis_events.chunks(INGEST_REDIS_PIPELINE_CHUNK) {
+        let mut pipeline = redis::pipe();
+        for event in chunk {
+            pipeline
+                .cmd("EVAL")
+                .arg(RECORD_USAGE_INGEST_LUA)
+                .arg(2i64) // dedup key + counter key
+                .arg(format!("meter:dedup:{}", event.id))
+                .arg(&event.counter_key)
+                .arg(INGEST_DEDUP_TTL_SECS)
+                .arg(event.quantity)
+                .arg(INGEST_DEDUP_TTL_SECS);
+        }
+        #[cfg(test)]
+        crate::test_support::query_count::bump("ingest.redis.pipeline");
+        match pipeline.query_async::<Vec<i64>>(&mut conn).await {
+            Ok(recorded) => {
+                for (_event, recorded) in chunk.iter().zip(recorded) {
+                    if recorded == 1 {
+                        result.accepted += 1;
+                    } else {
+                        result.duplicates += 1;
+                    }
+                }
+            }
             Err(error) => {
-                result.rejected += 1;
-                if result.errors.len() < error_display_limit {
-                    result.errors.push(format!(
-                        "tenant={} type={} quantity={}: {error}",
-                        event.tenant_id,
-                        crate::usage::meter_event_type_str(event.event_type),
-                        event.quantity
-                    ));
+                // A pipeline reports one error for the chunk: per-command
+                // success cannot be attributed. Compensate the whole chunk
+                // (counter decrement + dedup delete — the same compensation
+                // `record_usage` performs on EVAL failure) and reject it.
+                let mut compensation = redis::pipe();
+                for event in chunk {
+                    compensation
+                        .cmd("INCRBY")
+                        .arg(&event.counter_key)
+                        .arg(-event.quantity)
+                        .ignore();
+                    compensation
+                        .cmd("DEL")
+                        .arg(format!("meter:dedup:{}", event.id))
+                        .ignore();
+                }
+                if let Err(compensation_error) = compensation.query_async::<()>(&mut conn).await {
+                    tracing::error!(
+                        error = %compensation_error,
+                        "failed to compensate Redis counters after ingest EVAL failure"
+                    );
+                }
+                for event in chunk {
+                    push_ingest_error(
+                        &mut result,
+                        &events[event.index],
+                        &format!("redis command error: {error}"),
+                        ERROR_DISPLAY_LIMIT,
+                    );
                 }
             }
         }
     }
 
     result
+}
+
+/// EVAL commands per pipelined Redis round trip. Each EVAL remains atomic.
+const INGEST_REDIS_PIPELINE_CHUNK: usize = 500;
+/// Rows per multi-row `metering_events` INSERT (6 binds/row; 30,000 binds).
+const INGEST_METERING_CHUNK_ROWS: usize = 5_000;
+/// Rows per multi-row `audit_logs` INSERT (12 binds/row; 48,000 binds).
+const INGEST_AUDIT_CHUNK_ROWS: usize = 4_000;
+/// Dedup/counter TTL — identical to `usage::DEDUP_TTL_SECS`.
+const INGEST_DEDUP_TTL_SECS: i64 = 40 * 86_400;
+
+/// The dedup+counter Lua script: byte-identical to
+/// `usage::RECORD_USAGE_LUA` (private to that module), so both writers share
+/// one atomic contract.
+const RECORD_USAGE_INGEST_LUA: &str = r#"
+    local was_set = redis.call('SET', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+    if not was_set then
+        return 0
+    end
+    redis.call('INCRBY', KEYS[2], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    return 1
+"#;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestClaimState {
+    Claimed,
+    Replay,
+    Conflict,
+}
+
+/// One candidate event with everything the batched transaction needs.
+struct PreparedIngestEvent {
+    index: usize,
+    id: Uuid,
+    tenant_id: String,
+    event_type_str: &'static str,
+    quantity: i64,
+    metadata: serde_json::Value,
+    operation_key: String,
+    payload_hash: String,
+    counter_key: String,
+    original_timestamp: Option<DateTime<Utc>>,
+    claim: IngestClaimState,
+}
+
+#[derive(Debug, Clone)]
+struct IngestSubscriptionContext {
+    subscription_id: String,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct IngestSubscriptionRow {
+    tenant_id: String,
+    subscription_id: String,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct IngestCycleAnchorRow {
+    tenant_id: String,
+    billing_cycle_start: DateTime<Utc>,
+}
+
+fn push_ingest_error(
+    result: &mut IngestBatchResult,
+    event: &IngestEvent,
+    detail: &str,
+    error_display_limit: usize,
+) {
+    result.rejected += 1;
+    if result.errors.len() < error_display_limit {
+        result.errors.push(format!(
+            "tenant={} type={} quantity={}: {detail}",
+            event.tenant_id,
+            crate::usage::meter_event_type_str(event.event_type),
+            event.quantity
+        ));
+    }
+}
+
+/// Reject every candidate whose batch-level step failed. The single
+/// transaction is the batched path's point; per-event savepoints would
+/// restore the per-event statement count this fix removes.
+fn reject_ingest_candidates(
+    result: &mut IngestBatchResult,
+    candidates: &[usize],
+    error_display_limit: usize,
+    detail: String,
+) {
+    result.rejected += candidates.len();
+    if result.errors.len() < error_display_limit {
+        result.errors.push(detail);
+    }
+}
+
+/// Preload the metering subscription context for every distinct tenant with
+/// ONE statement. The ordering reproduces the serial matched-then-fallback
+/// rule exactly: a row covering `now` wins; when none does, the newest
+/// active row is used.
+async fn load_ingest_subscription_contexts(
+    pool: &PgPool,
+    tenants: &[String],
+    now: DateTime<Utc>,
+) -> Result<HashMap<String, IngestSubscriptionContext>, sqlx::Error> {
+    #[cfg(test)]
+    crate::test_support::query_count::bump("ingest.db.subscription_context");
+    let rows: Vec<IngestSubscriptionRow> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (tenant_id)
+               tenant_id,
+               adyen_subscription_id AS subscription_id,
+               billing_cycle_start AS period_start,
+               billing_cycle_end AS period_end
+        FROM adyen_subscriptions
+        WHERE tenant_id = ANY($1)
+          AND status IN ('active', 'trialing', 'past_due')
+        ORDER BY tenant_id,
+                 CASE WHEN billing_cycle_start <= $2 AND billing_cycle_end > $2
+                      THEN 0 ELSE 1 END,
+                 created_at DESC
+        "#,
+    )
+    .bind(tenants)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.tenant_id,
+                IngestSubscriptionContext {
+                    subscription_id: row.subscription_id,
+                    period_start: row.period_start,
+                    period_end: row.period_end,
+                },
+            )
+        })
+        .collect())
+}
+
+/// Preload every distinct tenant's billing-cycle anchor with ONE statement
+/// (`usage::tenant_cycle_anchor`, set-based).
+async fn load_ingest_cycle_anchors(
+    pool: &PgPool,
+    tenants: &[String],
+    now: DateTime<Utc>,
+) -> Result<HashMap<String, NaiveDate>, sqlx::Error> {
+    #[cfg(test)]
+    crate::test_support::query_count::bump("ingest.db.cycle_anchor");
+    let rows: Vec<IngestCycleAnchorRow> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (tenant_id) tenant_id, billing_cycle_start
+        FROM adyen_subscriptions
+        WHERE tenant_id = ANY($1)
+          AND status IN ('active', 'trialing', 'past_due')
+          AND billing_cycle_start IS NOT NULL
+          AND billing_cycle_start <= $2
+        ORDER BY tenant_id, billing_cycle_start DESC
+        "#,
+    )
+    .bind(tenants)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.tenant_id, row.billing_cycle_start.date_naive()))
+        .collect())
+}
+
+/// Metadata enrichment identical to `usage::enrich_usage_metadata` +
+/// `usage::attach_subscription_context` (private there): caller metadata is
+/// normalized, a caller-supplied `subscriptionId` suppresses enrichment, and
+/// an existing key always wins.
+fn enrich_ingest_metadata(
+    metadata: Option<serde_json::Value>,
+    context: Option<&IngestSubscriptionContext>,
+) -> serde_json::Value {
+    let mut metadata = match metadata {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(value) => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".into(), value);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    if metadata.contains_key("subscriptionId") {
+        return serde_json::Value::Object(metadata);
+    }
+    if let Some(context) = context {
+        metadata
+            .entry("subscriptionId")
+            .or_insert_with(|| json!(context.subscription_id));
+        metadata
+            .entry("subscriptionPeriodStart")
+            .or_insert_with(|| json!(context.period_start.to_rfc3339()));
+        metadata
+            .entry("subscriptionPeriodEnd")
+            .or_insert_with(|| json!(context.period_end.to_rfc3339()));
+    }
+    serde_json::Value::Object(metadata)
+}
+
+/// Byte-identical to `usage::usage_counter_key_anchored` (private there).
+fn ingest_counter_key(
+    tenant_id: &str,
+    event_type: MeterEventType,
+    at: DateTime<Utc>,
+    cycle_anchor: Option<NaiveDate>,
+) -> String {
+    let Some(anchor) = cycle_anchor else {
+        return format!(
+            "meter:rt:{}:{}:{}-{:02}",
+            tenant_id,
+            crate::usage::meter_event_type_str(event_type),
+            at.year(),
+            at.month()
+        );
+    };
+    let (year, month, _cycle_start) = ingest_most_recent_anchored_cycle(at, anchor);
+    format!(
+        "meter:rt:{}:{}:c{}-{:02}",
+        tenant_id,
+        crate::usage::meter_event_type_str(event_type),
+        year,
+        month
+    )
+}
+
+fn ingest_most_recent_anchored_cycle(
+    at: DateTime<Utc>,
+    anchor: NaiveDate,
+) -> (i32, u32, DateTime<Utc>) {
+    let mut year = at.year();
+    let mut month = at.month();
+    loop {
+        let candidate = ingest_anchored_date(year, month, anchor.day());
+        let candidate_start = candidate
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+        if let Some(start) = candidate_start {
+            if start <= at {
+                return (year, month, start);
+            }
+        }
+        if month == 1 {
+            month = 12;
+            year -= 1;
+        } else {
+            month -= 1;
+        }
+    }
+}
+
+fn ingest_anchored_date(year: i32, month: u32, day: u32) -> NaiveDate {
+    let last_day = {
+        let next = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)
+        }
+        .expect("first of next month is always valid");
+        (next - Duration::days(1)).day()
+    };
+    NaiveDate::from_ymd_opt(year, month, day.min(last_day)).expect("clamped day is always valid")
+}
+
+/// Bulk-claim every prepared operation in ONE `INSERT ... ON CONFLICT DO
+/// NOTHING RETURNING`, then classify the rows that already existed with ONE
+/// lookup. Same content = replay (duplicate), different content = conflict.
+async fn claim_usage_operations_bulk(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    prepared: &mut [PreparedIngestEvent],
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    // One claim row per distinct operation key, in FIRST-occurrence order:
+    // a repeated key within the batch must not be sent twice to the
+    // statement (PostgreSQL skips it, but the skipped row cannot be
+    // attributed through RETURNING).
+    let mut first_position: HashMap<String, usize> = HashMap::new();
+    let mut claim_inputs: Vec<&PreparedIngestEvent> = Vec::new();
+    for (position, event) in prepared.iter().enumerate() {
+        if !first_position.contains_key(&event.operation_key) {
+            first_position.insert(event.operation_key.clone(), position);
+            claim_inputs.push(event);
+        }
+    }
+
+    let mut claim_builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO usage_operations
+             (operation_key, tenant_id, event_kind, event_id, payload_hash, original_timestamp)
+         ",
+    );
+    claim_builder.push_values(claim_inputs.iter(), |mut row, event| {
+        row.push_bind(&event.operation_key)
+            .push_bind(&event.tenant_id)
+            .push_bind(event.event_type_str)
+            .push_bind(event.id)
+            .push_bind(&event.payload_hash)
+            .push_bind(now);
+    });
+    claim_builder.push(
+        " ON CONFLICT (operation_key) DO NOTHING
+          RETURNING operation_key, original_timestamp",
+    );
+
+    #[cfg(test)]
+    crate::test_support::query_count::bump("ingest.db.claim");
+    let claimed_rows: Vec<(String, DateTime<Utc>)> = claim_builder
+        .build_query_as()
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+    // Only the FIRST occurrence of an operation key may be "Claimed"; a later
+    // duplicate is a replay (same payload) or a conflict (different payload).
+    let claimed: HashMap<String, DateTime<Utc>> = claimed_rows.into_iter().collect();
+    let claimed_hashes: HashMap<String, (String, DateTime<Utc>)> = claim_inputs
+        .iter()
+        .filter_map(|event| {
+            claimed.get(&event.operation_key).map(|timestamp| {
+                (
+                    event.operation_key.clone(),
+                    (event.payload_hash.clone(), *timestamp),
+                )
+            })
+        })
+        .collect();
+
+    let missing: Vec<String> = prepared
+        .iter()
+        .filter(|event| !claimed.contains_key(&event.operation_key))
+        .map(|event| event.operation_key.clone())
+        .collect();
+
+    let mut existing: HashMap<String, (String, DateTime<Utc>)> = HashMap::new();
+    if !missing.is_empty() {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("ingest.db.claim_lookup");
+        let rows: Vec<(String, String, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT operation_key, payload_hash, original_timestamp
+               FROM usage_operations
+              WHERE operation_key = ANY($1)",
+        )
+        .bind(&missing)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+        existing.extend(
+            rows.into_iter()
+                .map(|(key, hash, timestamp)| (key, (hash, timestamp))),
+        );
+    }
+
+    for (position, event) in prepared.iter_mut().enumerate() {
+        if let Some((claimed_hash, timestamp)) = claimed_hashes.get(&event.operation_key) {
+            if first_position.get(&event.operation_key).copied() == Some(position) {
+                event.claim = IngestClaimState::Claimed;
+                event.original_timestamp = Some(*timestamp);
+            } else {
+                event.claim = if *claimed_hash == event.payload_hash {
+                    IngestClaimState::Replay
+                } else {
+                    IngestClaimState::Conflict
+                };
+            }
+        } else if let Some((hash, _timestamp)) = existing.get(&event.operation_key) {
+            event.claim = if *hash == event.payload_hash {
+                IngestClaimState::Replay
+            } else {
+                IngestClaimState::Conflict
+            };
+        } else {
+            // No row any more (a concurrent delete raced the lookup):
+            // conservative conflict, never double-counted.
+            event.claim = IngestClaimState::Conflict;
+        }
+    }
+
+    Ok(())
+}
+
+/// Chunked multi-row `metering_events` INSERT for newly claimed events.
+async fn insert_metering_events_bulk(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    claimed: &[&PreparedIngestEvent],
+) -> Result<(), String> {
+    for chunk in claimed.chunks(INGEST_METERING_CHUNK_ROWS) {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("ingest.db.metering");
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata) ",
+        );
+        builder.push_values(chunk, |mut row, event| {
+            row.push_bind(event.id)
+                .push_bind(&event.tenant_id)
+                .push_bind(event.event_type_str)
+                .push_bind(event.quantity)
+                .push_bind(
+                    event
+                        .original_timestamp
+                        .expect("a claimed event carries its immutable timestamp"),
+                )
+                .push_bind(&event.metadata);
+        });
+        builder.push(" ON CONFLICT (id, \"timestamp\") DO NOTHING");
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("DB error: {error}"))?;
+    }
+    Ok(())
+}
+
+struct IngestAuditRow {
+    tenant_id: String,
+    resource_id: String,
+    details: serde_json::Value,
+    timestamp: DateTime<Utc>,
+    hash: String,
+    previous_hash: Option<String>,
+    signature: String,
+}
+
+/// The chain link signature key, resolved exactly like the canonical billing
+/// writer (`routes::insert_audit_log`'s private helper): configured
+/// `AUDIT_SIGNING_KEY`, else the documented development fallback.
+fn ingest_audit_signing_key() -> String {
+    match std::env::var("AUDIT_SIGNING_KEY") {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            tracing::warn!(
+                "AUDIT_SIGNING_KEY is not configured — signing with the documented development fallback key"
+            );
+            "apexmail-audit-fallback-key".to_string()
+        }
+    }
+}
+
+/// Append one audit entry per newly claimed metering event with ONE
+/// chain-head advance and chunked multi-row INSERTs. Entries are hashed and
+/// chained IN INPUT ORDER in memory; the head row lock is the same
+/// serialization point the per-row writer used, so the chain stays linear.
+async fn append_metering_audit_bulk(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    claimed: &[&PreparedIngestEvent],
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    if claimed.is_empty() {
+        return Ok(());
+    }
+
+    let mut rows: Vec<IngestAuditRow> = Vec::with_capacity(claimed.len());
+    for event in claimed {
+        let timestamp = apexmail_lib::audit::truncate_timestamp_to_micros(
+            event.original_timestamp.unwrap_or(now),
+        );
+        let details = serde_json::Value::Object(crate::usage::build_metering_audit_metadata(
+            event.event_type_str,
+            event.quantity,
+            timestamp,
+            &event.metadata,
+        ));
+        let resource_id = event.id.to_string();
+        let hash = apexmail_lib::audit::audit_hash(
+            Some(&event.tenant_id),
+            None,
+            "billing.metering_event_recorded",
+            "metering_event",
+            Some(&resource_id),
+            &details,
+            timestamp,
+        );
+        rows.push(IngestAuditRow {
+            tenant_id: event.tenant_id.clone(),
+            resource_id,
+            details,
+            timestamp,
+            hash,
+            previous_hash: None,
+            signature: String::new(),
+        });
+    }
+
+    // Advance the GLOBAL chain head ONCE to the batch's final hash. The
+    // returned `prev_hash` is the head the batch links onto; every entry in
+    // between chains in memory. The ON CONFLICT row lock serializes this
+    // batch against concurrent appenders until COMMIT.
+    let final_hash = rows.last().expect("non-empty audit rows").hash.clone();
+    #[cfg(test)]
+    crate::test_support::query_count::bump("ingest.db.audit_head");
+    let previous: Option<String> = sqlx::query_scalar(
+        r#"
+        INSERT INTO audit_chain_head (chain_id, head_hash, prev_hash, head_seq, updated_at)
+        VALUES ('global', $1, NULL, 1, NOW())
+        ON CONFLICT (chain_id) DO UPDATE SET
+            prev_hash  = audit_chain_head.head_hash,
+            head_hash  = EXCLUDED.head_hash,
+            head_seq   = audit_chain_head.head_seq + 1,
+            updated_at = NOW()
+        RETURNING prev_hash
+        "#,
+    )
+    .bind(&final_hash)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("DB error: {error}"))?
+    .flatten();
+
+    let signing_key = ingest_audit_signing_key();
+    let mut previous_hash = previous;
+    for row in &mut rows {
+        row.previous_hash = previous_hash.clone();
+        row.signature = apexmail_lib::audit::audit_log_signature(
+            previous_hash.as_deref(),
+            &row.hash,
+            &signing_key,
+        )
+        .unwrap_or_default();
+        previous_hash = Some(row.hash.clone());
+    }
+
+    for chunk in rows.chunks(INGEST_AUDIT_CHUNK_ROWS) {
+        #[cfg(test)]
+        crate::test_support::query_count::bump("ingest.db.audit_insert");
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO audit_logs (
+                id, tenant_id, action, resource, resource_id,
+                details, outcome, previous_hash, hash, signature, timestamp, created_at
+             ) ",
+        );
+        builder.push_values(chunk, |mut row, entry| {
+            row.push_bind(crate::routes::generate_audit_log_id())
+                .push_bind(&entry.tenant_id)
+                .push_bind("billing.metering_event_recorded")
+                .push_bind("metering_event")
+                .push_bind(&entry.resource_id)
+                .push_bind(&entry.details)
+                .push_bind("success")
+                .push_bind(&entry.previous_hash)
+                .push_bind(&entry.hash)
+                .push_bind(&entry.signature)
+                .push_bind(entry.timestamp)
+                .push_bind(entry.timestamp);
+        });
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("DB error: {error}"))?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,6 +2019,391 @@ mod tests {
             "surprise": true
         });
         assert!(serde_json::from_value::<IngestEvent>(body).is_err());
+    }
+
+    // ─── Batched ingest (P2) ─────────────────────────────────────
+    //
+    // Fail-before: `ingest_usage_batch` was a micro-batch — it called
+    // `record_usage` per event, so every statement family below scaled with
+    // the event count (the cfg(test) proxy bumps in the old loop expose it).
+    // Pass-after: one preload query for subscription contexts, one for cycle
+    // anchors, one bulk claim, one conflict lookup, one multi-row metering
+    // insert, one chain-head advance + one multi-row audit insert, and one
+    // pipelined Redis round trip.
+
+    /// The PRE-BATCH implementation, kept verbatim in tests as the
+    /// equivalence oracle: one `record_usage` call per event, in order.
+    async fn ingest_usage_batch_serial(
+        pool: &PgPool,
+        redis: &deadpool_redis::Pool,
+        events: &[IngestEvent],
+    ) -> IngestBatchResult {
+        let mut result = IngestBatchResult::default();
+        let error_display_limit = 5;
+        for event in events {
+            match crate::usage::record_usage(
+                pool,
+                redis,
+                &event.tenant_id,
+                event.event_type,
+                event.quantity,
+                event.event_id,
+                event.metadata.clone(),
+            )
+            .await
+            {
+                Ok(true) => result.accepted += 1,
+                Ok(false) => result.duplicates += 1,
+                Err(error) => {
+                    result.rejected += 1;
+                    if result.errors.len() < error_display_limit {
+                        result.errors.push(format!(
+                            "tenant={} type={} quantity={}: {error}",
+                            event.tenant_id,
+                            crate::usage::meter_event_type_str(event.event_type),
+                            event.quantity
+                        ));
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// A mixed batch: accepted events in two tenants, an exact duplicate, a
+    /// conflicting reuse of the same id, an invalid quantity and an event
+    /// whose caller already supplied a subscriptionId.
+    fn mixed_ingest_batch(tenant_a: &str, tenant_b: &str, ids: [Uuid; 4]) -> Vec<IngestEvent> {
+        vec![
+            IngestEvent {
+                tenant_id: tenant_a.to_string(),
+                event_type: MeterEventType::ApiCalls,
+                quantity: 3,
+                event_id: Some(ids[0]),
+                metadata: None,
+            },
+            // Exact duplicate of event 0 (same id + payload).
+            IngestEvent {
+                tenant_id: tenant_a.to_string(),
+                event_type: MeterEventType::ApiCalls,
+                quantity: 3,
+                event_id: Some(ids[0]),
+                metadata: None,
+            },
+            // Same logical id, different payload: conflict, never re-counted.
+            IngestEvent {
+                tenant_id: tenant_a.to_string(),
+                event_type: MeterEventType::ApiCalls,
+                quantity: 4,
+                event_id: Some(ids[0]),
+                metadata: None,
+            },
+            IngestEvent {
+                tenant_id: tenant_b.to_string(),
+                event_type: MeterEventType::EmailsDelivered,
+                quantity: 2,
+                event_id: Some(ids[1]),
+                metadata: Some(serde_json::json!({ "source": "edge" })),
+            },
+            // Invalid quantity: rejected before any I/O.
+            IngestEvent {
+                tenant_id: tenant_b.to_string(),
+                event_type: MeterEventType::ApiCalls,
+                quantity: 0,
+                event_id: Some(ids[2]),
+                metadata: None,
+            },
+            // Caller-supplied subscription context: enrichment is skipped.
+            IngestEvent {
+                tenant_id: tenant_a.to_string(),
+                event_type: MeterEventType::WebhooksDelivered,
+                quantity: 5,
+                event_id: Some(ids[3]),
+                metadata: Some(serde_json::json!({ "subscriptionId": "caller-sub" })),
+            },
+        ]
+    }
+
+    fn ingest_statement_counts() -> [usize; 8] {
+        use crate::test_support::query_count::count;
+        [
+            count("ingest.db.subscription_context"),
+            count("ingest.db.cycle_anchor"),
+            count("ingest.db.claim"),
+            count("ingest.db.claim_lookup"),
+            count("ingest.db.metering"),
+            count("ingest.db.audit_head"),
+            count("ingest.db.audit_insert"),
+            count("ingest.redis.pipeline"),
+        ]
+    }
+
+    async fn metering_totals(pool: &PgPool, tenants: &[String]) -> Vec<(String, i64)> {
+        sqlx::query_as(
+            "SELECT event_type, SUM(quantity)::bigint
+               FROM metering_events
+              WHERE tenant_id = ANY($1)
+              GROUP BY event_type
+              ORDER BY event_type",
+        )
+        .bind(tenants)
+        .fetch_all(pool)
+        .await
+        .expect("metering totals")
+    }
+
+    async fn redis_counter_totals(
+        pool: &PgPool,
+        redis: &deadpool_redis::Pool,
+        tenants: &[String],
+        at: DateTime<Utc>,
+    ) -> Vec<(&'static str, i64)> {
+        let mut conn = redis.get().await.expect("redis");
+        let mut totals: HashMap<&'static str, i64> = HashMap::new();
+        for tenant in tenants {
+            for event_type in [
+                MeterEventType::ApiCalls,
+                MeterEventType::EmailsDelivered,
+                MeterEventType::WebhooksDelivered,
+            ] {
+                let key = crate::usage::enforced_counter_key(pool, tenant, event_type, at).await;
+                let value: Option<i64> = redis::cmd("GET")
+                    .arg(&key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("counter read");
+                *totals
+                    .entry(crate::usage::meter_event_type_str(event_type))
+                    .or_default() += value.unwrap_or(0);
+            }
+        }
+        let mut totals: Vec<_> = totals
+            .into_iter()
+            .filter(|(_, quantity)| *quantity != 0)
+            .collect();
+        totals.sort();
+        totals
+    }
+
+    /// Walk the billing-service GLOBAL audit chain from `audit_chain_head`
+    /// backwards, re-deriving each row hash from its stored columns and
+    /// checking every `previous_hash` link. Asserts exact length.
+    async fn assert_audit_chain_from_head(pool: &PgPool, expected_entries: usize) {
+        let mut current: Option<String> =
+            sqlx::query_scalar("SELECT head_hash FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_optional(pool)
+                .await
+                .expect("chain head")
+                .flatten();
+        let mut seen = 0_usize;
+        while let Some(hash) = current {
+            type AuditLinkRow = (
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+                serde_json::Value,
+                DateTime<Utc>,
+            );
+            let row: Option<AuditLinkRow> = sqlx::query_as(
+                "SELECT tenant_id, previous_hash, action, resource, resource_id,
+                        details, timestamp
+                   FROM audit_logs WHERE hash = $1",
+            )
+            .bind(&hash)
+            .fetch_optional(pool)
+            .await
+            .expect("audit row");
+            let (tenant_id, previous_hash, action, resource, resource_id, details, timestamp) =
+                row.expect("every previous_hash link resolves to a stored row");
+            assert_eq!(
+                apexmail_lib::audit::audit_hash(
+                    tenant_id.as_deref(),
+                    None,
+                    &action,
+                    &resource,
+                    resource_id.as_deref(),
+                    &details,
+                    timestamp,
+                ),
+                hash,
+                "stored columns must re-derive the row hash"
+            );
+            current = previous_hash;
+            seen += 1;
+        }
+        assert_eq!(seen, expected_entries, "chain length");
+    }
+
+    #[tokio::test]
+    async fn batched_ingest_statement_count_is_constant_in_event_and_tenant_count() {
+        use crate::test_support::query_count;
+
+        let owned = provision_env("ingest_batch_statements").await;
+        let pool = &owned.pool;
+        let redis = &owned.state.redis;
+        let tenants: Vec<String> = (0..3)
+            .map(|index| unique_tenant(&format!("ing_stmt_t{index}")))
+            .collect();
+        for tenant in &tenants {
+            crate::test_support::seed_tenant(pool, tenant, "growth").await;
+        }
+
+        let build_batch = |count: usize, tenants: &[String]| -> Vec<IngestEvent> {
+            (0..count)
+                .map(|index| IngestEvent {
+                    tenant_id: tenants[index % tenants.len()].clone(),
+                    event_type: if index % 2 == 0 {
+                        MeterEventType::ApiCalls
+                    } else {
+                        MeterEventType::EmailsDelivered
+                    },
+                    quantity: 1,
+                    event_id: Some(Uuid::new_v4()),
+                    metadata: None,
+                })
+                .collect()
+        };
+
+        query_count::reset();
+        let three = ingest_usage_batch(pool, redis, &build_batch(3, &tenants)).await;
+        assert_eq!(three.accepted, 3, "{three:?}");
+        let small = ingest_statement_counts();
+        assert_eq!(
+            small,
+            [1, 1, 1, 0, 1, 1, 1, 1],
+            "one preload/claim/write per statement family for a batch"
+        );
+
+        query_count::reset();
+        let thirty = ingest_usage_batch(pool, redis, &build_batch(30, &tenants)).await;
+        assert_eq!(thirty.accepted, 30, "{thirty:?}");
+        assert_eq!(
+            ingest_statement_counts(),
+            small,
+            "statement count is constant in the number of events"
+        );
+
+        // 30 DISTINCT tenants: the context/anchor preloads are still ONE
+        // statement each (the old path paid one SELECT per event).
+        let mut distinct_tenants = Vec::new();
+        for index in 0..30 {
+            let tenant = unique_tenant(&format!("ing_stmt_many{index}"));
+            crate::test_support::seed_tenant(pool, &tenant, "growth").await;
+            distinct_tenants.push(tenant);
+        }
+        query_count::reset();
+        let distinct = ingest_usage_batch(pool, redis, &build_batch(30, &distinct_tenants)).await;
+        assert_eq!(distinct.accepted, 30, "{distinct:?}");
+        assert_eq!(
+            ingest_statement_counts(),
+            small,
+            "statement count is constant in the number of distinct tenants"
+        );
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn batched_ingest_matches_serial_record_usage_for_a_mixed_batch() {
+        let owned = provision_env("ingest_batch_equiv").await;
+        let pool = &owned.pool;
+        let redis = &owned.state.redis;
+        let batch_tenants = vec![
+            unique_tenant("ing_equiv_batch_a"),
+            unique_tenant("ing_equiv_batch_b"),
+        ];
+        let serial_tenants = vec![
+            unique_tenant("ing_equiv_serial_a"),
+            unique_tenant("ing_equiv_serial_b"),
+        ];
+        for tenant in batch_tenants.iter().chain(serial_tenants.iter()) {
+            crate::test_support::seed_tenant(pool, tenant, "growth").await;
+        }
+
+        let batch_events = mixed_ingest_batch(
+            &batch_tenants[0],
+            &batch_tenants[1],
+            [
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            ],
+        );
+        let serial_events = mixed_ingest_batch(
+            &serial_tenants[0],
+            &serial_tenants[1],
+            [
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            ],
+        );
+
+        let batched = ingest_usage_batch(pool, redis, &batch_events).await;
+        let serial = ingest_usage_batch_serial(pool, redis, &serial_events).await;
+
+        // Exact result equivalence, including the duplicate and the
+        // conflicting reuse of an event id.
+        assert_eq!(
+            (
+                batched.accepted,
+                batched.duplicates,
+                batched.rejected,
+                batched.errors.len()
+            ),
+            (
+                serial.accepted,
+                serial.duplicates,
+                serial.rejected,
+                serial.errors.len()
+            ),
+            "batched {batched:?} vs serial {serial:?}"
+        );
+        assert_eq!(
+            (batched.accepted, batched.duplicates, batched.rejected),
+            (3, 1, 2),
+            "two accepted + duplicate + conflict + invalid per configuration"
+        );
+
+        // Durable accounting is identical.
+        assert_eq!(
+            metering_totals(pool, &batch_tenants).await,
+            metering_totals(pool, &serial_tenants).await,
+            "metering_events sums match the serial path"
+        );
+
+        // Real-time counters are identical.
+        let at = Utc::now();
+        assert_eq!(
+            redis_counter_totals(pool, redis, &batch_tenants, at).await,
+            redis_counter_totals(pool, redis, &serial_tenants, at).await,
+            "Redis counters match the serial path"
+        );
+
+        // One audit row per accepted event in each configuration, and the
+        // GLOBAL chain (six appends: 3 serial + 3 batched) re-derives.
+        let all_tenants: Vec<String> = batch_tenants
+            .iter()
+            .chain(serial_tenants.iter())
+            .cloned()
+            .collect();
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs
+              WHERE action = 'billing.metering_event_recorded'
+                AND tenant_id = ANY($1)",
+        )
+        .bind(&all_tenants)
+        .fetch_one(pool)
+        .await
+        .expect("audit rows");
+        assert_eq!(audited, 6, "one audit entry per accepted event");
+        assert_audit_chain_from_head(pool, 6).await;
+
+        owned.finish().await;
     }
 
     // ─── Redis/DB-backed sweep and reconciliation paths ───────────

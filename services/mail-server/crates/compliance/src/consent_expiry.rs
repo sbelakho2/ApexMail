@@ -43,7 +43,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::audit_logger::AuditLogger;
+use crate::audit_logger::{AuditBatchEntry, AuditLogger};
 use crate::types::{AuditAction, AuditOutcome, AuditResource, LogContext};
 
 /// Rows revoked per pass (P3): bounds the lock window and the statement size.
@@ -210,33 +210,29 @@ impl ConsentExpiryJob {
             .await?;
         tx.commit().await.map_err(|e| format!("DB commit: {e}"))?;
 
-        // Audit trail: one entry per revoked consent (unchanged shape).
-        for consent in &revoked {
-            let cascade_targets = cascade_targets_for(&consent.consent_type);
+        // Audit trail: ONE batched append per revoked batch (P2). The batch
+        // writer groups by tenant, takes each tenant's advisory chain lock
+        // once, reads the chain head once, computes the chained hashes in
+        // memory and writes a chunked multi-row INSERT — instead of
+        // BEGIN + lock + head read + INSERT + COMMIT per revoked consent.
+        let audit_entries: Vec<AuditBatchEntry> = revoked
+            .iter()
+            .map(|consent| {
+                let cascade_targets = cascade_targets_for(&consent.consent_type);
 
-            info!(
-                id = %consent.id,
-                tenant_id = %consent.tenant_id,
-                email = %mail_common::pii::redact_email(&consent.email),
-                consent_type = %consent.consent_type,
-                "Consent auto-revoked (expired)"
-            );
+                info!(
+                    id = %consent.id,
+                    tenant_id = %consent.tenant_id,
+                    email = %mail_common::pii::redact_email(&consent.email),
+                    consent_type = %consent.consent_type,
+                    "Consent auto-revoked (expired)"
+                );
 
-            let ctx = LogContext {
-                tenant_id: Some(consent.tenant_id.clone()),
-                user_id: None,
-                session_id: None,
-                ip_address: None,
-                user_agent: None,
-            };
-
-            if let Err(e) = self
-                .audit_logger
-                .log(
-                    AuditAction::Update,
-                    AuditResource::Consent,
-                    Some(&consent.tenant_id),
-                    serde_json::json!({
+                AuditBatchEntry {
+                    action: AuditAction::Update,
+                    resource: AuditResource::Consent,
+                    resource_id: Some(consent.tenant_id.clone()),
+                    details: serde_json::json!({
                         "consent_id": consent.id,
                         "consent_type": consent.consent_type,
                         "email": consent.email,
@@ -245,13 +241,26 @@ impl ConsentExpiryJob {
                         "cascade": cascade_targets,
                         "revoked_at": now.to_rfc3339(),
                     }),
-                    AuditOutcome::Success,
-                    None,
-                    &ctx,
-                )
-                .await
-            {
-                warn!(error = %e, consent_id = %consent.id, "Failed to write audit log for consent expiry");
+                    outcome: AuditOutcome::Success,
+                    error_message: None,
+                    context: LogContext {
+                        tenant_id: Some(consent.tenant_id.clone()),
+                        user_id: None,
+                        session_id: None,
+                        ip_address: None,
+                        user_agent: None,
+                    },
+                }
+            })
+            .collect();
+
+        if !audit_entries.is_empty() {
+            if let Err(e) = self.audit_logger.log_batch(&audit_entries).await {
+                warn!(
+                    error = %e,
+                    revoked = audit_entries.len(),
+                    "Failed to write batched audit log for consent expiry"
+                );
             }
         }
 
@@ -457,7 +466,7 @@ mod tests {
             AuditConfig {
                 retention_days: 365,
                 hash_chain_enabled: true,
-                signing_key: "consent-expiry-test-key-0123456789".into(),
+                signing_key: "consent-expiry-test-key".into(),
             },
         );
         logger.initialize().await.expect("audit init");
@@ -831,6 +840,88 @@ mod tests {
         .await
         .expect("audit rows");
         assert_eq!(audited, 0, "no audit entry for a rolled-back batch");
+    }
+
+    /// P2 consent-expiry audit chain: the pre-fix job called
+    /// `AuditLogger::log` once per revoked consent — BEGIN + advisory lock +
+    /// chain-head read + INSERT + COMMIT each. The batch writer must take the
+    /// per-tenant lock once, read the head once and write one multi-row
+    /// INSERT, so the statement count is CONSTANT in the number of revoked
+    /// consents.
+    ///
+    /// Fail-before: 5 revoked consents -> (lock, head, insert) == (5, 5, 5).
+    #[tokio::test]
+    async fn consent_expiry_audit_statements_are_constant_in_batch_size() {
+        use crate::audit_logger::query_count;
+
+        let Some(pool) = consent_db("consent_expiry_audit_batch").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let tenant = "t_consent_audit_batch";
+        let audit = Arc::new(quiet_audit(&pool).await);
+        let job = ConsentExpiryJob::new(pool.clone(), audit.clone());
+
+        async fn seed_expired(pool: &PgPool, tenant: &str, from: usize, to: usize) {
+            for index in from..to {
+                seed_consent(
+                    pool,
+                    tenant,
+                    &format!("audit-sub-{index}"),
+                    &format!("audit-{index}@example.test"),
+                    "newsletter",
+                    true,
+                    Some(-1),
+                )
+                .await;
+            }
+        }
+        let counts = || {
+            (
+                query_count::count("audit.db.lock"),
+                query_count::count("audit.db.head"),
+                query_count::count("audit.db.insert"),
+            )
+        };
+
+        // First batch: 5 revoked consents -> 5 audit entries.
+        seed_expired(&pool, tenant, 0, 5).await;
+        query_count::reset();
+        let revoked = job.check_and_revoke_expired().await.expect("first pass");
+        assert_eq!(revoked, 5);
+        let small = counts();
+        assert_eq!(
+            small,
+            (1, 1, 1),
+            "one advisory lock, one head read, one multi-row INSERT per tenant"
+        );
+
+        // Second batch: 20 MORE revoked consents -> the SAME statement count.
+        seed_expired(&pool, tenant, 5, 25).await;
+        query_count::reset();
+        let revoked = job.check_and_revoke_expired().await.expect("second pass");
+        assert_eq!(revoked, 20);
+        assert_eq!(
+            counts(),
+            small,
+            "audit statement count is constant in the revoked-consent count"
+        );
+
+        // The chain re-derives from the stored columns (25 entries total).
+        let validation = audit
+            .verify_chain(Some(tenant), None, None)
+            .await
+            .expect("verify chain");
+        assert!(validation.valid, "{validation:?}");
+        assert_eq!(validation.entries_checked, 25);
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE resource_id = $1 AND action = 'update'",
+        )
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("audit rows");
+        assert_eq!(audited, 25, "one audit entry per revoked consent");
     }
 
     /// The interval setting is LIVE and fails safe: a positive integer is

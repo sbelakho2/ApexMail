@@ -6727,6 +6727,34 @@ async fn form_placement_create(
             &state.config,
         );
     }
+    // Inbox Placement Monitoring is a paid line: the SSR form is a tenant
+    // creation path too, so it must not queue a test for a tenant without
+    // the entitlement (the engine refuses execution as a second backstop).
+    if let Err(error) = crate::entitlements::require_feature(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::InboxPlacement,
+    )
+    .await
+    {
+        return match error {
+            crate::error::ApiError::Forbidden(message) => {
+                redirect_with_field_map(&fields, &message, "/inbox-placement/new", &state.config)
+            }
+            other => {
+                tracing::error!(
+                    tenant_id = %user.tenant_id,
+                    error = %other,
+                    "placement entitlement lookup failed (web form)"
+                );
+                redirect_error(
+                    TEMPORARY_STORAGE_FLASH,
+                    "/inbox-placement/new",
+                    &state.config,
+                )
+            }
+        };
+    }
     let result = sqlx::query(
         "INSERT INTO placement_tests (id, tenant_id, name, from_email, subject, body_html, status, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW())",
@@ -17575,6 +17603,16 @@ mod coverage_handler_tests {
         let (other_tenant, other_tag) = coverage_support::tenant_pair("other");
         let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
         assert_eq!(seeded.tenant, tenant);
+        // Inbox Placement is a paid line: grant it so the placement form
+        // below reaches its handler instead of the entitlement refusal.
+        sqlx::query(
+            "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+             VALUES ($1, 'placement', 'active') ON CONFLICT (tenant_id, product_line) DO NOTHING",
+        )
+        .bind(&tenant)
+        .execute(&app.db)
+        .await
+        .expect("grant placement line");
         coverage_support::seed_tenant(&app.db, &other_tenant, &other_tag).await;
         for feature in [
             "custom_templates",
@@ -18053,6 +18091,18 @@ mod coverage_handler_tests {
         // External audit 15 Oct, H1: the console cancel form is the REAL
         // state change (period end by default, immediate when chosen) — it
         // never asks the customer to use a portal that does not exist.
+        let original_plan: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(&user.tenant_id)
+            .fetch_one(&app.db)
+            .await
+            .expect("original plan");
+        // Rerun-safe: the shared coverage DB may still hold a canceled row
+        // from a previous pass.
+        sqlx::query("DELETE FROM adyen_subscriptions WHERE tenant_id = $1 AND adyen_subscription_id = 'psp_web_cancel'")
+            .bind(&user.tenant_id)
+            .execute(&app.db)
+            .await
+            .ok();
         sqlx::query(
             "INSERT INTO adyen_subscriptions
                  (tenant_id, adyen_subscription_id, plan, status, billing_cycle_start,
@@ -18111,6 +18161,20 @@ mod coverage_handler_tests {
         .unwrap();
         assert_eq!(sub_status, "canceled");
         assert_eq!(tenant_plan, "free");
+
+        // Restore the shared fixture tenant: the immediate cancel downgraded
+        // its plan and the subscription row must not leak into other tests.
+        sqlx::query("DELETE FROM adyen_subscriptions WHERE tenant_id = $1 AND adyen_subscription_id = 'psp_web_cancel'")
+            .bind(&user.tenant_id)
+            .execute(&app.db)
+            .await
+            .ok();
+        sqlx::query("UPDATE tenants SET plan = $2 WHERE id = $1")
+            .bind(&user.tenant_id)
+            .bind(&original_plan)
+            .execute(&app.db)
+            .await
+            .ok();
     }
 
     // ── Batch-2 P0-A/P0-B: the list editor and detail are data-backed ──
@@ -25063,6 +25127,16 @@ mod residual_zero_tests {
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let (tenant, tag) = coverage_support::tenant_pair("plf");
         coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        // Inbox Placement is a paid line: the form is entitlement-gated, and
+        // this test exercises the STORAGE fault behind the gate.
+        sqlx::query(
+            "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+             VALUES ($1, 'placement', 'active') ON CONFLICT (tenant_id, product_line) DO NOTHING",
+        )
+        .bind(&tenant)
+        .execute(&state.db)
+        .await
+        .expect("grant placement line");
         let caller = coverage_support::user(&tenant);
         crate::routes::fault::arm_write_fault(&state.db, "placement_tests", "rz_place_insert", 0)
             .await

@@ -185,6 +185,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Use-all audit (health): the readiness/deep degraded branches were
+    /// only unit-tested as structs. With an unreachable database the
+    /// endpoints must answer 503 with the named component states — never a
+    /// fabricated "ok".
+    #[tokio::test]
+    async fn readiness_and_deep_check_report_a_disconnected_database() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/absent")
+            .expect("lazy dead pool");
+        let state = crate::app::test_support::test_state_over(db).await;
+
+        let response = readiness(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("readiness body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("readiness JSON");
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(json["db"], "disconnected");
+
+        let response = deep_check(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("deep body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("deep JSON");
+        assert_eq!(json["db"]["status"], "disconnected");
+    }
+
     #[test]
     fn test_deep_check_serialisation() {
         let dc = DeepCheck {

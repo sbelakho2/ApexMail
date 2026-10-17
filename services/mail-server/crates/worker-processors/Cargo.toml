@@ -55,6 +55,10 @@ apexmail-lib = { path = "../apexmail-lib" }
 # The canonical dedicated-IP warmup schedule (`warmup::WarmupSchedule`) is the
 # single source of truth for send-time warmup limits.
 mail-common = { path = "../mail-common" }
+# F2 journaling: the ONE shared mail_journal gate/write helper (the same
+# implementation api-server's retrieval routes and mailstore's inbound path
+# use) lives in mailstore-core, so the worker cannot drift from them.
+mailstore-core = { path = "../mailstore-core" }
 # F13: the shared unsubscribe-token codec — the outgoing pipeline generates
 # v2 tokens with the SAME codec the tracking-service verifies them with.
 tracking-service = { path = "../tracking-service" }

@@ -37,6 +37,53 @@ pub const FINALIZE_STATUS_SQL: &str = r#"
             WHERE id = $4
             "#;
 
+/// Whether the tenant holds the Inbox Placement Monitoring entitlement.
+///
+/// The runtime grant is an ACTIVE `product_line_contracts` row for the
+/// `placement` line (the purchase record the monthly line bills); a plan
+/// feature or a tenant `feature_flag_overrides` grant is honoured too, so
+/// an operator override grants the capability exactly like the API's
+/// entitlement snapshot. The engine checks this on its own execution path
+/// (not only at the HTTP route) so a test queued before the line lapsed is
+/// never run for free.
+pub async fn tenant_has_inbox_placement_entitlement(
+    pool: &PgPool,
+    tenant_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+                   SELECT 1 FROM product_line_contracts
+                   WHERE tenant_id = $1
+                     AND product_line = 'placement'
+                     AND (status = 'active'
+                          OR (status = 'terminated'
+                              AND ended_at IS NOT NULL
+                              AND ended_at > NOW()))
+               )
+            OR COALESCE((
+                   SELECT p.features->>'inbox_placement' = 'true'
+                   FROM tenants t
+                   LEFT JOIN plan_overrides po
+                     ON po.tenant_id = t.id
+                    AND po.active = true
+                    AND (po.expires_at IS NULL OR po.expires_at > NOW())
+                   LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
+                   WHERE t.id = $1
+               ), false)
+            OR EXISTS(
+                   SELECT 1 FROM feature_flag_overrides
+                   WHERE tenant_id = $1
+                     AND flag_key = 'inbox_placement'
+                     AND value = 'true'::jsonb
+               )
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// Core orchestration engine for inbox placement testing.
 ///
 /// Coordinates the full lifecycle: test creation, email dispatch via SMTP,
@@ -248,6 +295,30 @@ impl PlacementEngine {
         .fetch_optional(&self.db)
         .await?
         .ok_or_else(|| sqlx::Error::Protocol(format!("placement test {} not found", test_id)))?;
+
+        // 1a. Entitlement gate. The placement line is a paid product; a test
+        // queued while the tenant held it must not run after the line lapsed
+        // (route gates can only see the request that created it). The test is
+        // closed as `failed` with the line named in the log rather than run
+        // for free, and the check-and-set below never resurrects it.
+        if !tenant_has_inbox_placement_entitlement(&self.db, &test.tenant_id).await? {
+            let closed = sqlx::query(
+                "UPDATE placement_tests SET status = 'failed', completed_at = NOW() \
+                 WHERE id = $1 AND status IN ('pending', 'running')",
+            )
+            .bind(test_id)
+            .execute(&self.db)
+            .await?;
+            if closed.rows_affected() > 0 {
+                tracing::warn!(
+                    tenant_id = %test.tenant_id,
+                    test_id = %test_id,
+                    "placement test skipped: tenant holds no active placement contract \
+                     (inbox_placement entitlement)"
+                );
+            }
+            return Ok(());
+        }
 
         // 2. Mark as running via check-and-set (lowercase — see create_test
         // for schema notes). Zero affected rows means the test already

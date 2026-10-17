@@ -23,6 +23,21 @@ fail=0
 required=$(grep -oE '\$\{[A-Z0-9_]+:\?' "$COMPOSE" "$BASE_COMPOSE" 2>/dev/null \
   | grep -oE '[A-Z0-9_]+:' | tr -d ':' | sort -u)
 
+# F1 capability guards (feature-inventory audit): the paid/customer features
+# below fail silently (or 503) when their key is absent, so the production
+# overlay must keep a hard :? guard for each. The derived list above already
+# checks their values; pinning the names here means DELETING a guard is a
+# loud validation failure instead of a silently smaller required set.
+capability_guards="TRACKING_BASE_URL SNS_ALLOWED_TOPIC_ARNS
+PROD_MFA_SECRET_ENCRYPTION_KEY_FILE PROD_SSO_ENCRYPTION_KEY_FILE
+PROD_MAILSTORE_ENCRYPTION_KEY_FILE"
+for var in $capability_guards; do
+  if ! grep -q "\${${var}:?" "$COMPOSE"; then
+    echo "MISSING GUARD: $var is not guarded with \${${var}:?} in $COMPOSE" >&2
+    fail=1
+  fi
+done
+
 for var in $required; do
   value=$(grep -E "^${var}=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"' || true)
   if [ -z "$value" ]; then

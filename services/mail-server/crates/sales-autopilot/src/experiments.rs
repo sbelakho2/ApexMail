@@ -1990,6 +1990,308 @@ pub async fn record_reward(
     Ok(())
 }
 
+/// One reward to write in a batch.
+#[derive(Debug, Clone)]
+pub struct BatchRewardInput {
+    pub tenant_id: String,
+    pub experiment_id: Uuid,
+    pub variant: String,
+    pub kind: RewardKind,
+    pub outcome_key: String,
+    pub value_eur: f64,
+}
+
+/// What happened to one batched reward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchRewardOutcome {
+    /// The ledger row was inserted and the arm posterior moved.
+    Recorded,
+    /// The stable `outcome_key` already existed; the posterior was untouched.
+    Replayed,
+}
+
+/// Rewrite a batch of rewards with a CONSTANT number of statements.
+///
+/// This is the projector's write path: one preload of every distinct arm,
+/// one multi-row ledger INSERT (`ON CONFLICT (outcome_key) DO NOTHING` —
+/// the same exactly-once identity as [`record_reward`]), and one aggregated
+/// arm UPDATE. It takes the caller's transaction, so the projector never
+/// checks a second pool connection out per reward and the ledger/posterior
+/// moves stay in the same transaction as the claim markers.
+///
+/// Per-input contract is identical to [`record_reward`]: hostile inputs are
+/// rejected before any SQL for that input, a missing/corrupt arm fails only
+/// that input, and a replayed `outcome_key` reports [`BatchRewardOutcome::Replayed`]
+/// without moving the posterior.
+pub async fn record_rewards_batch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rewards: &[BatchRewardInput],
+) -> Result<Vec<Result<BatchRewardOutcome, SalesError>>, SalesError> {
+    if rewards.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut outcomes: Vec<Option<Result<BatchRewardOutcome, SalesError>>> =
+        (0..rewards.len()).map(|_| None).collect();
+    let mut validated_reward: Vec<Option<f64>> = vec![None; rewards.len()];
+
+    // 1. Pure input validation (same ladder as record_reward).
+    for (index, input) in rewards.iter().enumerate() {
+        let fail = |outcomes: &mut Vec<Option<Result<BatchRewardOutcome, SalesError>>>,
+                    error: SalesError| {
+            outcomes[index] = Some(Err(error));
+        };
+        if input.tenant_id.trim().is_empty() {
+            fail(
+                &mut outcomes,
+                SalesError::InvalidInput("tenant_id is required".into()),
+            );
+            continue;
+        }
+        let outcome_key = input.outcome_key.trim();
+        if outcome_key.is_empty() {
+            fail(
+                &mut outcomes,
+                SalesError::InvalidInput("outcome_key is required".into()),
+            );
+            continue;
+        }
+        if outcome_key.len() > MAX_OUTCOME_KEY_LEN {
+            fail(
+                &mut outcomes,
+                SalesError::InvalidInput(format!(
+                    "outcome_key is {} bytes; the maximum is {MAX_OUTCOME_KEY_LEN}",
+                    outcome_key.len()
+                )),
+            );
+            continue;
+        }
+        if input.variant.trim().is_empty() {
+            fail(
+                &mut outcomes,
+                SalesError::InvalidInput("variant is required".into()),
+            );
+            continue;
+        }
+        if !input.value_eur.is_finite() || input.value_eur < 0.0 {
+            fail(
+                &mut outcomes,
+                SalesError::InvalidInput(format!(
+                    "value_eur must be finite and >= 0, got {}",
+                    input.value_eur
+                )),
+            );
+            continue;
+        }
+        let reward = input.kind.reward();
+        if !reward.is_finite() {
+            fail(
+                &mut outcomes,
+                SalesError::InvalidInput(format!("reward for {} must be finite", input.kind)),
+            );
+            continue;
+        }
+        validated_reward[index] = Some(reward);
+    }
+
+    // 2. Preload every distinct arm ONCE for the batch.
+    let mut tenants: Vec<String> = Vec::new();
+    let mut experiment_ids: Vec<Uuid> = Vec::new();
+    for input in rewards {
+        if !tenants.contains(&input.tenant_id) {
+            tenants.push(input.tenant_id.clone());
+        }
+        if !experiment_ids.contains(&input.experiment_id) {
+            experiment_ids.push(input.experiment_id);
+        }
+    }
+    let arm_rows: Vec<(String, Uuid, String, f64, f64, i64, i64)> = sqlx::query_as(
+        "SELECT e.tenant_id, a.experiment_id, a.variant, a.alpha, a.beta, a.trials, a.successes \
+         FROM sales_experiment_arms a \
+         JOIN sales_experiments e ON e.id = a.experiment_id \
+         WHERE e.tenant_id = ANY($1) AND a.experiment_id = ANY($2)",
+    )
+    .bind(&tenants)
+    .bind(&experiment_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
+    type ArmKey = (String, Uuid, String);
+    type ArmStats = (f64, f64, i64, i64);
+    let mut arms: std::collections::HashMap<ArmKey, ArmStats> = std::collections::HashMap::new();
+    for (tenant_id, experiment_id, variant, alpha, beta, trials, successes) in arm_rows {
+        arms.insert(
+            (tenant_id, experiment_id, variant),
+            (alpha, beta, trials, successes),
+        );
+    }
+
+    // 3. Arm existence + posterior validation, per input.
+    for (index, input) in rewards.iter().enumerate() {
+        if validated_reward[index].is_none() && outcomes[index].is_some() {
+            continue;
+        }
+        let Some((alpha, beta, trials, successes)) = arms.get(&(
+            input.tenant_id.clone(),
+            input.experiment_id,
+            input.variant.trim().to_string(),
+        )) else {
+            outcomes[index] = Some(Err(SalesError::InvalidInput(format!(
+                "arm '{}' of experiment {} does not exist for tenant {}",
+                input.variant.trim(),
+                input.experiment_id,
+                input.tenant_id
+            ))));
+            validated_reward[index] = None;
+            continue;
+        };
+        if let Err(error) = validate_posterior(*alpha, *beta) {
+            outcomes[index] = Some(Err(error));
+            validated_reward[index] = None;
+            continue;
+        }
+        if *trials < 0 || *successes < 0 || successes > trials {
+            outcomes[index] = Some(Err(SalesError::InvalidInput(format!(
+                "arm '{}' has inconsistent counters: trials={trials}, successes={successes}",
+                input.variant.trim()
+            ))));
+            validated_reward[index] = None;
+        }
+    }
+
+    // 4. ONE multi-row ledger INSERT; RETURNING tells us which keys were new.
+    let insertable: Vec<usize> = (0..rewards.len())
+        .filter(|index| validated_reward[*index].is_some())
+        .collect();
+    let mut inserted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !insertable.is_empty() {
+        let keys: Vec<&str> = insertable
+            .iter()
+            .map(|index| rewards[*index].outcome_key.trim())
+            .collect();
+        let experiments: Vec<Uuid> = insertable
+            .iter()
+            .map(|index| rewards[*index].experiment_id)
+            .collect();
+        let variants: Vec<&str> = insertable
+            .iter()
+            .map(|index| rewards[*index].variant.trim())
+            .collect();
+        let reward_values: Vec<f64> = insertable
+            .iter()
+            .map(|index| validated_reward[*index].expect("validated reward"))
+            .collect();
+        let inserted: Vec<(String,)> = sqlx::query_as(
+            "INSERT INTO sales_experiment_outcomes \
+                 (outcome_key, experiment_id, variant, reward, recorded_at) \
+             SELECT t.outcome_key, t.experiment_id, t.variant, t.reward, NOW() \
+             FROM UNNEST($1::text[], $2::uuid[], $3::text[], $4::float8[]) \
+                  AS t(outcome_key, experiment_id, variant, reward) \
+             ON CONFLICT (outcome_key) DO NOTHING \
+             RETURNING outcome_key",
+        )
+        .bind(&keys)
+        .bind(&experiments)
+        .bind(&variants)
+        .bind(&reward_values)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+        inserted_keys.extend(inserted.into_iter().map(|(key,)| key));
+    }
+
+    // 5. Aggregate every NEW outcome's delta per arm and move the posteriors
+    //    in ONE statement.
+    #[derive(Default)]
+    struct ArmDelta {
+        alpha: f64,
+        beta: f64,
+        trials: i64,
+        successes: i64,
+        contacts: i64,
+        negative: i64,
+    }
+    let mut deltas: BTreeMap<(Uuid, String), ArmDelta> = BTreeMap::new();
+    // A duplicate outcome_key WITHIN the batch is replayed, not counted
+    // twice: the multi-row INSERT inserts it once, exactly like the legacy
+    // sequential loop.
+    let mut counted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for index in &insertable {
+        let input = &rewards[*index];
+        let key = input.outcome_key.trim().to_string();
+        if !inserted_keys.contains(&key) || !counted_keys.insert(key) {
+            outcomes[*index] = Some(Ok(BatchRewardOutcome::Replayed));
+            continue;
+        }
+        let reward = validated_reward[*index].expect("validated reward");
+        let delta = deltas
+            .entry((input.experiment_id, input.variant.trim().to_string()))
+            .or_default();
+        if reward > 0.0 {
+            delta.alpha += reward;
+            delta.successes += 1;
+        } else if reward < 0.0 {
+            delta.beta += -reward;
+        }
+        if input.kind.is_informative() {
+            delta.trials += 1;
+        }
+        if input.kind.is_negative() {
+            delta.negative += 1;
+        }
+        delta.contacts += 1;
+        outcomes[*index] = Some(Ok(BatchRewardOutcome::Recorded));
+    }
+
+    if !deltas.is_empty() {
+        let experiment_ids: Vec<Uuid> = deltas.keys().map(|(id, _)| *id).collect();
+        let variants: Vec<&str> = deltas.keys().map(|(_, variant)| variant.as_str()).collect();
+        let alpha: Vec<f64> = deltas.values().map(|delta| delta.alpha).collect();
+        let beta: Vec<f64> = deltas.values().map(|delta| delta.beta).collect();
+        let trials: Vec<i64> = deltas.values().map(|delta| delta.trials).collect();
+        let successes: Vec<i64> = deltas.values().map(|delta| delta.successes).collect();
+        let contacts: Vec<i64> = deltas.values().map(|delta| delta.contacts).collect();
+        let negative: Vec<i64> = deltas.values().map(|delta| delta.negative).collect();
+
+        let updated = sqlx::query(
+            "UPDATE sales_experiment_arms a \
+             SET alpha = a.alpha + v.alpha_inc, beta = a.beta + v.beta_inc, \
+                 trials = a.trials + v.trials_inc, successes = a.successes + v.successes_inc, \
+                 contacts = a.contacts + v.contacts_inc, \
+                 negative_outcomes = a.negative_outcomes + v.negative_inc, \
+                 updated_at = NOW() \
+             FROM UNNEST($1::uuid[], $2::text[], $3::float8[], $4::float8[], \
+                         $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[]) \
+                  AS v(experiment_id, variant, alpha_inc, beta_inc, trials_inc, \
+                       successes_inc, contacts_inc, negative_inc) \
+             WHERE a.experiment_id = v.experiment_id AND a.variant = v.variant",
+        )
+        .bind(&experiment_ids)
+        .bind(&variants)
+        .bind(&alpha)
+        .bind(&beta)
+        .bind(&trials)
+        .bind(&successes)
+        .bind(&contacts)
+        .bind(&negative)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?
+        .rows_affected();
+        if updated as usize != deltas.len() {
+            return Err(SalesError::Database(format!(
+                "{} reward arm(s) disappeared mid-transaction",
+                deltas.len() - updated as usize
+            )));
+        }
+    }
+
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("every input has a validation outcome"))
+        .collect())
+}
+
 /// Attribute enrichment spend to an arm so the §37 spend limit can be
 /// enforced. Validates before writing.
 pub async fn record_enrichment_spend(

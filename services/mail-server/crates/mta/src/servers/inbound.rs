@@ -136,6 +136,14 @@ pub struct SessionContext {
     pub helo_hostname: String,
     pub mail_from: Option<String>,
     pub rcpt_to: Vec<String>,
+    /// RCPT-time mailbox resolutions for the current transaction, keyed by
+    /// the envelope recipient exactly as accepted. DATA reuses these instead
+    /// of issuing the same `mail_accounts` lookup a second time. Cleared
+    /// whenever the envelope resets (EHLO/HELO, MAIL FROM, RSET, DATA), and
+    /// `serde(skip)` because it is an in-memory hot-path cache, not session
+    /// state worth persisting.
+    #[serde(skip)]
+    pub(crate) resolved_recipients: std::collections::HashMap<String, ResolvedMailbox>,
     /// Whether SPF result was served from cache or freshly evaluated.
     pub spf_status: Option<SpfStatus>,
     /// AUTH LOGIN state machine: None = not in auth login, Some(email) = waiting for password.
@@ -677,6 +685,7 @@ impl InboundServer {
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
@@ -731,6 +740,7 @@ impl InboundServer {
                         ctx.helo_hostname.clear();
                         ctx.mail_from = None;
                         ctx.rcpt_to.clear();
+                        ctx.resolved_recipients.clear();
                         // RFC 3207 §4.2: the server must discard knowledge
                         // obtained from the client before TLS was in place —
                         // including the EHLO state (the client MUST re-issue
@@ -1084,6 +1094,7 @@ impl InboundServer {
                     let _ = write_line_buf(stream, "451 4.3.0 Temporary failure\r\n").await;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
+                    ctx.resolved_recipients.clear();
                     continue;
                 }
 
@@ -1101,6 +1112,7 @@ impl InboundServer {
                     .await;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
+                    ctx.resolved_recipients.clear();
                 } else if terminated {
                     // F-01: refuse obvious routing loops before any
                     // parsing/persist work (cheap raw header scan).
@@ -1114,6 +1126,7 @@ impl InboundServer {
                         let _ = write_line_buf(stream, "550 5.4.6 Routing loop detected\r\n").await;
                         ctx.mail_from = None;
                         ctx.rcpt_to.clear();
+                        ctx.resolved_recipients.clear();
                         ctx.mail_smtputf8 = false;
                         continue;
                     }
@@ -1128,6 +1141,7 @@ impl InboundServer {
                     ctx.message_count += 1;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
+                    ctx.resolved_recipients.clear();
                     ctx.mail_smtputf8 = false;
                     // Enforce the per-connection message budget: once the
                     // client reached max_messages_per_connection, close the
@@ -1210,6 +1224,7 @@ impl InboundServer {
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
@@ -1267,6 +1282,7 @@ impl InboundServer {
             // (RFC 5321 §4.1.4).
             ctx.mail_from = None;
             ctx.rcpt_to.clear();
+            ctx.resolved_recipients.clear();
             ctx.mail_smtputf8 = false;
             let mut caps = format!("250-{} Hello {}\r\n", self.hostname, host);
             caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
@@ -1495,6 +1511,7 @@ impl InboundServer {
             // transaction's recipients — a new reverse-path starts a new
             // transaction.
             ctx.rcpt_to.clear();
+            ctx.resolved_recipients.clear();
             ctx.mail_from = Some(addr);
             ctx.mail_smtputf8 = mail_smtputf8_param(raw_line);
             "250 2.0.0 Ok\r\n".into()
@@ -1552,6 +1569,11 @@ impl InboundServer {
                         return reply.to_string();
                     }
                 }
+                // The DATA path reuses this result instead of resolving the
+                // same address a second time (see `resolved_recipients`).
+                if let Ok(Some(resolved)) = resolution {
+                    ctx.resolved_recipients.insert(addr.clone(), resolved);
+                }
             }
             ctx.rcpt_to.push(addr);
             "250 2.0.0 Ok\r\n".into()
@@ -1571,6 +1593,7 @@ impl InboundServer {
         } else if verb == "RSET" {
             ctx.mail_from = None;
             ctx.rcpt_to.clear();
+            ctx.resolved_recipients.clear();
             ctx.mail_smtputf8 = false;
             "250 2.0.0 Ok\r\n".into()
         } else if verb == "NOOP" {
@@ -1594,6 +1617,41 @@ impl InboundServer {
     }
 
     // ── message processing ─────────────────────────────────────────────────────
+
+    /// Turn the current transaction's envelope recipients into delivery jobs.
+    ///
+    /// RCPT resolved every non-VERP recipient against `mail_accounts` and
+    /// cached the result in [`SessionContext::resolved_recipients`]; DATA
+    /// reuses that resolution so the directory lookup runs ONCE per recipient
+    /// per message rather than once at RCPT and again at DATA. The semantics
+    /// are unchanged: a cached/uncached miss is [`NoSuchRecipient`] (550), a
+    /// directory failure is [`DirectoryUnavailable`] (451), and a cache miss
+    /// (e.g. a session deserialized without the `serde(skip)` cache) still
+    /// resolves fail-closed before any message row is written.
+    async fn resolve_recipient_jobs(
+        &self,
+        ctx: &SessionContext,
+    ) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        let mut recipient_jobs: Vec<(String, Option<String>)> = Vec::new();
+        for recipient in &ctx.rcpt_to {
+            if self.is_verp_recipient(recipient) {
+                // A VERP reply is consumed through
+                // inbound_messages.is_verp_reply by the bounce/reply-handler
+                // path; it is not a mailbox delivery.
+                continue;
+            }
+            let mailbox_id = match ctx.resolved_recipients.get(recipient) {
+                Some(resolved) => resolved.mailbox_id.clone(),
+                None => match self.mailbox_directory.resolve(recipient).await {
+                    Ok(Some(resolved)) => resolved.mailbox_id,
+                    Ok(None) => return Err(anyhow::Error::new(NoSuchRecipient)),
+                    Err(error) => return Err(anyhow::Error::new(error)),
+                },
+            };
+            recipient_jobs.push((recipient.clone(), Some(mailbox_id)));
+        }
+        Ok(recipient_jobs)
+    }
 
     async fn process_message(&self, ctx: &SessionContext, raw: &[u8]) -> anyhow::Result<String> {
         // inbound_messages.id is VARCHAR(26): "inb_" + 22 hex chars fits
@@ -1754,29 +1812,12 @@ impl InboundServer {
         );
         let sender = if mail_from == "<>" { "" } else { mail_from };
 
-        // 9. Resolve every non-VERP recipient against the mailbox registry
-        //    once more (the same lookup RCPT performed). RCPT plus this
-        //    check are what make the final 250 mean "a deliverable mailbox
-        //    exists": a mailbox deleted between RCPT and DATA must fail the
-        //    transaction (550), and a directory failure must tempfail (451)
-        //    — never produce an accepted message with a silently skipped
-        //    recipient job.
-        let mut recipient_jobs: Vec<(String, Option<String>)> = Vec::new();
-        for recipient in &ctx.rcpt_to {
-            if self.is_verp_recipient(recipient) {
-                // A VERP reply is consumed through
-                // inbound_messages.is_verp_reply by the bounce/reply-handler
-                // path; it is not a mailbox delivery.
-                continue;
-            }
-            match self.mailbox_directory.resolve(recipient).await {
-                Ok(Some(resolved)) => {
-                    recipient_jobs.push((recipient.clone(), Some(resolved.mailbox_id)))
-                }
-                Ok(None) => return Err(anyhow::Error::new(NoSuchRecipient)),
-                Err(error) => return Err(anyhow::Error::new(error)),
-            }
-        }
+        // 9. Resolve every non-VERP recipient against the mailbox registry.
+        //    RCPT already did this and cached the resolution; this reuses it
+        //    (a missing recipient still fails the transaction with 550, a
+        //    directory failure with 451) instead of issuing the same lookup
+        //    twice on the RCPT→DATA path.
+        let recipient_jobs = self.resolve_recipient_jobs(ctx).await?;
 
         // 10. Persist the message AND one delivery job per accepted recipient
         //    in ONE transaction; the SMTP 250 is only written after this
@@ -1829,18 +1870,8 @@ impl InboundServer {
         .execute(&mut *tx)
         .await?;
 
-        for (recipient, mailbox_id) in &recipient_jobs {
-            sqlx::query(
-                r#"INSERT INTO inbound_recipients (
-                    message_id, recipient, mailbox_id, status, attempt, next_attempt_at
-                ) VALUES ($1, $2, $3, 'pending', 0, NOW())
-                ON CONFLICT (message_id, recipient) DO NOTHING"#,
-            )
-            .bind(&message_id)
-            .bind(recipient)
-            .bind(mailbox_id)
-            .execute(&mut *tx)
-            .await?;
+        if !recipient_jobs.is_empty() {
+            insert_inbound_recipients(&mut tx, &message_id, &recipient_jobs).await?;
         }
         tx.commit().await?;
 
@@ -2678,12 +2709,53 @@ pub(crate) struct AttachmentPolicyReject;
 #[error("Message rejected by intrusion prevention")]
 pub(crate) struct IdsPolicyReject;
 
-/// A recipient definitively stopped existing between RCPT and end-of-DATA
-/// (or a race resolved to "no mailbox"). The message must be refused with
-/// `550 5.1.1` — never committed with a recipient that would be dropped.
+/// A recipient could not be resolved at DATA time (the RCPT-time resolution
+/// was absent from the session cache, e.g. a restored session). The message
+/// must be refused with `550 5.1.1` — never committed with a recipient that
+/// would be dropped.
 #[derive(Debug, thiserror::Error)]
 #[error("No such recipient mailbox")]
 pub(crate) struct NoSuchRecipient;
+
+/// Persist one delivery job per accepted recipient in ONE statement.
+///
+/// The previous implementation issued one `INSERT` per recipient (up to
+/// `max_recipients`, 100, per accepted message). `INSERT ... SELECT FROM
+/// unnest(...)` preserves the exact dedupe semantics — `ON CONFLICT
+/// (message_id, recipient) DO NOTHING`, order-insensitive — while collapsing
+/// the batch to a single round trip. `mailbox_id` is `text` in
+/// `inbound_recipients`, hence the `text[]` bind rather than `uuid[]`.
+async fn insert_inbound_recipients(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message_id: &str,
+    recipient_jobs: &[(String, Option<String>)],
+) -> Result<(), sqlx::Error> {
+    if recipient_jobs.is_empty() {
+        return Ok(());
+    }
+    let recipients: Vec<String> = recipient_jobs
+        .iter()
+        .map(|(recipient, _)| recipient.clone())
+        .collect();
+    let mailbox_ids: Vec<Option<String>> = recipient_jobs
+        .iter()
+        .map(|(_, mailbox_id)| mailbox_id.clone())
+        .collect();
+    sqlx::query(
+        r#"INSERT INTO inbound_recipients (
+            message_id, recipient, mailbox_id, status, attempt, next_attempt_at
+        )
+        SELECT $1, batch.recipient, batch.mailbox_id, 'pending', 0, NOW()
+        FROM unnest($2::text[], $3::text[]) AS batch(recipient, mailbox_id)
+        ON CONFLICT (message_id, recipient) DO NOTHING"#,
+    )
+    .bind(message_id)
+    .bind(recipients)
+    .bind(mailbox_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
 
 /// M23: format the SMTP response for a DATA result. The client only ever sees
 /// a generic temporary-failure message; internal error details are logged
@@ -2869,6 +2941,7 @@ as requested\r\n";
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
@@ -2896,6 +2969,7 @@ as requested\r\n";
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
@@ -3017,6 +3091,7 @@ as requested\r\n";
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
@@ -3097,6 +3172,133 @@ as requested\r\n";
     fn with_directory(mut server: InboundServer, directory: FakeDirectory) -> InboundServer {
         server.mailbox_directory = Arc::new(directory);
         server
+    }
+
+    /// A directory that resolves everything and counts how many lookups the
+    /// server performs. The RCPT→DATA hot path must consult it exactly ONCE
+    /// per accepted recipient (DATA reuses the RCPT-time resolution).
+    #[derive(Default)]
+    struct CountingDirectory {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingDirectory {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MailboxDirectory for CountingDirectory {
+        async fn resolve(
+            &self,
+            recipient: &str,
+        ) -> Result<Option<ResolvedMailbox>, DirectoryUnavailable> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(ResolvedMailbox {
+                mailbox_id: format!("mbx:{recipient}"),
+                email: recipient.to_ascii_lowercase(),
+            }))
+        }
+    }
+
+    /// The RCPT command resolves the mailbox; the DATA-time job builder must
+    /// reuse that result instead of issuing the same `mail_accounts` lookup
+    /// a second time (the old RCPT→DATA path resolved every recipient twice).
+    #[tokio::test]
+    async fn rcpt_then_data_resolves_each_recipient_exactly_once() {
+        let (mut server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))).await;
+        let directory = Arc::new(CountingDirectory::default());
+        let as_trait: Arc<dyn MailboxDirectory> = directory.clone();
+        server.mailbox_directory = as_trait;
+
+        assert_eq!(
+            handle_cmd(&server, "MAIL FROM:<sender@remote.test>\r\n", &mut ctx).await,
+            "250 2.0.0 Ok\r\n"
+        );
+        assert_eq!(
+            handle_cmd(&server, "RCPT TO:<User@Managed.test>\r\n", &mut ctx).await,
+            "250 2.0.0 Ok\r\n"
+        );
+        assert_eq!(directory.calls(), 1, "RCPT resolves the recipient once");
+        assert_eq!(
+            ctx.resolved_recipients
+                .get("User@Managed.test")
+                .map(|resolved| resolved.mailbox_id.as_str()),
+            Some("mbx:User@Managed.test"),
+            "the RCPT-time resolution is cached for DATA"
+        );
+
+        // The DATA-time seam (called by process_message) reuses the cache.
+        let jobs = server
+            .resolve_recipient_jobs(&ctx)
+            .await
+            .expect("cached recipient resolves");
+        assert_eq!(
+            jobs,
+            vec![(
+                "User@Managed.test".to_string(),
+                Some("mbx:User@Managed.test".to_string())
+            )]
+        );
+        assert_eq!(
+            directory.calls(),
+            1,
+            "DATA must not resolve the recipient a second time"
+        );
+
+        // A new transaction resets the cache: RSET/MAIL clear it and the next
+        // RCPT resolves again.
+        assert_eq!(
+            handle_cmd(&server, "RSET\r\n", &mut ctx).await,
+            "250 2.0.0 Ok\r\n"
+        );
+        assert!(ctx.resolved_recipients.is_empty(), "RSET resets the cache");
+        assert_eq!(
+            handle_cmd(&server, "MAIL FROM:<sender@remote.test>\r\n", &mut ctx).await,
+            "250 2.0.0 Ok\r\n"
+        );
+        assert_eq!(
+            handle_cmd(&server, "RCPT TO:<User@Managed.test>\r\n", &mut ctx).await,
+            "250 2.0.0 Ok\r\n"
+        );
+        assert_eq!(directory.calls(), 2, "the new transaction resolves again");
+    }
+
+    /// A cache miss (e.g. a session restored from serialized state, where the
+    /// `serde(skip)` cache is empty) still resolves at DATA time with the
+    /// exact fail-closed semantics: a definitive miss is `NoSuchRecipient`
+    /// (550), a directory error stays transient (451).
+    #[tokio::test]
+    async fn data_time_resolution_falls_back_to_the_directory_when_uncached() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4))).await;
+
+        ctx.rcpt_to = vec!["cached-miss@managed.test".to_string()];
+        let missing = with_directory(server, FakeDirectory::resolving(FakeResolution::Missing));
+        let error = missing
+            .resolve_recipient_jobs(&ctx)
+            .await
+            .expect_err("an uncached missing mailbox must fail closed");
+        assert!(
+            error.downcast_ref::<NoSuchRecipient>().is_some(),
+            "missing mailbox must surface NoSuchRecipient (550)"
+        );
+
+        let (server, ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))).await;
+        let mut ctx = ctx;
+        ctx.rcpt_to = vec!["outage@managed.test".to_string()];
+        let outage = with_directory(
+            server,
+            FakeDirectory::resolving(FakeResolution::Unavailable),
+        );
+        let error = outage
+            .resolve_recipient_jobs(&ctx)
+            .await
+            .expect_err("an uncached directory outage must tempfail");
+        assert!(
+            error.downcast_ref::<DirectoryUnavailable>().is_some(),
+            "directory outage must surface DirectoryUnavailable (451)"
+        );
     }
 
     #[tokio::test]
@@ -3825,6 +4027,7 @@ as requested\r\n";
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
@@ -4787,6 +4990,228 @@ mod adversarial_db_tests {
             .await
             .expect("directory available")
             .is_none());
+    }
+
+    // ── statement counters (batched-hotspot tests) ─────────────────────────
+
+    /// A `FOR EACH STATEMENT` trigger bumps the counter once per INSERT /
+    /// UPDATE / DELETE statement, not once per row — the only way to tell a
+    /// batched path (1 statement for N rows) from the old per-row loop (N
+    /// statements). Mirrors the api-server `test_db` helper.
+    async fn install_statement_counters(pool: &PgPool, table: &str) {
+        assert!(
+            table
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "statement counter table name must be identifier-shaped: {table}"
+        );
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _apexmail_test_stmt_counts (
+                 probed_table TEXT NOT NULL,
+                 op TEXT NOT NULL,
+                 statements BIGINT NOT NULL DEFAULT 0,
+                 PRIMARY KEY (probed_table, op)
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count table");
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION _apexmail_test_count_stmt() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               INSERT INTO _apexmail_test_stmt_counts (probed_table, op, statements) \
+               VALUES (TG_TABLE_NAME, TG_OP, 1) \
+               ON CONFLICT (probed_table, op) \
+               DO UPDATE SET statements = _apexmail_test_stmt_counts.statements + 1; \
+               RETURN NULL; \
+             END $$",
+        )
+        .execute(pool)
+        .await
+        .expect("create statement-count function");
+        sqlx::query(&format!(
+            "CREATE OR REPLACE TRIGGER _apexmail_test_count_stmt \
+             AFTER INSERT OR UPDATE OR DELETE ON {table} \
+             FOR EACH STATEMENT EXECUTE FUNCTION _apexmail_test_count_stmt()"
+        ))
+        .execute(pool)
+        .await
+        .expect("install statement-count trigger");
+    }
+
+    async fn statement_count(pool: &PgPool, table: &str, op: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT statements FROM _apexmail_test_stmt_counts \
+             WHERE probed_table = $1 AND op = $2",
+        )
+        .bind(table)
+        .bind(op)
+        .fetch_optional(pool)
+        .await
+        .expect("read statement count")
+        .unwrap_or(0)
+    }
+
+    async fn reset_statement_counts(pool: &PgPool) {
+        sqlx::query("UPDATE _apexmail_test_stmt_counts SET statements = 0")
+            .execute(pool)
+            .await
+            .expect("reset statement counts");
+    }
+
+    /// The exact resolver query from `PgMailboxDirectory::resolve`, planned
+    /// generically so no bind value or table contents influence the index
+    /// choice. `enable_seqscan=off` makes the pre-263 seq scan explicit (the
+    /// planner only keeps Seq Scan when there is no index path at all).
+    async fn explain_mailbox_lookup(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> String {
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (GENERIC_PLAN, FORMAT JSON)
+             SELECT id::text, email FROM mail_accounts
+              WHERE LOWER(email) = LOWER($1) AND is_active = true
+              LIMIT 1",
+        )
+        .bind("planner@directory.test")
+        .fetch_one(&mut **tx)
+        .await
+        .expect("EXPLAIN the mailbox lookup");
+        plan.to_string()
+    }
+
+    /// Fail-before / pass-after: migration 263's `lower(email)` partial index
+    /// turns the RCPT-time directory lookup from a Seq Scan into an Index
+    /// Scan. The fail-before arm drops the index inside a transaction and
+    /// reproduces the audited pre-263 plan; the rollback restores it.
+    #[tokio::test]
+    async fn lower_email_mailbox_lookup_uses_the_expression_index() {
+        let Some(pool) = test_pool("inbound_lower_email_index").await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .expect("disable seq scans");
+
+        // Pass-after: the expression index serves the exact resolver query.
+        let indexed_plan = explain_mailbox_lookup(&mut tx).await;
+        assert!(
+            indexed_plan.contains("idx_mail_accounts_email_lower"),
+            "the lookup must use the migration-263 index: {indexed_plan}"
+        );
+        assert!(
+            !indexed_plan.contains("\"Seq Scan\""),
+            "the active-mailbox lookup must not seq-scan: {indexed_plan}"
+        );
+
+        // Fail-before: without the index even enable_seqscan=off plans the
+        // audited Seq Scan (there is no other usable path).
+        sqlx::query("DROP INDEX idx_mail_accounts_email_lower")
+            .execute(&mut *tx)
+            .await
+            .expect("drop index for the fail-before arm");
+        let unindexed_plan = explain_mailbox_lookup(&mut tx).await;
+        assert!(
+            unindexed_plan.contains("\"Seq Scan\""),
+            "control: without the index the lookup must seq-scan: {unindexed_plan}"
+        );
+        tx.rollback().await.expect("rollback restores the index");
+
+        let restored: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('idx_mail_accounts_email_lower')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe index");
+        assert_eq!(
+            restored.as_deref(),
+            Some("idx_mail_accounts_email_lower"),
+            "rollback must leave the canonical index in place"
+        );
+    }
+
+    /// Pass-after: N recipients are written with ONE INSERT statement.
+    /// Fail-before control: the previous one-INSERT-per-recipient loop fires
+    /// N statement-trigger events (row-count assertions cannot tell the two
+    /// apart; statement counts can).
+    #[tokio::test]
+    async fn inbound_recipients_batch_insert_is_one_statement() {
+        let Some(pool) = test_pool("inbound_recipients_batch").await else {
+            return;
+        };
+        install_statement_counters(&pool, "inbound_recipients").await;
+
+        for message_id in ["batch_msg_per_row", "batch_msg_unnest"] {
+            sqlx::query("INSERT INTO inbound_messages (id) VALUES ($1)")
+                .bind(message_id)
+                .execute(&pool)
+                .await
+                .expect("insert parent message row");
+        }
+
+        // Five distinct recipients plus one duplicate: the batch must insert
+        // five rows and dedupe the sixth exactly like the old loop did.
+        let mut jobs: Vec<(String, Option<String>)> = (0..5)
+            .map(|index| {
+                (
+                    format!("user{index}@managed.test"),
+                    Some(format!("mbx-{index}")),
+                )
+            })
+            .collect();
+        jobs.push((
+            "user0@managed.test".to_string(),
+            Some("mbx-dup".to_string()),
+        ));
+
+        // Fail-before control: the old per-recipient loop.
+        reset_statement_counts(&pool).await;
+        let mut tx = pool.begin().await.expect("begin per-row control");
+        for (recipient, mailbox_id) in &jobs {
+            sqlx::query(
+                "INSERT INTO inbound_recipients (
+                     message_id, recipient, mailbox_id, status, attempt, next_attempt_at
+                 ) VALUES ($1, $2, $3, 'pending', 0, NOW())
+                 ON CONFLICT (message_id, recipient) DO NOTHING",
+            )
+            .bind("batch_msg_per_row")
+            .bind(recipient)
+            .bind(mailbox_id)
+            .execute(&mut *tx)
+            .await
+            .expect("per-row insert");
+        }
+        tx.commit().await.expect("commit per-row control");
+        assert_eq!(
+            statement_count(&pool, "inbound_recipients", "INSERT").await,
+            jobs.len() as i64,
+            "control: the old loop issues one INSERT per recipient"
+        );
+
+        // Pass-after: ONE statement for all recipients.
+        reset_statement_counts(&pool).await;
+        let mut tx = pool.begin().await.expect("begin batch");
+        insert_inbound_recipients(&mut tx, "batch_msg_unnest", &jobs)
+            .await
+            .expect("batch insert");
+        tx.commit().await.expect("commit batch");
+        assert_eq!(
+            statement_count(&pool, "inbound_recipients", "INSERT").await,
+            1,
+            "the batch must be a single INSERT ... SELECT FROM unnest"
+        );
+
+        let rows: Vec<(String, Option<String>, String, i32)> = sqlx::query_as(
+            "SELECT recipient, mailbox_id, status, attempt
+               FROM inbound_recipients WHERE message_id = $1 ORDER BY recipient",
+        )
+        .bind("batch_msg_unnest")
+        .fetch_all(&pool)
+        .await
+        .expect("read batch rows");
+        assert_eq!(rows.len(), 5, "the duplicate recipient is deduped");
+        assert_eq!(rows[0].0, "user0@managed.test");
+        assert_eq!(rows[0].1.as_deref(), Some("mbx-0"));
+        assert!(rows.iter().all(|row| row.2 == "pending" && row.3 == 0));
     }
 
     #[test]
@@ -7667,6 +8092,7 @@ mod dispatch_fcrdns_auth_tests {
             helo_hostname: "send.example.com".into(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            resolved_recipients: std::collections::HashMap::new(),
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,

@@ -130,6 +130,31 @@ ignore = [
     # release against scc 3. The panic-in-compare precondition never occurs
     # with serial_test's standard key types. Revisit on serial_test upgrade.
     "RUSTSEC-2026-0205",
+
+    # ── 2026-10-17 advisory refresh (new DB entries, triaged) ───────────
+    # zip 2.4.2 (RUSTSEC-2026-0367/0368/0369): the vulnerable APIs are
+    # `ZipArchive::extract` / `ZipStreamReader::extract` (symlink escape,
+    # SUID/SGID preservation). The remaining 2.4.2 copies are transitive and
+    # READ-ONLY in memory: mail-auth DMARC/TLS-RPT report parsing
+    # (ZipArchive::new + by_index) and calamine XLSX reading (by_index; no
+    # extract call). The ONE attacker-facing archive extractor —
+    # crates/sandbox — is upgraded to zip 9.0.5 and covered by its 99-test
+    # suite (bounded in-memory extraction; never writes to the filesystem).
+    # Revisit when mail-auth/calamine lift their zip 2 range.
+    "RUSTSEC-2026-0367",  # zip: SUID/SGID preservation on extract
+    "RUSTSEC-2026-0368",  # zip: extract() symlink escape
+    "RUSTSEC-2026-0369",  # zip: permissions applied through symlinks
+    # rustls 0.21.12 (RUSTSEC-2026-0346/0349): EOL line pinned by
+    # aws-smithy-http-client 1.5.0 (AWS SDK) and hickory-proto 0.24.4 (via
+    # mail-auth 0.5.1 / mail-send 0.4.9). No 0.21.x fix exists; the fix is a
+    # 0.23 major for BOTH parents. Our 0.23 copy IS patched (0.23.46) — the
+    # same two advisories against 0.23.45 were fixed by that update. The
+    # Debug advisory requires Debug-formatting TLS session values (we never
+    # log them); the downgrade requires a hostile server on connections we
+    # open to AWS/known resolvers. Tracked with the AWS SDK + mail-auth
+    # majors.
+    "RUSTSEC-2026-0346",  # rustls 0.21: Debug exposes TLS secrets
+    "RUSTSEC-2026-0349",  # rustls 0.21: ServerHello downgrade
 ]
 
 # ── Duplicate version tracking ───────────────────────────────────────────────

@@ -79,6 +79,9 @@ billing-common = { path = "../billing-common" }
 billing-entitlements = { path = "../billing-entitlements" }
 ui-foundation = { path = "../ui-foundation" }
 mail-common = { path = "../mail-common" }
+# F2 journaling: the tenant-scoped `mail_journal` retrieval service (the
+# same gate/write helpers the worker and mailstore use).
+mailstore-core = { path = "../mailstore-core" }
 ddos-protection = { path = "../ddos-protection" }
 waf-engine = { path = "../waf-engine" }
 apexmail-analytics = { path = "../analytics", package = "analytics" }

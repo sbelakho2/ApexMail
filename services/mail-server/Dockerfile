@@ -274,6 +274,9 @@ ENTRYPOINT ["/usr/bin/tini", "--", "worker"]
 FROM runtime-base AS enterprise
 
 COPY --from=builder /app/target/release/enterprise-server /usr/local/bin/
+# Operator CLI for the Dedicated Tenant lifecycle (validate/bundle/review);
+# the deploy/scripts/provision-dedicated-tenant.sh wrapper execs it here.
+COPY --from=builder /app/target/release/dedicated-tenant /usr/local/bin/
 
 USER apexmail
 EXPOSE 3008

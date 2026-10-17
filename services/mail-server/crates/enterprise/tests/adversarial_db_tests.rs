@@ -209,6 +209,7 @@ async fn seed_entitled_plan(db: &PgPool) {
         sort_order: 999,
         features: PlanFeatures {
             api_access: true,
+            sso_enabled: true,
             template_approval_workflow: true,
             subaccounts: true,
             max_subaccounts: 100,
@@ -2069,7 +2070,16 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
     run(async {
         let Some(h) = harness().await else { return };
         let app = h.app.clone();
-        let tenant = h.tenant_a.clone();
+        // The tenant that OWNS the SSO configuration must sell the
+        // `sso_enabled` entitlement; tenant_a stays free for the refusal arm.
+        let sso_tenant = seed_entitled_tenant(&h.db).await;
+        // An admin token scoped to the entitled tenant: admin_a only has
+        // access to tenant_a, which is deliberately free.
+        let sso_admin_token = mint_token(
+            &sso_tenant,
+            &format!("sso-admin-{}", Uuid::new_v4().simple()),
+            true,
+        );
         let domain = format!("sso-{}.example.com", Uuid::new_v4().simple());
 
         // Audit F8 (verifier repair): SSO configuration is an admin-only
@@ -2082,7 +2092,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
             "/sso/configure",
             Some(&h.token_a),
             Some(serde_json::json!({
-                "tenant_id": tenant,
+                "tenant_id": sso_tenant,
                 "provider_type": "saml",
                 "domain": domain,
                 "enabled": true,
@@ -2104,8 +2114,8 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
             &app,
             "POST",
             "/sso/configure",
-            Some(&h.admin_token),
-            Some(serde_json::json!({"tenant_id": tenant, "provider_type": "saml"})),
+            Some(&sso_admin_token),
+            Some(serde_json::json!({"tenant_id": sso_tenant, "provider_type": "saml"})),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -2140,9 +2150,9 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
             &app,
             "POST",
             "/sso/configure",
-            Some(&h.admin_token),
+            Some(&sso_admin_token),
             Some(serde_json::json!({
-                "tenant_id": tenant,
+                "tenant_id": sso_tenant,
                 "provider_type": "saml",
                 "domain": domain,
                 "enabled": true,
@@ -2157,8 +2167,8 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         let (status, json) = call(
             &app,
             "GET",
-            &format!("/sso/config/{tenant}"),
-            Some(&h.token_a),
+            &format!("/sso/config/{sso_tenant}"),
+            Some(&sso_admin_token),
             None,
         )
         .await;
@@ -2168,7 +2178,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         let (status, _) = call(
             &app,
             "GET",
-            &format!("/sso/config/{tenant}"),
+            &format!("/sso/config/{sso_tenant}"),
             Some(&h.token_b),
             None,
         )
@@ -2243,7 +2253,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "missing bearer session");
         let (status, _) = call(&app, "GET", "/sso/validate", Some("garbage-session"), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, json) = call(&app, "POST", "/sso/cleanup", Some(&h.admin_token), None).await;
+        let (status, json) = call(&app, "POST", "/sso/cleanup", Some(&sso_admin_token), None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["cleaned"].is_number());
 
@@ -2283,7 +2293,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         sqlx::query(
             "UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE tenant_id=$1",
         )
-        .bind(&tenant)
+        .bind(&sso_tenant)
         .execute(&h.db)
         .await
         .unwrap();
@@ -2307,6 +2317,90 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
 /// with `{"success":false}`, which lies to any client checking
 /// `response.ok`. The ApiResult envelope itself is unchanged (`success`,
 /// `error`, `code` still present).
+#[test]
+fn sso_configuration_and_login_require_the_sso_entitlement() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let app = h.app.clone();
+        // tenant_a is on `free`: the plan does not sell `sso_enabled`.
+        let tenant = h.tenant_a.clone();
+        let domain = format!("free-sso-{}.example.com", Uuid::new_v4().simple());
+
+        // Configuring federation is refused and NAMES the missing entitlement.
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/sso/configure",
+            Some(&h.admin_token),
+            Some(serde_json::json!({
+                "tenant_id": tenant,
+                "provider_type": "saml",
+                "domain": domain,
+                "enabled": true,
+                "idp_entity_id": "urn:free:idp",
+                "sso_url": "https://idp.example.com/sso",
+                "certificate": "not-a-certificate"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert!(
+            json["error"].as_str().unwrap_or("").contains("sso_enabled"),
+            "the refusal must name the entitlement: {json}"
+        );
+
+        // A configuration that OUTLIVED a downgrade cannot start a login.
+        sqlx::query(
+            "INSERT INTO ent_sso_configurations
+                 (tenant_id, provider_type, enabled, domain, idp_entity_id, sso_url, certificate)
+             VALUES ($1, 'saml', true, $2, 'urn:free:idp', 'https://idp.example.com/sso', 'not-a-certificate')",
+        )
+        .bind(&tenant)
+        .bind(&domain)
+        .execute(&h.db)
+        .await
+        .expect("seed stale SSO config");
+        let (status, json) = call(
+            &app,
+            "GET",
+            &format!("/sso/login/saml/{domain}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert!(
+            json["error"].as_str().unwrap_or("").contains("sso_enabled"),
+            "the login refusal must name the entitlement: {json}"
+        );
+
+        // The ACS refuses before touching the assertion (no session can be
+        // minted for a plan that no longer sells SSO).
+        let acs_request = Request::builder()
+            .method("POST")
+            .uri(format!("/sso/acs/{domain}"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "SAMLResponse=not-base64&RelayState={domain}"
+            )))
+            .expect("ACS request");
+        let acs_response = app
+            .clone()
+            .oneshot(acs_request)
+            .await
+            .expect("ACS response");
+        assert_eq!(acs_response.status(), StatusCode::FORBIDDEN);
+        let acs_body = axum::body::to_bytes(acs_response.into_body(), usize::MAX)
+            .await
+            .expect("ACS body");
+        let acs_text = String::from_utf8_lossy(&acs_body);
+        assert!(
+            acs_text.contains("sso_enabled"),
+            "the ACS refusal must name the entitlement: {acs_text}"
+        );
+    });
+}
+
 #[test]
 fn not_found_service_results_become_404_with_the_same_envelope() {
     run(async {

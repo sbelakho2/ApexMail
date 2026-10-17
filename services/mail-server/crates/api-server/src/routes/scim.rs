@@ -1471,20 +1471,16 @@ async fn create_group(
     .execute(&state.db)
     .await?;
 
-    // Add members if provided (validated above)
-    for (member, user_id) in request.members.iter().zip(member_ids) {
-        sqlx::query(
-            "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (group_id, user_id) DO NOTHING",
-        )
-        .bind(&id)
-        .bind(user_id)
-        .bind(auth.tenant_id.to_string())
-        .bind(&member.display)
-        .bind(now)
-        .execute(&state.db)
-        .await?;
+    // Add members if provided (validated above). One bulk INSERT per chunk
+    // instead of one statement per member.
+    let member_pairs: Vec<(Uuid, Option<String>)> = request
+        .members
+        .iter()
+        .zip(member_ids)
+        .map(|(member, user_id)| (user_id, member.display.clone()))
+        .collect();
+    for chunk in member_pairs.chunks(SCIM_MEMBER_INSERT_CHUNK) {
+        insert_group_member_chunk(&state.db, &id, &auth.tenant_id, chunk, true).await?;
     }
 
     log_scim_audit(
@@ -1576,7 +1572,6 @@ async fn update_group(
     // Validate the REPLACEMENT member list BEFORE any mutation (P3): the
     // previous order deleted the existing members first and validated
     // after — a bad replacement list left the group permanently emptied.
-    let now = Utc::now();
     // Audit C: every replacement member must belong to the caller's tenant.
     let member_ids = validate_members_in_tenant(
         &state.db,
@@ -1606,18 +1601,14 @@ async fn update_group(
         .execute(&mut *tx)
         .await?;
 
-    for (member, user_id) in request.members.iter().zip(member_ids) {
-        sqlx::query(
-            "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(&row.id)
-        .bind(user_id)
-        .bind(auth.tenant_id.to_string())
-        .bind(&member.display)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+    let member_pairs: Vec<(Uuid, Option<String>)> = request
+        .members
+        .iter()
+        .zip(member_ids)
+        .map(|(member, user_id)| (user_id, member.display.clone()))
+        .collect();
+    for chunk in member_pairs.chunks(SCIM_MEMBER_INSERT_CHUNK) {
+        insert_group_member_chunk(&mut *tx, &row.id, &auth.tenant_id, chunk, false).await?;
     }
 
     tx.commit().await?;
@@ -1664,7 +1655,6 @@ async fn patch_group(
     .ok_or_else(|| ScimError::not_found("group not found"))?;
 
     let mut display_name = row.display_name.clone();
-    let now = Utc::now();
     // Count of operations that actually mutated the group — the audit entry
     // distinguishes "nothing applied" (bad paths) from real changes.
     let mut applied_ops = 0u32;
@@ -1697,21 +1687,25 @@ async fn patch_group(
                         // tenant — same rule as create/update.
                         let validated =
                             validate_members_in_tenant(&state.db, &auth.tenant_id, &values).await?;
-                        for (member, user_id) in members.iter().zip(validated) {
-                            let display = member
-                                .get("display")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            sqlx::query(
-                                "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
-                                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, user_id) DO NOTHING",
+                        let member_pairs: Vec<(Uuid, Option<String>)> = members
+                            .iter()
+                            .zip(validated)
+                            .map(|(member, user_id)| {
+                                let display = member
+                                    .get("display")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                (user_id, display)
+                            })
+                            .collect();
+                        for chunk in member_pairs.chunks(SCIM_MEMBER_INSERT_CHUNK) {
+                            insert_group_member_chunk(
+                                &state.db,
+                                &row.id,
+                                &auth.tenant_id,
+                                chunk,
+                                true,
                             )
-                            .bind(&row.id)
-                            .bind(user_id)
-                            .bind(auth.tenant_id.to_string())
-                            .bind(&display)
-                            .bind(now)
-                            .execute(&state.db)
                             .await?;
                         }
                         applied_ops += 1;
@@ -1845,6 +1839,59 @@ fn parse_member_removal_path(path: &str) -> Option<&str> {
         return None;
     }
     Some(value)
+}
+
+/// Maximum rows per `scim_group_members` bulk INSERT. Large IdP group
+/// replacements are chunked so one statement (and its bind array) stays
+/// bounded; every operation is still O(members / chunk) statements instead of
+/// O(members).
+const SCIM_MEMBER_INSERT_CHUNK: usize = 1_000;
+
+/// Write one chunk of group members with a single multi-row INSERT.
+///
+/// `on_conflict` preserves each caller's historical semantics: create/patch
+/// tolerate an existing membership (`DO NOTHING`), while a full replace has
+/// already deleted the old set and keeps the plain INSERT (duplicate request
+/// entries still fail exactly as they did row-by-row).
+async fn insert_group_member_chunk<'e, E>(
+    executor: E,
+    group_id: &str,
+    tenant_id: &str,
+    members: &[(Uuid, Option<String>)],
+    on_conflict: bool,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if members.is_empty() {
+        return Ok(());
+    }
+
+    let group_ids: Vec<String> = vec![group_id.to_string(); members.len()];
+    let user_ids: Vec<Uuid> = members.iter().map(|(user_id, _)| *user_id).collect();
+    let tenant_ids: Vec<String> = vec![tenant_id.to_string(); members.len()];
+    let displays: Vec<Option<String>> =
+        members.iter().map(|(_, display)| display.clone()).collect();
+    let created_at = vec![Utc::now(); members.len()];
+
+    let sql = if on_conflict {
+        "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
+         SELECT * FROM UNNEST($1::text[], $2::uuid[], $3::text[], $4::text[], $5::timestamptz[])
+         ON CONFLICT (group_id, user_id) DO NOTHING"
+    } else {
+        "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
+         SELECT * FROM UNNEST($1::text[], $2::uuid[], $3::text[], $4::text[], $5::timestamptz[])"
+    };
+
+    sqlx::query(sql)
+        .bind(&group_ids)
+        .bind(&user_ids)
+        .bind(&tenant_ids)
+        .bind(&displays)
+        .bind(&created_at)
+        .execute(executor)
+        .await?;
+    Ok(())
 }
 
 /// Validate that every SCIM group member reference resolves to a user that
@@ -3294,6 +3341,83 @@ mod tests {
     use axum::body::Body;
     use axum::http::{HeaderMap, Method};
 
+    /// Thread-local SQL capture for the batching regression tests (the pool
+    /// is rebuilt with `log_statements(Debug)`).
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &sqlx::PgPool) -> sqlx::PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
+    }
+
     struct ScimFixture {
         app: axum::Router,
         pool: sqlx::PgPool,
@@ -4449,6 +4573,123 @@ mod tests {
         let (status, _, body) = scim_call(app, key_a, Method::GET, "/v1/scim/Users", None).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
 
+        fixture.cleanup().await;
+    }
+
+    /// P2: group create and replace must write every member in ONE bulk
+    /// INSERT statement (the legacy path issued one INSERT per member).
+    #[tokio::test]
+    async fn group_member_writes_are_one_statement_per_operation() {
+        let Some(fixture) = scim_fixture("scim_bulk_members").await else {
+            return;
+        };
+        let logged = logging_pool(&fixture.pool).await;
+        let state = crate::app::test_support::test_state_over(logged.clone()).await;
+        let auth = AuthUser {
+            tenant_id: fixture.tenant_a.clone(),
+            user_id: None,
+            api_key_id: Some(fixture.key_a.clone()),
+            session_id: None,
+            scopes: vec!["scim:read".into(), "scim:write".into()],
+        };
+
+        let mut members = Vec::new();
+        for index in 0..20 {
+            let user_id = seed_router_user(
+                &logged,
+                &fixture.tenant_a,
+                &format!("bulk-{index}@example.com"),
+                Some(&format!("Bulk {index}")),
+                "member",
+                "active",
+            )
+            .await;
+            members.push(json!({
+                "value": user_id.to_string(),
+                "display": format!("Bulk {index}"),
+            }));
+        }
+        let body = json!({
+            "schemas": [SCIM_GROUP_SCHEMA],
+            "displayName": "Bulk Group",
+            "members": members,
+        });
+
+        let (capture, guard) = capture_sql();
+        let response = create_group(State(state.clone()), auth.clone(), Ok(Json(body)))
+            .await
+            .expect("create group");
+        drop(guard);
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO scim_group_members"),
+            1,
+            "20 members must be one INSERT: {:?}",
+            capture.statements()
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&bytes).expect("group body");
+        let scim_id = created["id"].as_str().expect("group scim id").to_string();
+
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scim_group_members WHERE tenant_id = $1")
+                .bind(&fixture.tenant_a)
+                .fetch_one(&logged)
+                .await
+                .expect("member count");
+        assert_eq!(stored, 20);
+
+        // Replace semantics: same 20 users (new display strings) => one
+        // DELETE and one bulk INSERT, never one statement per member.
+        let replacement = json!({
+            "schemas": [SCIM_GROUP_SCHEMA],
+            "displayName": "Bulk Group Renamed",
+            "members": members
+                .iter()
+                .map(|member| json!({
+                    "value": member["value"],
+                    "display": format!("{} replaced", member["display"].as_str().unwrap_or("")),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let (capture, guard) = capture_sql();
+        let _ = update_group(
+            State(state),
+            auth,
+            axum::extract::Path(scim_id),
+            Ok(Json(replacement)),
+        )
+        .await
+        .expect("replace group members");
+        drop(guard);
+        assert_eq!(
+            capture.count_starting_with("DELETE FROM scim_group_members"),
+            1,
+            "replace removes the old set in one statement: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO scim_group_members"),
+            1,
+            "20 replacement members must be one INSERT: {:?}",
+            capture.statements()
+        );
+        let displays: Vec<String> =
+            sqlx::query_scalar("SELECT display FROM scim_group_members WHERE tenant_id = $1")
+                .bind(&fixture.tenant_a)
+                .fetch_all(&logged)
+                .await
+                .expect("member displays");
+        assert_eq!(displays.len(), 20);
+        assert!(
+            displays.iter().all(|display| display.ends_with("replaced")),
+            "every replacement display persisted: {displays:?}"
+        );
+
+        logged.close().await;
         fixture.cleanup().await;
     }
 }

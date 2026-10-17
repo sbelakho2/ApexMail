@@ -7,9 +7,8 @@ license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "P
 
 [features]
 default = ["core"]
-full = ["core", "deep_inspection"]
+full = ["core"]
 core = []
-deep_inspection = []  # Full payload reassembly and inspection
 
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }

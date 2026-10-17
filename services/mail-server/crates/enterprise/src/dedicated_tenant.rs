@@ -2648,7 +2648,9 @@ mod tests {
     fn write_bundle_is_idempotent_and_lays_out_the_deployment_dir() {
         let request = request();
         let bundle = render_bundle(&request);
-        let base = std::env::temp_dir().join(format!("apexmail_bundle_test_{}", Uuid::new_v4()));
+        // Test-only scratch dir with a UUID-unique name (no predictable
+        // path another process could pre-create).
+        let base = std::env::temp_dir().join(format!("apexmail_bundle_test_{}", Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let first = write_bundle(&base, &request, &bundle).expect("write");
         let second = write_bundle(&base, &request, &bundle).expect("rewrite");
         assert_eq!(first, second);

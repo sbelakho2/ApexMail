@@ -38,6 +38,7 @@ use super::sales::{
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
 use super::transport::{
     create_transport_from_config_with_db_and_redis, EmailTransport, HybridTransport,
+    APEXMAIL_ROUTE_HEADER,
 };
 use super::transport_router::{transport_kind_for, TransportKind};
 use super::types::{
@@ -706,6 +707,74 @@ const HANDLE_SUCCESS_UPDATE_SQL: &str = r#"
             WHERE id = $2::uuid
               AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
+
+/// F2 journaling: render the message that will be sent into canonical raw
+/// RFC 5322 bytes (headers + body) for the `mail_journal` legal copy.
+///
+/// This mirrors the transport's own MIME construction (same structured
+/// mailbox lists, same header set, same text/html/attachment parts) without
+/// the route-specific `X-ApexMail-Route` header — internal routing metadata
+/// is not part of the customer's message and must not enter the journal.
+/// Serialization is in-memory and cannot fail; the expect is the same one
+/// the SMTP transport uses for its explicit-envelope path.
+fn render_journal_message(email: &PreparedEmail) -> Vec<u8> {
+    use mail_send::mail_builder::headers::address::Address;
+    use mail_send::mail_builder::headers::text::Text;
+    use mail_send::mail_builder::MessageBuilder;
+
+    fn address<'a>(name: Option<&'a str>, email: &'a str) -> Address<'a> {
+        match name.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => Address::new_address(Some(name), email),
+            None => Address::new_address(None::<&str>, email),
+        }
+    }
+
+    fn mailbox_list(mailboxes: &[Mailbox]) -> Address<'_> {
+        Address::new_list(
+            mailboxes
+                .iter()
+                .map(|mailbox| address(mailbox.name.as_deref(), &mailbox.email))
+                .collect(),
+        )
+    }
+
+    let mut builder = MessageBuilder::new()
+        .from(address(email.from_name.as_deref(), &email.from))
+        .subject(email.subject.as_str());
+    if email.mime_to.is_empty() {
+        builder = builder.to(address(None, &email.to));
+    } else {
+        builder = builder.to(mailbox_list(&email.mime_to));
+    }
+    if !email.mime_cc.is_empty() {
+        builder = builder.cc(mailbox_list(&email.mime_cc));
+    }
+    if let Some(reply_to) = &email.reply_to {
+        builder = builder.reply_to(mailbox_list(std::slice::from_ref(reply_to)));
+    }
+    for (key, value) in &email.headers {
+        if key.eq_ignore_ascii_case(APEXMAIL_ROUTE_HEADER) {
+            continue;
+        }
+        builder = builder.header(key.as_str(), Text::new(value.as_str()));
+    }
+    if let Some(text) = &email.text {
+        builder = builder.text_body(text.as_str());
+    }
+    if let Some(html) = &email.html {
+        builder = builder.html_body(html.as_str());
+    }
+    for attachment in &email.attachments {
+        builder = builder.attachment(
+            attachment.content_type.as_str(),
+            attachment.filename.as_str(),
+            attachment.content.as_slice(),
+        );
+    }
+    builder
+        .write_to_vec()
+        .expect("MIME serialization for the journal copy cannot fail in memory")
+}
 
 /// Audit-5: handle_soft_bounce's requeue write, fenced on the lease token.
 const SOFT_BOUNCE_UPDATE_SQL: &str = r#"
@@ -3413,6 +3482,10 @@ impl EmailProcessor {
         // needs the local signature; a shared SES send is signed by SES
         // BYODKIM).
         let email = self.prepare_email(job, &domain, &route)?;
+        // F2 journaling: render the raw RFC 5322 copy ONCE, before the
+        // send. It is inserted with the send effect below when the tenant is
+        // journaling-enabled.
+        let journal_raw = render_journal_message(&email);
 
         // ── WORKER PRE-SEND DLP GATE (data-loss-prevention enforcement) ───
         // The scan runs on the fully PREPARED copy (subject, text body,
@@ -3512,7 +3585,7 @@ impl EmailProcessor {
                     recipient = %job.to,
                     "acceptance ledger already records this logical send as accepted — not submitting again"
                 );
-                self.handle_possibly_sent(job).await?;
+                self.handle_possibly_sent(job, Some(&journal_raw)).await?;
                 return Ok(());
             }
             Ok(AcceptanceClaim::InFlight) => {
@@ -3612,7 +3685,8 @@ impl EmailProcessor {
         let outcome: ProcessorResult<()> = match send_result {
             Ok(result) => {
                 self.smtp_circuit_breaker.record_success();
-                self.handle_success(job, &result).await
+                self.handle_success_with_journal(job, &result, Some(&journal_raw))
+                    .await
             }
             Err(e) => {
                 // P1 split-brain fix (dogfood 2026-10-06): the relay durably
@@ -4396,23 +4470,38 @@ impl EmailProcessor {
     /// row only becomes 'sent' when the set is empty. Requeue paths
     /// (`handle_soft_bounce`) retry only this remaining set, so an
     /// already-delivered recipient is never re-sent.
-    async fn handle_success(
+    /// [`Self::handle_success`] plus the F2 outbound journal copy.
+    ///
+    /// `journal_raw` is the rendered raw RFC 5322 message when the caller
+    /// has one (the real dispatch path always does). The send-effect row
+    /// update and the `mail_journal` INSERT are committed in ONE
+    /// transaction: a journal failure rolls the status update back and
+    /// surfaces the error — a paid "Archive + Journaling" tenant never gets
+    /// a successful-looking send without its legal copy.
+    ///
+    /// `None` keeps the pre-journaling behaviour for callers that have no
+    /// rendered message (unit tests of the send-effect SQL). The production
+    /// dispatch path in `process_job_inner` always passes `Some`.
+    async fn handle_success_with_journal(
         &self,
         job: &EmailJob,
         result: &DeliveryReceipt,
+        journal_raw: Option<&[u8]>,
     ) -> ProcessorResult<()> {
+        let mut tx = self.db.begin().await?;
         let updated = sqlx::query(HANDLE_SUCCESS_UPDATE_SQL)
             .bind(&result.transport_message_id)
             .bind(&job.id)
             .bind(&job.to)
             .bind(lease_token_of(job))
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await?;
 
         // Audit-5: a fenced-out write means the lease was lost (the row was
         // recovered and re-claimed). The new owner owns the row now — do not
         // record events or stamp messages on its behalf.
         if fenced_out(updated.rows_affected()) {
+            tx.rollback().await?;
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
@@ -4420,6 +4509,47 @@ impl EmailProcessor {
             );
             return Ok(());
         }
+
+        // F2: the journal copy rides the SAME transaction as the send
+        // effect. The gate is read in-transaction (a lookup failure fails
+        // the effect rather than silently skipping the paid copy).
+        if let Some(raw) = journal_raw {
+            let enabled =
+                mailstore_core::journal::tenant_journaling_enabled_tx(&mut tx, &job.tenant_id)
+                    .await?;
+            if enabled {
+                let entry = mailstore_core::journal::NewJournalEntry {
+                    tenant_id: job.tenant_id.clone(),
+                    direction: mailstore_core::journal::JournalDirection::Outbound,
+                    source_table: Some("email_queue".to_string()),
+                    source_id: Some(job.id.clone()),
+                    message_id: Some(job.message_id.clone())
+                        .filter(|value| !value.trim().is_empty()),
+                    from_address: Some(job.from.clone()),
+                    to_addresses: vec![job.to.clone()],
+                    subject: Some(job.subject.clone()),
+                    raw_message: raw.to_vec(),
+                };
+                if let Err(error) =
+                    mailstore_core::journal::insert_journal_entry_tx(&mut tx, &entry).await
+                {
+                    // The transaction rolls back on drop, leaving the queue
+                    // row un-terminalized; the error is returned so the job
+                    // is retried/alarmed instead of appearing sent without a
+                    // journal copy.
+                    metrics::counter!("email.journal_write_failed").increment(1);
+                    error!(
+                        job_id = %job.id,
+                        tenant_id = %job.tenant_id,
+                        error = %error,
+                        "mail journal INSERT failed — failing the send effect (paid journaling guarantee)"
+                    );
+                    return Err(error.into());
+                }
+            }
+        }
+
+        tx.commit().await?;
 
         // Audit item 12 — THE DELIBERATE GAP: provider/SMTP acceptance
         // (exactly what this function handles) is NOT recorded as a
@@ -4604,15 +4734,21 @@ impl EmailProcessor {
     /// message. Record the recipient as possibly-sent in the row metadata
     /// (auditable) and remove it from the pending set so the row completes
     /// instead of redelivery-looping.
-    async fn handle_possibly_sent(&self, job: &EmailJob) -> ProcessorResult<()> {
+    async fn handle_possibly_sent(
+        &self,
+        job: &EmailJob,
+        journal_raw: Option<&[u8]>,
+    ) -> ProcessorResult<()> {
+        let mut tx = self.db.begin().await?;
         let updated = sqlx::query(POSSIBLY_SENT_UPDATE_SQL)
             .bind(&job.id)
             .bind(&job.to)
             .bind(lease_token_of(job))
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await?;
 
         if fenced_out(updated.rows_affected()) {
+            tx.rollback().await?;
             warn!(
                 job_id = %job.id,
                 recipient = %job.to,
@@ -4620,6 +4756,46 @@ impl EmailProcessor {
             );
             return Ok(());
         }
+
+        // AlreadyAccepted means the acceptance ledger recorded this logical
+        // send but the send-effect transaction (which owns the journal copy)
+        // may not have committed before the process died. Record the copy
+        // here, in the SAME transaction as the row transition. The unique
+        // (tenant, direction, source) identity makes a duplicate impossible
+        // when the effect transaction did commit.
+        if let Some(raw) = journal_raw {
+            let enabled =
+                mailstore_core::journal::tenant_journaling_enabled_tx(&mut tx, &job.tenant_id)
+                    .await?;
+            if enabled {
+                let entry = mailstore_core::journal::NewJournalEntry {
+                    tenant_id: job.tenant_id.clone(),
+                    direction: mailstore_core::journal::JournalDirection::Outbound,
+                    source_table: Some("email_queue".to_string()),
+                    source_id: Some(job.id.clone()),
+                    message_id: Some(job.message_id.clone())
+                        .filter(|value| !value.trim().is_empty()),
+                    from_address: Some(job.from.clone()),
+                    to_addresses: vec![job.to.clone()],
+                    subject: Some(job.subject.clone()),
+                    raw_message: raw.to_vec(),
+                };
+                if let Err(error) =
+                    mailstore_core::journal::insert_journal_entry_tx(&mut tx, &entry).await
+                {
+                    metrics::counter!("email.journal_write_failed").increment(1);
+                    error!(
+                        job_id = %job.id,
+                        tenant_id = %job.tenant_id,
+                        error = %error,
+                        "mail journal INSERT failed on the already-accepted path — rolling the transition back so it is retried WITH the legal copy"
+                    );
+                    return Err(error.into());
+                }
+            }
+        }
+
+        tx.commit().await?;
 
         // F25: possibly-sent is a durable recipient transition.
         self.reconcile_parent_progress(job).await;
@@ -15614,7 +15790,7 @@ mod orchestration_tests {
             provider_source: None,
         };
         processor
-            .handle_success(&job, &receipt)
+            .handle_success_with_journal(&job, &receipt, None)
             .await
             .expect("fenced success");
         processor
@@ -15622,7 +15798,7 @@ mod orchestration_tests {
             .await
             .expect("fenced suppression");
         processor
-            .handle_possibly_sent(&job)
+            .handle_possibly_sent(&job, None)
             .await
             .expect("fenced possibly-sent");
         let soft = ProcessorError::Smtp {
@@ -18745,7 +18921,7 @@ mod residual_arms_db_tests {
             provider_source: None,
         };
         processor
-            .handle_success(&job, &receipt)
+            .handle_success_with_journal(&job, &receipt, None)
             .await
             .expect("success handling completes");
         pool.close().await;
@@ -21499,5 +21675,411 @@ mod suppression_probe_db_tests {
         )
         .await
         .expect("processor")
+    }
+}
+
+#[cfg(test)]
+mod journaling_db_tests {
+    //! F2 outbound journaling: the `mail_journal` copy is written in the
+    //! SAME transaction as the send effect, gated on the Mailboxes add-on.
+    //!
+    //! `TEST_DATABASE_URL` gates the suite (canonical per-test database via
+    //! the production migrator); an unset variable soft-skips.
+
+    use super::*;
+    use uuid::Uuid;
+
+    async fn pool(name: &str) -> Option<PgPool> {
+        crate::test_support::canonical_pool(name, name).await
+    }
+
+    fn redis_pool() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    async fn processor(pool: &PgPool) -> Arc<EmailProcessor> {
+        Arc::new(
+            EmailProcessor::with_transport(
+                pool.clone(),
+                redis_pool(),
+                EmailConfig::default(),
+                HybridTransport::new(None::<Arc<dyn EmailTransport>>, None),
+            )
+            .await
+            .expect("processor"),
+        )
+    }
+
+    struct Fixture {
+        tenant_id: String,
+        queue_id: Uuid,
+        message_id: Uuid,
+        lease_token: String,
+        from: String,
+        to: String,
+        subject: String,
+    }
+
+    async fn seed(pool: &PgPool, label: &str) -> Fixture {
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let tenant_id = format!("jw-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("Journal {label} {suffix}"))
+        .bind(format!("jw-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+
+        let queue_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let lease_token = format!("journal-lease-{suffix}");
+        let from = "sender@journal.example".to_string();
+        let to = "recipient@example.com".to_string();
+        let subject = format!("Journal {label}");
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  \"to\", text, metadata, attempt, message_category) \
+             VALUES ($1, $2, ARRAY[$3], $4, 'processing', $5, $6, $3, 'body', $7, 0, 'marketing')",
+        )
+        .bind(queue_id)
+        .bind(&from)
+        .bind(&to)
+        .bind(&subject)
+        .bind(&tenant_id)
+        .bind(message_id)
+        .bind(serde_json::json!({ "lease_token": lease_token }))
+        .execute(pool)
+        .await
+        .expect("insert email_queue");
+
+        Fixture {
+            tenant_id,
+            queue_id,
+            message_id,
+            lease_token,
+            from,
+            to,
+            subject,
+        }
+    }
+
+    fn job(fixture: &Fixture) -> EmailJob {
+        EmailJob {
+            id: fixture.queue_id.to_string(),
+            message_id: fixture.message_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: String::new(),
+            from: fixture.from.clone(),
+            to: fixture.to.clone(),
+            subject: fixture.subject.clone(),
+            html: None,
+            text: Some("body".into()),
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: Some(serde_json::json!({ "lease_token": fixture.lease_token })),
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn receipt() -> DeliveryReceipt {
+        DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: Some("journal-smtp-1".into()),
+            actual_source_ip: None,
+            recipient_provider: None,
+            provider_source: None,
+        }
+    }
+
+    async fn journal_count(pool: &PgPool, tenant_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM mail_journal WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_one(pool)
+            .await
+            .expect("journal count")
+    }
+
+    async fn queue_status(pool: &PgPool, queue_id: Uuid) -> String {
+        sqlx::query_scalar("SELECT status FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue status")
+    }
+
+    async fn active_contract(pool: &PgPool, tenant_id: &str) {
+        sqlx::query(
+            "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+             VALUES ($1, 'mailboxes', 'active')",
+        )
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("insert contract");
+    }
+
+    async fn install_fault_trigger(pool: &PgPool) {
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION journal_outbound_test_fault() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'mail_journal outbound fault injection'; END $$ LANGUAGE plpgsql",
+        )
+        .execute(pool)
+        .await
+        .expect("fault function");
+        sqlx::query("DROP TRIGGER IF EXISTS journal_outbound_test_fault ON mail_journal")
+            .execute(pool)
+            .await
+            .expect("drop stale trigger");
+        sqlx::query(
+            "CREATE TRIGGER journal_outbound_test_fault BEFORE INSERT ON mail_journal \
+             FOR EACH ROW EXECUTE FUNCTION journal_outbound_test_fault()",
+        )
+        .execute(pool)
+        .await
+        .expect("fault trigger");
+    }
+
+    /// Add-on OFF: the send effect still commits, but ZERO journal rows.
+    #[tokio::test]
+    async fn outbound_addon_off_writes_no_journal_row() {
+        let Some(pool) = pool("journal_out_off").await else {
+            return;
+        };
+        let fixture = seed(&pool, "off").await;
+        let processor = processor(&pool).await;
+        let raw = b"From: sender@journal.example\r\nTo: recipient@example.com\r\n\
+                    Subject: Journal off\r\n\r\nbody";
+
+        processor
+            .handle_success_with_journal(&job(&fixture), &receipt(), Some(raw))
+            .await
+            .expect("send effect commits");
+
+        assert_eq!(journal_count(&pool, &fixture.tenant_id).await, 0);
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        pool.close().await;
+    }
+
+    /// Add-on ON: exactly one outbound row with the exact raw bytes,
+    /// source `email_queue`/queue id, and the recipient list.
+    #[tokio::test]
+    async fn outbound_addon_on_writes_one_exact_journal_copy() {
+        let Some(pool) = pool("journal_out_on").await else {
+            return;
+        };
+        let fixture = seed(&pool, "on").await;
+        active_contract(&pool, &fixture.tenant_id).await;
+        let processor = processor(&pool).await;
+        let raw = b"From: sender@journal.example\r\nTo: recipient@example.com\r\n\
+                    Subject: Journal on\r\nMessage-ID: <out-264@example.com>\r\n\r\nbody-on";
+
+        processor
+            .handle_success_with_journal(&job(&fixture), &receipt(), Some(raw))
+            .await
+            .expect("send effect with journal copy");
+
+        type JournalRow = (
+            String,
+            Option<String>,
+            serde_json::Value,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Vec<u8>,
+        );
+        let (direction, from_address, to_addresses, subject, source_table, source_id, stored): JournalRow =
+            sqlx::query_as(
+            "SELECT direction, from_address, to_addresses, subject, source_table, source_id, \
+                    raw_message \
+             FROM mail_journal WHERE tenant_id = $1",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("one journal row");
+        assert_eq!(direction, "outbound");
+        assert_eq!(from_address.as_deref(), Some(fixture.from.as_str()));
+        assert_eq!(to_addresses, serde_json::json!([fixture.to]));
+        assert_eq!(subject.as_deref(), Some(fixture.subject.as_str()));
+        assert_eq!(source_table.as_deref(), Some("email_queue"));
+        assert_eq!(
+            source_id.as_deref(),
+            Some(fixture.queue_id.to_string().as_str())
+        );
+        assert_eq!(stored, raw, "raw bytes must be exact");
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        pool.close().await;
+    }
+
+    /// AlreadyAccepted retry: the acceptance ledger recorded the send but
+    /// the send-effect transaction (which owns the journal copy) may have
+    /// died first. The retry path writes the missing legal copy in the
+    /// row-transition transaction, and a replay is a no-op.
+    #[tokio::test]
+    async fn already_accepted_retry_writes_the_missing_journal_copy_once() {
+        let Some(pool) = pool("journal_out_already_accepted").await else {
+            return;
+        };
+        let fixture = seed(&pool, "already").await;
+        active_contract(&pool, &fixture.tenant_id).await;
+        let processor = processor(&pool).await;
+        let raw = b"From: sender@journal.example\r\nTo: recipient@example.com\r\n\
+                    Subject: Already accepted\r\n\r\nbody-recovered";
+        let job = job(&fixture);
+
+        processor
+            .handle_possibly_sent(&job, Some(raw))
+            .await
+            .expect("the retry writes its legal copy");
+        assert_eq!(
+            journal_count(&pool, &fixture.tenant_id).await,
+            1,
+            "the already-accepted retry must recover the missing journal copy"
+        );
+
+        processor
+            .handle_possibly_sent(&job, Some(raw))
+            .await
+            .expect("replay is not an error");
+        assert_eq!(
+            journal_count(&pool, &fixture.tenant_id).await,
+            1,
+            "a replayed retry must not duplicate the legal copy"
+        );
+
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT raw_message FROM mail_journal WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored raw");
+        assert_eq!(stored, raw, "raw bytes must be exact");
+        pool.close().await;
+    }
+
+    /// The per-seat switch is the second gate branch: an archive-enabled
+    /// mailbox journals outbound mail even with no contract row.
+    #[tokio::test]
+    async fn outbound_archive_enabled_mailbox_is_enough() {
+        let Some(pool) = pool("journal_out_archive").await else {
+            return;
+        };
+        let fixture = seed(&pool, "archive").await;
+        sqlx::query(
+            "INSERT INTO mail_accounts (email, domain, password_hash, tenant_id, \
+                                       archive_enabled, archive_enabled_at) \
+             VALUES ($1, 'journal.example', 'not-a-real-hash', $2, true, NOW())",
+        )
+        .bind(format!("seat-{}@journal.example", fixture.tenant_id))
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("archive-enabled mailbox");
+        let processor = processor(&pool).await;
+
+        processor
+            .handle_success_with_journal(
+                &job(&fixture),
+                &receipt(),
+                Some(b"Subject: x\r\n\r\nbody"),
+            )
+            .await
+            .expect("send effect with journal copy");
+        assert_eq!(journal_count(&pool, &fixture.tenant_id).await, 1);
+        pool.close().await;
+    }
+
+    /// Fault injection: a journal INSERT failure fails the send effect and
+    /// rolls the queue status back (no silent skip, no 'sent' row).
+    #[tokio::test]
+    async fn outbound_journal_fault_fails_the_send_effect() {
+        let Some(pool) = pool("journal_out_fault").await else {
+            return;
+        };
+        let fixture = seed(&pool, "fault").await;
+        active_contract(&pool, &fixture.tenant_id).await;
+        install_fault_trigger(&pool).await;
+        let processor = processor(&pool).await;
+
+        let error = processor
+            .handle_success_with_journal(
+                &job(&fixture),
+                &receipt(),
+                Some(b"Subject: fault\r\n\r\nbody"),
+            )
+            .await
+            .expect_err("the journal failure must fail the send effect");
+        assert!(
+            matches!(error, ProcessorError::Database(_)),
+            "the journal DB error must surface: {error:?}"
+        );
+        assert_eq!(journal_count(&pool, &fixture.tenant_id).await, 0);
+        assert_eq!(
+            queue_status(&pool, fixture.queue_id).await,
+            "processing",
+            "the send-effect status update must roll back with the journal row"
+        );
+
+        sqlx::query("DROP TRIGGER journal_outbound_test_fault ON mail_journal")
+            .execute(&pool)
+            .await
+            .expect("drop trigger");
+        pool.close().await;
+    }
+
+    /// The rendered journal copy is the prepared MIME (headers + body),
+    /// without the internal `X-ApexMail-Route` transport header.
+    #[test]
+    fn journal_render_carries_headers_body_and_no_route_header() {
+        let email = PreparedEmail {
+            send_unit: "email_queue:test:rcpt@example.com".into(),
+            from: "sender@example.com".into(),
+            to: "rcpt@example.com".into(),
+            mime_to: vec![Mailbox {
+                name: Some("Recipient".into()),
+                email: "rcpt@example.com".into(),
+            }],
+            mime_cc: vec![],
+            reply_to: None,
+            from_name: Some("Sender Name".into()),
+            ses_configuration_set: None,
+            subject: "Rendered subject".into(),
+            html: Some("<p>html-body</p>".into()),
+            text: Some("text-body".into()),
+            headers: vec![(APEXMAIL_ROUTE_HEADER.to_string(), "internal".into())],
+            attachments: vec![],
+            dkim: None,
+            verp: None,
+        };
+        let raw = String::from_utf8(render_journal_message(&email)).expect("utf8 MIME");
+        assert!(
+            raw.contains("From: \"Sender Name\" <sender@example.com>"),
+            "{raw}"
+        );
+        assert!(raw.contains("\"Recipient\" <rcpt@example.com>"), "{raw}");
+        assert!(raw.contains("Subject: Rendered subject"), "{raw}");
+        assert!(raw.contains("text-body"));
+        assert!(raw.contains("html-body"));
+        assert!(
+            !raw.contains(APEXMAIL_ROUTE_HEADER),
+            "internal routing metadata must not enter the journal copy"
+        );
     }
 }

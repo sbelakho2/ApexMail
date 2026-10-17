@@ -3667,7 +3667,7 @@ mod coverage_adversarial {
                 std::env::var("ADYEN_API_BASE_URL").ok(),
                 std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             );
-            std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
             std::env::set_var("ADYEN_API_BASE_URL", &base);
             std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -3699,7 +3699,7 @@ mod coverage_adversarial {
             assert_eq!(call.method, "POST");
             assert_eq!(
                 call.headers.get("x-api-key").map(String::as_str),
-                Some("AQEohONJaaPk33yRwggDP5DPc2s"),
+                Some("adyen-test-key-fixture"),
                 "auth is the API key header, never a bearer token"
             );
             assert_eq!(
@@ -3895,7 +3895,7 @@ mod coverage_adversarial {
             // Adyen's `/payments` body requires `merchantAccount`, so the
             // call must fail loudly (the outbox retries and exposes it)
             // rather than silently falling back to the wallet path.
-            std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
             let error = create_and_finalize_adyen_usage_invoice(
                 &env.state,
                 &invoice,
@@ -5241,7 +5241,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_API_BASE_URL").ok(),
             std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -5316,7 +5316,7 @@ mod coverage_adversarial {
                 std::env::var("ADYEN_API_BASE_URL").ok(),
                 std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             );
-            std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
             std::env::set_var("ADYEN_API_BASE_URL", &base);
             std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -5430,7 +5430,7 @@ mod coverage_adversarial {
                 std::env::var("ADYEN_API_BASE_URL").ok(),
                 std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             );
-            std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
             std::env::set_var("ADYEN_API_BASE_URL", &base);
             std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 

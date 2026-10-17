@@ -399,6 +399,10 @@ const REQUIRED_CONSOLE_SCHEMA: &[(&str, &[&str])] = &[
     ("ip_pool_addresses", &["pool_id", "ip_address"]),
     ("queue_jobs", &["id", "queue", "created_at"]),
     ("audit_logs", &["id", "tenant_id", "created_at"]),
+    (
+        "mail_journal",
+        &["id", "tenant_id", "direction", "journaled_at"],
+    ),
     ("gdpr_requests", &["id", "tenant_id", "status"]),
     ("sales_leads", &["id", "email", "created_at"]),
     ("system_alerts", &["id", "severity", "created_at"]),
@@ -661,6 +665,9 @@ async fn web_route_data(
         "/settings/dedicated-ips" => Some(web_dedicated_ips(state, &tenant, cid).await),
         // Deferred-feature 4: the tenant's suppression list (read-only).
         "/settings/suppressions" => Some(web_suppressions(state, &tenant, q, cid).await),
+        // Mailboxes archive + journaling: tenant-admin only; historical
+        // entries stay readable when the add-on is later switched off.
+        "/settings/journal" => Some(web_journal(state, &tenant, q, cid, user).await),
         _ => None,
     };
     let campaign_editor = if path == "/campaigns/new" {
@@ -3234,6 +3241,121 @@ async fn web_suppressions(
             .collect(),
     });
     data
+}
+
+/// `/settings/journal` — the Mailboxes archive + journaling list.
+///
+/// Tenant-admin only (the same `*` scope the tenant-admin API requires);
+/// a non-admin member gets an honest "administrators only" empty state
+/// rather than rows. The list is newest-first by `journaled_at` and carries
+/// metadata only — the per-row action links to the raw download
+/// (`GET /v1/journal/:id/raw`), never inline body markup.
+async fn web_journal(
+    state: &AppState,
+    tenant: &str,
+    q: &ListQuery,
+    cid: &str,
+    user: &AuthUser,
+) -> ListPageData {
+    let mut data = base_list(
+        "Journal",
+        "The legal copy of inbound and outbound messages for workspace mailboxes \
+         with archive + journaling enabled.",
+        "/settings/journal",
+    );
+    data.page = q.page;
+    data.empty_title = "No journal entries yet".into();
+    data.empty_description =
+        "Journaling writes a copy here for every inbound and outbound message once the \
+         Mailboxes archive + journaling add-on is active for this workspace. Nothing has \
+         been journaled yet."
+            .into();
+
+    let is_tenant_admin = user.scopes.iter().any(|scope| scope == "*");
+    if !is_tenant_admin {
+        data.empty_title = "Journal is available to workspace administrators".into();
+        data.empty_description =
+            "Your role can use the workspace but cannot read the legal journal. Ask a \
+             workspace owner or admin for access."
+                .into();
+        data.table = Some(TableData {
+            columns: journal_columns(),
+            rows: Vec::new(),
+        });
+        return data;
+    }
+
+    let total = loaded_count(
+        state,
+        "web.journal.count",
+        cid,
+        "SELECT COUNT(*)::bigint FROM mail_journal WHERE tenant_id = $1",
+        &[tenant.to_string()],
+    )
+    .await;
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
+
+    let rows = load_query(
+        "web.journal.list",
+        cid,
+        mailstore_core::journal::list_journal(&state.db, tenant, PER_PAGE as i64, offset),
+    )
+    .await;
+    let (rows, rows_unavailable) = rows.rows_or_unavailable();
+
+    data.page = page;
+    data.total_pages = total_pages;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
+    data.kpis = vec![KpiCardData::new("Entries", total.kpi_value())
+        .with_hint("Journaled messages retained for this workspace")];
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Journal", cid);
+    }
+    data.table = Some(TableData {
+        columns: journal_columns(),
+        rows: rows
+            .into_iter()
+            .map(|row| {
+                let id = row.id.to_string();
+                DataRowData {
+                    id: id.clone(),
+                    cells: vec![
+                        DataCell::text(row.direction),
+                        DataCell::text(row.from_address.unwrap_or_else(|| "—".into())),
+                        DataCell::text(if row.to_addresses.0.is_empty() {
+                            "—".to_string()
+                        } else {
+                            row.to_addresses.0.join(", ")
+                        }),
+                        DataCell::text(row.subject.unwrap_or_else(|| "—".into())),
+                        DataCell::mono(row.message_id.unwrap_or_else(|| "—".into())),
+                        time_cell(Some(row.journaled_at)),
+                        DataCell::Link {
+                            href: format!("/v1/journal/{id}/raw"),
+                            text: "Download raw".into(),
+                        },
+                    ],
+                }
+            })
+            .collect(),
+    });
+    data
+}
+
+fn journal_columns() -> Vec<String> {
+    vec![
+        "Direction".into(),
+        "From".into(),
+        "To".into(),
+        "Subject".into(),
+        "Message ID".into(),
+        "Journaled".into(),
+        "Raw".into(),
+    ]
 }
 
 // ─── Control-plane (system-scoped) routes ──────────────────────
@@ -9081,6 +9203,67 @@ mod coverage_loader_tests {
         // "all good" verdict.
         let dead = dead_state().await;
         assert!(missing_required_console_schema(&dead.db).await.is_err());
+    }
+
+    /// `/settings/journal`: tenant-admin only, tenant-scoped rows, and the
+    /// per-row raw download link. No raw body is rendered inline.
+    #[tokio::test]
+    async fn web_journal_loader_is_admin_gated_and_tenant_scoped() {
+        let Some(app) = state("cov_web_journal").await else {
+            eprintln!(
+                "skipping web_journal_loader_is_admin_gated_and_tenant_scoped: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let (tenant_a, tag_a) = tenant_pair("jwa");
+        let (tenant_b, tag_b) = tenant_pair("jwb");
+        for (tenant, tag) in [(&tenant_a, &tag_a), (&tenant_b, &tag_b)] {
+            sqlx::query(
+                r#"INSERT INTO mail_journal
+                       (tenant_id, direction, source_table, source_id, message_id, from_address,
+                        to_addresses, subject, raw_message)
+                   VALUES ($1, 'inbound', 'mail_messages', $2, $3, 'sender@example.com',
+                           '["rcpt@example.com"]'::jsonb, $4, $5)"#,
+            )
+            .bind(tenant)
+            .bind(format!("src-{tag}"))
+            .bind(format!("<{tag}@example.com>"))
+            .bind(format!("subject-{tag}"))
+            .bind(
+                format!("From: sender@example.com\r\nSubject: {tag}\r\n\r\nbody-{tag}")
+                    .into_bytes(),
+            )
+            .execute(&app.db)
+            .await
+            .expect("seed journal row");
+        }
+
+        let mut admin = user(&tenant_a);
+        admin.scopes = vec!["*".into()];
+        let data = web(&app, "/settings/journal", None, &admin).await;
+        assert!(!unavailable_marked(&data), "journal list must be available");
+        assert_eq!(data.total_count, 1);
+        assert_eq!(table(&data).rows.len(), 1);
+        assert!(has(&data, &tag_a));
+        assert!(
+            !has(&data, &tag_b),
+            "another tenant's journal must not leak"
+        );
+        assert!(
+            has(&data, "/v1/journal/"),
+            "the row must link to the raw download"
+        );
+        assert!(!has(&data, "body-"), "the list must not render raw bodies");
+
+        // A non-admin member sees an honest admin-only empty state.
+        let member = user(&tenant_a);
+        let data = web(&app, "/settings/journal", None, &member).await;
+        assert!(table(&data).rows.is_empty());
+        assert!(
+            data.empty_title.contains("administrators"),
+            "non-admin copy must name the restriction: {}",
+            data.empty_title
+        );
     }
 }
 

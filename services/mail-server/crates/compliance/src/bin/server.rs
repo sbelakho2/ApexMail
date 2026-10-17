@@ -503,6 +503,8 @@ async fn run_cron_jobs_with_intervals(
                             skipped_legal_hold = held,
                             exports = report.gdpr_exports_deleted,
                             outbox_purged = report.dsr_outbox_purged,
+                            journal_purged = report.mail_journal_purged,
+                            journal_retention_days = report.mail_journal_retention_days,
                             audit_archived = report.audit_logs_archived,
                             archive_expired = report.archive_expired,
                             archive_deleted = report.archive_deleted,

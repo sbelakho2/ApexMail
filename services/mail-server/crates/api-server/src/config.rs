@@ -1068,7 +1068,7 @@ impl Config {
                 &env_or("IDEMPOTENCY_TTL_SECONDS", "86400"),
             )?,
 
-            aws_region: env_or("AWS_REGION", "us-east-1"),
+            aws_region: env_or("AWS_REGION", "eu-west-1"),
             ses_ip_pool_prefix: env_or("SES_IP_POOL_PREFIX", "apexmail"),
             ses_default_warmup_days: parse_u32(
                 "SES_DEFAULT_WARMUP_DAYS",

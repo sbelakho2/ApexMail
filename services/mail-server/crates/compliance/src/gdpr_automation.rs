@@ -32,6 +32,10 @@ use crate::retention_classes;
 /// The maximum extension authorised by GDPR Art. 12(3): two further months.
 pub const MAX_EXTENSION_MONTHS: u32 = 2;
 
+/// Rows per invoice-export page. The export keyset-paginates so a tenant with
+/// a large invoice history never materialises the whole table in one query.
+const INVOICE_EXPORT_PAGE_SIZE: i64 = 200;
+
 /// Statutory response deadline: ONE CALENDAR MONTH from receipt (Art. 12(3)).
 ///
 /// Calendar arithmetic, not a fixed number of days: 2026-01-31 must fall due
@@ -971,14 +975,17 @@ impl GdprAutomation {
         // F82: subject ownership is resolved through the CANONICAL invoice
         // identity — the immutable billing-address snapshot's email and the
         // customer/tenant identity relation (the subject being a user of the
-        // invoice's tenant). There is no customer_email column; querying it
-        // failed with 42703 and the old handler misclassified that schema
-        // error as an optional-store skip, silently dropping the subject's
-        // invoices from the export. The snapshot text is parsed in Rust so a
-        // malformed legacy snapshot can never abort the whole export with a
-        // JSON cast error. Invoices are a REQUIRED canonical store: any
-        // error (including 42P01/42703) fails the export visibly and the
-        // request keeps its retry work instead of reporting a partial skip.
+        // invoice's tenant). There is no customer_email column.
+        //
+        // P2: the subject filter and pagination run in SQL. The legacy query
+        // loaded EVERY tenant invoice into memory and filtered in Rust.
+        // `billing_address` is TEXT on the canonical schema and may carry a
+        // malformed legacy snapshot, so the email is extracted with a
+        // non-throwing POSIX regex (equivalent to `->>'email'` for valid
+        // snapshots, but a malformed value simply does not match instead of
+        // aborting the export with a JSON cast error). The keyset
+        // `(issued_at, id)` cursor keeps every page bounded (LIMIT) and
+        // stable across pages.
         let subject_is_tenant_user: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM users u              WHERE u.tenant_id::text = $1 AND LOWER(u.email) = LOWER($2))",
         )
@@ -988,40 +995,56 @@ impl GdprAutomation {
         .await
         .map_err(|e| format!("DB error (invoices identity): {e}"))?;
 
-        let invoice_rows: Result<Vec<(serde_json::Value, Option<String>)>, sqlx::Error> =
-            sqlx::query_as(
-                "SELECT row_to_json(i), i.billing_address FROM invoices i WHERE tenant_id = $1",
-            )
-            .bind(tid)
-            .fetch_all(&self.db)
-            .await;
-        match invoice_rows {
-            Ok(rows) => {
-                let marker = redact_marker(email);
-                let email_lower = email.to_lowercase();
-                let mut vals: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
-                for (row, snapshot_raw) in rows {
-                    let snapshot_email_matches = snapshot_raw
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .and_then(|snap| {
-                            snap.get("email")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string)
-                        })
-                        .is_some_and(|snap_email| snap_email.to_lowercase() == email_lower);
-                    if subject_is_tenant_user || snapshot_email_matches {
-                        vals.push(anonymize_json_text(row, email, &marker));
+        let marker = redact_marker(email);
+        let mut invoice_values: Vec<serde_json::Value> = Vec::new();
+        let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
+        loop {
+            let page: Result<Vec<(serde_json::Value, DateTime<Utc>, Uuid)>, sqlx::Error> =
+                sqlx::query_as(
+                    r#"
+                    SELECT row_to_json(i), i.issued_at, i.id
+                      FROM invoices i
+                     WHERE i.tenant_id = $1
+                       AND ($3::boolean
+                            OR LOWER(substring(i.billing_address
+                                               from '"email"\s*:\s*"([^"]*)"')) = LOWER($2))
+                       AND ($4::timestamptz IS NULL
+                            OR (i.issued_at, i.id) < ($4::timestamptz, $5::uuid))
+                     ORDER BY i.issued_at DESC, i.id DESC
+                     LIMIT $6
+                    "#,
+                )
+                .bind(tid)
+                .bind(email)
+                .bind(subject_is_tenant_user)
+                .bind(cursor.map(|(issued_at, _)| issued_at))
+                .bind(cursor.map(|(_, id)| id))
+                .bind(INVOICE_EXPORT_PAGE_SIZE)
+                .fetch_all(&self.db)
+                .await;
+
+            match page {
+                Ok(rows) => {
+                    let fetched = rows.len();
+                    for (row, issued_at, id) in rows {
+                        cursor = Some((issued_at, id));
+                        invoice_values.push(anonymize_json_text(row, email, &marker));
+                    }
+                    if (fetched as i64) < INVOICE_EXPORT_PAGE_SIZE {
+                        break;
                     }
                 }
-                stores.push(StoreExportResult::included("invoices", vals.len()));
-                data.insert("invoices".into(), serde_json::Value::Array(vals));
+                // F82: REQUIRED store — a schema error is NOT an optional-store
+                // skip. Failing keeps the request's retry work; the export is
+                // visibly incomplete rather than quietly missing invoices.
+                Err(e) => return Err(format!("DB error (invoices): {e}")),
             }
-            // F82: REQUIRED store — a schema error is NOT an optional-store
-            // skip. Failing keeps the request's retry work; the export is
-            // visibly incomplete rather than quietly missing invoices.
-            Err(e) => return Err(format!("DB error (invoices): {e}")),
         }
+        stores.push(StoreExportResult::included(
+            "invoices",
+            invoice_values.len(),
+        ));
+        data.insert("invoices".into(), serde_json::Value::Array(invoice_values));
 
         // Audit entries referencing the subject (accountability trail).
         self.export_table(
@@ -4713,6 +4736,106 @@ mod hostile_db_tests {
         .await
     }
 
+    /// Thread-local SQL capture for the bounded-export regression test.
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn matching(&self, needle: &str) -> Vec<String> {
+            self.statements()
+                .into_iter()
+                .filter(|statement| statement.contains(needle))
+                .collect()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a> {
+                summary: &'a mut Option<String>,
+                full: &'a mut Option<String>,
+            }
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    match field.name() {
+                        "summary" => *self.summary = Some(value.to_string()),
+                        // `db.statement` carries the FULL SQL whenever the
+                        // summary was truncated (slow-statement logging is
+                        // enabled for every statement by this pool).
+                        "db.statement" => {
+                            let trimmed = value.trim();
+                            if !trimmed.is_empty() {
+                                *self.full = Some(trimmed.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.summary = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            let mut full = None;
+            event.record(&mut SummaryVisitor {
+                summary: &mut summary,
+                full: &mut full,
+            });
+            if let Some(statement) = full.or(summary) {
+                self.0.statements.lock().unwrap().push(statement);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug)
+                    // Every statement is "slow", which makes sqlx attach the
+                    // full `db.statement` (needed to assert the LIMIT/keyset
+                    // shape of the invoice pages).
+                    .log_slow_statements(
+                        tracing::log::LevelFilter::Debug,
+                        std::time::Duration::ZERO,
+                    ),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
+    }
+
     fn automation_with(pool: PgPool, config: GdprConfig) -> GdprAutomation {
         GdprAutomation::new(pool, test_support::redis_pool(), config)
     }
@@ -5875,5 +5998,142 @@ mod hostile_db_tests {
         let marker = redact_marker("a@b.c");
         let out = replace_ignore_ascii_case("😀😀a@b.c", "a@b.c", &marker);
         assert_eq!(out, format!("😀😀{marker}"));
+    }
+
+    /// P2: the invoice export filters and paginates in SQL. Mixed snapshot
+    /// cases (matching / mixed-case / malformed / other-tenant) select the
+    /// same rows as the legacy Rust filter, and every invoice query carries a
+    /// LIMIT + keyset predicate (the legacy query loaded ALL tenant rows).
+    #[tokio::test]
+    async fn invoice_export_filters_in_sql_and_pages_with_a_bound() {
+        let Some(base) =
+            crate::test_support::canonical_pool("gdpr_invoice_sql", "gdpr_invoice_sql").await
+        else {
+            return;
+        };
+        let pool = logging_pool(&base).await;
+        let gdpr = GdprAutomation::new(
+            pool.clone(),
+            test_support::redis_pool(),
+            test_support::gdpr_config(),
+        );
+
+        let tenant = test_support::unique_tenant();
+        let other_tenant = test_support::unique_tenant();
+        for (id, label) in [(&tenant, "tenant"), (&other_tenant, "other")] {
+            sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+                .bind(id)
+                .bind(label)
+                .execute(&pool)
+                .await
+                .expect("seed tenant");
+        }
+
+        let subject = format!("mixed-{}@example.test", Uuid::new_v4().simple());
+        let request_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+             (id, tenant_id, request_type, email, verification_token_hash, verified,
+              status, requested_at, expires_at)
+             VALUES ($1, $2, 'access', $3, 'hash', true, 'verified', NOW(),
+                     NOW() + INTERVAL '30 days')",
+        )
+        .bind(&request_id)
+        .bind(&tenant)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .expect("seed access request");
+
+        // The subject is NOT a member of the tenant (`users`), so ownership
+        // comes exclusively from the immutable billing-address snapshot.
+        const MATCHING: i64 = 450; // > 2 export pages
+        let snapshot = serde_json::json!({
+            "email": subject.to_uppercase(),
+            "country": "EE",
+            "company_name": "Mixed Case OÜ",
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, billing_address, issued_at)
+             SELECT gen_random_uuid(), $1, 100, $2, NOW() - make_interval(secs => g)
+             FROM generate_series(1, $3) AS g",
+        )
+        .bind(&tenant)
+        .bind(&snapshot)
+        .bind(MATCHING as i32)
+        .execute(&pool)
+        .await
+        .expect("seed matching invoices");
+        for (tenant_id, snapshot) in [
+            (
+                &tenant,
+                Some(serde_json::json!({"email": "billing@corp.example"}).to_string()),
+            ),
+            (&tenant, Some("{not valid json".to_string())),
+            (&tenant, None),
+            (
+                &other_tenant,
+                Some(serde_json::json!({ "email": subject }).to_string()),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO invoices (id, tenant_id, amount, billing_address)
+                 VALUES (gen_random_uuid(), $1, 50, $2)",
+            )
+            .bind(tenant_id)
+            .bind(snapshot)
+            .execute(&pool)
+            .await
+            .expect("seed non-matching invoice");
+        }
+
+        let (capture, guard) = capture_sql();
+        gdpr.process_request(&request_id)
+            .await
+            .expect("access export");
+        drop(guard);
+
+        let invoice_queries = capture.matching("FROM invoices i");
+        assert_eq!(
+            invoice_queries.len(),
+            3,
+            "450 rows over 200-row pages must be 3 bounded queries: {invoice_queries:?}"
+        );
+        for query in &invoice_queries {
+            let normalized = query.to_uppercase();
+            assert!(
+                normalized.contains("LIMIT"),
+                "every invoice query must be bounded: {query}"
+            );
+            assert!(
+                normalized.contains("IS NULL") && normalized.contains("I.ISSUED_AT, I.ID) <"),
+                "every page after the first uses the keyset predicate: {query}"
+            );
+        }
+
+        let (data,): (serde_json::Value,) =
+            sqlx::query_as("SELECT data FROM gdpr_exports WHERE request_id = $1")
+                .bind(&request_id)
+                .fetch_one(&pool)
+                .await
+                .expect("export row");
+        let invoices = data["invoices"].as_array().expect("invoice array");
+        assert_eq!(
+            invoices.len(),
+            MATCHING as usize,
+            "only the subject's (and only this tenant's) invoices are exported"
+        );
+        let serialized = serde_json::to_string(invoices).unwrap();
+        assert!(
+            !serialized.to_lowercase().contains(&subject),
+            "the exported snapshot is anonymized"
+        );
+        assert!(
+            serialized.contains("erased+"),
+            "the subject's snapshot email is replaced with the redaction marker"
+        );
+
+        pool.close().await;
     }
 }

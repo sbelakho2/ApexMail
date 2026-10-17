@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 40,
+      "routeCount": 41,
       "routes": [
         {
           "path": "/",
@@ -238,6 +238,12 @@
         {
           "path": "/settings/suppressions",
           "name": "Suppressions",
+          "category": "dashboard",
+          "authRequired": true
+        },
+        {
+          "path": "/settings/journal",
+          "name": "Journal",
           "category": "dashboard",
           "authRequired": true
         },

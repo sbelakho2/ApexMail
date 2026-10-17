@@ -77,6 +77,15 @@ pub enum FeatureKey {
     /// purchase record the monthly seat billing reads) or a plan/override
     /// grant; the mailbox provisioning path refuses without it.
     Mailboxes,
+    /// `inbox_placement` — Inbox Placement Monitoring (seed-account
+    /// placement tests), sold as a separate monthly line
+    /// (`platform-catalog` `addon_by_name("inbox_placement_monitoring")`),
+    /// not included in any self-serve plan. Runtime grant: an ACTIVE
+    /// `product_line_contracts` row (`product_line = 'placement'`, the
+    /// purchase record the monthly line bills) or a plan/override grant; the
+    /// placement create routes and the engine's execution path refuse
+    /// without it.
+    InboxPlacement,
     /// `advanced_analytics` — advanced analytics endpoints (engagement,
     /// deliverability).
     AdvancedAnalytics,
@@ -130,6 +139,7 @@ impl FeatureKey {
         Self::Webhooks,
         Self::InboundEmail,
         Self::Mailboxes,
+        Self::InboxPlacement,
         Self::AdvancedAnalytics,
         Self::SendTimeOptimization,
         Self::AbTesting,
@@ -162,6 +172,7 @@ impl FeatureKey {
             Self::Webhooks => "webhooks_enabled",
             Self::InboundEmail => "inbound_email",
             Self::Mailboxes => "mailboxes",
+            Self::InboxPlacement => "inbox_placement",
             Self::AdvancedAnalytics => "advanced_analytics",
             Self::SendTimeOptimization => "send_time_optimization",
             Self::AbTesting => "ab_testing",
@@ -381,6 +392,20 @@ pub const PLAN_FEATURE_CLASSIFICATION: &[FieldClassification] = &[
         class: FeatureClass::RuntimeEnforced,
         gate: Gate::Feature(FeatureKey::Mailboxes),
         rationale: "Mailbox provisioning is a real operator handler gated on the Mailboxes product entitlement (an active product_line_contracts row or a plan/override grant), so a non-entitled tenant is refused by name instead of receiving unbilled mailboxes.",
+    },
+    // RuntimeEnforced — the placement create routes (api-server
+    // `placement_create_test` and the tenant placement read routes) require
+    // `FeatureKey::InboxPlacement`, and the placement engine's execution
+    // path refuses to run a test for a tenant that does not hold it. Sold
+    // ONLY as the Inbox Placement Monitoring line (`platform-catalog`
+    // `inbox_placement_monitoring`, €99/$109 per month), so no canonical
+    // plan seed grants it — the contract row is the purchase act and the
+    // monthly line bills from the same record.
+    FieldClassification {
+        field: "inbox_placement",
+        class: FeatureClass::RuntimeEnforced,
+        gate: Gate::Feature(FeatureKey::InboxPlacement),
+        rationale: "Placement test creation and execution are real handlers gated on the Inbox Placement product entitlement (an active placement contract row or a plan/override grant), so a non-entitled tenant is refused by name instead of running unbilled seed tests.",
     },
 
     // ── Analytics ──────────────────────────────────────────────────

@@ -632,6 +632,15 @@ impl OutcomeProjector {
 
         report.claimed = rows.len() as u64;
 
+        // Rows that need no reward (unparsable / no experiment) are marked
+        // processed together with the successful batch below.
+        let mut processed_ids: Vec<Uuid> = Vec::new();
+        // The reward writes themselves are batched: one arm preload, one
+        // multi-row ledger INSERT, one arm UPDATE — constant in batch size
+        // and all inside THIS transaction (no per-row pool checkout).
+        let mut batch_inputs: Vec<experiments::BatchRewardInput> = Vec::new();
+        let mut batched_rows: Vec<(Uuid, Uuid, String, OutcomeKind)> = Vec::new();
+
         for row in rows {
             let Some(kind) = OutcomeKind::parse(&row.outcome) else {
                 // Unreachable through the migration 200 CHECK constraint
@@ -643,7 +652,7 @@ impl OutcomeProjector {
                     "sales outcome has an unknown outcome value; marking processed without reward"
                 );
                 metrics::counter!("sales_outcomes_unmapped_total").increment(1);
-                mark_reward_processed(&mut tx, row.id).await?;
+                processed_ids.push(row.id);
                 report.unattributed += 1;
                 continue;
             };
@@ -658,7 +667,7 @@ impl OutcomeProjector {
                 // Not experiment mail (no experiment on the enrollment):
                 // there is nobody to attribute to. Mark processed so the row
                 // does not occupy the pending index forever.
-                mark_reward_processed(&mut tx, row.id).await?;
+                processed_ids.push(row.id);
                 report.unattributed += 1;
                 tracing::debug!(
                     outcome_id = %row.id,
@@ -671,10 +680,11 @@ impl OutcomeProjector {
                 .step_variant
                 .as_deref()
                 .or(row.experiment_variant.as_deref())
-                .unwrap_or("default");
+                .unwrap_or("default")
+                .to_string();
             let outcome_key = format!("{OUTCOME_KEY_PREFIX}{}", row.id);
             // `value_eur` is NUMERIC(14,4) NOT NULL DEFAULT 0 and the CHECK
-            // allows corrections, but record_reward rejects negative values
+            // allows corrections, but the reward path rejects negative values
             // outright; clamp so a negative correction cannot poison the
             // claim loop.
             let value_eur = if row.value_eur.is_finite() && row.value_eur > 0.0 {
@@ -683,30 +693,40 @@ impl OutcomeProjector {
                 0.0
             };
 
-            match experiments::record_reward(
-                &self.db,
-                &row.tenant_id,
+            batched_rows.push((row.id, experiment_id, variant.clone(), kind));
+            batch_inputs.push(experiments::BatchRewardInput {
+                tenant_id: row.tenant_id,
                 experiment_id,
                 variant,
-                RewardKind::from_outcome_kind(kind),
-                &outcome_key,
+                kind: RewardKind::from_outcome_kind(kind),
+                outcome_key,
                 value_eur,
-            )
-            .await
-            {
-                Ok(()) => {
-                    mark_reward_processed(&mut tx, row.id).await?;
-                    report.recorded += 1;
+            });
+        }
+
+        let batch_results = experiments::record_rewards_batch(&mut tx, &batch_inputs).await?;
+
+        for ((outcome_id, experiment_id, variant, kind), result) in
+            batched_rows.into_iter().zip(batch_results)
+        {
+            match result {
+                Ok(outcome) => {
+                    // A replay is still a successfully projected outcome
+                    // (the legacy per-row path counted it identically); the
+                    // debug line records whether the posterior moved.
                     metrics::counter!(
                         "sales_outcome_rewards_recorded_total",
                         "outcome" => kind.as_str(),
                     )
                     .increment(1);
+                    processed_ids.push(outcome_id);
+                    report.recorded += 1;
                     tracing::debug!(
-                        outcome_id = %row.id,
+                        outcome_id = %outcome_id,
                         experiment_id = %experiment_id,
                         variant,
                         outcome = kind.as_str(),
+                        replayed = outcome == experiments::BatchRewardOutcome::Replayed,
                         "experiment reward projected from a production outcome"
                     );
                 }
@@ -716,7 +736,7 @@ impl OutcomeProjector {
                     report.failed += 1;
                     metrics::counter!("sales_outcome_reward_failures_total").increment(1);
                     tracing::error!(
-                        outcome_id = %row.id,
+                        outcome_id = %outcome_id,
                         experiment_id = %experiment_id,
                         variant,
                         error = %error,
@@ -724,6 +744,18 @@ impl OutcomeProjector {
                     );
                 }
             }
+        }
+
+        // ONE statement marks every unattributed row and every rewarded row.
+        if !processed_ids.is_empty() {
+            sqlx::query(
+                "UPDATE sales_outcomes SET reward_processed_at = NOW() \
+                 WHERE id = ANY($1) AND reward_processed_at IS NULL",
+            )
+            .bind(&processed_ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?;
         }
 
         tx.commit()
@@ -743,22 +775,6 @@ impl OutcomeProjector {
 
         Ok(report)
     }
-}
-
-/// Mark one outcome's reward claim once the reward ledger accepted it.
-async fn mark_reward_processed(
-    tx: &mut Transaction<'_, Postgres>,
-    outcome_id: Uuid,
-) -> Result<(), SalesError> {
-    sqlx::query(
-        "UPDATE sales_outcomes SET reward_processed_at = NOW() \
-         WHERE id = $1 AND reward_processed_at IS NULL",
-    )
-    .bind(outcome_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
-    Ok(())
 }
 
 /// Run the outcome projector until `shutdown` resolves.
@@ -962,6 +978,82 @@ mod tests {
         .await
         .expect("insert tenant fixture");
         tenant
+    }
+
+    /// Thread-local SQL capture for the reward-batching regression test.
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
     }
 
     async fn insert_sender(pool: &PgPool, tenant: &str) -> Uuid {
@@ -1694,6 +1786,51 @@ mod tests {
         .expect("insert sales outcome")
     }
 
+    /// Insert a reward outcome against an explicit step execution — the
+    /// canonical UNIQUE(tenant, outcome, step_execution_id) means a batch of
+    /// same-kind outcomes needs one execution per outcome.
+    async fn insert_outcome_for_step(
+        pool: &PgPool,
+        tenant: &str,
+        fixture: &RewardFixture,
+        step_execution_id: Uuid,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO sales_outcomes \
+                 (id, tenant_id, enrollment_id, step_execution_id, outcome, value_eur, occurred_at) \
+             VALUES (gen_random_uuid(), $1, $2, $3, 'positive_reply', 0, NOW()) \
+             RETURNING id",
+        )
+        .bind(tenant)
+        .bind(fixture.enrollment_id)
+        .bind(step_execution_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert sales outcome for step execution")
+    }
+
+    /// Clone the fixture's step execution so a same-kind outcome batch does
+    /// not collide on the canonical unique key.
+    async fn clone_step_execution(pool: &PgPool, tenant: &str, fixture: &RewardFixture) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_step_executions \
+             (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, \
+              step_index, state, variant, idempotency_key) \
+             SELECT $1, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, \
+                    step_index, state, variant, $2 \
+             FROM sales_step_executions WHERE id = $3 AND tenant_id = $4",
+        )
+        .bind(id)
+        .bind(format!("batch-step-{}", Uuid::new_v4()))
+        .bind(fixture.step_execution_id)
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("clone step execution");
+        id
+    }
+
     async fn arm_posterior(
         pool: &PgPool,
         experiment_id: Uuid,
@@ -1800,5 +1937,138 @@ mod tests {
             marker.is_none(),
             "an unlinked outcome must stay out of the reward claim set"
         );
+    }
+
+    /// P2: reward projection is O(1) in statements per batch — one ledger
+    /// INSERT, one arm UPDATE, one reward_processed UPDATE — and the
+    /// posterior/ledger state matches the legacy per-row writes exactly.
+    #[tokio::test]
+    async fn reward_projection_statement_count_is_constant_in_batch_size() {
+        let base = match migrator::test_support::fresh_canonical_pool(
+            "projector_batch_stmt",
+            "projector_batch_stmt",
+        )
+        .await
+        {
+            Ok(Some(pool)) => pool,
+            Ok(None) => return,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let pool = logging_pool(&base).await;
+        let tenant = insert_tenant(&pool, "proj-batch").await;
+        let fixture = seed_reward_fixture(&pool, &tenant).await;
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-batch");
+
+        // ── One outcome ────────────────────────────────────────────────────
+        insert_outcome(&pool, &tenant, &fixture, "positive_reply").await;
+        let (capture, guard) = capture_sql();
+        let report = projector
+            .project_rewards(&ProjectorConfig {
+                batch_size: 1,
+                ..ProjectorConfig::default()
+            })
+            .await
+            .expect("one-row reward tick");
+        drop(guard);
+        assert_eq!(report.recorded, 1);
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO sales_experiment_outcomes"),
+            1,
+            "one ledger INSERT for one outcome: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("UPDATE sales_experiment_arms"),
+            1
+        );
+        assert_eq!(
+            capture.count_starting_with("UPDATE sales_outcomes SET reward_processed_at"),
+            1
+        );
+
+        // ── A ten-row batch uses the SAME statement count ──────────────────
+        for _ in 0..9 {
+            let execution = clone_step_execution(&pool, &tenant, &fixture).await;
+            insert_outcome_for_step(&pool, &tenant, &fixture, execution).await;
+        }
+        let (capture, guard) = capture_sql();
+        let report = projector
+            .project_rewards(&ProjectorConfig {
+                batch_size: 10,
+                ..ProjectorConfig::default()
+            })
+            .await
+            .expect("ten-row reward tick");
+        drop(guard);
+        assert_eq!(report.recorded, 9);
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO sales_experiment_outcomes"),
+            1,
+            "the batch is one multi-row INSERT: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("UPDATE sales_experiment_arms"),
+            1,
+            "all arm deltas aggregate into one UPDATE: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("UPDATE sales_outcomes SET reward_processed_at"),
+            1,
+            "all claim markers are set in one UPDATE: {:?}",
+            capture.statements()
+        );
+
+        // Legacy equivalence: ten positive_reply rewards at 0.5 each.
+        let (alpha, beta, trials, successes) =
+            arm_posterior(&pool, fixture.experiment_id, "challenger").await;
+        assert!((alpha - 6.0).abs() < 1e-9, "alpha = {alpha}");
+        assert!((beta - 1.0).abs() < 1e-9);
+        assert_eq!((trials, successes), (10, 10));
+        let ledger_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_experiment_outcomes WHERE experiment_id = $1",
+        )
+        .bind(fixture.experiment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count experiment outcomes");
+        assert_eq!(ledger_rows, 10, "one stable key per outcome");
+
+        // ── Replay: the conflict key absorbs every row in one INSERT ───────
+        sqlx::query("UPDATE sales_outcomes SET reward_processed_at = NULL WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("simulate crash before the marker");
+        let (capture, guard) = capture_sql();
+        let report = projector
+            .project_rewards(&ProjectorConfig {
+                batch_size: 10,
+                ..ProjectorConfig::default()
+            })
+            .await
+            .expect("replay reward tick");
+        drop(guard);
+        assert_eq!(report.recorded, 10, "replays still succeed");
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO sales_experiment_outcomes"),
+            1,
+            "the replay is one conflict-checked INSERT: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("UPDATE sales_experiment_arms"),
+            0,
+            "no posterior move on replay: {:?}",
+            capture.statements()
+        );
+        let (alpha, beta, trials, successes) =
+            arm_posterior(&pool, fixture.experiment_id, "challenger").await;
+        assert!((alpha - 6.0).abs() < 1e-9, "replay alpha = {alpha}");
+        assert!((beta - 1.0).abs() < 1e-9);
+        assert_eq!((trials, successes), (10, 10), "replay is a posterior no-op");
+
+        pool.close().await;
     }
 }

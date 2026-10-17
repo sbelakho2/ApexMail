@@ -31,6 +31,15 @@ async fn seed_tenant(db: &PgPool, tenant_id: &str) {
     .execute(db)
     .await
     .expect("seed tenant");
+    // The engine's execution gate requires the paid placement contract.
+    sqlx::query(
+        "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+         VALUES ($1, 'placement', 'active') ON CONFLICT (tenant_id, product_line) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .execute(db)
+    .await
+    .expect("seed placement contract");
 }
 
 /// Insert a placement test directly with the given status/schedule.

@@ -37,7 +37,9 @@ fn read_file(path: &str) -> Result<String, String> {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // CLI argument parsing for an operator tool; argv[0] is never used
+    // for a security decision.
+    let args: Vec<String> = std::env::args().skip(1).collect(); // nosemgrep: rust.lang.security.args.args
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return usage();
     }

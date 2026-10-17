@@ -4,6 +4,9 @@
 
 #![deny(unsafe_code)]
 mod encryption;
+/// Mail journal (migration 264): the shared gate, transactional write and
+/// tenant-scoped retrieval used by the worker, mailstore and api-server.
+pub mod journal;
 mod models;
 mod service;
 mod storage;

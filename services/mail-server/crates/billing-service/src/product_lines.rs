@@ -1,8 +1,10 @@
 //! Contract product-line billing: the **Platform** and **Mailboxes** lines
-//! (the owner's 2026-10-15 price table, `platform-catalog`).
+//! plus the flat **Compliance**, **Inbox Placement Monitoring** and
+//! **EU-only Routing** lines (the owner's 2026-10-15 price table,
+//! `platform-catalog`).
 //!
-//! Before this module the two lines existed only as catalog rows: the
-//! `platform` contract line (base + per-1K overage + per-subaccount fee),
+//! Before this module the two contract lines existed only as catalog rows:
+//! the `platform` contract line (base + per-1K overage + per-subaccount fee),
 //! and the Mailboxes add-on (per-seat, 10-seat minimum, archive add-on).
 //! `ent_sub_accounts` rows were an enterprise feature nothing billed;
 //! `mail_accounts` were provisioning-only. This module turns both into real
@@ -11,6 +13,15 @@
 //! created with a period-identity marker, per-period state transitions and
 //! the shared collection ladder ([`crate::overage::collect_usage_invoice`]:
 //! wallet first, then the recurring Adyen charge, then dunning).
+//!
+//! The three flat lines are recorded by the CP purchase writer
+//! ([`purchase_product_line`] / [`cancel_product_line`]) and billed monthly
+//! at their catalog list price. They are also runtime entitlements:
+//! Compliance and EU-only Routing grant `EuOnlyRouting`; Inbox Placement
+//! grants `FeatureKey::InboxPlacement`. The contract row is the single
+//! source of truth; the EU-only writer keeps
+//! `tenants.settings.addons.euOnlyRouting` in step for the settings-based
+//! reader.
 //!
 //! # The model (and its truth source)
 //!
@@ -78,10 +89,9 @@
 //!
 //! # What is NOT built (named, not faked)
 //!
-//! * **Operator CRUD for product-line contracts.** Contract rows are
-//!   written by ops SQL (or a future admin route); this deliverable is the
-//!   billing path the brief asked for, and the table is the single truth
-//!   source both the sweep and the Mailboxes provisioning gate read.
+//! * **Proration.** A contract month bills only when covered in full; there
+//!   is no partial-month charge or credit. Cancellation therefore stops the
+//!   NEXT period, not the current one.
 //! * **Mailbox journaling.** Nothing copies inbound/outbound messages to a
 //!   journal destination, and there is no third-party journal connector.
 //!   The billing flag and the mail-side retention marker (the account's
@@ -95,6 +105,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -108,10 +119,55 @@ pub const PLATFORM_USAGE_KIND: &str = "platform";
 /// `billing_periods.usage_kind` for the Mailboxes seat line.
 pub const MAILBOXES_USAGE_KIND: &str = "mailboxes";
 
+/// `billing_periods.usage_kind` for the Compliance contract line.
+pub const COMPLIANCE_USAGE_KIND: &str = "compliance";
+
+/// `billing_periods.usage_kind` for the Inbox Placement Monitoring line.
+pub const PLACEMENT_USAGE_KIND: &str = "placement";
+
+/// `billing_periods.usage_kind` for the EU-only Routing line.
+pub const EU_ONLY_ROUTING_USAGE_KIND: &str = "eu_only_routing";
+
 /// The `product_line_contracts.product_line` values this module bills.
 pub const PLATFORM_PRODUCT_LINE: &str = "platform";
 /// The Mailboxes product line (also the provisioning entitlement record).
 pub const MAILBOXES_PRODUCT_LINE: &str = "mailboxes";
+/// The Compliance contract line (includes EU-only routing).
+pub const COMPLIANCE_PRODUCT_LINE: &str = "compliance";
+/// The Inbox Placement Monitoring add-on line.
+pub const PLACEMENT_PRODUCT_LINE: &str = "placement";
+/// The self-serve EU-only Routing add-on line.
+pub const EU_ONLY_ROUTING_PRODUCT_LINE: &str = "eu_only_routing";
+
+/// Every product line this module records and bills. `dedicated_tenant` is
+/// deliberately absent: it is sold by the deployment flow, not this module.
+pub const BILLABLE_PRODUCT_LINES: &[&str] = &[
+    PLATFORM_PRODUCT_LINE,
+    MAILBOXES_PRODUCT_LINE,
+    COMPLIANCE_PRODUCT_LINE,
+    PLACEMENT_PRODUCT_LINE,
+    EU_ONLY_ROUTING_PRODUCT_LINE,
+];
+
+/// The flat monthly lines (no metered component, one unit per month). The
+/// price comes from `platform-catalog`; the product line name and the
+/// `billing_periods.usage_kind` are the same string by construction.
+pub fn is_flat_product_line(product_line: &str) -> bool {
+    matches!(
+        product_line,
+        COMPLIANCE_PRODUCT_LINE | PLACEMENT_PRODUCT_LINE | EU_ONLY_ROUTING_PRODUCT_LINE
+    )
+}
+
+/// The invoice description label for a flat line.
+pub fn flat_line_display_name(product_line: &str) -> Option<&'static str> {
+    match product_line {
+        COMPLIANCE_PRODUCT_LINE => Some("Compliance contract line"),
+        PLACEMENT_PRODUCT_LINE => Some("Inbox Placement Monitoring"),
+        EU_ONLY_ROUTING_PRODUCT_LINE => Some("EU-only Routing add-on"),
+        _ => None,
+    }
+}
 
 /// Default currency when the tenant has no valid billing currency — the
 /// same default the api-server resolver applies.
@@ -418,6 +474,83 @@ pub fn mailbox_charge(
         archive_seats,
         archive_cents: archive_seats.saturating_mul(pricing.archive_seat_cents),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Flat lines — pricing (pure, integer cents)
+// ---------------------------------------------------------------------------
+
+/// A flat monthly product line's frozen price set for one currency. The
+/// Compliance line reads its price from the catalog `ProductLineRow`;
+/// Placement and EU-only routing read their `AddonRow`s. Nothing here is a
+/// second price table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlatPricing {
+    /// The `product_line_contracts.product_line` / `billing_periods.usage_kind`
+    /// this price set belongs to.
+    pub product_line: &'static str,
+    pub currency: &'static str,
+    /// Flat monthly amount, cents.
+    pub monthly_cents: i64,
+}
+
+impl FlatPricing {
+    /// The whole price set as the period's `pricing_snapshot` JSON.
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "snapshotVersion": 1,
+            "usageKind": self.product_line,
+            "currency": self.currency,
+            "monthlyCents": self.monthly_cents,
+            "source": "platform-catalog",
+        })
+    }
+}
+
+/// The flat price set for a catalog price currency. `None` when the line is
+/// not a flat billable line (the callers surface that as `needs_review`,
+/// never as a guessed price).
+pub fn flat_pricing(product_line: &str, price_currency: &str) -> Option<FlatPricing> {
+    let currency = catalog_price_currency(price_currency);
+    let in_usd = currency == "USD";
+    let (eur_cents, usd_cents): (i64, i64) = match product_line {
+        COMPLIANCE_PRODUCT_LINE => {
+            let row = platform_catalog::product_line_by_name(COMPLIANCE_PRODUCT_LINE)?;
+            (row.price_monthly_cents, row.price_monthly_usd_cents)
+        }
+        PLACEMENT_PRODUCT_LINE => {
+            let row = platform_catalog::addon_by_name("inbox_placement_monitoring")?;
+            (row.price_cents, row.price_usd_cents)
+        }
+        EU_ONLY_ROUTING_PRODUCT_LINE => {
+            let row = platform_catalog::addon_by_name("eu_only_routing")?;
+            (row.price_cents, row.price_usd_cents)
+        }
+        _ => return None,
+    };
+    Some(FlatPricing {
+        product_line: match product_line {
+            COMPLIANCE_PRODUCT_LINE => COMPLIANCE_PRODUCT_LINE,
+            PLACEMENT_PRODUCT_LINE => PLACEMENT_PRODUCT_LINE,
+            _ => EU_ONLY_ROUTING_PRODUCT_LINE,
+        },
+        currency,
+        monthly_cents: if in_usd { usd_cents } else { eur_cents },
+    })
+}
+
+/// One flat line for one period: exactly one invoice line at the monthly
+/// catalog amount (quantity 1 — the price is per month, not per unit).
+pub fn flat_charge_lines(pricing: &FlatPricing, period_label: &str) -> Vec<ChargeLine> {
+    let label = flat_line_display_name(pricing.product_line).unwrap_or(pricing.product_line);
+    vec![ChargeLine {
+        description: format!(
+            "{label} ({period_label}) — {} per month",
+            format_cents(pricing.monthly_cents, pricing.currency)
+        ),
+        quantity: 1,
+        unit_price: pricing.monthly_cents,
+    }]
 }
 
 // ---------------------------------------------------------------------------
@@ -765,10 +898,7 @@ fn billable_lines_for_month(
     contracts
         .iter()
         .filter(|row| {
-            if !matches!(
-                row.product_line.as_str(),
-                PLATFORM_PRODUCT_LINE | MAILBOXES_PRODUCT_LINE
-            ) {
+            if !BILLABLE_PRODUCT_LINES.contains(&row.product_line.as_str()) {
                 warn!(
                     tenant_id = %row.tenant_id,
                     product_line = %row.product_line,
@@ -927,6 +1057,14 @@ async fn process_tenant_month(
                 description = format!(
                     "Mailboxes contract line for {period_label} — {} billable seats",
                     charge.billable_seats
+                );
+            }
+            PeriodCharge::Flat(pricing) => {
+                line_items.extend(flat_charge_lines(pricing, &period_label));
+                metered_watermarks.push((period.id, None));
+                description = format!(
+                    "{} for {period_label}",
+                    flat_line_display_name(pricing.product_line).unwrap_or(pricing.product_line)
                 );
             }
         }
@@ -1156,9 +1294,27 @@ async fn ensure_period_records(
                     pricing.snapshot_json(),
                 )
             }
-            _ => {
+            COMPLIANCE_PRODUCT_LINE | PLACEMENT_PRODUCT_LINE | EU_ONLY_ROUTING_PRODUCT_LINE => {
+                // The catalog carries every flat line; a missing row is a
+                // catalog bug and the expect names the line instead of
+                // silently pricing it as something else.
+                let pricing = flat_pricing(line.product_line.as_str(), price_currency)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "platform-catalog carries no price for flat product line {}",
+                            line.product_line
+                        )
+                    });
+                (line.product_line.as_str(), None, pricing.snapshot_json())
+            }
+            MAILBOXES_PRODUCT_LINE => {
                 let pricing = mailbox_pricing(price_currency);
                 (MAILBOXES_PRODUCT_LINE, None, pricing.snapshot_json())
+            }
+            other => {
+                return Err(format!(
+                    "product-line sweep: unsupported product line {other}"
+                ))
             }
         };
         sqlx::query(
@@ -1224,6 +1380,9 @@ async fn claim_period(
     let usage_kind: &'static str = match usage_kind {
         PLATFORM_USAGE_KIND => PLATFORM_USAGE_KIND,
         MAILBOXES_USAGE_KIND => MAILBOXES_USAGE_KIND,
+        COMPLIANCE_USAGE_KIND => COMPLIANCE_USAGE_KIND,
+        PLACEMENT_USAGE_KIND => PLACEMENT_USAGE_KIND,
+        EU_ONLY_ROUTING_USAGE_KIND => EU_ONLY_ROUTING_USAGE_KIND,
         other => {
             return Err(format!(
                 "product-line sweep: unsupported usage kind {other}"
@@ -1243,6 +1402,9 @@ async fn claim_period(
 enum PeriodCharge {
     Platform(PlatformCharge),
     Mailboxes(MailboxCharge),
+    /// Compliance / Inbox Placement Monitoring / EU-only Routing: one flat
+    /// monthly amount, priced from the frozen snapshot.
+    Flat(FlatPricing),
 }
 
 #[derive(Debug)]
@@ -1300,6 +1462,18 @@ async fn build_charges(
                     seats, archived, &pricing,
                 )));
             }
+            COMPLIANCE_USAGE_KIND | PLACEMENT_USAGE_KIND | EU_ONLY_ROUTING_USAGE_KIND => {
+                let pricing = snapshot_flat_pricing(&period.pricing_snapshot).ok_or_else(|| {
+                    ChargeFailure::Unpriced {
+                        period_id: period.id,
+                        reason: format!(
+                            "{} period has no usable pricing snapshot",
+                            period.usage_kind
+                        ),
+                    }
+                })?;
+                charges.push(PeriodCharge::Flat(pricing));
+            }
             other => {
                 return Err(ChargeFailure::Fatal(format!(
                     "product-line sweep: unsupported usage kind {other}"
@@ -1346,6 +1520,28 @@ fn snapshot_mailbox_pricing(snapshot: &serde_json::Value) -> Option<MailboxPrici
         minimum_seats: snapshot.get("minimumSeats").and_then(|v| v.as_i64())?,
         seat_cents: snapshot.get("seatCents").and_then(|v| v.as_i64())?,
         archive_seat_cents: snapshot.get("archiveSeatCents").and_then(|v| v.as_i64())?,
+    })
+}
+
+/// Rebuild [`FlatPricing`] from a period's snapshot JSON. `None` when the
+/// snapshot is missing/corrupt — the caller surfaces the period for review
+/// instead of pricing from today's catalog (audit F32).
+fn snapshot_flat_pricing(snapshot: &serde_json::Value) -> Option<FlatPricing> {
+    let currency: &'static str = match snapshot.get("currency").and_then(|v| v.as_str())? {
+        "USD" => "USD",
+        "EUR" => "EUR",
+        _ => return None,
+    };
+    let product_line: &'static str = match snapshot.get("usageKind").and_then(|v| v.as_str())? {
+        COMPLIANCE_USAGE_KIND => COMPLIANCE_USAGE_KIND,
+        PLACEMENT_USAGE_KIND => PLACEMENT_USAGE_KIND,
+        EU_ONLY_ROUTING_USAGE_KIND => EU_ONLY_ROUTING_USAGE_KIND,
+        _ => return None,
+    };
+    Some(FlatPricing {
+        product_line,
+        currency,
+        monthly_cents: snapshot.get("monthlyCents").and_then(|v| v.as_i64())?,
     })
 }
 
@@ -1467,6 +1663,418 @@ pub async fn mailboxes_contract_active(db: &PgPool, tenant_id: &str) -> Result<b
     .await
     .map_err(|e| format!("mailboxes contract lookup failed: {e}"))?;
     Ok(active)
+}
+
+/// Whether a product line's contract currently GRANTS its entitlement. A
+/// terminated contract keeps granting until its recorded `ended_at` (the
+/// contract period it was paid for); a suspended one does not.
+pub async fn product_line_contract_active(
+    db: &PgPool,
+    tenant_id: &str,
+    product_line: &str,
+) -> Result<bool, String> {
+    let active: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM product_line_contracts
+            WHERE tenant_id = $1
+              AND product_line = $2
+              AND (status = 'active'
+                   OR (status = 'terminated' AND ended_at IS NOT NULL AND ended_at > NOW()))
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(product_line)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("{product_line} contract lookup failed: {e}"))?;
+    Ok(active)
+}
+
+/// Every product line whose contract currently grants an entitlement,
+/// sorted for deterministic presentation. Used by the entitlement resolver
+/// (`plans::get_entitlement_snapshot`) so contract purchases grant runtime
+/// capabilities without a plan seed.
+pub async fn active_product_lines(
+    db: &PgPool,
+    tenant_id: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT product_line
+        FROM product_line_contracts
+        WHERE tenant_id = $1
+          AND (status = 'active'
+               OR (status = 'terminated' AND ended_at IS NOT NULL AND ended_at > NOW()))
+        ORDER BY product_line
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(db)
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Contract purchase / cancellation (the CP write path)
+// ---------------------------------------------------------------------------
+
+/// One product-line purchase request. `units` is the purchased seat/unit
+/// count (1 for the flat lines; the Mailboxes line still bills the seats
+/// actually provisioned, so `units` is recorded, not billed).
+#[derive(Debug, Clone)]
+pub struct ProductLinePurchaseInput {
+    pub tenant_id: String,
+    pub product_line: String,
+    pub billing_interval: String,
+    pub units: i64,
+    pub idempotency_key: Option<String>,
+}
+
+/// The recorded contract row returned by the purchase/cancel/read paths.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductLineContractRecord {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub product_line: String,
+    pub status: String,
+    pub active_from: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub billing_interval: String,
+    pub contracted_units: i32,
+    pub purchase_key: Option<String>,
+    pub notes: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// What a purchase request did — 201 Created, 200 Renewed, or 200 Replayed
+/// (the same idempotency key already produced this contract).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductLinePurchaseOutcome {
+    Created,
+    Renewed,
+    Replayed,
+}
+
+impl ProductLinePurchaseOutcome {
+    pub fn created(self) -> bool {
+        matches!(self, Self::Created)
+    }
+
+    pub fn replayed(self) -> bool {
+        matches!(self, Self::Replayed)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Renewed => "renewed",
+            Self::Replayed => "replayed",
+        }
+    }
+}
+
+/// Why a product-line write was refused. Typed so the HTTP layer maps each
+/// case to a named status instead of a generic 500.
+#[derive(Debug, thiserror::Error)]
+pub enum ProductLineError {
+    #[error("unknown product line `{0}`; sellable lines: {1}")]
+    UnknownLine(String, &'static str),
+    #[error("invalid billing interval `{0}`; allowed: monthly, yearly")]
+    InvalidInterval(String),
+    #[error("units must be a positive integer, got {0}")]
+    InvalidUnits(i64),
+    #[error("idempotency key must be at most 128 characters")]
+    InvalidIdempotencyKey,
+    #[error("tenant `{0}` not found")]
+    TenantNotFound(String),
+    #[error("no product-line contract for tenant `{tenant_id}` and line `{product_line}`")]
+    ContractNotFound {
+        tenant_id: String,
+        product_line: String,
+    },
+    #[error(
+        "idempotency key `{key}` was already used for product line `{existing}`; \
+         a key identifies exactly one purchase"
+    )]
+    IdempotencyConflict { key: String, existing: String },
+    #[error("product-line write failed: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("product-line audit failed: {0}")]
+    Audit(String),
+}
+
+const CONTRACT_COLUMNS: &str = "id, tenant_id, product_line, status, active_from, ended_at, \
+     billing_interval, contracted_units, purchase_key, notes, created_at, updated_at";
+
+fn normalize_product_line(raw: &str) -> Result<&'static str, ProductLineError> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    BILLABLE_PRODUCT_LINES
+        .iter()
+        .copied()
+        .find(|line| *line == normalized)
+        .ok_or_else(|| {
+            ProductLineError::UnknownLine(
+                raw.trim().to_string(),
+                "platform, mailboxes, compliance, placement, eu_only_routing",
+            )
+        })
+}
+
+fn normalize_billing_interval(raw: &str) -> Result<&'static str, ProductLineError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "monthly" => Ok("monthly"),
+        "yearly" | "annual" => Ok("yearly"),
+        _ => Err(ProductLineError::InvalidInterval(raw.trim().to_string())),
+    }
+}
+
+/// Set or clear `tenants.settings.addons.euOnlyRouting` (the self-serve
+/// add-on marker `mail_common::eu_only_addon_enabled` reads). The contract
+/// row stays the source of truth for the entitlement; this keeps the
+/// settings marker consistent with it.
+async fn set_eu_only_addon_flag(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    enabled: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE tenants
+           SET settings = jsonb_set(
+                   jsonb_set(
+                       COALESCE(settings, '{}'::jsonb),
+                       ARRAY['addons']::text[],
+                       CASE WHEN jsonb_typeof(COALESCE(settings->'addons', '{}'::jsonb)) = 'object'
+                            THEN COALESCE(settings->'addons', '{}'::jsonb)
+                            ELSE '{}'::jsonb END,
+                       true),
+                   ARRAY['addons', 'euOnlyRouting']::text[],
+                   to_jsonb($2::boolean),
+                   true),
+               updated_at = NOW()
+         WHERE id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(enabled)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Record (create or renew) a product-line contract and audit the write in
+/// the same transaction.
+///
+/// * A replay of the SAME `idempotency_key` for the same tenant+line
+///   returns the recorded contract unchanged (`Replayed`), so a retried CP
+///   request can never mint a second contract or shift `active_from`.
+/// * A key already used for a DIFFERENT line is refused
+///   (`IdempotencyConflict`) — the key identifies one purchase.
+/// * A purchase on an ACTIVE line renews the metadata but preserves the
+///   original `active_from` (no re-proration); a terminated line starts a
+///   fresh contract period at NOW.
+pub async fn purchase_product_line(
+    db: &PgPool,
+    input: ProductLinePurchaseInput,
+) -> Result<(ProductLineContractRecord, ProductLinePurchaseOutcome), ProductLineError> {
+    let product_line = normalize_product_line(&input.product_line)?;
+    let billing_interval = normalize_billing_interval(&input.billing_interval)?;
+    if input.units < 1 || input.units > i32::MAX as i64 {
+        return Err(ProductLineError::InvalidUnits(input.units));
+    }
+    let idempotency_key = input
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    if idempotency_key.is_some_and(|key| key.len() > 128) {
+        return Err(ProductLineError::InvalidIdempotencyKey);
+    }
+
+    let mut tx = db.begin().await?;
+    // One lock per TENANT (not per line): idempotency keys are tenant
+    // scoped, so two concurrent requests reusing one key on different lines
+    // must serialize on the key pre-check and the unique-index backstop
+    // rather than racing to a 23505.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("product-line-purchase:{}", input.tenant_id))
+        .execute(&mut *tx)
+        .await?;
+
+    let tenant_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)")
+            .bind(&input.tenant_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !tenant_exists {
+        return Err(ProductLineError::TenantNotFound(input.tenant_id));
+    }
+
+    if let Some(key) = idempotency_key {
+        let existing: Option<ProductLineContractRecord> = sqlx::query_as(&format!(
+            "SELECT {CONTRACT_COLUMNS} FROM product_line_contracts \
+             WHERE tenant_id = $1 AND purchase_key = $2"
+        ))
+        .bind(&input.tenant_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(record) = existing {
+            if record.product_line != product_line {
+                return Err(ProductLineError::IdempotencyConflict {
+                    key: key.to_string(),
+                    existing: record.product_line,
+                });
+            }
+            tx.commit().await?;
+            return Ok((record, ProductLinePurchaseOutcome::Replayed));
+        }
+    }
+
+    let existing_line: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM product_line_contracts \
+         WHERE tenant_id = $1 AND product_line = $2 FOR UPDATE",
+    )
+    .bind(&input.tenant_id)
+    .bind(product_line)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let outcome = if existing_line.is_some() {
+        ProductLinePurchaseOutcome::Renewed
+    } else {
+        ProductLinePurchaseOutcome::Created
+    };
+
+    let record: ProductLineContractRecord = sqlx::query_as(&format!(
+        r#"
+        INSERT INTO product_line_contracts (
+            tenant_id, product_line, status, active_from, ended_at,
+            billing_interval, contracted_units, purchase_key
+        )
+        VALUES ($1, $2, 'active', NOW(), NULL, $3, $4, $5)
+        ON CONFLICT (tenant_id, product_line) DO UPDATE SET
+            status = 'active',
+            active_from = CASE WHEN product_line_contracts.status = 'active'
+                               THEN product_line_contracts.active_from
+                               ELSE NOW() END,
+            ended_at = NULL,
+            billing_interval = EXCLUDED.billing_interval,
+            contracted_units = EXCLUDED.contracted_units,
+            purchase_key = COALESCE(EXCLUDED.purchase_key, product_line_contracts.purchase_key),
+            updated_at = NOW()
+        RETURNING {CONTRACT_COLUMNS}
+        "#
+    ))
+    .bind(&input.tenant_id)
+    .bind(product_line)
+    .bind(billing_interval)
+    .bind(input.units)
+    .bind(idempotency_key)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if product_line == EU_ONLY_ROUTING_PRODUCT_LINE {
+        set_eu_only_addon_flag(&mut tx, &input.tenant_id, true).await?;
+    }
+
+    crate::routes::append_audit_log(
+        &mut tx,
+        &input.tenant_id,
+        "billing.product_line_purchased",
+        "product_line_contract",
+        Some(&record.id.to_string()),
+        serde_json::json!({
+            "productLine": product_line,
+            "billingInterval": billing_interval,
+            "units": input.units,
+            "idempotencyKey": idempotency_key,
+            "outcome": outcome.as_str(),
+        }),
+        Utc::now(),
+    )
+    .await
+    .map_err(ProductLineError::Audit)?;
+
+    tx.commit().await?;
+    Ok((record, outcome))
+}
+
+/// Terminate a product-line contract. The first cancellation instant is
+/// preserved on replay; the current (partial) month stays unbilled under the
+/// sweep's no-proration rule, and the next month is never billed.
+pub async fn cancel_product_line(
+    db: &PgPool,
+    tenant_id: &str,
+    product_line: &str,
+) -> Result<ProductLineContractRecord, ProductLineError> {
+    let product_line = normalize_product_line(product_line)?;
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("product-line-purchase:{tenant_id}"))
+        .execute(&mut *tx)
+        .await?;
+
+    let record: Option<ProductLineContractRecord> = sqlx::query_as(&format!(
+        r#"
+        UPDATE product_line_contracts
+           SET status = 'terminated',
+               ended_at = COALESCE(ended_at, NOW()),
+               updated_at = NOW()
+         WHERE tenant_id = $1 AND product_line = $2
+        RETURNING {CONTRACT_COLUMNS}
+        "#
+    ))
+    .bind(tenant_id)
+    .bind(product_line)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(record) = record else {
+        return Err(ProductLineError::ContractNotFound {
+            tenant_id: tenant_id.to_string(),
+            product_line: product_line.to_string(),
+        });
+    };
+
+    if product_line == EU_ONLY_ROUTING_PRODUCT_LINE {
+        set_eu_only_addon_flag(&mut tx, tenant_id, false).await?;
+    }
+
+    crate::routes::append_audit_log(
+        &mut tx,
+        tenant_id,
+        "billing.product_line_cancelled",
+        "product_line_contract",
+        Some(&record.id.to_string()),
+        serde_json::json!({
+            "productLine": product_line,
+            "endedAt": record.ended_at,
+        }),
+        Utc::now(),
+    )
+    .await
+    .map_err(ProductLineError::Audit)?;
+
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// The tenant's contract rows (all statuses), for the CP read surface.
+pub async fn list_product_line_contracts(
+    db: &PgPool,
+    tenant_id: &str,
+) -> Result<Vec<ProductLineContractRecord>, ProductLineError> {
+    let rows = sqlx::query_as(&format!(
+        "SELECT {CONTRACT_COLUMNS} FROM product_line_contracts \
+         WHERE tenant_id = $1 ORDER BY product_line"
+    ))
+    .bind(tenant_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -2726,4 +3334,374 @@ mod coverage_adversarial {
             assert!(invoice_rows(env, tenant).await.is_empty());
         }
     );
+
+    // ------------------------------------------------------------------
+    // F3 — Compliance / Inbox Placement / EU-only Routing lines
+    // ------------------------------------------------------------------
+
+    async fn purchase(
+        env: &Env,
+        tenant: &str,
+        line: &str,
+        key: Option<&str>,
+    ) -> ProductLineContractRecord {
+        let (record, outcome) = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: tenant.to_string(),
+                product_line: line.to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: key.map(str::to_string),
+            },
+        )
+        .await
+        .expect("purchase product line");
+        assert_eq!(outcome, ProductLinePurchaseOutcome::Created, "{line}");
+        record
+    }
+
+    /// Backdate a contract so the sweep's target completed month is fully
+    /// covered (a purchase takes effect NOW; the sweep bills whole months).
+    async fn backdate_contract(env: &Env, tenant: &str, line: &str, active_from: DateTime<Utc>) {
+        sqlx::query(
+            "UPDATE product_line_contracts SET active_from = $3 \
+             WHERE tenant_id = $1 AND product_line = $2",
+        )
+        .bind(tenant)
+        .bind(line)
+        .bind(active_from)
+        .execute(&env.pool)
+        .await
+        .expect("backdate contract");
+    }
+
+    async fn snapshot(env: &Env, tenant: &str) -> billing_entitlements::EntitlementSnapshot {
+        crate::plans::get_entitlement_snapshot(&env.pool, tenant)
+            .await
+            .expect("entitlement lookup")
+            .expect("tenant exists")
+    }
+
+    // Compliance: purchase records the contract, grants EU-only routing for
+    // the contract period even without the settings add-on marker, and the
+    // sweep bills exactly the catalog amount.
+    env_test!(
+        compliance_purchase_grants_eu_only_and_bills_the_catalog_amount,
+        |env| {
+            use billing_entitlements::FeatureKey;
+
+            let tenant = "plcov_f3_compliance";
+            let (start, _end) = target_month();
+            seed_tenant(env, tenant, None).await;
+            seed_address(env, tenant).await;
+
+            purchase(env, tenant, "compliance", Some("buy-compliance-1")).await;
+            backdate_contract(
+                env,
+                tenant,
+                "compliance",
+                start - chrono::Duration::days(30),
+            )
+            .await;
+
+            let snapshot = snapshot(env, tenant).await;
+            assert!(
+                snapshot.has_feature(FeatureKey::EuOnlyRouting),
+                "the Compliance line includes EU-only routing"
+            );
+            let settings: serde_json::Value =
+                sqlx::query_scalar("SELECT settings FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("settings");
+            assert!(
+                settings
+                    .get("addons")
+                    .and_then(|addons| addons.get("euOnlyRouting"))
+                    .is_none(),
+                "the compliance entitlement is the contract, not the self-serve marker: {settings}"
+            );
+
+            let result = sweep_product_line_months(&env.state).await.expect("sweep");
+            assert_eq!(result.invoices_created, 1);
+            let rows = invoice_rows(env, tenant).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1, 99_000, "€990/month compliance line");
+            let items = line_items(env, rows[0].0).await;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["quantity"], 1);
+            assert_eq!(items[0]["unit_price"], 99_000);
+            assert!(items[0]["description"]
+                .as_str()
+                .expect("description")
+                .contains("Compliance contract line"));
+
+            let (state, metered, invoice, _currency) = period_row(env, tenant, "compliance")
+                .await
+                .expect("compliance period");
+            assert_eq!(state, "invoiced");
+            assert_eq!(metered, None, "flat lines carry no email watermark");
+            assert_eq!(invoice, Some(rows[0].0));
+
+            // Replay never bills twice.
+            let replay = sweep_product_line_months(&env.state).await.expect("replay");
+            assert_eq!(replay.invoices_created, 0);
+            assert_eq!(invoice_rows(env, tenant).await.len(), 1);
+        }
+    );
+
+    // Inbox Placement Monitoring: purchase grants the placement
+    // entitlement and bills exactly €99/month.
+    env_test!(
+        placement_purchase_grants_inbox_placement_and_bills_the_catalog_amount,
+        |env| {
+            use billing_entitlements::FeatureKey;
+
+            let tenant = "plcov_f3_placement";
+            let (start, _end) = target_month();
+            seed_tenant(env, tenant, None).await;
+            seed_address(env, tenant).await;
+
+            purchase(env, tenant, "placement", Some("buy-placement-1")).await;
+            backdate_contract(env, tenant, "placement", start - chrono::Duration::days(30)).await;
+
+            let snapshot = snapshot(env, tenant).await;
+            assert!(snapshot.has_feature(FeatureKey::InboxPlacement));
+            assert!(!snapshot.has_feature(FeatureKey::EuOnlyRouting));
+
+            sweep_product_line_months(&env.state).await.expect("sweep");
+            let rows = invoice_rows(env, tenant).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1, 9_900, "€99/month placement line");
+            let items = line_items(env, rows[0].0).await;
+            assert_eq!(items[0]["unit_price"], 9_900);
+            assert!(items[0]["description"]
+                .as_str()
+                .expect("description")
+                .contains("Inbox Placement Monitoring"));
+        }
+    );
+
+    // EU-only add-on: purchase records the contract, flips the documented
+    // settings marker, grants the routing entitlement, and bills €149/month;
+    // cancel clears the marker and stops the next period.
+    env_test!(
+        eu_only_purchase_flips_routing_grant_and_cancel_stops_the_next_period,
+        |env| {
+            use billing_entitlements::FeatureKey;
+
+            let tenant = "plcov_f3_euonly";
+            let (start, end) = target_month();
+            seed_tenant(env, tenant, None).await;
+            seed_address(env, tenant).await;
+
+            purchase(env, tenant, "eu_only_routing", Some("buy-eu-1")).await;
+            backdate_contract(
+                env,
+                tenant,
+                "eu_only_routing",
+                start - chrono::Duration::days(30),
+            )
+            .await;
+
+            let settings: serde_json::Value =
+                sqlx::query_scalar("SELECT settings FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("settings");
+            assert_eq!(
+                settings["addons"]["euOnlyRouting"], true,
+                "the purchase writer keeps the settings marker consistent: {settings}"
+            );
+            assert!(snapshot(env, tenant)
+                .await
+                .has_feature(FeatureKey::EuOnlyRouting));
+
+            sweep_product_line_months(&env.state).await.expect("sweep");
+            let rows = invoice_rows(env, tenant).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1, 14_900, "€149/month EU-only routing line");
+
+            let cancelled = cancel_product_line(&env.pool, tenant, "eu_only_routing")
+                .await
+                .expect("cancel");
+            assert_eq!(cancelled.status, "terminated");
+            let ended_at = cancelled.ended_at.expect("ended_at recorded");
+            let settings: serde_json::Value =
+                sqlx::query_scalar("SELECT settings FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("settings after cancel");
+            assert_eq!(
+                settings["addons"]["euOnlyRouting"], false,
+                "cancelling the add-on clears the marker: {settings}"
+            );
+            assert!(
+                !snapshot(env, tenant)
+                    .await
+                    .has_feature(FeatureKey::EuOnlyRouting),
+                "a cancelled line stops granting at its end instant"
+            );
+
+            // The NEXT completed month is not covered (the current partial
+            // month is not prorated, and the sweep only looks at completed
+            // months): cancellation stops the next period.
+            let next_start = end;
+            let next_end = end + chrono::Duration::days(31);
+            assert!(!contract_covers_period(
+                cancelled.active_from,
+                Some(ended_at),
+                next_start,
+                next_end
+            ));
+
+            // A replayed cancel preserves the first cancellation instant and
+            // stays terminal (idempotent).
+            let replay = cancel_product_line(&env.pool, tenant, "eu_only_routing")
+                .await
+                .expect("cancel replay");
+            assert_eq!(replay.ended_at, Some(ended_at));
+        }
+    );
+
+    // Idempotency: the same key on the same line returns the recorded
+    // contract (no second row, active_from unchanged); the same key on a
+    // different line is a conflict (a key identifies one purchase).
+    env_test!(purchase_is_idempotent_and_keys_cannot_cross_lines, |env| {
+        let tenant = "plcov_f3_idem";
+        seed_tenant(env, tenant, None).await;
+
+        let (first, outcome) = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: tenant.to_string(),
+                product_line: "compliance".to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: Some("same-key".to_string()),
+            },
+        )
+        .await
+        .expect("first purchase");
+        assert_eq!(outcome, ProductLinePurchaseOutcome::Created);
+
+        let (replayed, outcome) = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: tenant.to_string(),
+                product_line: "compliance".to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: Some("same-key".to_string()),
+            },
+        )
+        .await
+        .expect("replayed purchase");
+        assert_eq!(outcome, ProductLinePurchaseOutcome::Replayed);
+        assert_eq!(replayed.id, first.id);
+        assert_eq!(
+            replayed.active_from, first.active_from,
+            "a replay never shifts the contract start"
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM product_line_contracts \
+             WHERE tenant_id = $1 AND product_line = 'compliance'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("contract count");
+        assert_eq!(rows, 1, "one contract row per (tenant, line)");
+
+        let conflict = purchase_product_line(
+            &env.pool,
+            ProductLinePurchaseInput {
+                tenant_id: tenant.to_string(),
+                product_line: "placement".to_string(),
+                billing_interval: "monthly".to_string(),
+                units: 1,
+                idempotency_key: Some("same-key".to_string()),
+            },
+        )
+        .await
+        .expect_err("a key cannot be reused for another line");
+        assert!(matches!(
+            conflict,
+            ProductLineError::IdempotencyConflict { .. }
+        ));
+    });
+
+    // Tenant isolation: a purchase for one tenant never touches another
+    // tenant's contracts, settings or invoices.
+    env_test!(purchase_is_tenant_isolated, |env| {
+        use billing_entitlements::FeatureKey;
+
+        let buyer = "plcov_f3_buyer";
+        let other = "plcov_f3_other";
+        seed_tenant(env, buyer, None).await;
+        seed_tenant(env, other, None).await;
+
+        purchase(env, buyer, "eu_only_routing", Some("buyer-key")).await;
+
+        let other_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM product_line_contracts WHERE tenant_id = $1",
+        )
+        .bind(other)
+        .fetch_one(&env.pool)
+        .await
+        .expect("other contracts");
+        assert_eq!(other_rows, 0, "no contract leaked to the other tenant");
+        let other_settings: serde_json::Value =
+            sqlx::query_scalar("SELECT settings FROM tenants WHERE id = $1")
+                .bind(other)
+                .fetch_one(&env.pool)
+                .await
+                .expect("other settings");
+        assert!(
+            other_settings.get("addons").is_none(),
+            "the add-on marker is tenant-scoped: {other_settings}"
+        );
+        assert!(
+            !snapshot(env, other)
+                .await
+                .has_feature(FeatureKey::EuOnlyRouting),
+            "the other tenant gains no entitlement"
+        );
+        assert!(snapshot(env, buyer)
+            .await
+            .has_feature(FeatureKey::EuOnlyRouting));
+    });
+
+    // A USD tenant bills the published USD list for every flat line:
+    // $1,090 compliance + $109 placement + $165 EU-only routing.
+    env_test!(usd_flat_lines_bill_the_usd_catalog_list, |env| {
+        let tenant = "plcov_f3_usd";
+        let (start, _end) = target_month();
+        seed_tenant(env, tenant, Some("usd")).await;
+        seed_address(env, tenant).await;
+        for line in ["compliance", "placement", "eu_only_routing"] {
+            purchase(env, tenant, line, None).await;
+            backdate_contract(env, tenant, line, start - chrono::Duration::days(30)).await;
+        }
+
+        sweep_product_line_months(&env.state).await.expect("sweep");
+        let rows = invoice_rows(env, tenant).await;
+        assert_eq!(rows.len(), 1, "one invoice per tenant-month across lines");
+        let (invoice_id, subtotal, _total, currency, _status) = rows[0].clone();
+        assert_eq!(currency, "usd");
+        assert_eq!(subtotal, 109_000 + 10_900 + 16_500, "$1,090 + $109 + $165");
+        let items = line_items(env, invoice_id).await;
+        assert_eq!(items.len(), 3);
+        let prices: Vec<i64> = items
+            .iter()
+            .filter_map(|item| item["unit_price"].as_i64())
+            .collect();
+        assert!(prices.contains(&109_000));
+        assert!(prices.contains(&10_900));
+        assert!(prices.contains(&16_500));
+    });
 }

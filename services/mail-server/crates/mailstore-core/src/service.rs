@@ -781,11 +781,18 @@ impl MailstoreService for MailstoreServiceImpl {
             updated_at: chrono::Utc::now(),
         };
 
-        let (_id, uid) = self
-            .storage
-            .store_message(&stored)
-            .await
-            .map_err(|e| map_storage_error("Failed to store message", e))?;
+        // Migration 264: the SMTP delivery path (`dedup_exempt = false`) is
+        // inbound mailbox persistence and journals its copy transactionally.
+        // IMAP APPEND (`dedup_exempt = true`) is a user-initiated copy into
+        // an existing mailbox, not an inbound delivery, so it is never
+        // journaled here.
+        let stored_result = if req.dedup_exempt {
+            self.storage.store_message(&stored).await
+        } else {
+            self.storage.store_inbound_message(&stored).await
+        };
+        let (_id, uid) =
+            stored_result.map_err(|e| map_storage_error("Failed to store message", e))?;
 
         let blob_hash = sha256_hex(&req.raw_message);
         let message_id = stored.id.to_string();

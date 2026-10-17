@@ -61,6 +61,17 @@ async fn seed_tenant(db: &PgPool, tenant_id: &str) {
     .execute(db)
     .await
     .expect("seed tenant");
+    // Inbox Placement is a paid line: the engine's execution gate requires
+    // the tenant to HOLD the placement contract (the purchase record the
+    // monthly line bills).
+    sqlx::query(
+        "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+         VALUES ($1, 'placement', 'active') ON CONFLICT (tenant_id, product_line) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .execute(db)
+    .await
+    .expect("seed placement contract");
 }
 
 async fn seed_verified_domain(db: &PgPool, tenant_id: &str, domain: &str, verified: bool) {
@@ -934,4 +945,93 @@ async fn readers_handle_missing_rows_and_provider_filters() {
         .await
         .unwrap();
     assert!(trends_zoho.is_empty());
+}
+
+// ── Entitlement gate (the paid Inbox Placement line) ────────────────────────
+
+/// The engine refuses to EXECUTE a queued test for a tenant that holds no
+/// active placement contract: the test is closed as `failed` without any
+/// send/poll/persist work, so a lapsed line never runs seeded-mailbox tests
+/// for free. An entitled tenant passes the same gate (exercised by every
+/// execution test above, whose fixture grants the contract).
+#[tokio::test]
+async fn execute_test_skips_a_tenant_without_the_placement_entitlement() {
+    let Some(db) = canonical_pool("ipx_engine_entitlement").await else {
+        return;
+    };
+    let tenant = tenant_key("n");
+    // Tenant WITHOUT the placement contract.
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $1, $1, 'free', 'active')",
+    )
+    .bind(&tenant)
+    .execute(&db)
+    .await
+    .expect("seed unentitled tenant");
+
+    assert!(
+        !crate::engine::tenant_has_inbox_placement_entitlement(&db, &tenant)
+            .await
+            .expect("entitlement probe"),
+        "a tenant with no placement contract and no plan grant is not entitled"
+    );
+
+    let test_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO placement_tests \
+         (id, tenant_id, name, status, from_email, subject, total_accounts, \
+          completed_accounts, seed_accounts_used, created_at) \
+         VALUES ($1, $2, NULL, 'pending', 's@send.example', 's', 0, 0, '{}', NOW())",
+    )
+    .bind(test_id)
+    .bind(&tenant)
+    .execute(&db)
+    .await
+    .expect("insert pending test");
+
+    let engine = PlacementEngine::new(test_config(1, false, None), db.clone());
+    engine
+        .execute_test(test_id)
+        .await
+        .expect("the gate is a skip, not an infrastructure error");
+
+    let (status, completed_at): (String, Option<chrono::DateTime<Utc>>) =
+        sqlx::query_as("SELECT status, completed_at FROM placement_tests WHERE id = $1")
+            .bind(test_id)
+            .fetch_one(&db)
+            .await
+            .expect("read back");
+    assert_eq!(
+        status, "failed",
+        "an unentitled test is closed, never executed"
+    );
+    assert!(
+        completed_at.is_some(),
+        "the skip stamps the terminal instant"
+    );
+    let results: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM placement_results WHERE test_id = $1")
+            .bind(test_id)
+            .fetch_one(&db)
+            .await
+            .expect("result count");
+    assert_eq!(results, 0, "no send/poll/result work ran");
+
+    // Granting the contract (the purchase record) flips the gate.
+    sqlx::query(
+        "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+         VALUES ($1, 'placement', 'active')",
+    )
+    .bind(&tenant)
+    .execute(&db)
+    .await
+    .expect("grant placement contract");
+    assert!(
+        crate::engine::tenant_has_inbox_placement_entitlement(&db, &tenant)
+            .await
+            .expect("entitlement probe"),
+        "an active placement contract grants the entitlement"
+    );
+
+    db.close().await;
 }

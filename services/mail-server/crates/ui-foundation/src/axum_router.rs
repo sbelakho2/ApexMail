@@ -2257,6 +2257,7 @@ fn web_route_page_name(path: &str) -> &'static str {
         return route.name;
     }
     match path {
+        "/settings/journal" => "Journal",
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => "Edit Campaign",
         p if p.starts_with("/campaigns/") => "Campaign Detail",
         p if p.starts_with("/lists/") && p.ends_with("/members") => "List Members",
@@ -2584,6 +2585,11 @@ fn render_web(
         // state (the api-server loader owns the real rows).
         "/settings/suppressions" => data_backed_inner("/settings/suppressions", data)
             .unwrap_or_else(leptos_views::web_settings_suppressions_page),
+        // Mailboxes archive + journaling: the tenant-admin legal record.
+        // Data-backed like the other settings lists; the static fallback is
+        // the honest empty state, never fabricated entries.
+        "/settings/journal" => data_backed_inner("/settings/journal", data)
+            .unwrap_or_else(leptos_views::web_settings_journal_page),
         // /messages/{id}/timeline — the time-travel debugging page. The
         // api-server renders the real reconstruction through the data path;
         // this static skeleton is the honest fallback (and backs the route
@@ -3802,6 +3808,51 @@ mod tests {
         assert!(html.contains("name=\"query\""));
         assert!(html.contains("name=\"status\""));
         assert!(html.contains("value=\"spring\""));
+    }
+
+    /// `/settings/journal` (Mailboxes archive + journaling): the static
+    /// fallback is the honest empty state; the data path renders real rows
+    /// with a raw-download link and no inline body.
+    #[test]
+    fn journal_route_renders_honest_empty_and_data_backed_rows() {
+        assert!(
+            crate::leptos_views::web_settings_page().contains("href=\"/settings/journal\""),
+            "the settings hub must link the journal page"
+        );
+
+        let empty = render_route("web", "/settings/journal")
+            .expect("web /settings/journal must render without data");
+        assert!(empty.contains("Journal"));
+        assert!(empty.contains("No journal entries yet"));
+        assert!(empty.contains("Only workspace administrators can open this page"));
+        assert!(!empty.contains("demo"));
+
+        let mut data = RouteData::default();
+        let mut list = crate::view_data::ListPageData {
+            title: "Journal".into(),
+            base_path: "/settings/journal".into(),
+            ..Default::default()
+        };
+        list.table = Some(crate::view_data::TableData {
+            columns: vec!["Direction".into(), "Raw".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "row-1".into(),
+                cells: vec![
+                    crate::view_data::DataCell::text("inbound"),
+                    crate::view_data::DataCell::Link {
+                        href: "/v1/journal/row-1/raw".into(),
+                        text: "Download raw".into(),
+                    },
+                ],
+            }],
+        });
+        data.list = Some(list);
+        let html = render_route_with_data("web", "/settings/journal", None, None, &[], Some(&data))
+            .expect("journal page renders with data");
+        assert!(html.contains("inbound"));
+        assert!(html.contains("href=\"/v1/journal/row-1/raw\""));
+        assert!(html.contains("Download raw"));
+        assert!(html.contains("<title>Journal — ApexMail</title>"));
     }
 
     #[test]

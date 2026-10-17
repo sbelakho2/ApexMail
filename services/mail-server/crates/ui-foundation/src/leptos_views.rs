@@ -5365,6 +5365,7 @@ pub fn web_settings_page() -> String {
 <a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Sending IPs reserved for this workspace</p></a>\
 <a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Event delivery to your endpoints</p></a>\
 <a href=\"/settings/suppressions\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Suppressions</h3><p class=\"text-sm text-muted-foreground mt-1\">Addresses that never receive campaign mail</p></a>\
+<a href=\"/settings/journal\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Journal</h3><p class=\"text-sm text-muted-foreground mt-1\">Archive and journaling copies for workspace mailboxes</p></a>\
 </nav></div>\
 <div><h2 class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Billing</h2>\
 <nav class=\"mt-3 grid gap-4 md:grid-cols-3\">\
@@ -5403,6 +5404,65 @@ pub fn web_settings_suppressions_page() -> String {
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Suppressions</h1><p class=\"text-sm text-muted-foreground\">Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.</p></div></div>\
 <section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">Why this list is read-only</p><p class=\"mt-1 text-xs text-muted-foreground\">Addresses land here automatically when they bounce, complain, or unsubscribe, and they never receive campaign mail while listed. That makes the list a safety record rather than something to edit — a contact who wants mail again resubscribes through your signup path.</p></section>\
 {table}</div>",
+        table = table.render_html(),
+    )
+}
+
+/// Mailboxes archive + journaling page — the static fallback the render
+/// pipeline shows without server data. The data-backed page renders the
+/// real tenant-scoped rows through the generic list machinery; this
+/// fallback is the honest empty state (no fabricated entries, no raw body).
+pub fn web_settings_journal_page() -> String {
+    let table = Table {
+        caption: Some("Journal"),
+        columns: vec![
+            TableColumn {
+                label: "Direction",
+                align: "left",
+            },
+            TableColumn {
+                label: "From",
+                align: "left",
+            },
+            TableColumn {
+                label: "To",
+                align: "left",
+            },
+            TableColumn {
+                label: "Subject",
+                align: "left",
+            },
+            TableColumn {
+                label: "Message ID",
+                align: "left",
+            },
+            TableColumn {
+                label: "Journaled",
+                align: "left",
+            },
+            TableColumn {
+                label: "Raw",
+                align: "left",
+            },
+        ],
+        rows: vec![],
+    };
+    format!(
+        "<div class=\"space-y-6\">\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Journal</h1><p class=\"text-sm text-muted-foreground\">The legal copy of inbound and outbound messages for workspace mailboxes with archive + journaling enabled.</p></div></div>\
+<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">How journaling works</p><p class=\"mt-1 text-xs text-muted-foreground\">When the Mailboxes archive + journaling add-on is active — for the workspace or for an individual mailbox — every inbound delivery and every outbound send writes one immutable copy here, including the complete raw message. Disabling the add-on stops new copies; entries already written stay readable. Only workspace administrators can open this page.</p></section>\
+<section data-view-state=\"empty\" class=\"space-y-4\">{empty}</section>\
+{table}</div>",
+        empty = EmptyState {
+            title: "No journal entries yet",
+            description: Some(
+                "Journaling writes a copy here for every inbound and outbound message once the add-on is active. Nothing has been journaled yet."
+            ),
+            icon_markup: None,
+            action_label: None,
+            action_href: None,
+        }
+        .render_html(),
         table = table.render_html(),
     )
 }

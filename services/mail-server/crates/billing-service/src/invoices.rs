@@ -3457,7 +3457,7 @@ mod coverage_adversarial {
         // both sides move. The provider call is the refund contract —
         // X-API-Key, deterministic Idempotency-Key, JSON body with the
         // merchant account, minor-unit amount and `invoice:{id}` reference.
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -3473,7 +3473,7 @@ mod coverage_adversarial {
         assert_eq!(call.method, "POST");
         assert_eq!(
             call.headers.get("x-api-key").map(String::as_str),
-            Some("AQEohONJaaPk33yRwggDP5DPc2s"),
+            Some("adyen-test-key-fixture"),
             "auth is the API key header, never a bearer token"
         );
         assert_eq!(

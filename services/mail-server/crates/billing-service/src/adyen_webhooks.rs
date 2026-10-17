@@ -3401,7 +3401,7 @@ mod tests {
         assert!(verify_item_hmac(OFFICIAL_HMAC_KEY, &tampered, OFFICIAL_HMAC_SIGNATURE).is_err());
 
         // Wrong secret → mismatch.
-        let wrong_secret = "44782DEF547AAA06C910C43932B1EB0C71FC68D9D0C057550C48EC2ACF6BA057";
+        let wrong_secret = "deliberately-wrong-hmac-secret-not-a-key";
         assert!(verify_item_hmac(wrong_secret, &item, OFFICIAL_HMAC_SIGNATURE).is_err());
 
         // Bit-flipped signature → mismatch.

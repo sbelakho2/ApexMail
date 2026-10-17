@@ -190,7 +190,6 @@ Multi-layered DDoS protection addressing volumetric attacks, protocol attacks, a
 | `ml` | Isolation Forest anomaly detection | No |
 | `challenges` | PoW, JS, Cookie, CAPTCHA challenges | No |
 | `coordinator` | Cross-region threat intel sharing (Redis Streams + CRDTs) | No |
-| `xdp` | XDP/eBPF packet filtering (requires separate kernel module build) | No |
 | `full` | core + ml + challenges + coordinator (excludes xdp) | No |
 
 ### Architecture — 5-Layer Pipeline
@@ -376,7 +375,6 @@ Network-level IDS/IPS with Suricata/ET-compatible signature matching, protocol a
 | Flag | Contents | Default |
 |------|----------|---------|
 | `core` | Signature matching + protocol analysis + connection tracking | Yes |
-| `deep_inspection` | Extended payload inspection | No |
 | `full` | All features | No |
 
 ### Module Map (6 source files)

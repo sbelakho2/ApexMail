@@ -279,6 +279,19 @@ regexes = [
     "cp-secret-key-12345",
     "tok_abc123def456",
     "integration-test-signing-key-0123456789",
+    # 2026-10-17 triage (Adyen switch wave): billing-service's test modules
+    # seeded a deterministic Adyen-shaped key and compliance's consent test a
+    # deterministic signing key. Both are unit-test inputs, never read from
+    # the environment in production (production keys live only in the host
+    # env/secret files). Exact-value anchors only — a real secret with a
+    # different value still fires. The Adyen-shaped literal is allowlisted
+    # for HISTORY (it was removed from the tree); if it ever originated from
+    # a real Adyen dashboard key, rotate it — the value must not be trusted.
+    "AQEohONJaaPk33yRwggDP5DPc2s",
+    "consent-expiry-test-key",
+    # Adyen HMAC test: a deliberately WRONG hex secret used only to assert
+    # signature rejection (verify_item_hmac must fail). Not a credential.
+    "44782DEF547AAA06C910C43932B1EB0C71FC68D9D0C057550C48EC2ACF6BA057",
     "unique-key-12345",
     "unique-idempotency-key-12345",
     "0x12345678ABCDEF01",

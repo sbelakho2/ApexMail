@@ -235,7 +235,11 @@ fn sweep_zip(
         if file.is_dir() {
             continue;
         }
-        let name = file.name().to_string();
+        // zip 9's `name()` errors on names that are not valid UTF-8 (common
+        // for legacy CP437 archives). The raw bytes always exist, and the
+        // entry's CONTENT must still be inspected — use the raw name and a
+        // lossy display copy, exactly like zip 2's former `name()`.
+        let name = String::from_utf8_lossy(file.name_raw()).to_string();
         let path = format!("{path_prefix}{name}");
 
         // Encrypted entries cannot be decompressed for inspection: fail

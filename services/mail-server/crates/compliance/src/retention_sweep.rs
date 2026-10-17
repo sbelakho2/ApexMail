@@ -17,7 +17,11 @@
 //!    verifiably landed in `audit_logs_archive`; conflicting originals stay).
 //! 4. Purge stale `dsr_verification_outbox` rows once their request window
 //!    (`request_expiration_days`) has passed — the raw token must not linger.
-//! 5. Insert one `retention_report` row per run so the policy is observable.
+//! 5. Purge `mail_journal` rows older than `MAIL_JOURNAL_RETENTION_DAYS`
+//!    when the operator set a positive window. The journal is retained
+//!    indefinitely by default (0): it is the legal record the Mailboxes
+//!    add-on sells, so deletion is an explicit policy, never a default.
+//! 6. Insert one `retention_report` row per run so the policy is observable.
 //!
 //! Per-tenant retention (F4): the cutoff is NOT a flat default. Each tenant's
 //! effective window is resolved as
@@ -265,6 +269,12 @@ pub struct RetentionSweepReport {
     pub categories: Vec<CategorySweepResult>,
     pub gdpr_exports_deleted: u64,
     pub dsr_outbox_purged: u64,
+    /// `mail_journal` rows purged this run. Zero unless the operator set a
+    /// positive `MAIL_JOURNAL_RETENTION_DAYS` — the journal is retained
+    /// indefinitely by default because it is the paid legal record.
+    pub mail_journal_purged: u64,
+    /// The effective journal window (days). 0 means "retain indefinitely".
+    pub mail_journal_retention_days: i64,
     pub audit_logs_considered: i64,
     pub audit_logs_archived: i64,
     /// Legally-restricted archive rows that reached statutory expiry this run
@@ -354,6 +364,29 @@ impl RetentionSweeper {
             )
             .await;
 
+        // mail_journal — the Mailboxes archive + journaling legal copy.
+        // Retained INDEFINITELY by default (window 0): the journal is the
+        // record the add-on sells, so deletion must be an explicit operator
+        // policy, never an implicit default. A positive
+        // MAIL_JOURNAL_RETENTION_DAYS purges older rows with the same
+        // legal-hold exclusion as every other target. A malformed value
+        // parses to 0 (fail closed: retain, never accidentally purge).
+        let journal_retention_days = std::env::var("MAIL_JOURNAL_RETENTION_DAYS")
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|days| *days > 0)
+            .unwrap_or(0);
+        let journal_purged = if journal_retention_days > 0 {
+            self.purge_with_hold_filter(
+                "DELETE FROM mail_journal WHERE journaled_at < $1",
+                now - chrono::Duration::days(journal_retention_days),
+            )
+            .await
+            .0
+        } else {
+            0
+        };
+
         // audit_logs — trimmed via the existing archive() (transactional
         // copy-then-verify-delete; conflicting originals stay in the live
         // table by design, see audit_logger E-2; held tenants excluded).
@@ -393,6 +426,8 @@ impl RetentionSweeper {
             categories,
             gdpr_exports_deleted: exports_deleted.0,
             dsr_outbox_purged: outbox_purged.0,
+            mail_journal_purged: journal_purged,
+            mail_journal_retention_days: journal_retention_days,
             audit_logs_considered: audit_considered,
             audit_logs_archived: audit_archived,
             archive_expired: archive.expired,
@@ -1365,6 +1400,102 @@ mod tests {
             !free_purged,
             "an unheld tenant's expired export must be purged by the same sweep"
         );
+    }
+
+    /// `mail_journal` retention is OPT-IN: with no window (the default) the
+    /// legal copies survive forever; a positive MAIL_JOURNAL_RETENTION_DAYS
+    /// purges only rows past the window and never touches a held tenant.
+    #[tokio::test]
+    async fn mail_journal_retention_is_opt_in_and_hold_aware() {
+        let Some(pool) =
+            crate::test_support::canonical_pool("sweep_journal", "sweep_journal").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let sweeper = RetentionSweeper::new(pool.clone(), 7, 30, 365);
+        let logger = crate::audit_logger::AuditLogger::new(
+            pool.clone(),
+            crate::config::AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: false,
+                signing_key: "unit-test-sweep-signing-key".into(),
+            },
+        );
+        let held_tenant = crate::test_support::unique_tenant();
+        let free_tenant = crate::test_support::unique_tenant();
+        for (tenant, held) in [(&held_tenant, true), (&free_tenant, false)] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, legal_hold)
+                 VALUES ($1, 'n', $1, 'free', $2)",
+            )
+            .bind(tenant)
+            .bind(held)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+        }
+        let mut journal_ids = Vec::new();
+        for (tenant, days_old) in [
+            (&held_tenant, 90i32),
+            (&held_tenant, 0),
+            (&free_tenant, 90),
+            (&free_tenant, 0),
+        ] {
+            let id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO mail_journal (
+                     tenant_id, direction, source_table, source_id, message_id,
+                     from_address, to_addresses, subject, raw_message, journaled_at
+                 ) VALUES ($1, 'outbound', 'email_queue', $2, $3, 's@sweep.test',
+                           '[\"r@sweep.test\"]'::jsonb, 's', $4,
+                           NOW() - make_interval(days => $5))
+                 RETURNING id",
+            )
+            .bind(tenant)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(format!("<{}@sweep.test>", uuid::Uuid::new_v4()))
+            .bind(b"Subject: sweep\r\n\r\nbody".as_slice())
+            .bind(days_old)
+            .fetch_one(&pool)
+            .await
+            .expect("seed journal row");
+            journal_ids.push((tenant.clone(), days_old, id));
+        }
+
+        // Default (0/unset): nothing is purged — the legal record persists.
+        std::env::remove_var("MAIL_JOURNAL_RETENTION_DAYS");
+        let report = sweeper
+            .run_sweep(&logger)
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.mail_journal_retention_days, 0);
+        assert_eq!(report.mail_journal_purged, 0);
+
+        // Explicit window: only the free tenant's old row goes.
+        std::env::set_var("MAIL_JOURNAL_RETENTION_DAYS", "30");
+        let report = sweeper
+            .run_sweep(&logger)
+            .await
+            .expect("the sweep completes");
+        std::env::remove_var("MAIL_JOURNAL_RETENTION_DAYS");
+        assert_eq!(report.mail_journal_retention_days, 30);
+        assert_eq!(report.mail_journal_purged, 1);
+        for (tenant, days_old, id) in &journal_ids {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mail_journal WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("probe journal row");
+            if *tenant == free_tenant && *days_old == 90 {
+                assert!(!exists, "an expired unheld journal copy is purged");
+            } else {
+                assert!(
+                    exists,
+                    "journal rows inside the window or under legal hold survive"
+                );
+            }
+        }
     }
 
     // ── Capability wave 2: the sweep never deletes beyond the plan ceiling ──

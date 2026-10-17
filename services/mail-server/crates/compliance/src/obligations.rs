@@ -37,6 +37,10 @@ use uuid::Uuid;
 
 use crate::statutory_calendar::{statutory_due_date, ESTONIA_CALENDAR_VERSION};
 
+/// Rows per multi-row obligation upsert. A year horizon (tens of rows) is a
+/// single statement; a hostile/expanded horizon stays bounded per statement.
+const OBLIGATION_UPSERT_CHUNK: usize = 500;
+
 /// A statutory filing obligation type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -487,13 +491,43 @@ pub async fn sync_obligations(
         .map_err(|error| format!("failed to begin obligation sync: {error}"))?;
 
     let mut upserted = 0u64;
-    for obligation in &obligations {
+    for chunk in obligations.chunks(OBLIGATION_UPSERT_CHUNK) {
+        let entity_ids: Vec<Uuid> = chunk.iter().map(|_| facts.legal_entity_id).collect();
+        let obligation_types: Vec<&str> = chunk
+            .iter()
+            .map(|obligation| obligation.obligation_type.as_str())
+            .collect();
+        let period_starts: Vec<NaiveDate> = chunk
+            .iter()
+            .map(|obligation| obligation.period_start)
+            .collect();
+        let period_ends: Vec<NaiveDate> = chunk
+            .iter()
+            .map(|obligation| obligation.period_end)
+            .collect();
+        let period_labels: Vec<&str> = chunk
+            .iter()
+            .map(|obligation| obligation.period_label.as_str())
+            .collect();
+        let legal_due_dates: Vec<NaiveDate> = chunk
+            .iter()
+            .map(|obligation| obligation.legal_due_date)
+            .collect();
+        let due_dates: Vec<NaiveDate> =
+            chunk.iter().map(|obligation| obligation.due_date).collect();
+        let calendar_versions: Vec<&str> = chunk
+            .iter()
+            .map(|obligation| obligation.calendar_version.as_str())
+            .collect();
+
         let result = sqlx::query(
             r#"
             INSERT INTO statutory_obligations
                 (legal_entity_id, obligation_type, period_start, period_end,
                  period_label, legal_due_date, due_date, calendar_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            SELECT * FROM UNNEST(
+                $1::uuid[], $2::text[], $3::date[], $4::date[],
+                $5::text[], $6::date[], $7::date[], $8::text[])
             ON CONFLICT (legal_entity_id, obligation_type, period_start) DO UPDATE SET
                 period_end = EXCLUDED.period_end,
                 period_label = EXCLUDED.period_label,
@@ -504,17 +538,17 @@ pub async fn sync_obligations(
             WHERE statutory_obligations.status = 'pending'
             "#,
         )
-        .bind(facts.legal_entity_id)
-        .bind(obligation.obligation_type.as_str())
-        .bind(obligation.period_start)
-        .bind(obligation.period_end)
-        .bind(&obligation.period_label)
-        .bind(obligation.legal_due_date)
-        .bind(obligation.due_date)
-        .bind(&obligation.calendar_version)
+        .bind(&entity_ids)
+        .bind(&obligation_types)
+        .bind(&period_starts)
+        .bind(&period_ends)
+        .bind(&period_labels)
+        .bind(&legal_due_dates)
+        .bind(&due_dates)
+        .bind(&calendar_versions)
         .execute(&mut *tx)
         .await
-        .map_err(|error| format!("failed to upsert statutory obligation: {error}"))?;
+        .map_err(|error| format!("failed to upsert statutory obligations: {error}"))?;
         upserted += result.rows_affected();
     }
 
@@ -609,6 +643,82 @@ pub async fn sync_all_obligations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Thread-local SQL capture for the chunked-write regression test.
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
+    }
 
     fn d(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("test date")
@@ -878,5 +988,101 @@ mod tests {
                 obligation_type.as_str()
             );
         }
+    }
+
+    /// P3: a full-year horizon upserts in ONE multi-row INSERT (the legacy
+    /// path issued one statement per derived obligation), and the upsert is
+    /// idempotent with filed rows untouched.
+    #[tokio::test]
+    async fn sync_obligations_is_one_statement_and_idempotent() {
+        let Some(base) =
+            crate::test_support::canonical_pool("obligations_batch", "obligations_batch").await
+        else {
+            return;
+        };
+        let pool = logging_pool(&base).await;
+        let entity_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO legal_entities (legal_name, registry_code, country_code) \
+             VALUES ('Batch OÜ', $1, 'EE') RETURNING id",
+        )
+        .bind(format!("B{}", &Uuid::new_v4().simple().to_string()[..8]))
+        .fetch_one(&pool)
+        .await
+        .expect("insert legal entity");
+        let facts = EntityFilingFacts {
+            legal_entity_id: entity_id,
+            vat_registered_from: Some(d(2020, 1, 1)),
+            vd_reporting_from: Some(d(2020, 1, 1)),
+            employer_since: Some(d(2020, 1, 1)),
+            oss_registered_from: Some(d(2020, 1, 1)),
+            fiscal_year_end_month: 12,
+            entity_active_from: Some(d(2020, 1, 1)),
+        };
+        let horizon = ObligationHorizon::from_start(d(2026, 1, 1), 366);
+        let expected = derive_obligations(&facts, horizon).len();
+        assert!(expected > 30, "a year horizon derives many obligations");
+
+        let (capture, guard) = capture_sql();
+        let upserted = sync_obligations(&pool, &facts, horizon)
+            .await
+            .expect("sync obligations");
+        drop(guard);
+        assert_eq!(upserted as usize, expected);
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO statutory_obligations"),
+            1,
+            "the whole horizon is one INSERT statement: {:?}",
+            capture.statements()
+        );
+
+        // Filed rows keep their status on a re-run; pending rows refresh.
+        let filed_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM statutory_obligations WHERE legal_entity_id = $1 \
+             ORDER BY due_date LIMIT 1",
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("obligation id");
+        sqlx::query("UPDATE statutory_obligations SET status = 'filed' WHERE id = $1")
+            .bind(filed_id)
+            .execute(&pool)
+            .await
+            .expect("mark filed");
+
+        let (capture, guard) = capture_sql();
+        let replayed = sync_obligations(&pool, &facts, horizon)
+            .await
+            .expect("replay sync");
+        drop(guard);
+        assert_eq!(
+            replayed as usize,
+            expected - 1,
+            "the filed row is untouched"
+        );
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO statutory_obligations"),
+            1,
+            "the idempotent replay is still one statement: {:?}",
+            capture.statements()
+        );
+        let (total, filed): (i64, String) = (
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM statutory_obligations WHERE legal_entity_id = $1",
+            )
+            .bind(entity_id)
+            .fetch_one(&pool)
+            .await
+            .expect("total rows"),
+            sqlx::query_scalar("SELECT status FROM statutory_obligations WHERE id = $1")
+                .bind(filed_id)
+                .fetch_one(&pool)
+                .await
+                .expect("filed status"),
+        );
+        assert_eq!(total as usize, expected, "no duplicate rows");
+        assert_eq!(filed, "filed", "a filed obligation never re-opens");
+
+        pool.close().await;
     }
 }

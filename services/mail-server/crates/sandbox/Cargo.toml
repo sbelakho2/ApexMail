@@ -16,7 +16,7 @@ serde_json = "1.0"
 tracing = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 aho-corasick = { workspace = true }
-zip = "2.4"  # bounded in-memory extraction of ZIP-family attachments (audit: nested-payload visibility)
+zip = "9"  # bounded in-memory extraction of ZIP-family attachments (audit: nested-payload visibility)
 mail-common = { path = "../mail-common", optional = true }
 
 [features]

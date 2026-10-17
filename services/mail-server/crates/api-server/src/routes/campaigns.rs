@@ -950,6 +950,17 @@ async fn create_campaign(
     Json(body): Json<CreateCampaignRequest>,
 ) -> Result<(StatusCode, Json<CampaignResponse>), ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
+    // E-3 (use-all audit): A/B experiment EXECUTION is a paid capability. The
+    // experiment results API checked `ab_testing`, but creating (and later
+    // sending) an A/B campaign did not.
+    if body.ab_test.is_some() {
+        crate::entitlements::require_feature(
+            &state,
+            &auth.tenant_id,
+            billing_entitlements::FeatureKey::AbTesting,
+        )
+        .await?;
+    }
 
     // `chars().count()`, not `String::len()`: the limit (and the DB
     // VARCHAR(255/998) columns, which count characters) are character-based,
@@ -1279,6 +1290,16 @@ async fn update_campaign(
     Json(body): Json<UpdateCampaignRequest>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
+    // E-3: enabling A/B execution on an existing campaign is the same paid
+    // capability as creating one; gate the update path too.
+    if body.ab_test.is_some() {
+        crate::entitlements::require_feature(
+            &state,
+            &auth.tenant_id,
+            billing_entitlements::FeatureKey::AbTesting,
+        )
+        .await?;
+    }
 
     if body.name.is_none()
         && body.subject.is_none()
@@ -2190,6 +2211,121 @@ mod adversarial_tests {
                 .await
                 .expect("cleanup tenants");
         }
+    }
+
+    /// E-3 (use-all audit): creating an A/B campaign is the paid
+    /// `ab_testing` capability; the experiment results API was gated but the
+    /// create path was not. Denied plans must write nothing; an entitled plan
+    /// creates normally.
+    #[tokio::test]
+    async fn ab_campaign_creation_requires_the_ab_testing_entitlement() {
+        let Some((state, pool)) = state_and_pool("adv_campaign_ab_gate").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant).await;
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let template_a = apexmail_lib::id::generate_id("", 26);
+        let template_b = apexmail_lib::id::generate_id("", 26);
+        for (id, name) in [(&template_a, "A"), (&template_b, "B")] {
+            sqlx::query(
+                "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, created_at, updated_at) \
+                 VALUES ($1, $2, $3, 'Hi {{first_name}}', '<p>Hello</p>', 'Hello', NOW(), NOW())",
+            )
+            .bind(id)
+            .bind(&tenant)
+            .bind(format!("AB arm {name} {tag}"))
+            .execute(&pool)
+            .await
+            .expect("seed template");
+        }
+        let auth = auth_for(&tenant, &["campaigns:write"]);
+        let request = |name: String| CreateCampaignRequest {
+            name,
+            subject: "Campaign".into(),
+            template_id: None,
+            from: Some(format!("news+{tag}@example.test")),
+            scheduled_at: None,
+            list_ids: Some(vec![]),
+            exclude_list_ids: Some(vec![]),
+            from_name: None,
+            reply_to: None,
+            preview_text: None,
+            html: None,
+            text: None,
+            variables: None,
+            segment_id: None,
+            track_opens: None,
+            track_clicks: None,
+            utm_params: None,
+            settings: None,
+            ab_test: Some(serde_json::json!({
+                "arms": [{"templateId": template_a}, {"templateId": template_b}],
+                "testPercentage": 0.2,
+                "metric": "open",
+                "waitMinutes": 60
+            })),
+        };
+
+        // Free plan: refused before any write, naming the entitlement.
+        let error = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(request(format!("AB denied {tag}"))),
+        )
+        .await
+        .expect_err("free plan must not create A/B campaigns");
+        match error {
+            ApiError::Forbidden(message) => {
+                assert!(message.contains("ab_testing"), "{message}");
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+        let denied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("campaign count");
+        assert_eq!(denied, 0, "a refused A/B create must persist nothing");
+
+        // Entitled plan (the canonical Growth seed sells ab_testing).
+        let growth = billing_service::plans::default_plans()
+            .into_iter()
+            .find(|plan| plan.name == "growth")
+            .expect("growth seed");
+        billing_service::plans::upsert_plan(&pool, &growth)
+            .await
+            .expect("seed growth plan");
+        sqlx::query("UPDATE tenants SET plan = 'growth' WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("switch to growth");
+        let (status, Json(created)) = create_campaign(
+            State(state.clone()),
+            auth,
+            Json(request(format!("AB allowed {tag}"))),
+        )
+        .await
+        .expect("entitled plan creates the A/B campaign");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.name, format!("AB allowed {tag}"));
+
+        sqlx::query("DELETE FROM campaigns WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM templates WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[test]

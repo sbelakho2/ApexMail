@@ -12,7 +12,6 @@ core = []
 ml = ["dep:rand"]
 challenges = ["dep:hex", "dep:subtle", "dep:rand"]
 coordinator = ["dep:rand", "dep:hex"]
-xdp = []  # Requires separate kernel module build
 
 [dependencies]
 # Core

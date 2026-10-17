@@ -113,6 +113,18 @@ def clickhouse_config() -> dict[str, str]:
     }
 
 
+
+def _require_http_url(url: str) -> str:
+    """Only http(s) endpoints reach urllib.
+
+    urllib also accepts file:// URLs, so an operator-supplied endpoint must
+    be scheme-checked before the request is built.
+    """
+    scheme = urllib.parse.urlsplit(url).scheme
+    if scheme not in ("http", "https"):
+        raise RuntimeError(f"ClickHouse endpoint must be http(s), got {scheme or '<none>'}")
+    return url
+
 def query_clickhouse(
     config: dict[str, str], query: str, timeout: float = 30.0
 ) -> list[dict[str, object]]:
@@ -130,7 +142,7 @@ def query_clickhouse(
         }
     )
     request = urllib.request.Request(  # noqa: S310 — operator-configured ClickHouse endpoint (env convention), not user input
-        f"{config['url']}/?{params}",
+        _require_http_url(f"{config['url']}/?{params}"),
         data=query.encode("utf-8"),
         method="POST",
         # ClickHouse parses a form-urlencoded body as PARAMETERS and expects
@@ -139,7 +151,7 @@ def query_clickhouse(
         headers={"Content-Type": "text/plain; charset=utf-8"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = ""

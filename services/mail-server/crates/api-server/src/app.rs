@@ -188,6 +188,47 @@ async fn grader_list_results(
 // These extract PlacementState from AppState and delegate to the
 // inbox-placement crate's transport-agnostic handlers.
 
+/// The placement tenant gate: Inbox Placement Monitoring is a paid product
+/// line (`FeatureKey::InboxPlacement`, granted by an active `placement`
+/// contract or a plan/override). The refusal NAMES `inbox_placement`; a
+/// tenant-scoped credential cannot reach seeded-mailbox testing for free.
+async fn placement_entitlement_gate(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match crate::entitlements::require_feature(
+        state,
+        tenant_id,
+        billing_entitlements::FeatureKey::InboxPlacement,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(crate::error::ApiError::Forbidden(message)) => Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": { "code": "FORBIDDEN", "message": message }
+            })),
+        )),
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "placement entitlement lookup failed"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "INTERNAL_ERROR",
+                        "message": "entitlement lookup failed"
+                    }
+                })),
+            ))
+        }
+    }
+}
+
 async fn placement_create_test(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<auth::AuthUser>,
@@ -204,6 +245,9 @@ async fn placement_create_test(
             )
         }
     };
+    if let Err(response) = placement_entitlement_gate(&state, &user.tenant_id).await {
+        return response;
+    }
     inbox_placement::routes::create_placement_test(ps, user.tenant_id, body).await
 }
 
@@ -223,6 +267,9 @@ async fn placement_list_tests(
             )
         }
     };
+    if let Err(response) = placement_entitlement_gate(&state, &user.tenant_id).await {
+        return response;
+    }
     inbox_placement::routes::list_placement_tests(
         ps,
         user.tenant_id,
@@ -249,6 +296,9 @@ async fn placement_get_test(
             )
         }
     };
+    if let Err(response) = placement_entitlement_gate(&state, &user.tenant_id).await {
+        return response;
+    }
     inbox_placement::routes::get_placement_test(ps, user.tenant_id, id).await
 }
 
@@ -268,6 +318,9 @@ async fn placement_get_trends(
             )
         }
     };
+    if let Err(response) = placement_entitlement_gate(&state, &user.tenant_id).await {
+        return response;
+    }
     inbox_placement::routes::get_placement_trends(ps, user.tenant_id, params.days, params.provider)
         .await
 }
@@ -750,6 +803,9 @@ pub fn build_app(state: AppState) -> Router {
         // Customer audit trail (audit_logs, Growth and above): tenant-scoped
         // read + export, scope `audit:read` (see routes/audit.rs).
         .nest("/v1/audit", routes::audit::router())
+        // Mailboxes archive + journaling retrieval (mail_journal, migration
+        // 264): tenant-admin, strictly tenant-scoped list/detail/raw.
+        .nest("/v1/journal", routes::journal::router())
         .nest("/v1/analytics", routes::analytics::router())
         .nest("/v1/support", routes::support::router())
         .nest("/v1/scim", routes::scim::router())
@@ -3164,6 +3220,72 @@ mod tests {
             None, // placement_state
             ResilientClient::new_from_config(&test_config()),
         ))
+    }
+
+    /// Use-all audit (WAF): the enforce/monitor branch had engine tests but no
+    /// middleware-level proof. A hostile query must be blocked with
+    /// WAF_BLOCKED when WAF_ENFORCE=true, pass through in monitor mode, and
+    /// pass through when the WAF is disabled.
+    #[tokio::test]
+    async fn waf_middleware_enforces_monitors_and_passes_when_disabled() {
+        let hostile = "/health?q=1%27%20OR%20%271%27%3D%271%27--";
+
+        let mut cfg = test_config();
+        cfg.waf_enabled = true;
+        cfg.waf_enforce = true;
+        let app = test_app_with_config(cfg.clone()).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(hostile)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("enforce response");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "enforce mode must block the hostile query"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(
+            String::from_utf8_lossy(&body).contains("WAF_BLOCKED"),
+            "the refusal must be the named WAF envelope"
+        );
+
+        cfg.waf_enforce = false;
+        let app = test_app_with_config(cfg.clone()).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(hostile)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("monitor response");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "monitor mode must forward the request"
+        );
+
+        cfg.waf_enabled = false;
+        let app = test_app_with_config(cfg).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(hostile)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("disabled response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     async fn test_app_with_ddos(ddos_protector: Arc<DdosProtector>) -> Router {
@@ -8011,6 +8133,135 @@ mod adversarial_helper_tests {
         let providers = placement_list_providers(State(state)).await;
         assert_eq!(providers.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(providers.1["error"]["code"], "PLACEMENT_DISABLED");
+    }
+
+    /// Inbox Placement Monitoring is a paid line: a tenant without the
+    /// placement entitlement is refused by name (403), and the purchase
+    /// record (an active `placement` contract) flips the gate so the request
+    /// reaches the engine (which then refuses for its own fixture reasons —
+    /// no seed accounts — not for entitlement).
+    #[tokio::test]
+    async fn placement_routes_refuse_an_unentitled_tenant_by_name() {
+        let Some(pool) = crate::test_db::canonical_pool("placement_entitlement_route").await else {
+            return;
+        };
+        let tenant = "placementent01";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, 'placement entitlement test', $1, 'growth', 'active') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let mut config = crate::app::test_support::test_config();
+        config.placement_enabled = true;
+        // Build through the PRODUCTION constructor so placement_state is
+        // populated from the config (the lightweight test helper leaves it
+        // None, which would answer 503 before the entitlement gate).
+        crate::test_db::ensure_aws_test_env();
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        let ses_provider = crate::ses_provider::SesIpProvider::new(
+            aws_sdk_sesv2::Client::new(&aws_config),
+            pool.clone(),
+            "apexmail".into(),
+            "us-east-1".into(),
+        );
+        let state = crate::state::AppStateInner::new(
+            pool.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: pool.clone(),
+                ro: pool.clone(),
+            },
+            redis,
+            config,
+            reqwest::Client::new(),
+            ses_provider,
+            None,
+        )
+        .await
+        .expect("app state with placement enabled");
+        let user = crate::middleware::auth::AuthUser {
+            tenant_id: tenant.into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec![],
+        };
+
+        let body = || {
+            Json(
+                serde_json::from_value(json!({
+                    "from_email": "sender@example.test",
+                    "subject": "entitlement probe"
+                }))
+                .expect("placement request"),
+            )
+        };
+
+        // No contract, no plan grant: named 403 on create...
+        let created =
+            placement_create_test(State(state.clone()), axum::Extension(user.clone()), body())
+                .await;
+        assert_eq!(created.0, StatusCode::FORBIDDEN, "{:?}", created.1);
+        let message = created.1["error"]["message"]
+            .as_str()
+            .expect("message")
+            .to_string();
+        assert!(
+            message.contains("inbox_placement"),
+            "the refusal names the entitlement: {message}"
+        );
+
+        // ...and on the read routes (a lapsed line must not expose the
+        // seeded-mailbox surface either).
+        let listed = placement_list_tests(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Query(serde_json::from_value(json!({})).expect("list query")),
+        )
+        .await;
+        assert_eq!(listed.0, StatusCode::FORBIDDEN);
+
+        // The purchase record (an active placement contract) grants it.
+        sqlx::query(
+            "INSERT INTO product_line_contracts (tenant_id, product_line, status) \
+             VALUES ($1, 'placement', 'active') ON CONFLICT (tenant_id, product_line) DO NOTHING",
+        )
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .expect("grant placement contract");
+
+        let created =
+            placement_create_test(State(state.clone()), axum::Extension(user.clone()), body())
+                .await;
+        assert_ne!(
+            created.0,
+            StatusCode::FORBIDDEN,
+            "an entitled tenant passes the gate: {:?}",
+            created.1
+        );
+        assert_eq!(
+            created.0,
+            StatusCode::BAD_REQUEST,
+            "the engine's own fixture refusal (no seed accounts) is a 400: {:?}",
+            created.1
+        );
+        assert!(created.1["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no active seed accounts"));
+
+        pool.close().await;
     }
 
     #[test]

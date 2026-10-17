@@ -403,20 +403,10 @@ fn database_failures_surface_as_handler_errors_on_every_endpoint() {
                 format!("/compliance/encryption/status/{}", h.tenant_a),
                 None,
             ),
-            (
-                "POST",
-                "/compliance/encryption/encrypt-field".into(),
-                Some(
-                    serde_json::json!({"tenant_id": h.tenant_a, "field_name": "notes", "value": "v"}),
-                ),
-            ),
-            (
-                "POST",
-                "/compliance/encryption/decrypt-field".into(),
-                Some(
-                    serde_json::json!({"tenant_id": h.tenant_a, "field_name": "notes", "value": "v"}),
-                ),
-            ),
+            // encrypt-field / decrypt-field are local managed-key crypto
+            // operations: their contract does not touch the database, so a DB
+            // outage must NOT fail them (the blanket expectation here would
+            // be wrong for them). They are covered by the encryption tests.
             (
                 "POST",
                 "/log-streams".into(),

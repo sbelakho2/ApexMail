@@ -72,6 +72,11 @@ cargo audit --deny warnings \
     --ignore RUSTSEC-2026-0205 \
     --ignore RUSTSEC-2026-0187 \
     --ignore RUSTSEC-2024-0449 \
+    --ignore RUSTSEC-2026-0367 \
+    --ignore RUSTSEC-2026-0368 \
+    --ignore RUSTSEC-2026-0369 \
+    --ignore RUSTSEC-2026-0346 \
+    --ignore RUSTSEC-2026-0349 \
     2>&1 | tee "$MAIL_SERVER_DIR/cargo-audit-report.txt"
 
 echo ""

@@ -1116,6 +1116,7 @@ struct RenderedTemplateFields {
 /// [`ApiError`] because the single-send path answers 404 for a missing
 /// template while template/validation refusals are 422, and the batch path
 /// reports every refusal as a per-item error string.
+#[derive(Debug)]
 enum TemplateSendRefusal {
     /// Unknown or another tenant's template id → 404 NOT_FOUND.
     NotFound(String),
@@ -1143,6 +1144,175 @@ enum TemplateSendRefusal {
 /// it is merge-resolved and header-hardened by the same pipeline; request
 /// `html`/`text` overrides are applied verbatim afterwards by
 /// [`effective_template_body`].
+/// A stored template row preloaded once for a whole batch.
+struct PreloadedTemplate {
+    subject: String,
+    html_body: String,
+    text_body: Option<String>,
+}
+
+/// Load every DISTINCT template id referenced by `bodies` in ONE query.
+///
+/// The batch send path used to call [`resolve_template_send`] per item, which
+/// re-read the same `templates` row N times for a batch that shares one
+/// template. The returned map contains an entry for every requested id:
+/// `Some(row)` when the tenant owns it, `None` when it does not (the caller
+/// turns that into the per-item `NotFound` refusal, exactly like the
+/// single-item path).
+async fn preload_batch_templates(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    bodies: &[SendMessageRequest],
+) -> Result<std::collections::HashMap<String, Option<PreloadedTemplate>>, sqlx::Error> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for body in bodies {
+        if let Some(template_id) = body
+            .template_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if seen.insert(template_id.to_string()) {
+                ids.push(template_id.to_string());
+            }
+        }
+    }
+
+    let mut map: std::collections::HashMap<String, Option<PreloadedTemplate>> =
+        std::collections::HashMap::new();
+    if ids.is_empty() {
+        return Ok(map);
+    }
+
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, subject, html_body, text_body FROM templates \
+         WHERE tenant_id = $1 AND id = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+
+    for id in ids {
+        map.insert(id, None);
+    }
+    for (id, subject, html_body, text_body) in rows {
+        map.insert(
+            id,
+            Some(PreloadedTemplate {
+                subject,
+                html_body,
+                text_body,
+            }),
+        );
+    }
+    Ok(map)
+}
+
+/// Render a preloaded template for one send, mirroring the renderer's
+/// `render_stored` contract exactly: the request subject (when present) is
+/// the merge-resolved subject override, otherwise the stored subject is; an
+/// explicit stored `text_body` is merge-resolved and wins over plaintext
+/// generated from the HTML; missing merge fields are reported as refusals.
+fn render_preloaded_template_send(
+    renderer: &TemplateRenderer,
+    template_id: &str,
+    preloaded: &PreloadedTemplate,
+    body: &SendMessageRequest,
+) -> Result<RenderedTemplateFields, TemplateSendRefusal> {
+    let props = match body.template_data.as_ref() {
+        None | Some(serde_json::Value::Null) => serde_json::json!({}),
+        Some(value) if value.is_object() => value.clone(),
+        Some(_) => {
+            return Err(TemplateSendRefusal::Refused(vec![
+                "field 'template_data' must be a JSON object of template variables".to_string(),
+            ]))
+        }
+    };
+
+    let options = RenderOptions {
+        props,
+        generate_plaintext: true,
+        minify: false,
+        subject: (!body.subject.is_empty()).then(|| body.subject.clone()),
+        missing_field_fallback: None,
+    };
+    let mut effective = options.clone();
+    if effective.subject.is_none() {
+        effective.subject = Some(preloaded.subject.clone());
+    }
+
+    let mut rendered = renderer
+        .render_source(&preloaded.html_body, &effective)
+        .map_err(|error| match error {
+            TemplateError::NotFound { .. } => {
+                TemplateSendRefusal::NotFound(template_id.to_string())
+            }
+            TemplateError::Database(error) => {
+                TemplateSendRefusal::Internal(format!("template store error: {error}"))
+            }
+            other => TemplateSendRefusal::Refused(vec![format!(
+                "template '{template_id}' could not be rendered: {other}"
+            )]),
+        })?;
+
+    // Stored plaintext wins over the HTML-derived fallback, exactly as the
+    // renderer's stored-render path does.
+    if effective.generate_plaintext {
+        if let Some(text) = preloaded.text_body.as_deref() {
+            let outcome = template_renderer::transpiler::resolve_placeholders_plain_reported(
+                text,
+                &options.props,
+                options.missing_field_fallback.as_deref().unwrap_or(""),
+            );
+            rendered.plaintext = Some(outcome.html);
+            rendered.warnings.extend(outcome.warnings);
+        }
+    }
+
+    let missing = missing_template_variables(&rendered.warnings);
+    if !missing.is_empty() {
+        return Err(TemplateSendRefusal::Refused(
+            missing
+                .into_iter()
+                .map(|variable| {
+                    format!("template variable '{variable}' is missing from template_data")
+                })
+                .collect(),
+        ));
+    }
+
+    Ok(RenderedTemplateFields {
+        subject: rendered.subject.unwrap_or_default(),
+        html: rendered.html,
+        text: rendered.plaintext,
+    })
+}
+
+/// Resolve one body's template from a batch preload — no database access.
+fn resolve_preloaded_template_send(
+    renderer: &TemplateRenderer,
+    templates: &std::collections::HashMap<String, Option<PreloadedTemplate>>,
+    body: &SendMessageRequest,
+) -> Result<Option<RenderedTemplateFields>, TemplateSendRefusal> {
+    let Some(template_id) = body
+        .template_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    match templates.get(template_id).and_then(Option::as_ref) {
+        Some(preloaded) => {
+            render_preloaded_template_send(renderer, template_id, preloaded, body).map(Some)
+        }
+        None => Err(TemplateSendRefusal::NotFound(template_id.to_string())),
+    }
+}
+
 async fn resolve_template_send(
     db: &sqlx::PgPool,
     tenant_id: &str,
@@ -1157,61 +1327,18 @@ async fn resolve_template_send(
         return Ok(None);
     };
 
-    let props = match body.template_data.as_ref() {
-        None | Some(serde_json::Value::Null) => serde_json::json!({}),
-        Some(value) if value.is_object() => value.clone(),
-        Some(_) => {
-            return Err(TemplateSendRefusal::Refused(vec![
-                "field 'template_data' must be a JSON object of template variables".to_string(),
-            ]))
-        }
-    };
-
-    let renderer = TemplateRenderer::new(db.clone(), send_template_renderer_config());
-    let options = RenderOptions {
-        props,
-        generate_plaintext: true,
-        minify: false,
-        subject: (!body.subject.is_empty()).then(|| body.subject.clone()),
-        missing_field_fallback: None,
-    };
-
-    let rendered = renderer
-        .render_template(tenant_id, template_id, None, &options)
+    // One template load for this single body, then the SAME preloaded render
+    // path the batch uses — one implementation, no drift.
+    let templates = preload_batch_templates(db, tenant_id, std::slice::from_ref(body))
         .await
-        .map_err(|error| match error {
-            TemplateError::NotFound { .. } => {
-                TemplateSendRefusal::NotFound(template_id.to_string())
-            }
-            TemplateError::Database(error) => {
-                TemplateSendRefusal::Internal(format!("template store error: {error}"))
-            }
-            other => TemplateSendRefusal::Refused(vec![format!(
-                "template '{template_id}' could not be rendered: {other}"
-            )]),
-        })?;
-
-    let missing = missing_template_variables(&rendered.warnings);
-    if !missing.is_empty() {
-        return Err(TemplateSendRefusal::Refused(
-            missing
-                .into_iter()
-                .map(|variable| {
-                    format!("template variable '{variable}' is missing from template_data")
-                })
-                .collect(),
-        ));
+        .map_err(|error| TemplateSendRefusal::Internal(format!("template store error: {error}")))?;
+    let renderer = TemplateRenderer::new(db.clone(), send_template_renderer_config());
+    match templates.get(template_id).and_then(Option::as_ref) {
+        Some(preloaded) => {
+            render_preloaded_template_send(&renderer, template_id, preloaded, body).map(Some)
+        }
+        None => Err(TemplateSendRefusal::NotFound(template_id.to_string())),
     }
-
-    Ok(Some(RenderedTemplateFields {
-        // The renderer returns the stored subject unless the request
-        // overrode it; a missing subject would be a renderer contract break.
-        subject: rendered.subject.unwrap_or_default(),
-        html: rendered.html,
-        // The stored text_body (merge-resolved) or the plaintext generated
-        // from the rendered HTML.
-        text: rendered.plaintext,
-    }))
 }
 
 /// Apply the documented override rule and validate the final content before
@@ -1786,6 +1913,43 @@ async fn suppressed_recipients(
             tracing::error!(error = %error, tenant_id = %tenant_id, "suppression lookup failed");
             ApiError::Internal("suppression lookup error".into())
         })
+}
+
+/// Probe suppression ONCE for the union of a batch's delivery recipients.
+///
+/// The per-item validation path called [`suppressed_recipients`] for every
+/// item — for a batch that mostly addressed distinct recipients this was N
+/// identical-round-trip queries. The union result is mapped back per item in
+/// `validate_send_with_domain_cache`, preserving the exact per-item
+/// `"recipient is suppressed: <email>"` refusals.
+async fn preload_batch_suppressed_recipients(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    bodies: &[SendMessageRequest],
+) -> Result<std::collections::HashSet<String>, ApiError> {
+    let mut canonical: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for body in bodies {
+        // An unparsable item is rejected later by its own validation; it
+        // simply contributes no recipients to the union probe.
+        if let Ok(parsed) = parse_send_addresses(body) {
+            for recipient in parsed_delivery_recipients(&parsed) {
+                canonical.insert(canonical_email(&recipient));
+            }
+        }
+    }
+
+    if canonical.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    let recipient_list: Vec<String> = canonical.into_iter().collect();
+    let suppressed = send_admission::suppressed_recipients_in_db(db, tenant_id, &recipient_list)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %tenant_id, "suppression lookup failed");
+            ApiError::Internal("suppression lookup error".into())
+        })?;
+    Ok(suppressed.into_iter().collect())
 }
 
 async fn insert_message_and_queue(
@@ -2581,6 +2745,19 @@ pub(crate) async fn send_batch(
             ApiError::Internal("database error".into())
         })?;
 
+    // Perf P3: load every DISTINCT template once and run ONE suppression
+    // probe over the union of the batch's recipients. Both are pure reads
+    // done before the item loop; the previous code repeated each per item.
+    let preloaded_templates = preload_batch_templates(&state.db, &auth.tenant_id, &body.messages)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to preload batch templates");
+            ApiError::Internal("template store error".into())
+        })?;
+    let suppressed_recipients =
+        preload_batch_suppressed_recipients(&state.db, &auth.tenant_id, &body.messages).await?;
+    let renderer = TemplateRenderer::new(state.db.clone(), send_template_renderer_config());
+
     for (i, msg) in body.messages.iter().enumerate() {
         // F23: forbidden/invalid values are validated BEFORE this item's
         // quota reservation — a rejected item never touches quota.
@@ -2610,9 +2787,14 @@ pub(crate) async fn send_batch(
             }
         };
 
-        if let Err(e) =
-            validate_send_with_domain_cache(msg, &state.db, &auth.tenant_id, Some(&domain_ids))
-                .await
+        if let Err(e) = validate_send_with_domain_cache(
+            msg,
+            &state.db,
+            &auth.tenant_id,
+            Some(&domain_ids),
+            Some(&suppressed_recipients),
+        )
+        .await
         {
             // Validation refusals carry the field-level details in the
             // error; `to_string()` would flatten them to "validation
@@ -2636,11 +2818,11 @@ pub(crate) async fn send_batch(
             }
         };
 
-        // Template sends: resolve per item BEFORE this item's quota
-        // reservation — a refused template rejects just this item and never
-        // touches quota. Items without a template borrow their request body
-        // unchanged, so their path (and stored bytes) is identical.
-        let rendered = match resolve_template_send(&state.db, &auth.tenant_id, msg).await {
+        // Template sends: resolve from the batch preload BEFORE this item's
+        // quota reservation — a refused template rejects just this item and
+        // never touches quota. Items without a template borrow their request
+        // body unchanged, so their path (and stored bytes) is identical.
+        let rendered = match resolve_preloaded_template_send(&renderer, &preloaded_templates, msg) {
             Ok(rendered) => rendered,
             Err(TemplateSendRefusal::NotFound(template_id)) => {
                 reject_item!(format!("template not found: {template_id}"));
@@ -3138,17 +3320,19 @@ async fn validate_send(
     db: &sqlx::PgPool,
     tenant_id: &str,
 ) -> Result<(), ApiError> {
-    validate_send_with_domain_cache(body, db, tenant_id, None).await
+    validate_send_with_domain_cache(body, db, tenant_id, None, None).await
 }
 
-/// Like [`validate_send`], but skips the per-message domain query when the
-/// caller already resolved the batch's sender domains (see
-/// [`resolve_batch_domain_ids`]).
+/// Like [`validate_send`], but skips the per-message domain and suppression
+/// queries when the caller already resolved the batch's sender domains /
+/// recipient union (see [`resolve_batch_domain_ids`] and
+/// [`preload_batch_suppressed_recipients`]).
 async fn validate_send_with_domain_cache(
     body: &SendMessageRequest,
     db: &sqlx::PgPool,
     tenant_id: &str,
     domain_cache: Option<&std::collections::HashMap<String, Option<String>>>,
+    suppression_cache: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), ApiError> {
     let mut errors = Vec::new();
 
@@ -3241,7 +3425,22 @@ async fn validate_send_with_domain_cache(
     }
 
     let envelope_recipients = parsed_delivery_recipients(&parsed);
-    let suppressed = suppressed_recipients(db, tenant_id, &envelope_recipients).await?;
+    let suppressed: Vec<String> = match suppression_cache {
+        // Batch path: map the ONE union probe back onto this item's
+        // recipients. Sorted + deduped exactly like `suppressed_recipients`
+        // returns its DB result, so the per-item error order is unchanged.
+        Some(cache) => {
+            let mut suppressed: Vec<String> = envelope_recipients
+                .iter()
+                .map(|recipient| canonical_email(recipient))
+                .filter(|recipient| cache.contains(recipient))
+                .collect();
+            suppressed.sort();
+            suppressed.dedup();
+            suppressed
+        }
+        None => suppressed_recipients(db, tenant_id, &envelope_recipients).await?,
+    };
     if !suppressed.is_empty() {
         errors.extend(
             suppressed
@@ -3490,6 +3689,93 @@ mod tests {
     fn bounded_id(prefix: &str) -> String {
         let suffix_len = 26usize.saturating_sub(prefix.len() + 1);
         apexmail_lib::id::generate_id(prefix, suffix_len)
+    }
+
+    /// Exact SQL-statement capture for the batching regression tests: the
+    /// pool is rebuilt with `log_statements(Debug)` and a thread-local
+    /// subscriber records each `sqlx::query` event's `summary`.
+    ///
+    /// Per-test-process under nextest and default-current-thread tokio
+    /// tests, so the thread-local guard covers the whole awaited handler.
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    /// Install the capturing subscriber for the current thread; the returned
+    /// guard restores the previous (global) default when dropped.
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// A second pool over the same canonical database whose connections log
+    /// every statement at DEBUG. The fixture pool created by
+    /// `test_db::optional_pg_pool` does not, and statement logs are opt-in
+    /// per connection.
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
     }
 
     /// Parsed mailboxes for a test request body — bodies here always use
@@ -7538,6 +7824,150 @@ Bcc: victim@example.com"@example.com"#
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
         assert!(body.to_string().contains("exceeds maximum"));
 
+        fixture.cleanup().await;
+    }
+
+    /// P3: a batch where every item shares ONE template must load that
+    /// template once and probe suppression once — not once per item — while
+    /// producing byte-identical per-item results to the single-item path.
+    #[tokio::test]
+    async fn batch_send_preloads_distinct_templates_and_suppressions_once() {
+        let Some(fixture) = msg_fixture("adv_batch_preload").await else {
+            return;
+        };
+        // The handler must run over the logging pool so its SQL is visible.
+        let pool = logging_pool(&fixture.pool).await;
+        let template_id = seed_send_template(
+            &pool,
+            &fixture.tenant,
+            "Welcome {{ name }}",
+            "<h1>Hello {{ name }}</h1>",
+            Some("Hello {{ name }}"),
+        )
+        .await;
+
+        const ITEMS: usize = 25;
+        const SUPPRESSED_INDEX: usize = 7;
+        let recipients: Vec<String> = (0..ITEMS)
+            .map(|index| format!("preload-{index}@example.com"))
+            .collect();
+        for recipient in &recipients {
+            grant_marketing_consent(&pool, &fixture.tenant, recipient).await;
+        }
+        // One recipient is on the tenant suppression list, so the probe has
+        // real work and must return a per-item rejection.
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason)
+             VALUES ($1, $2, $3, 'hard_bounce')",
+        )
+        .bind(bounded_id("sup"))
+        .bind(&fixture.tenant)
+        .bind(&recipients[SUPPRESSED_INDEX])
+        .execute(&pool)
+        .await
+        .expect("seed suppression");
+
+        let messages: Vec<SendMessageRequest> = recipients
+            .iter()
+            .enumerate()
+            .map(|(index, recipient)| {
+                serde_json::from_value(serde_json::json!({
+                    "from": format!("sender@{}", fixture.domain),
+                    "to": [recipient],
+                    "template_id": template_id,
+                    "template_data": {"name": format!("User {index}")},
+                }))
+                .expect("batch item body")
+            })
+            .collect();
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let auth = AuthUser {
+            tenant_id: fixture.tenant.clone(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["messages:send".into()],
+        };
+
+        let (capture, guard) = capture_sql();
+        let response = send_batch(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Json(BatchSendRequest {
+                messages: messages.clone(),
+            }),
+        )
+        .await
+        .expect("batch send");
+        drop(guard);
+        let (status, body) = cov_json(response).await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["data"]["accepted"], (ITEMS - 1) as u64, "{body}");
+        assert_eq!(body["data"]["rejected"], 1, "{body}");
+        assert_eq!(
+            body["data"]["results"][SUPPRESSED_INDEX]["index"],
+            SUPPRESSED_INDEX
+        );
+        assert_eq!(
+            body["data"]["results"][SUPPRESSED_INDEX]["status"],
+            "rejected"
+        );
+        assert!(
+            body["data"]["results"][SUPPRESSED_INDEX]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("suppressed"),
+            "the suppressed item names its refusal: {body}"
+        );
+
+        // 25 items, one shared template → ONE template load; one suppression
+        // probe for the union of recipients (the legacy path was 25 + 25).
+        // sqlx summaries are the first four SQL words, so the legacy renderer
+        // load and the batch preload are counted by their distinct prefixes.
+        let template_queries = capture.count_starting_with("SELECT id, tenant_id, name,")
+            + capture.count_starting_with("SELECT id, subject, html_body,");
+        assert_eq!(
+            template_queries,
+            1,
+            "template preload must be one query: {:?}",
+            capture.statements()
+        );
+        assert_eq!(
+            capture.count_starting_with("SELECT LOWER(email) FROM suppressions"),
+            1,
+            "suppression probe must be one query: {:?}",
+            capture.statements()
+        );
+
+        // Equivalence: resolving each item through the single-item path
+        // reproduces exactly the rendered content the batch persisted.
+        for (index, message) in messages.iter().enumerate() {
+            if index == SUPPRESSED_INDEX {
+                continue;
+            }
+            let rendered = resolve_template_send(&pool, &fixture.tenant, message)
+                .await
+                .expect("single-item template resolution")
+                .expect("template present");
+            let effective = effective_template_body(message, rendered).expect("effective body");
+            let (subject, html, text): (String, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT subject, html_body, text_body FROM messages
+                     WHERE tenant_id = $1 AND to_emails @> $2::jsonb",
+            )
+            .bind(&fixture.tenant)
+            .bind(serde_json::json!([recipients[index]]))
+            .fetch_one(&pool)
+            .await
+            .expect("batch item persisted");
+            assert_eq!(subject, effective.subject, "item {index} subject");
+            assert_eq!(html, effective.html, "item {index} html");
+            assert_eq!(text, effective.text, "item {index} text");
+        }
+
+        pool.close().await;
         fixture.cleanup().await;
     }
 

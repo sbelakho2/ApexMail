@@ -85,6 +85,21 @@ pub struct PlanFeatures {
     /// deploy.
     #[serde(default)]
     pub mailboxes: bool,
+    /// RuntimeEnforced — Inbox Placement Monitoring (seed-account placement
+    /// tests). Sold as a separate monthly line (`platform-catalog`
+    /// `addon_by_name("inbox_placement_monitoring")`, €99/$109 per month);
+    /// no self-serve plan seed grants it. Runtime grant: an active
+    /// `product_line_contracts` row (`product_line = 'placement'`, the
+    /// purchase record the monthly line bills) or a plan/override grant. The
+    /// placement create routes refuse without it and the engine refuses to
+    /// execute tests for a tenant that no longer holds it.
+    ///
+    /// `#[serde(default)]`: plan rows written before this key existed carry
+    /// no value for it, and a missing entitlement Bool must read as NOT
+    /// entitled (fail-closed) — never a deserialization error on a rolling
+    /// deploy.
+    #[serde(default)]
+    pub inbox_placement: bool,
 
     // Analytics
     /// RuntimeEnforced — engagement/deliverability analytics endpoints require this entitlement.
@@ -175,6 +190,7 @@ impl Default for PlanFeatures {
             subaccounts: false,
             max_subaccounts: 0,
             mailboxes: false,
+            inbox_placement: false,
             support_level: SupportLevel::Community,
             dedicated_csm: false,
             priority_onboarding: false,

@@ -4325,6 +4325,15 @@ pub(crate) async fn mint_api_key(
     // material, not an implicit side effect of being logged in. Admin/owner
     // sessions hold the "*" wildcard, so they pass transparently.
     require_scopes(caller, &["api-keys:write"])?;
+    // E-2 (use-all audit): `api_access` is RuntimeEnforced, but only the SSR
+    // form checked it. Gate the SHARED mint path so the JSON endpoint (and
+    // every future surface) enforces the plan entitlement too.
+    crate::entitlements::require_feature(
+        state,
+        &caller.tenant_id,
+        billing_entitlements::FeatureKey::ApiAccess,
+    )
+    .await?;
 
     let name = name.trim();
     if name.is_empty() {
@@ -5882,6 +5891,116 @@ mod tests {
             Err(ApiError::Forbidden(message)) if message.contains("suspended")
         ));
 
+        pool.close().await;
+    }
+
+    /// E-2 (use-all audit): the JSON mint path enforces the `api_access`
+    /// entitlement exactly like the console form. A plan without it must
+    /// answer 403 and persist no key.
+    #[tokio::test]
+    async fn api_key_mint_requires_the_api_access_entitlement() {
+        let Some(pool) = crate::test_db::canonical_pool("api_key_api_access_gate").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id UUID PRIMARY KEY,
+                tenant_id VARCHAR(26) NOT NULL,
+                name TEXT NOT NULL,
+                key_prefix VARCHAR(32) NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                scopes JSONB NOT NULL,
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("api_keys fixture DDL must apply");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant_id = format!("tkeygate{}", &Uuid::new_v4().simple().to_string()[..15]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Key Gate Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let caller = AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+
+        // The built-in free plan sells api_access: minting succeeds.
+        mint_api_key(&state, &caller, "allowed", &["messages:read".into()], None)
+            .await
+            .expect("free plan grants api_access");
+
+        // A plan without the entitlement refuses BEFORE writing a row.
+        billing_service::plans::upsert_plan(
+            &pool,
+            &billing_service::plans::PlanSeed {
+                name: "api-denied",
+                display_name: "API Denied",
+                description: "test fixture",
+                price_monthly: 0,
+                price_yearly: 0,
+                price_monthly_usd: 0,
+                price_yearly_usd: 0,
+                email_limit: 1_000,
+                api_call_limit: 1_000,
+                sort_order: 999,
+                features: billing_service::types::PlanFeatures {
+                    api_access: false,
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("seed denied plan");
+        sqlx::query("UPDATE tenants SET plan = 'api-denied' WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("switch to the denied plan");
+        let error =
+            match mint_api_key(&state, &caller, "denied", &["messages:read".into()], None).await {
+                Ok(_) => panic!("api_access must be enforced on the JSON path"),
+                Err(error) => error,
+            };
+        match error {
+            ApiError::Forbidden(message) => {
+                assert!(message.contains("api_access"), "{message}");
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+        let denied_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND name = 'denied'",
+        )
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("denied row count");
+        assert_eq!(denied_rows, 0, "a refused mint must persist nothing");
+
+        sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .ok();
         pool.close().await;
     }
 
@@ -10663,7 +10782,8 @@ mod adversarial_auth_tests_3 {
             .await,
             Err(ApiError::Forbidden(_))
         ));
-        // Unknown tenant.
+        // Unknown tenant: entitlement resolution answers 404 before any
+        // write (the api_access gate runs on the shared mint path).
         assert!(matches!(
             create_api_key(
                 State(fx.state.clone()),
@@ -10675,7 +10795,7 @@ mod adversarial_auth_tests_3 {
                 })
             )
             .await,
-            Err(ApiError::Forbidden(_))
+            Err(ApiError::NotFound(_))
         ));
 
         let _ = defaulted;

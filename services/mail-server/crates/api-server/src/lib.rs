@@ -18,6 +18,7 @@ pub mod resilience;
 pub mod routes;
 pub mod ses_provider;
 pub mod state;
+pub mod threat_feeds;
 
 #[cfg(test)]
 pub(crate) mod test_db {

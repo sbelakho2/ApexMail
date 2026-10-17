@@ -25,6 +25,8 @@ pub mod events;
 pub mod explorer;
 pub mod health;
 pub mod helpers;
+/// Mailboxes archive + journaling retrieval (`mail_journal`, migration 264).
+pub mod journal;
 pub mod lists;
 pub mod message_timeline;
 pub mod messages;
@@ -85,6 +87,7 @@ mod tests {
         "dedicated_ips.rs",
         "domains.rs",
         "events.rs",
+        "journal.rs",
         "lists.rs",
         "messages.rs",
         // The importer's SQL-bearing files (the per-kind parsers are pure).

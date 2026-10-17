@@ -347,3 +347,260 @@ async fn delete_segment(
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::auth::AuthUser;
+
+    async fn fixture(name: &str) -> Option<(AppState, sqlx::PgPool, String, String, Uuid)> {
+        let pool = crate::test_db::canonical_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        let other = apexmail_lib::id::generate_id("", 26);
+        for id in [&tenant, &other] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+                 VALUES ($1, 'Segment Co', $1, 'free', 'active', NOW(), NOW())",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+        }
+        let list = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO lists (id, tenant_id, name, opt_in_mode) \
+             VALUES ($1, $2, 'Audience', 'single_opt_in')",
+        )
+        .bind(list)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed list");
+        Some((state, pool, tenant, other, list))
+    }
+
+    fn auth(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: Some(Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+        }
+    }
+
+    /// Use-all audit (P0): segments had ZERO tests. Pin CRUD, bounds, tenant
+    /// isolation and the unique-name contract.
+    #[tokio::test]
+    async fn segment_crud_validates_bounds_and_tenant_scope() {
+        let Some((state, pool, tenant, other, list)) = fixture("segments_crud").await else {
+            return;
+        };
+        let writer = auth(&tenant, &["campaigns:write"]);
+        let reader = auth(&tenant, &["campaigns:read"]);
+
+        let body = || SegmentWriteRequest {
+            name: "High intent".into(),
+            description: Some("opens and status".into()),
+            list_ids: Some(vec![list.to_string()]),
+            exclude_list_ids: Some(vec![]),
+            r#match: Some(serde_json::json!({
+                "tags_all": ["vip"],
+                "tags_any": ["trial", "paid"],
+                "statuses": ["active"]
+            })),
+        };
+        let (status, Json(created)) =
+            create_segment(State(state.clone()), writer.clone(), Json(body()))
+                .await
+                .expect("create segment");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.name, "High intent");
+        assert_eq!(created.list_ids, serde_json::json!([list.to_string()]));
+        assert_eq!(created.r#match["tags_all"], serde_json::json!(["vip"]));
+
+        // Duplicate name → 409, not a database 500.
+        assert!(matches!(
+            create_segment(State(state.clone()), writer.clone(), Json(body())).await,
+            Err(ApiError::Conflict(_))
+        ));
+
+        // Bounds and malformed inputs.
+        let mut too_many = SegmentWriteRequest {
+            list_ids: Some(vec![list.to_string(); MAX_LISTS_PER_SEGMENT + 1]),
+            ..body()
+        };
+        too_many.name = "Too many".into();
+        assert!(matches!(
+            create_segment(State(state.clone()), writer.clone(), Json(too_many)).await,
+            Err(ApiError::Validation(_))
+        ));
+        let mut malformed = SegmentWriteRequest {
+            list_ids: Some(vec!["not-a-uuid".into()]),
+            ..body()
+        };
+        malformed.name = "Malformed".into();
+        assert!(matches!(
+            create_segment(State(state.clone()), writer.clone(), Json(malformed)).await,
+            Err(ApiError::Validation(_))
+        ));
+        let mut foreign_list = SegmentWriteRequest {
+            list_ids: Some(vec![Uuid::new_v4().to_string()]),
+            ..body()
+        };
+        foreign_list.name = "Foreign list".into();
+        assert!(matches!(
+            create_segment(State(state.clone()), writer.clone(), Json(foreign_list)).await,
+            Err(ApiError::NotFound(_))
+        ));
+
+        // Read + tenant isolation (the other tenant cannot get/update/delete).
+        let Json(fetched) = get_segment(
+            State(state.clone()),
+            reader.clone(),
+            Path(created.id.clone()),
+        )
+        .await
+        .expect("get own segment");
+        assert_eq!(fetched.id, created.id);
+        let other_writer = auth(&other, &["campaigns:write"]);
+        assert!(matches!(
+            get_segment(
+                State(state.clone()),
+                auth(&other, &["campaigns:read"]),
+                Path(created.id.clone())
+            )
+            .await,
+            Err(ApiError::NotFound(_))
+        ));
+        assert!(matches!(
+            update_segment(
+                State(state.clone()),
+                other_writer.clone(),
+                Path(created.id.clone()),
+                Json(SegmentWriteRequest {
+                    name: "Hijacked".into(),
+                    description: None,
+                    list_ids: None,
+                    exclude_list_ids: None,
+                    r#match: None,
+                })
+            )
+            .await,
+            Err(ApiError::NotFound(_))
+        ));
+        assert!(matches!(
+            delete_segment(State(state.clone()), other_writer, Path(created.id.clone())).await,
+            Err(ApiError::NotFound(_))
+        ));
+
+        // Update + delete by the owner.
+        let Json(updated) = update_segment(
+            State(state.clone()),
+            writer.clone(),
+            Path(created.id.clone()),
+            Json(SegmentWriteRequest {
+                name: "High intent v2".into(),
+                description: None,
+                list_ids: Some(vec![]),
+                exclude_list_ids: None,
+                r#match: Some(serde_json::json!({"statuses": ["active"]})),
+            }),
+        )
+        .await
+        .expect("update segment");
+        assert_eq!(updated.name, "High intent v2");
+        assert_eq!(updated.list_ids, serde_json::json!([]));
+        assert_eq!(
+            delete_segment(State(state.clone()), writer, Path(created.id.clone()))
+                .await
+                .expect("delete"),
+            StatusCode::NO_CONTENT
+        );
+        assert!(matches!(
+            get_segment(State(state.clone()), reader, Path(created.id)).await,
+            Err(ApiError::NotFound(_))
+        ));
+
+        sqlx::query("DELETE FROM lists WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        for id in [&tenant, &other] {
+            sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+        pool.close().await;
+    }
+
+    /// The FK contract the audit named: deleting a segment nulls the
+    /// campaign's reference instead of deleting the campaign or failing.
+    #[tokio::test]
+    async fn segment_delete_nulls_the_campaign_reference() {
+        let Some((state, pool, tenant, _other, list)) = fixture("segments_cascade").await else {
+            return;
+        };
+        let writer = auth(&tenant, &["campaigns:write"]);
+        let (_, Json(segment)) = create_segment(
+            State(state.clone()),
+            writer.clone(),
+            Json(SegmentWriteRequest {
+                name: "Cascade".into(),
+                description: None,
+                list_ids: Some(vec![list.to_string()]),
+                exclude_list_ids: None,
+                r#match: None,
+            }),
+        )
+        .await
+        .expect("create segment");
+        let campaign = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO campaigns (id, tenant_id, name, status, segment_id, created_at, updated_at) \
+             VALUES ($1, $2, 'Segmented', 'draft', $3, NOW(), NOW())",
+        )
+        .bind(campaign)
+        .bind(&tenant)
+        .bind(Uuid::parse_str(&segment.id).expect("segment id"))
+        .execute(&pool)
+        .await
+        .expect("seed campaign");
+
+        delete_segment(State(state.clone()), writer, Path(segment.id))
+            .await
+            .expect("delete segment");
+        let segment_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT segment_id FROM campaigns WHERE id = $1")
+                .bind(campaign)
+                .fetch_one(&pool)
+                .await
+                .expect("campaign after delete");
+        assert!(
+            segment_id.is_none(),
+            "ON DELETE SET NULL must clear the campaign reference"
+        );
+
+        sqlx::query("DELETE FROM campaigns WHERE id = $1")
+            .bind(campaign)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM lists WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        pool.close().await;
+    }
+}

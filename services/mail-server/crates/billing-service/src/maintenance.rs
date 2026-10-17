@@ -1645,6 +1645,177 @@ const DRAIN_AND_INCR_LUA: &str = r#"
     return 1
 "#;
 
+/// EVAL commands per pipelined Redis round trip (P2). Each EVAL remains an
+/// atomic script invocation; the pipeline only removes the per-event network
+/// round trip.
+const DRAIN_EVAL_PIPELINE_CHUNK: usize = 500;
+
+#[derive(sqlx::FromRow)]
+struct DrainCycleAnchorRow {
+    tenant_id: String,
+    billing_cycle_start: DateTime<Utc>,
+}
+
+/// Memo key for a resolved counter key. The brief's
+/// (tenant_id, event_type, year-month) tuple is extended with the SELECTED
+/// cycle anchor: two events in the same calendar month can legitimately
+/// select different anchors when a subscription starts mid-month, and the
+/// key must stay byte-identical to
+/// `usage::enforced_counter_key_for_event_type` for each event.
+type DrainCounterMemoKey = (String, String, i32, u32, Option<chrono::NaiveDate>);
+
+/// Resolve the enforced counter keys for a whole drain (P2).
+///
+/// ONE SELECT loads every active/trialing/past-due subscription's
+/// `billing_cycle_start` for the drain's distinct tenants; per-event anchor
+/// selection (latest start at or before the event timestamp) and the
+/// anchored cycle math then run in memory. This mirrors
+/// `usage::enforced_counter_key_for_event_type` exactly (the helpers it
+/// calls are private to `usage.rs`); the caller's memo collapses repeated
+/// (tenant, type, month, anchor) combinations.
+async fn drain_counter_keys(
+    state: &AppState,
+    events: &[PreparedMeterEvent],
+) -> Result<Vec<String>, String> {
+    let mut tenants: Vec<String> = events
+        .iter()
+        .map(|event| event.tenant_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    tenants.sort();
+
+    #[cfg(test)]
+    crate::test_support::query_count::bump("drain.db.counter_keys");
+    let rows: Vec<DrainCycleAnchorRow> = sqlx::query_as(
+        r#"
+        SELECT tenant_id, billing_cycle_start
+        FROM adyen_subscriptions
+        WHERE tenant_id = ANY($1)
+          AND status IN ('active', 'trialing', 'past_due')
+          AND billing_cycle_start IS NOT NULL
+        ORDER BY tenant_id, billing_cycle_start
+        "#,
+    )
+    .bind(&tenants)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load drain subscription anchors: {error}"))?;
+
+    let mut anchors: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+    for row in rows {
+        anchors
+            .entry(row.tenant_id)
+            .or_default()
+            .push(row.billing_cycle_start);
+    }
+
+    let mut memo: HashMap<DrainCounterMemoKey, String> = HashMap::new();
+    let mut keys = Vec::with_capacity(events.len());
+    for event in events {
+        let anchor = drain_anchor_for(
+            anchors.get(&event.tenant_id).map(Vec::as_slice),
+            event.timestamp,
+        );
+        let memo_key = (
+            event.tenant_id.clone(),
+            event.event_type.clone(),
+            event.timestamp.year(),
+            event.timestamp.month(),
+            anchor,
+        );
+        let key = memo
+            .entry(memo_key)
+            .or_insert_with(|| {
+                drain_format_counter_key(
+                    &event.tenant_id,
+                    &event.event_type,
+                    event.timestamp,
+                    anchor,
+                )
+            })
+            .clone();
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+/// Latest cycle start at or before `at` (the SELECT's
+/// `ORDER BY billing_cycle_start DESC LIMIT 1` in memory).
+fn drain_anchor_for(
+    starts: Option<&[DateTime<Utc>]>,
+    at: DateTime<Utc>,
+) -> Option<chrono::NaiveDate> {
+    starts?
+        .iter()
+        .rev()
+        .find(|start| **start <= at)
+        .map(|start| start.date_naive())
+}
+
+/// Exact copy of `usage::most_recent_anchored_cycle` (private there):
+/// the most recent anchored cycle start at or before `at`.
+fn drain_most_recent_anchored_cycle(
+    at: DateTime<Utc>,
+    anchor: chrono::NaiveDate,
+) -> (i32, u32, DateTime<Utc>) {
+    let mut year = at.year();
+    let mut month = at.month();
+    loop {
+        let candidate = drain_anchored_date(year, month, anchor.day());
+        let candidate_start = candidate
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+        if let Some(start) = candidate_start {
+            if start <= at {
+                return (year, month, start);
+            }
+        }
+        if month == 1 {
+            month = 12;
+            year -= 1;
+        } else {
+            month -= 1;
+        }
+    }
+}
+
+fn drain_anchored_date(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+    let last_day = {
+        let next = if month == 12 {
+            chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+        }
+        .expect("first of next month is always valid");
+        (next - chrono::Duration::days(1)).day()
+    };
+    chrono::NaiveDate::from_ymd_opt(year, month, day.min(last_day))
+        .expect("clamped day is always valid")
+}
+
+/// Byte-identical to `usage::enforced_counter_key_for_event_type` (see the
+/// Fix F2 note in the drain): cycle-anchored keys for subscription tenants,
+/// UTC calendar-month keys otherwise.
+fn drain_format_counter_key(
+    tenant_id: &str,
+    event_type: &str,
+    at: DateTime<Utc>,
+    anchor: Option<chrono::NaiveDate>,
+) -> String {
+    match anchor {
+        Some(anchor) => {
+            let (year, month, _cycle_start) = drain_most_recent_anchored_cycle(at, anchor);
+            format!("meter:rt:{tenant_id}:{event_type}:c{year}-{month:02}")
+        }
+        None => format!(
+            "meter:rt:{tenant_id}:{event_type}:{}-{:02}",
+            at.year(),
+            at.month()
+        ),
+    }
+}
+
 pub(crate) async fn drain_pending_metering_events(
     state: &AppState,
     limit: usize,
@@ -1726,43 +1897,46 @@ pub(crate) async fn drain_pending_metering_events(
             })?;
     }
 
-    for event in &valid_events {
-        let guard_key = format!("meter:guard:{}", event.normalized_id);
-        // Fix F2 — the recovered event must bump the SAME counter the quota
-        // gate enforces. The key is derived through the shared anchored-key
-        // selection (billing-cycle anchored for subscription tenants, UTC
-        // calendar month otherwise) — the old calendar-month key forked
-        // cycle-anchored tenants onto a second, never-enforced counter, so
-        // recovered events bypassed quota entirely.
-        let counter_key = crate::usage::enforced_counter_key_for_event_type(
-            &state.db,
-            &event.tenant_id,
-            &event.event_type,
-            event.timestamp,
-        )
-        .await;
-        let pending_key = format!("meter:pending:{}", event.raw_id);
+    // P2 — resolve EVERY event's enforced counter key from ONE batched
+    // subscription-anchor SELECT plus an in-memory memo keyed by
+    // (tenant, event_type, event year-month, selected cycle anchor start).
+    // Pre-fix this was one `enforced_counter_key_for_event_type` SELECT per
+    // event (up to 10,000 every 60s).
+    let counter_keys = drain_counter_keys(state, &valid_events).await?;
 
-        // Only increment the counter if this event was newly inserted into
-        // the DB.  Events that were already there (re-run after crash) will
-        // have their counter guard already set, so the Lua script is a no-op
-        // for the counter while still cleaning up the pending key.
-        let _: i64 = redis::cmd("EVAL")
-            .arg(DRAIN_AND_INCR_LUA)
-            .arg(3i64) // number of keys
-            .arg(&guard_key)
-            .arg(&counter_key)
-            .arg(&pending_key)
-            .arg(event.quantity)
-            .arg(METERING_PERIOD_TTL_SECONDS)
-            .query_async(&mut conn)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to drain+incr metering event {}: {error}",
-                    event.raw_id
-                )
-            })?;
+    // P2 — the EVALs stay one atomic script invocation PER EVENT (the guard
+    // semantics are unchanged) but are pipelined in bounded chunks: one
+    // network round trip per chunk instead of one per event.
+    for (chunk, chunk_keys) in valid_events
+        .chunks(DRAIN_EVAL_PIPELINE_CHUNK)
+        .zip(counter_keys.chunks(DRAIN_EVAL_PIPELINE_CHUNK))
+    {
+        let mut pipeline = redis::pipe();
+        for (event, counter_key) in chunk.iter().zip(chunk_keys) {
+            let guard_key = format!("meter:guard:{}", event.normalized_id);
+            let pending_key = format!("meter:pending:{}", event.raw_id);
+            // Only increment the counter if this event was newly inserted into
+            // the DB.  Events that were already there (re-run after crash) will
+            // have their counter guard already set, so the Lua script is a no-op
+            // for the counter while still cleaning up the pending key.
+            pipeline
+                .cmd("EVAL")
+                .arg(DRAIN_AND_INCR_LUA)
+                .arg(3i64) // number of keys
+                .arg(&guard_key)
+                .arg(counter_key)
+                .arg(&pending_key)
+                .arg(event.quantity)
+                .arg(METERING_PERIOD_TTL_SECONDS);
+        }
+        #[cfg(test)]
+        crate::test_support::query_count::bump("drain.redis.pipeline");
+        let _: Vec<i64> = pipeline.query_async(&mut conn).await.map_err(|error| {
+            format!(
+                "Failed to drain+incr metering events (chunk starting at {}): {error}",
+                chunk[0].raw_id
+            )
+        })?;
     }
 
     // Clean up any remaining pending keys that belong to re-inserted events.
@@ -6232,7 +6406,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
         // The add-on price is CENTS (minor units) — never a provider price id.
@@ -6294,7 +6468,7 @@ mod coverage_adversarial {
         assert_eq!(call.method, "POST");
         assert_eq!(
             call.headers.get("x-api-key").map(String::as_str),
-            Some("AQEohONJaaPk33yRwggDP5DPc2s")
+            Some("adyen-test-key-fixture")
         );
         assert_eq!(
             call.headers.get("idempotency-key").map(String::as_str),
@@ -6413,7 +6587,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -6471,7 +6645,7 @@ mod coverage_adversarial {
         assert_eq!(call.method, "POST");
         assert_eq!(
             call.headers.get("x-api-key").map(String::as_str),
-            Some("AQEohONJaaPk33yRwggDP5DPc2s")
+            Some("adyen-test-key-fixture")
         );
         assert_eq!(
             call.headers.get("idempotency-key").map(String::as_str),
@@ -6854,6 +7028,210 @@ mod coverage_adversarial {
         assert!(!redis_exists(env, &pending_key).await);
     });
 
+    // P2 metering recovery drain — the pre-fix loop issued ONE
+    // `enforced_counter_key_for_event_type` SELECT per event and ONE Redis
+    // EVAL round trip per event. The fix memoizes the key per
+    // (tenant, event_type, event month) and loads every tenant's cycle
+    // anchors in ONE batched SELECT, so 100 events cost one lookup no matter
+    // how many distinct tenants they span.
+    //
+    // Fail-before: 100 events -> `drain.db.counter_keys` == 100,
+    // `drain.redis.pipeline` == 0.
+    env_test!(
+        metering_drain_counter_key_lookup_is_constant_in_distinct_tenants,
+        |env| {
+            use crate::test_support::query_count;
+
+            let _drain_guard = METER_DRAIN_LOCK.lock().await;
+            let _metering_guard = metering_keys_guard(&env.admin_url).await;
+            crate::test_support::clear_pending_metering_keys(&env.redis).await;
+
+            let now = Utc::now();
+            let events: Vec<(String, &'static str, String, i64)> = (0..100)
+                .map(|index| {
+                    // 100 DISTINCT tenants, two event types, varying quantities.
+                    let tenant = format!("w6drainq{index:03}");
+                    let event_type = if index % 2 == 0 {
+                        "api_calls"
+                    } else {
+                        "emails_sent"
+                    };
+                    let raw_id = format!("w6drainq-raw-{index}");
+                    let quantity = i64::from((index % 5) + 1);
+                    (tenant, event_type, raw_id, quantity)
+                })
+                .collect();
+
+            let mut conn = env.redis.get().await.expect("redis");
+            let mut expected: Vec<(String, i64)> = Vec::with_capacity(events.len());
+            for (tenant, event_type, raw_id, quantity) in &events {
+                let guard_key = format!("meter:guard:{}", normalize_metering_event_id(raw_id));
+                let counter_key = crate::usage::enforced_counter_key_for_event_type(
+                    &env.pool, tenant, event_type, now,
+                )
+                .await;
+                let pending_key = format!("meter:pending:{raw_id}");
+                // Deterministic prior state: clear the 40-day guard/counter
+                // keys so a re-run of this test drains and increments again.
+                let _: () = redis::cmd("DEL")
+                    .arg(&guard_key)
+                    .arg(&counter_key)
+                    .arg(&pending_key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("clear prior keys");
+                let payload = serde_json::json!({
+                    "id": raw_id,
+                    "tenantId": tenant,
+                    "eventType": event_type,
+                    "quantity": quantity,
+                    "timestamp": now.to_rfc3339(),
+                    "metadata": {},
+                });
+                let _: () = redis::cmd("SET")
+                    .arg(&pending_key)
+                    .arg(payload.to_string())
+                    .query_async(&mut conn)
+                    .await
+                    .expect("seed pending");
+                expected.push((counter_key, *quantity));
+            }
+            drop(conn);
+
+            query_count::reset();
+            let result = drain_pending_metering_events(&env.state, 100)
+                .await
+                .expect("batched drain");
+            assert!(result.processed_count >= 100, "{result:?}");
+            assert_eq!(
+                query_count::count("drain.db.counter_keys"),
+                1,
+                "ONE counter-key lookup for the whole drain, not one per event/tenant"
+            );
+            assert_eq!(
+                query_count::count("drain.redis.eval"),
+                0,
+                "no serial EVAL round trips (the EVALs are pipelined)"
+            );
+            assert_eq!(
+                query_count::count("drain.redis.pipeline"),
+                1,
+                "100 pipelined EVALs fit one chunk"
+            );
+
+            for (counter_key, quantity) in expected {
+                assert_eq!(
+                    redis_i64(env, &counter_key).await,
+                    quantity,
+                    "counter {counter_key} moved by exactly its event quantity"
+                );
+            }
+        }
+    );
+
+    // P2 metering recovery drain — pipelined EVALs must produce exactly the
+    // counter values the serial path produced, including for a
+    // billing-cycle-anchored tenant (whose key is `c`-prefixed and differs
+    // from the UTC calendar-month key).
+    env_test!(
+        metering_drain_pipelined_counters_match_serial_expected_values,
+        |env| {
+            use crate::test_support::query_count;
+
+            let _drain_guard = METER_DRAIN_LOCK.lock().await;
+            let _metering_guard = metering_keys_guard(&env.admin_url).await;
+            crate::test_support::clear_pending_metering_keys(&env.redis).await;
+
+            let now = Utc::now();
+            let mut events: Vec<(String, &'static str, String, i64)> = Vec::new();
+            for tenant_index in 0..10 {
+                let tenant = format!("w6drainp{tenant_index:02}");
+                if tenant_index == 0 {
+                    // Cycle-anchored tenant: the counter key is
+                    // `...:c<year>-<month>` (cycle start), not the calendar
+                    // month key a tenant without a subscription uses.
+                    sqlx::query(
+                        "INSERT INTO adyen_subscriptions
+                         (tenant_id, adyen_subscription_id, plan, status,
+                          billing_cycle_start, billing_cycle_end)
+                         VALUES ($1, $2, 'growth', 'active', $3, $4)",
+                    )
+                    .bind(&tenant)
+                    .bind("w6drainp-sub-0")
+                    .bind(now - chrono::Duration::days(20))
+                    .bind(now + chrono::Duration::days(20))
+                    .execute(&env.pool)
+                    .await
+                    .expect("seed cycle-anchored subscription");
+                }
+                for event_index in 0..10 {
+                    let event_type = if event_index % 2 == 0 {
+                        "api_calls"
+                    } else {
+                        "emails_sent"
+                    };
+                    let raw_id = format!("w6drainp-{tenant_index}-{event_index}");
+                    let quantity = i64::from(((tenant_index + event_index) % 4) + 1);
+                    events.push((tenant.clone(), event_type, raw_id, quantity));
+                }
+            }
+
+            let mut conn = env.redis.get().await.expect("redis");
+            let mut expected: HashMap<String, i64> = HashMap::new();
+            for (tenant, event_type, raw_id, quantity) in &events {
+                let guard_key = format!("meter:guard:{}", normalize_metering_event_id(raw_id));
+                let counter_key = crate::usage::enforced_counter_key_for_event_type(
+                    &env.pool, tenant, event_type, now,
+                )
+                .await;
+                let pending_key = format!("meter:pending:{raw_id}");
+                let _: () = redis::cmd("DEL")
+                    .arg(&guard_key)
+                    .arg(&counter_key)
+                    .arg(&pending_key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("clear prior keys");
+                let payload = serde_json::json!({
+                    "id": raw_id,
+                    "tenantId": tenant,
+                    "eventType": event_type,
+                    "quantity": quantity,
+                    "timestamp": now.to_rfc3339(),
+                    "metadata": {},
+                });
+                let _: () = redis::cmd("SET")
+                    .arg(&pending_key)
+                    .arg(payload.to_string())
+                    .query_async(&mut conn)
+                    .await
+                    .expect("seed pending");
+                *expected.entry(counter_key).or_default() += quantity;
+            }
+            drop(conn);
+
+            query_count::reset();
+            let result = drain_pending_metering_events(&env.state, 100)
+                .await
+                .expect("pipelined drain");
+            assert!(result.processed_count >= 100, "{result:?}");
+            assert_eq!(query_count::count("drain.redis.eval"), 0);
+            assert_eq!(
+                query_count::count("drain.redis.pipeline"),
+                1,
+                "100 EVALs are one pipeline round trip"
+            );
+
+            for (counter_key, quantity) in expected {
+                assert_eq!(
+                    redis_i64(env, &counter_key).await,
+                    quantity,
+                    "pipelined counter {counter_key} matches the serial sum"
+                );
+            }
+        }
+    );
+
     async fn redis_i64(env: &Env, key: &str) -> i64 {
         let mut conn = env.redis.get().await.expect("redis");
         redis::cmd("GET")
@@ -7110,7 +7488,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -7250,7 +7628,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
         );
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -7347,7 +7725,7 @@ mod coverage_adversarial {
                 std::env::var("ADYEN_MERCHANT_ACCOUNT").ok(),
             );
             std::env::set_var("AUTO_PAY_OPEN_INVOICES", "1");
-            std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+            std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
             std::env::set_var("ADYEN_API_BASE_URL", &base);
             std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
 
@@ -7563,7 +7941,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_API_BASE_URL").ok(),
             std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
 
@@ -9000,7 +9378,7 @@ mod coverage_adversarial {
         std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "10");
         // Cents, not a provider price id.
         std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_MERCHANT_ACCOUNT", "ApexMailTestECOM");
         std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
@@ -9638,7 +10016,7 @@ mod coverage_adversarial {
             std::env::var("ADYEN_API_BASE_URL").ok(),
             std::env::var("ADYEN_DEDICATED_IP_PRICE").ok(),
         );
-        std::env::set_var("ADYEN_API_KEY", "AQEohONJaaPk33yRwggDP5DPc2s");
+        std::env::set_var("ADYEN_API_KEY", "adyen-test-key-fixture");
         std::env::set_var("ADYEN_API_BASE_URL", &base);
         std::env::set_var("ADYEN_DEDICATED_IP_PRICE", "500");
 

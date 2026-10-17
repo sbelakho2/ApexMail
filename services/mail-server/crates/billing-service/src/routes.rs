@@ -78,6 +78,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/usage/record-checked", post(record_usage_checked))
         .route("/usage/ingest", post(ingest_usage))
         .route("/usage/reconciliation", get(get_reconciliation_reports))
+        // Contract product lines (CP-only writes: purchase/renew/cancel).
+        // The CP reaches this service directly at `/v1/admin/billing/...`.
+        .route(
+            "/v1/admin/billing/product-lines",
+            get(list_product_lines_route).post(purchase_product_line_route),
+        )
+        .route(
+            "/v1/admin/billing/product-lines/:tenant_id/:product_line/cancel",
+            post(cancel_product_line_route),
+        )
         // Invoices
         .route("/invoices", get(list_invoices))
         .route("/invoices/:id", get(get_invoice))
@@ -153,6 +163,12 @@ struct LegacyPlanFeaturesPayload {
     /// (fail-closed, never a deserialization error).
     #[serde(default)]
     mailboxes: bool,
+    /// Inbox Placement Monitoring product entitlement (a separate monthly
+    /// line; granted by an active `product_line_contracts` row or a
+    /// plan/override). Defaults to false so older payloads parse
+    /// (fail-closed, never a deserialization error).
+    #[serde(default)]
+    inbox_placement: bool,
     advanced_analytics: bool,
     send_time_optimization: bool,
     ab_testing: bool,
@@ -192,6 +208,7 @@ impl From<PlanFeatures> for LegacyPlanFeaturesPayload {
             webhooks_enabled: features.webhooks_enabled,
             inbound_email: features.inbound_email,
             mailboxes: features.mailboxes,
+            inbox_placement: features.inbox_placement,
             advanced_analytics: features.advanced_analytics,
             send_time_optimization: features.send_time_optimization,
             ab_testing: features.ab_testing,
@@ -233,6 +250,7 @@ impl From<LegacyPlanFeaturesPayload> for PlanFeatures {
             webhooks_enabled: features.webhooks_enabled,
             inbound_email: features.inbound_email,
             mailboxes: features.mailboxes,
+            inbox_placement: features.inbox_placement,
             advanced_analytics: features.advanced_analytics,
             send_time_optimization: features.send_time_optimization,
             ab_testing: features.ab_testing,
@@ -2363,6 +2381,190 @@ async fn check_quota(
 }
 
 // ---------------------------------------------------------------------------
+// Contract product lines (CP-only purchase / cancel / read)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/admin/billing/product-lines` body. `seats` is accepted as an
+/// alias for `units` (the Mailboxes line speaks seats); the flat lines
+/// record 1 unit. `interval` is the purchase term (`monthly` | `yearly`);
+/// the sweep bills every line monthly (annual contracts are billed monthly).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductLinePurchaseBody {
+    tenant_id: String,
+    line: String,
+    #[serde(default)]
+    seats: Option<i64>,
+    #[serde(default)]
+    units: Option<i64>,
+    #[serde(default)]
+    interval: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductLineListQuery {
+    tenant_id: String,
+}
+
+/// Map a typed product-line write refusal to a named HTTP response.
+fn product_line_write_error(error: crate::product_lines::ProductLineError) -> Response {
+    use crate::product_lines::ProductLineError as Error;
+
+    match error {
+        Error::UnknownLine(line, allowed) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            format!("unknown product line `{line}`; sellable lines: {allowed}"),
+        ),
+        Error::InvalidInterval(interval) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            format!("invalid billing interval `{interval}`; allowed: monthly, yearly"),
+        ),
+        Error::InvalidUnits(units) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            format!("units must be a positive integer, got {units}"),
+        ),
+        Error::InvalidIdempotencyKey => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            "idempotency key must be at most 128 characters",
+        ),
+        Error::TenantNotFound(tenant_id) => error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            format!("tenant `{tenant_id}` not found"),
+        ),
+        Error::ContractNotFound { .. } => error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "product-line contract not found",
+        ),
+        Error::IdempotencyConflict { key, existing } => error_response(
+            StatusCode::CONFLICT,
+            ErrorCode::IdempotencyConflict,
+            format!(
+                "idempotency key `{key}` was already used for product line `{existing}`; \
+                 a key identifies exactly one purchase"
+            ),
+        ),
+        Error::Db(error) => {
+            tracing::error!(error = %error, "product-line write failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal server error",
+            )
+        }
+        Error::Audit(error) => {
+            tracing::error!(error = %error, "product-line audit write failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal server error",
+            )
+        }
+    }
+}
+
+/// `POST /v1/admin/billing/product-lines` — create or renew a contract line
+/// for a tenant. CP-only: a full service token (`require_any_scope`); a
+/// tenant-scoped token is refused even for its own tenant because this is a
+/// platform-wide commercial write.
+async fn purchase_product_line_route(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ProductLinePurchaseBody>,
+) -> Response {
+    if let Err(response) = require_any_scope(&scope) {
+        return response;
+    }
+    let units = match (body.units, body.seats) {
+        (Some(units), Some(seats)) if units != seats => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::ValidationError,
+                "units and seats disagree; send one quantity",
+            )
+        }
+        (Some(units), _) => units,
+        (None, Some(seats)) => seats,
+        (None, None) => 1,
+    };
+    // Body key wins; the Idempotency-Key header is the HTTP-native form.
+    let header_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let input = crate::product_lines::ProductLinePurchaseInput {
+        tenant_id: body.tenant_id,
+        product_line: body.line,
+        billing_interval: body.interval.unwrap_or_else(|| "monthly".to_string()),
+        units,
+        idempotency_key: body.idempotency_key.or(header_key),
+    };
+
+    match crate::product_lines::purchase_product_line(&state.db, input).await {
+        Ok((contract, outcome)) => {
+            let status = if outcome.created() {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (
+                status,
+                Json(serde_json::json!({
+                    "contract": contract,
+                    "outcome": outcome.as_str(),
+                    "created": outcome.created(),
+                    "replayed": outcome.replayed(),
+                })),
+            )
+                .into_response()
+        }
+        Err(error) => product_line_write_error(error),
+    }
+}
+
+/// `POST /v1/admin/billing/product-lines/:tenant_id/:product_line/cancel` —
+/// terminate a contract line. Cancellation stops the next billing period
+/// (the partially covered current month is not prorated or billed).
+async fn cancel_product_line_route(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+    Path((tenant_id, product_line)): Path<(String, String)>,
+) -> Response {
+    if let Err(response) = require_any_scope(&scope) {
+        return response;
+    }
+    match crate::product_lines::cancel_product_line(&state.db, &tenant_id, &product_line).await {
+        Ok(contract) => Json(serde_json::json!({ "contract": contract })).into_response(),
+        Err(error) => product_line_write_error(error),
+    }
+}
+
+/// `GET /v1/admin/billing/product-lines?tenantId=...` — the tenant's
+/// contract rows (all statuses), for the CP billing console.
+async fn list_product_lines_route(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+    Query(query): Query<ProductLineListQuery>,
+) -> Response {
+    if let Err(response) = require_any_scope(&scope) {
+        return response;
+    }
+    match crate::product_lines::list_product_line_contracts(&state.db, &query.tenant_id).await {
+        Ok(contracts) => Json(serde_json::json!({ "contracts": contracts })).into_response(),
+        Err(error) => product_line_write_error(error),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
 
@@ -2614,7 +2816,7 @@ mod tests {
     use crate::config::PaygPricing;
     use crate::subscriptions::SubscriptionError;
     use axum::body::{to_bytes, Body};
-    use axum::http::Request;
+    use axum::http::{Method, Request};
     use deadpool_redis::Config as RedisConfig;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
@@ -3570,5 +3772,263 @@ mod tests {
             "internal server error",
         )
         .await;
+    }
+
+    // ── F3: contract product-line purchase/cancel (CP-only) ─────────────
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, 'product line route test', $1, 'growth', 'active') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn send(
+        app: Router,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("x-api-key", token);
+        }
+        let body = match body {
+            Some(value) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = app
+            .oneshot(builder.body(body).expect("request"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    const PURCHASE_URI: &str = "/v1/admin/billing/product-lines";
+
+    /// The purchase/cancel/read family is CP-only: no credential is 401 and a
+    /// tenant-scoped token is 403 even when it names the target tenant.
+    #[tokio::test]
+    async fn product_line_writes_are_cp_only() {
+        use axum::http::Method;
+
+        let Some(env) = crate::test_support::provision("f3_pl_route_auth").await else {
+            return;
+        };
+        let tenant = "f3plauth01";
+        seed_tenant(&env.pool, tenant).await;
+        let app = router(env.state.clone());
+        let body = serde_json::json!({
+            "tenantId": tenant,
+            "line": "compliance",
+            "units": 1,
+            "interval": "monthly"
+        });
+
+        // No credential.
+        let (status, _) = send(
+            app.clone(),
+            Method::POST,
+            PURCHASE_URI,
+            None,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Tenant-scoped service token: forbidden for a platform-wide write.
+        let scoped = format!("{tenant}:adversarial-service-token");
+        let (status, json) = send(
+            app.clone(),
+            Method::POST,
+            PURCHASE_URI,
+            Some(&scoped),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+
+        // Full CP token.
+        let (status, json) = send(
+            app.clone(),
+            Method::POST,
+            PURCHASE_URI,
+            Some("adversarial-service-token"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        assert_eq!(json["contract"]["productLine"], "compliance");
+        assert_eq!(json["contract"]["status"], "active");
+        assert_eq!(json["outcome"], "created");
+        assert_eq!(json["created"], true);
+
+        // Read is CP-only too.
+        let list_uri = format!("{PURCHASE_URI}?tenantId={tenant}");
+        let (status, _) = send(app.clone(), Method::GET, &list_uri, Some(&scoped), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, json) = send(
+            app.clone(),
+            Method::GET,
+            &list_uri,
+            Some("adversarial-service-token"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["contracts"].as_array().expect("array").len(), 1);
+
+        // Cancel is CP-only too.
+        let cancel_uri = format!("{PURCHASE_URI}/{tenant}/compliance/cancel");
+        let (status, _) = send(app.clone(), Method::POST, &cancel_uri, Some(&scoped), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, json) = send(
+            app,
+            Method::POST,
+            &cancel_uri,
+            Some("adversarial-service-token"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["contract"]["status"], "terminated");
+
+        env.finish().await;
+    }
+
+    /// The route honours the Idempotency-Key header (a replay returns the
+    /// same contract and status 200) and a purchase for one tenant leaves
+    /// another tenant untouched.
+    #[tokio::test]
+    async fn product_line_purchase_route_is_idempotent_and_isolated() {
+        use axum::http::Method;
+
+        let Some(env) = crate::test_support::provision("f3_pl_route_idem").await else {
+            return;
+        };
+        let buyer = "f3plbuyer1";
+        let other = "f3plother1";
+        seed_tenant(&env.pool, buyer).await;
+        seed_tenant(&env.pool, other).await;
+        let app = router(env.state.clone());
+        let body = serde_json::json!({
+            "tenantId": buyer,
+            "line": "placement",
+            "interval": "monthly"
+        });
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(PURCHASE_URI)
+                    .header("x-api-key", "adversarial-service-token")
+                    .header("idempotency-key", "route-key-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(first.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        let contract_id = first_json["contract"]["id"].clone();
+
+        // Replay through the documented route surface.
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(PURCHASE_URI)
+                    .header("x-api-key", "adversarial-service-token")
+                    .header("idempotency-key", "route-key-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(replay.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(replay_json["replayed"], true);
+        assert_eq!(replay_json["created"], false);
+        assert_eq!(replay_json["contract"]["id"], contract_id);
+
+        // A second tenant's purchase does not touch the first tenant.
+        let (status, json) = send(
+            app.clone(),
+            Method::POST,
+            PURCHASE_URI,
+            Some("adversarial-service-token"),
+            Some(serde_json::json!({
+                "tenantId": other,
+                "line": "eu_only_routing",
+                "interval": "yearly"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        assert_eq!(json["contract"]["billingInterval"], "yearly");
+
+        let (buyer_rows, other_rows): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*)::bigint FROM product_line_contracts WHERE tenant_id = $1), \
+                    (SELECT COUNT(*)::bigint FROM product_line_contracts WHERE tenant_id = $2)",
+        )
+        .bind(buyer)
+        .bind(other)
+        .fetch_one(&env.pool)
+        .await
+        .expect("contract counts");
+        assert_eq!(buyer_rows, 1, "the replay minted no second contract");
+        assert_eq!(other_rows, 1, "the other tenant's write is isolated");
+
+        let buyer_settings: serde_json::Value =
+            sqlx::query_scalar("SELECT settings FROM tenants WHERE id = $1")
+                .bind(buyer)
+                .fetch_one(&env.pool)
+                .await
+                .expect("buyer settings");
+        assert!(
+            buyer_settings
+                .get("addons")
+                .and_then(|addons| addons.get("euOnlyRouting"))
+                .is_none(),
+            "the EU-only marker was written for the OTHER tenant only: {buyer_settings}"
+        );
+        let other_settings: serde_json::Value =
+            sqlx::query_scalar("SELECT settings FROM tenants WHERE id = $1")
+                .bind(other)
+                .fetch_one(&env.pool)
+                .await
+                .expect("other settings");
+        assert_eq!(other_settings["addons"]["euOnlyRouting"], true);
+
+        env.finish().await;
     }
 }

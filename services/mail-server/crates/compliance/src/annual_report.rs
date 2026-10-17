@@ -93,6 +93,11 @@ use crate::xbrl_taxonomy::{
 
 /// Canonical structured-document format identifier.
 pub const ANNUAL_REPORT_FORMAT: &str = "apexmail.annual-report/1";
+
+/// Rows per `annual_report_lines` INSERT. A report's derivation snapshot is
+/// written in `ceil(lines / 500)` statements instead of one per account,
+/// keeping each statement's bind array bounded.
+const ANNUAL_REPORT_LINE_CHUNK: usize = 500;
 /// XBRL instance namespace (standard).
 pub const XBRL_INSTANCE_NAMESPACE: &str = "http://www.xbrl.org/2003/instance";
 /// XBRL linkbase namespace (standard).
@@ -1366,6 +1371,102 @@ struct FiscalPeriodRow {
     default_currency: String,
 }
 
+/// Write the derivation snapshot lines in bounded multi-row chunks.
+///
+/// The mapping is unchanged from the row-by-row writer: account types map to
+/// their statement/section, and an unknown type contributes no line. The
+/// caller has already deleted the report's previous lines; duplicate account
+/// ids still violate the canonical UNIQUE(report_id, account_id) exactly as
+/// before.
+async fn insert_annual_report_lines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    report_id: Uuid,
+    lines: &[LedgerBalanceLine],
+) -> Result<(), String> {
+    #[allow(clippy::type_complexity)]
+    let mut prepared: Vec<(
+        Uuid,
+        &'static str,
+        &'static str,
+        Uuid,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+    )> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let (statement, section) = match line.account_type.as_str() {
+            "asset" => ("balance_sheet", "assets"),
+            "liability" => ("balance_sheet", "liabilities"),
+            "equity" => ("balance_sheet", "equity"),
+            "revenue" => ("income_statement", "revenue"),
+            "expense" => ("income_statement", "expenses"),
+            _ => continue,
+        };
+        prepared.push((
+            report_id,
+            statement,
+            section,
+            line.account_id,
+            line.account_code.clone(),
+            line.account_name.clone(),
+            line.account_type.clone(),
+            line.account_role.clone(),
+            line.debit_cents,
+            line.credit_cents,
+            line.balance_debit_positive,
+        ));
+    }
+
+    if prepared.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in prepared.chunks(ANNUAL_REPORT_LINE_CHUNK) {
+        let report_ids: Vec<Uuid> = chunk.iter().map(|row| row.0).collect();
+        let statements: Vec<&str> = chunk.iter().map(|row| row.1).collect();
+        let sections: Vec<&str> = chunk.iter().map(|row| row.2).collect();
+        let account_ids: Vec<Uuid> = chunk.iter().map(|row| row.3).collect();
+        let account_codes: Vec<&str> = chunk.iter().map(|row| row.4.as_str()).collect();
+        let account_names: Vec<&str> = chunk.iter().map(|row| row.5.as_str()).collect();
+        let account_types: Vec<&str> = chunk.iter().map(|row| row.6.as_str()).collect();
+        let account_roles: Vec<Option<&str>> = chunk.iter().map(|row| row.7.as_deref()).collect();
+        let debits: Vec<i64> = chunk.iter().map(|row| row.8).collect();
+        let credits: Vec<i64> = chunk.iter().map(|row| row.9).collect();
+        let balances: Vec<i64> = chunk.iter().map(|row| row.10).collect();
+
+        sqlx::query(
+            r#"
+            INSERT INTO annual_report_lines
+                (report_id, statement, section, account_id, account_code, account_name,
+                 account_type, account_role, debit_cents, credit_cents, balance_cents)
+            SELECT * FROM UNNEST(
+                $1::uuid[], $2::text[], $3::text[], $4::uuid[], $5::text[], $6::text[],
+                $7::text[], $8::text[], $9::bigint[], $10::bigint[], $11::bigint[])
+            "#,
+        )
+        .bind(&report_ids)
+        .bind(&statements)
+        .bind(&sections)
+        .bind(&account_ids)
+        .bind(&account_codes)
+        .bind(&account_names)
+        .bind(&account_types)
+        .bind(&account_roles)
+        .bind(&debits)
+        .bind(&credits)
+        .bind(&balances)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("failed to insert annual report lines: {error}"))?;
+    }
+
+    Ok(())
+}
+
 /// Generate (or regenerate, while draft) the annual report for a CLOSED
 /// fiscal period.
 ///
@@ -1583,43 +1684,7 @@ pub async fn generate_annual_report_configured(
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("failed to clear annual report lines: {error}"))?;
-    for line in &lines {
-        let section = match line.account_type.as_str() {
-            "asset" => "assets",
-            "liability" => "liabilities",
-            "equity" => "equity",
-            "revenue" => "revenue",
-            "expense" => "expenses",
-            _ => continue,
-        };
-        let statement = if matches!(line.account_type.as_str(), "revenue" | "expense") {
-            "income_statement"
-        } else {
-            "balance_sheet"
-        };
-        sqlx::query(
-            r#"
-            INSERT INTO annual_report_lines
-                (report_id, statement, section, account_id, account_code, account_name,
-                 account_type, account_role, debit_cents, credit_cents, balance_cents)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            "#,
-        )
-        .bind(report_id)
-        .bind(statement)
-        .bind(section)
-        .bind(line.account_id)
-        .bind(&line.account_code)
-        .bind(&line.account_name)
-        .bind(&line.account_type)
-        .bind(&line.account_role)
-        .bind(line.debit_cents)
-        .bind(line.credit_cents)
-        .bind(line.balance_debit_positive)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to insert annual report line: {error}"))?;
-    }
+    insert_annual_report_lines(&mut tx, report_id, &lines).await?;
 
     sqlx::query(
         "INSERT INTO annual_report_events (report_id, event, actor, detail) \
@@ -1997,6 +2062,82 @@ pub async fn get_annual_report(
 mod tests {
     use super::*;
 
+    /// Thread-local SQL capture for the chunked-write regression test.
+    #[derive(Clone, Default)]
+    struct SqlCapture {
+        statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SqlCapture {
+        fn statements(&self) -> Vec<String> {
+            self.statements.lock().unwrap().clone()
+        }
+
+        fn count_starting_with(&self, prefix: &str) -> usize {
+            self.statements()
+                .iter()
+                .filter(|statement| statement.trim_start().starts_with(prefix))
+                .count()
+        }
+    }
+
+    struct SqlCaptureLayer(SqlCapture);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SqlCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "sqlx::query" {
+                return;
+            }
+            struct SummaryVisitor<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for SummaryVisitor<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "summary" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut summary = None;
+            event.record(&mut SummaryVisitor(&mut summary));
+            if let Some(summary) = summary {
+                self.0.statements.lock().unwrap().push(summary);
+            }
+        }
+    }
+
+    fn capture_sql() -> (SqlCapture, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = SqlCapture::default();
+        let subscriber = tracing_subscriber::registry().with(SqlCaptureLayer(capture.clone()));
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn logging_pool(pool: &PgPool) -> PgPool {
+        use sqlx::ConnectOptions;
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .test_before_acquire(false)
+            .connect_with(
+                (*pool.connect_options())
+                    .clone()
+                    .log_statements(tracing::log::LevelFilter::Debug),
+            )
+            .await
+            .expect("logging pool over the canonical test database")
+    }
+
     fn d(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("test date")
     }
@@ -2183,5 +2324,140 @@ mod tests {
                 "migration 221 must carry {needed}"
             );
         }
+    }
+
+    /// P3: 501 derived report lines are written in ceil(501 / 500) = 2
+    /// statements (the legacy path issued one INSERT per line), and the
+    /// persisted line set is unchanged.
+    #[tokio::test]
+    async fn annual_report_lines_are_written_in_chunks() {
+        let Some(base) =
+            crate::test_support::canonical_pool("annual_report_batch", "annual_report_batch").await
+        else {
+            return;
+        };
+        let pool = logging_pool(&base).await;
+
+        let registry = format!("R{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let entity_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO legal_entities (legal_name, registry_code, country_code) \
+             VALUES ('Chunk OÜ', $1, 'EE') RETURNING id",
+        )
+        .bind(&registry)
+        .fetch_one(&pool)
+        .await
+        .expect("insert legal entity");
+        let period_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO fiscal_periods \
+             (legal_entity_id, period_type, label, start_date, end_date) \
+             VALUES ($1, 'year', 'FY 2025', $2, $3) RETURNING id",
+        )
+        .bind(entity_id)
+        .bind(d(2025, 1, 1))
+        .bind(d(2025, 12, 31))
+        .fetch_one(&pool)
+        .await
+        .expect("insert fiscal period");
+        let entry_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO journal_entries \
+             (legal_entity_id, fiscal_period_id, entry_date, entry_type, memo, \
+              source_hash, idempotency_key) \
+             VALUES ($1, $2, $3, 'standard', 'chunk fixture', $4, $5) RETURNING id",
+        )
+        .bind(entity_id)
+        .bind(period_id)
+        .bind(d(2025, 12, 31))
+        .bind(hex::encode(Sha256::digest(b"chunk fixture")))
+        .bind(format!("chunk-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("insert journal entry");
+
+        const ASSET_ACCOUNTS: i64 = 500;
+        sqlx::query(
+            "INSERT INTO chart_of_accounts \
+             (legal_entity_id, code, name, account_type, normal_balance) \
+             SELECT $1, lpad(g::text, 4, '0'), 'Asset ' || g, 'asset', 'debit' \
+             FROM generate_series(1, $2) AS g",
+        )
+        .bind(entity_id)
+        .bind(ASSET_ACCOUNTS as i32)
+        .execute(&pool)
+        .await
+        .expect("seed asset accounts");
+        sqlx::query(
+            "INSERT INTO journal_lines (entry_id, line_no, account_id, debit_cents) \
+             SELECT $1, row_number() OVER (ORDER BY code), id, 100 \
+             FROM chart_of_accounts WHERE legal_entity_id = $2 AND account_type = 'asset'",
+        )
+        .bind(entry_id)
+        .bind(entity_id)
+        .execute(&pool)
+        .await
+        .expect("post asset debits");
+        let equity_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO chart_of_accounts \
+             (legal_entity_id, code, name, account_type, normal_balance, account_role) \
+             VALUES ($1, '3000', 'Equity', 'equity', 'credit', 'retained_earnings') \
+             RETURNING id",
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert equity account");
+        sqlx::query(
+            "INSERT INTO journal_lines (entry_id, line_no, account_id, debit_cents, credit_cents) \
+             VALUES ($1, $2, $3, 0, $4)",
+        )
+        .bind(entry_id)
+        .bind(ASSET_ACCOUNTS as i32 + 1)
+        .bind(equity_id)
+        .bind(ASSET_ACCOUNTS * 100)
+        .execute(&pool)
+        .await
+        .expect("post balancing equity credit");
+        sqlx::query(
+            "UPDATE journal_entries SET posted_at = NOW(), posted_by = 'unit-test' WHERE id = $1",
+        )
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .expect("post journal entry");
+        // The statutory report derives from a CLOSED period; post first,
+        // then close (the journal guard refuses postings into a closed one).
+        sqlx::query("UPDATE fiscal_periods SET status = 'closed' WHERE id = $1")
+            .bind(period_id)
+            .execute(&pool)
+            .await
+            .expect("close fiscal period");
+
+        let (capture, guard) = capture_sql();
+        let report = generate_annual_report(&pool, entity_id, period_id, "unit-test")
+            .await
+            .expect("generate annual report");
+        drop(guard);
+
+        // 500 asset lines + 1 equity line, chunked at 500 rows per statement.
+        assert_eq!(
+            capture.count_starting_with("INSERT INTO annual_report_lines"),
+            2,
+            "501 lines must be two chunked INSERTs: {:?}",
+            capture.statements()
+        );
+        let persisted: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT statement, COUNT(*)::bigint FROM annual_report_lines \
+             WHERE report_id = $1 GROUP BY statement ORDER BY statement",
+        )
+        .bind(report.id)
+        .fetch_all(&pool)
+        .await
+        .expect("persisted line counts");
+        assert_eq!(
+            persisted,
+            vec![("balance_sheet".to_string(), ASSET_ACCOUNTS + 1)],
+            "every derived line is persisted on the same statement"
+        );
+
+        pool.close().await;
     }
 }

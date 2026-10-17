@@ -6,7 +6,7 @@
 use chrono::Utc;
 use sqlx::PgPool;
 
-use billing_entitlements::EntitlementSnapshot;
+use billing_entitlements::{EntitlementSnapshot, FeatureKey};
 
 use crate::types::{Plan, PlanFeatures, QuotaLimit, RateLimitTier, SupportLevel};
 
@@ -1038,6 +1038,31 @@ pub async fn get_entitlement_snapshot(
     };
 
     let mut snapshot = entitlement_snapshot_for_features(&row.tenant_id, &row.plan_name, &features);
+
+    // Contract product lines are purchase records for entitlements that no
+    // self-serve plan seed grants: the Compliance line includes EU-only
+    // routing, the EU-only add-on line grants it directly, and the Inbox
+    // Placement Monitoring line grants placement tests. They are applied
+    // BEFORE tenant overrides so an explicit admin override remains the
+    // final authority while a contract grants without a plan change.
+    for line in crate::product_lines::active_product_lines(pool, tenant_id).await? {
+        match line.as_str() {
+            crate::product_lines::COMPLIANCE_PRODUCT_LINE
+            | crate::product_lines::EU_ONLY_ROUTING_PRODUCT_LINE => {
+                snapshot.apply_override(
+                    FeatureKey::EuOnlyRouting.as_str(),
+                    &serde_json::Value::Bool(true),
+                );
+            }
+            crate::product_lines::PLACEMENT_PRODUCT_LINE => {
+                snapshot.apply_override(
+                    FeatureKey::InboxPlacement.as_str(),
+                    &serde_json::Value::Bool(true),
+                );
+            }
+            _ => {}
+        }
+    }
 
     // Tenant overrides are the runtime escape hatch (admin feature flags).
     // Latest row per key, JSON booleans only; unknown/non-runtime keys are

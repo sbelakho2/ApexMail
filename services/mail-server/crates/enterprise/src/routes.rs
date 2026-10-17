@@ -1230,6 +1230,28 @@ async fn require_plan_feature(
     Ok(snapshot)
 }
 
+/// SSO is a paid entitlement (`FeatureKey::Sso`). Gating only the password
+/// login path let a Pro/Free tenant configure and use enterprise SSO, because
+/// the enterprise routes never checked the flag (use-all audit, P0). Every
+/// route that CONFIGURES or MINTS an SSO session must pass this gate.
+async fn require_sso_entitlement(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    require_plan_feature(state, tenant_id, FeatureKey::Sso)
+        .await
+        .map(|_| ())
+}
+
+/// The tenant that owns an SSO domain, when a configuration exists.
+/// `None` keeps the callers' existing "not configured" refusal path (404/401).
+async fn sso_domain_tenant(state: &AppState, domain: &str) -> Option<String> {
+    match state.sso.get_config_by_domain(domain).await {
+        Ok(Some(config)) => Some(config.tenant_id),
+        Ok(None) | Err(_) => None,
+    }
+}
+
 /// Gate a fetched resource on its owning tenant's plan capability, mirroring
 /// [`guard_resource_tenant`]'s lookup shape (`None` = admit).
 async fn guard_plan_feature<T: TenantOwned + serde::Serialize>(
@@ -1911,6 +1933,11 @@ async fn sso_configure(
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
+    // SSO is a paid entitlement: a tenant without `sso_enabled` must not be
+    // able to configure federation at all.
+    if let Err(e) = require_sso_entitlement(&state, &body.tenant_id).await {
+        return e;
+    }
     // Configure-time validation of the tenant-supplied federation inputs:
     // without it, an issuer the egress guard will refuse (plain-HTTP and
     // not allowlisted) is stored happily and then 500s on EVERY unauthenticated
@@ -2082,6 +2109,11 @@ async fn sso_saml_login(
         )
             .into_response();
     }
+    if let Some(tenant_id) = sso_domain_tenant(&state, &domain).await {
+        if let Err(e) = require_sso_entitlement(&state, &tenant_id).await {
+            return e.into_response();
+        }
+    }
     match state
         .sso
         .initiate_saml_login(&domain, query.return_to.as_deref())
@@ -2124,6 +2156,11 @@ async fn sso_oidc_login(
             "Too many SSO login initiations; retry later",
         )
             .into_response();
+    }
+    if let Some(tenant_id) = sso_domain_tenant(&state, &domain).await {
+        if let Err(e) = require_sso_entitlement(&state, &tenant_id).await {
+            return e.into_response();
+        }
     }
     match state
         .sso
@@ -2203,6 +2240,14 @@ async fn sso_saml_acs_inner(state: S, path_domain: Option<String>, body: SamlAcs
         )
         .into_response();
     };
+    // The ACS mints the session: it must refuse before touching the assertion
+    // when the tenant's plan no longer sells SSO (a configuration can outlive
+    // a downgrade).
+    if let Some(tenant_id) = sso_domain_tenant(&state, &domain).await {
+        if let Err(e) = require_sso_entitlement(&state, &tenant_id).await {
+            return e.into_response();
+        }
+    }
     let saml_xml = match decode_saml_response(&body.saml_response) {
         Ok(saml_xml) => saml_xml,
         Err(reason) => return err_json(StatusCode::BAD_REQUEST, &reason).into_response(),
@@ -2224,7 +2269,6 @@ async fn sso_saml_acs_inner(state: S, path_domain: Option<String>, body: SamlAcs
         }
         Err(error) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
     };
-
     // The assertion is trusted here: NameID identifies the user, attributes
     // carry the profile. Audit F2: the asserted email must pass the SAME
     // assurance the OIDC callback enforces (`validate_asserted_email` —
@@ -2389,6 +2433,13 @@ async fn sso_oidc_callback_inner(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    if let Some(domain) = path_domain.as_deref() {
+        if let Some(tenant_id) = sso_domain_tenant(&state, domain).await {
+            if let Err(e) = require_sso_entitlement(&state, &tenant_id).await {
+                return e.into_response();
+            }
+        }
+    }
     match state
         .sso
         .complete_oidc_callback(path_domain.as_deref(), &code, &oidc_state, None)
@@ -5453,7 +5504,7 @@ mod tests {
     async fn seed_sso_flow_tenant(state: &AppState, tenant: &str) {
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
-             VALUES ($1, $2, $3, 'pro', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             VALUES ($1, $2, $3, 'scale', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(tenant)
@@ -5493,6 +5544,9 @@ mod tests {
         config.jwt_issuer = None;
         let recorder = PrometheusBuilder::new().build_recorder();
         let state = Arc::new(AppState::new(pool, config, recorder.handle()));
+        // The SSO flow tests run on the real Business plan (the seed that
+        // sells `sso_enabled`); entitlement resolution reads the plans row.
+        seed_canonical_business_plan(&state).await;
         (router(state.clone()), state)
     }
 

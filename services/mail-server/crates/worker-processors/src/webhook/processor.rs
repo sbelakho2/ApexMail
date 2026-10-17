@@ -27,6 +27,11 @@ use crate::common::{ProcessorError, ProcessorResult, WebhookConfig};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Successes per flush statement. Each chunk is one data-modifying CTE
+/// (fenced DELETE + deliveries INSERT); the cap keeps one statement's bind
+/// arrays bounded for a large shutdown flush.
+const SUCCESS_FLUSH_CHUNK: usize = 500;
+
 // ── Webhook secret at rest (SM3/SM10 addendum: decrypt-or-migrate) ──────
 
 /// The AAD binding a webhook secret envelope to its row — byte-for-byte the
@@ -1045,6 +1050,12 @@ impl WebhookProcessor {
     }
 
     /// Flush pending successes in a batch transaction.
+    ///
+    /// P2: each chunk is ONE statement — a data-modifying CTE deletes the
+    /// claimed queue rows by `(id, claim_token)` and inserts the matching
+    /// delivery rows. The fence is unchanged (a row is consumed and recorded
+    /// only when this worker owns the claim); chunking only bounds the bind
+    /// array. The legacy path issued a DELETE + INSERT per success.
     async fn flush_pending_successes(&self) {
         let successes: Vec<PendingSuccess> = {
             let mut pending = self
@@ -1071,55 +1082,114 @@ impl WebhookProcessor {
             }
         };
 
-        for success in &successes {
-            let job = &success.job;
-            let result = &success.result;
+        for chunk in successes.chunks(SUCCESS_FLUSH_CHUNK) {
+            // The legacy loop processed one pending entry at a time, so a
+            // duplicated entry was consumed by the first DELETE and ignored
+            // by the second. Deduplicate on (id, claim_token) so the CTE
+            // cannot join one claimed row to two input rows.
+            let mut seen: std::collections::HashSet<(&str, Option<&str>)> =
+                std::collections::HashSet::new();
+            let chunk: Vec<&PendingSuccess> = chunk
+                .iter()
+                .filter(|success| {
+                    seen.insert((success.job.id.as_str(), success.job.claim_token.as_deref()))
+                })
+                .collect();
+            let ids: Vec<&str> = chunk
+                .iter()
+                .map(|success| success.job.id.as_str())
+                .collect();
+            let claim_tokens: Vec<Option<&str>> = chunk
+                .iter()
+                .map(|success| success.job.claim_token.as_deref())
+                .collect();
+            let status_codes: Vec<Option<i32>> = chunk
+                .iter()
+                .map(|success| success.result.status_code.map(|code| code as i32))
+                .collect();
+            let response_times: Vec<i64> = chunk
+                .iter()
+                .map(|success| success.result.response_time_ms as i64)
+                .collect();
+            let response_bodies: Vec<Option<&str>> = chunk
+                .iter()
+                .map(|success| success.result.response_body.as_deref())
+                .collect();
 
-            // Delete from queue FIRST — F10: fenced on this claim's owner
-            // token (a success flush can outlive its visibility lease). Only
-            // the owner of the row may append the delivery record: inserting
-            // before the fenced delete let a stale worker write a duplicate
-            // `webhook_deliveries` row for a job the new owner still owns.
-            let deleted = match sqlx::query(
-                "DELETE FROM webhook_queue WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)",
-            )
-            .bind(&job.id)
-            .bind(&job.claim_token)
-            .execute(&mut *tx)
-            .await
+            // A savepoint keeps a failed chunk from poisoning the whole
+            // flush transaction: earlier chunks still commit, exactly as the
+            // legacy per-row error handling continued past a failed row.
+            if let Err(e) = sqlx::query("SAVEPOINT webhook_success_flush")
+                .execute(&mut *tx)
+                .await
             {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(error = %e, job_id = %job.id, "Failed to delete from queue");
-                    continue;
-                }
-            };
-
-            if deleted.rows_affected() == 0 {
-                warn!(job_id = %job.id, "success flush fenced out — lease lost; not recorded");
-                continue;
+                error!(error = %e, "Failed to open success-flush savepoint");
+                break;
             }
 
-            // Insert delivery record
-            if let Err(e) = sqlx::query(
+            let flushed = sqlx::query(
                 r#"
-                INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, event_type, payload, status_code, response_time_ms, response_body, attempt, delivered_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                WITH claimed AS (
+                    DELETE FROM webhook_queue q
+                    USING UNNEST($1::text[], $2::text[]) AS c(id, claim_token)
+                    WHERE q.id = c.id
+                      AND q.claim_token IS NOT DISTINCT FROM c.claim_token
+                    RETURNING q.id, q.claim_token, q.webhook_id, q.tenant_id, q.event_type, q.payload, q.attempt
+                ), deliveries AS (
+                    SELECT 'dlv_' || gen_random_uuid()::text AS id,
+                           claimed.webhook_id, claimed.tenant_id, claimed.event_type,
+                           claimed.payload, u.status_code, u.response_time_ms,
+                           u.response_body, claimed.attempt
+                      FROM claimed
+                      JOIN UNNEST($1::text[], $2::text[], $3::int[], $4::bigint[], $5::text[])
+                           AS u(id, claim_token, status_code, response_time_ms, response_body)
+                        ON u.id = claimed.id
+                       AND u.claim_token IS NOT DISTINCT FROM claimed.claim_token
+                )
+                INSERT INTO webhook_deliveries
+                    (id, webhook_id, tenant_id, event_type, payload, status_code,
+                     response_time_ms, response_body, attempt, delivered_at)
+                SELECT id, webhook_id, tenant_id, event_type, payload, status_code,
+                       response_time_ms, response_body, attempt, NOW()
+                  FROM deliveries
                 "#,
             )
-            .bind(format!("dlv_{}", uuid::Uuid::new_v4()))
-            .bind(&job.webhook_id)
-            .bind(&job.tenant_id)
-            .bind(&job.event_type)
-            .bind(&job.payload)
-            .bind(result.status_code.map(|c| c as i32))
-            .bind(result.response_time_ms as i64)
-            .bind(&result.response_body)
-            .bind(job.attempt)
+            .bind(&ids)
+            .bind(&claim_tokens)
+            .bind(&status_codes)
+            .bind(&response_times)
+            .bind(&response_bodies)
             .execute(&mut *tx)
-            .await
-            {
-                error!(error = %e, job_id = %job.id, "Failed to insert delivery record");
+            .await;
+
+            match flushed {
+                Ok(result) => {
+                    if (result.rows_affected() as usize) < chunk.len() {
+                        warn!(
+                            expected = chunk.len(),
+                            recorded = result.rows_affected(),
+                            "success flush fenced out some rows — lease lost; not recorded"
+                        );
+                    }
+                    if let Err(e) = sqlx::query("RELEASE SAVEPOINT webhook_success_flush")
+                        .execute(&mut *tx)
+                        .await
+                    {
+                        error!(error = %e, "Failed to release success-flush savepoint");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, successes = chunk.len(), "Failed to flush success chunk");
+                    if let Err(rollback_error) =
+                        sqlx::query("ROLLBACK TO SAVEPOINT webhook_success_flush")
+                            .execute(&mut *tx)
+                            .await
+                    {
+                        error!(error = %rollback_error, "Failed to roll back success-flush chunk");
+                        break;
+                    }
+                }
             }
         }
 
@@ -1177,6 +1247,52 @@ mod adversarial_tests {
     pub(super) async fn test_pool(test_name: &str) -> Option<PgPool> {
         crate::test_support::install_test_tracing();
         crate::test_support::canonical_pool(test_name, test_name).await
+    }
+
+    /// Statement-level counters for the two DML shapes of the success flush:
+    /// one `webhook_queue` DELETE and one `webhook_deliveries` INSERT per
+    /// flushed chunk (the legacy path did both once per success).
+    async fn install_flush_statement_counters(pool: &PgPool) {
+        sqlx::raw_sql(
+            "DROP TABLE IF EXISTS wh_flush_delete_counter, wh_flush_insert_counter;
+             CREATE TABLE wh_flush_delete_counter (id int PRIMARY KEY, statements bigint NOT NULL DEFAULT 0);
+             CREATE TABLE wh_flush_insert_counter (id int PRIMARY KEY, statements bigint NOT NULL DEFAULT 0);
+             INSERT INTO wh_flush_delete_counter (id, statements) VALUES (1, 0);
+             INSERT INTO wh_flush_insert_counter (id, statements) VALUES (1, 0);
+             CREATE OR REPLACE FUNCTION wh_flush_count_delete() RETURNS trigger AS $$
+             BEGIN
+               UPDATE wh_flush_delete_counter SET statements = statements + 1 WHERE id = 1;
+               RETURN NULL;
+             END $$ LANGUAGE plpgsql;
+             CREATE OR REPLACE FUNCTION wh_flush_count_insert() RETURNS trigger AS $$
+             BEGIN
+               UPDATE wh_flush_insert_counter SET statements = statements + 1 WHERE id = 1;
+               RETURN NULL;
+             END $$ LANGUAGE plpgsql;
+             DROP TRIGGER IF EXISTS wh_flush_delete_trigger ON webhook_queue;
+             DROP TRIGGER IF EXISTS wh_flush_insert_trigger ON webhook_deliveries;
+             CREATE TRIGGER wh_flush_delete_trigger AFTER DELETE ON webhook_queue
+               FOR EACH STATEMENT EXECUTE FUNCTION wh_flush_count_delete();
+             CREATE TRIGGER wh_flush_insert_trigger AFTER INSERT ON webhook_deliveries
+               FOR EACH STATEMENT EXECUTE FUNCTION wh_flush_count_insert();",
+        )
+        .execute(pool)
+        .await
+        .expect("install flush statement counters");
+    }
+
+    async fn flush_statement_counts(pool: &PgPool) -> (i64, i64) {
+        let deletes: i64 =
+            sqlx::query_scalar("SELECT statements FROM wh_flush_delete_counter WHERE id = 1")
+                .fetch_one(pool)
+                .await
+                .expect("delete counter");
+        let inserts: i64 =
+            sqlx::query_scalar("SELECT statements FROM wh_flush_insert_counter WHERE id = 1")
+                .fetch_one(pool)
+                .await
+                .expect("insert counter");
+        (deletes, inserts)
     }
 
     fn test_config() -> WebhookConfig {
@@ -2852,6 +2968,100 @@ mod adversarial_tests {
 
         // Nothing pending → the flush is a no-op.
         proc.flush_pending_successes().await;
+        Ok(())
+    }
+
+    /// P2: ten successes flush with ONE fenced DELETE and ONE deliveries
+    /// INSERT (two statements total) and the recorded delivery rows are
+    /// byte-for-byte the legacy shape.
+    #[tokio::test]
+    async fn flush_pending_successes_is_bounded_and_shape_preserving(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_flush_batch").await else { return Ok(()) };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
+
+        let mut rows = Vec::new();
+        let mut expected = std::collections::HashMap::new();
+        for index in 0..10u16 {
+            let token = format!("tok-{index}");
+            let row = insert_queue_row(
+                &pool,
+                &webhook_id,
+                &tenant,
+                json!({"index": index}),
+                1,
+                &token,
+                ClaimOffsets {
+                    scheduled_secs: None,
+                    locked_secs: None,
+                },
+            )
+            .await;
+            let mut job = job_for(&webhook_id, &tenant, "https://example.test/hook");
+            job.id = row.clone();
+            job.claim_token = Some(token);
+            job.payload = json!({"index": index});
+            let body = (index % 2 == 0).then(|| format!("response-{index}"));
+            expected.insert(
+                row.clone(),
+                (i32::from(200 + index), i64::from(index) * 10, body.clone()),
+            );
+            rows.push(PendingSuccess {
+                job,
+                result: WebhookDeliveryResult::success(200 + index, u64::from(index) * 10, body),
+            });
+        }
+
+        install_flush_statement_counters(&pool).await;
+        {
+            let mut pending = proc.pending_successes.lock().unwrap();
+            pending.extend(rows);
+        }
+        proc.flush_pending_successes().await;
+
+        let (deletes, inserts) = flush_statement_counts(&pool).await;
+        assert_eq!(deletes, 1, "10 successes delete in one statement");
+        assert_eq!(
+            inserts, 1,
+            "10 successes insert deliveries in one statement"
+        );
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webhook_queue WHERE webhook_id = $1")
+                .bind(&webhook_id)
+                .fetch_one(&pool)
+                .await
+                .expect("remaining queue rows");
+        assert_eq!(remaining, 0, "every claimed queue row is consumed");
+
+        type DeliveryRow = (String, Option<i32>, Option<i64>, Option<String>, i32);
+        let delivered: Vec<DeliveryRow> = sqlx::query_as(
+            "SELECT id, status_code, response_time_ms, response_body, attempt
+                 FROM webhook_deliveries WHERE webhook_id = $1",
+        )
+        .bind(&webhook_id)
+        .fetch_all(&pool)
+        .await
+        .expect("delivery rows");
+        assert_eq!(delivered.len(), 10);
+        for (delivery_id, status, time, body, attempt) in delivered {
+            assert!(
+                delivery_id.starts_with("dlv_"),
+                "legacy id shape: {delivery_id}"
+            );
+            assert_eq!(attempt, 1);
+            let matching = expected
+                .values()
+                .find(|(expected_status, expected_time, _)| {
+                    *expected_time == time.unwrap_or(-1) && *expected_status == status.unwrap_or(-1)
+                })
+                .expect("delivery maps back to one pending success");
+            assert_eq!(body, matching.2);
+        }
+
         Ok(())
     }
 

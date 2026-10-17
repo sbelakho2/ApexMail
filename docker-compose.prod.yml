@@ -328,6 +328,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-16}
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
@@ -337,6 +338,15 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       CLICKHOUSE_INSERT_TIMEOUT_SECONDS: ${CLICKHOUSE_INSERT_TIMEOUT_SECONDS:-30}
+      CLICKHOUSE_MAX_CONNECTIONS: ${CLICKHOUSE_MAX_CONNECTIONS:-20}
+      # ── Public tracking host (pixel/click link rewriting) ────────────────
+      # The worker and this service share TRACKING_PUBLIC_HOST (with
+      # TRACKING_BASE_URL as the legacy alias). The nginx edge serves the
+      # tracking vhost ONLY for track.apexmail.ee and answers 421 for any
+      # other Host, so the old t.apexmail.ee fallback produced links nobody
+      # could follow. Kept in lockstep with the worker + api-server values.
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production (https://track.apexmail.ee)}
+      TRACKING_PUBLIC_HOST: ${TRACKING_PUBLIC_HOST:-${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production (https://track.apexmail.ee)}}
     secrets:
       - postgres_password
       - clickhouse_password
@@ -369,7 +379,20 @@ services:
     restart: unless-stopped
     # Use entrypoint wrapper to bridge _FILE env vars to native env vars
     # "api-server" is passed explicitly so the wrapper doesn't consume CMD args (--listen) as binary name
-    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "api-server"]
+    # MFA/webhook secrets are encrypted at rest with MFA_SECRET_ENCRYPTION_KEY
+    # (crates/apexmail-lib/src/secret_at_rest.rs refuses to write plaintext
+    # under ENVIRONMENT=production). The shared entrypoint wrapper has no
+    # mapping for this key, so load-secret-env.sh bridges the Docker secret to
+    # the native env var before the wrapper runs.
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/load-secret-env.sh
+      - MFA_SECRET_ENCRYPTION_KEY
+      - MFA_SECRET_ENCRYPTION_KEY_FILE
+      - --
+      - /bin/sh
+      - /opt/apexmail/entrypoint-wrapper.sh
+      - api-server
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
@@ -405,6 +428,31 @@ services:
       # from the SAME value as TRUSTED_PROXIES so the two can never drift
       # (the compose networks are pinned to these exact subnets below).
       DDOS_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.18.0.0/16,172.20.0.0/16,172.21.0.0/16}
+      # ── Public tracking host (customer CNAME target + worker rewriting) ──
+      # crates/api-server/src/routes/tracking_domains.rs reads this to answer
+      # the CNAME target; the worker rewrites links with the SAME host. The
+      # nginx edge only serves track.apexmail.ee, so this must never fall back
+      # to the old t.apexmail.ee (421 Misdirected Request).
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production (https://track.apexmail.ee)}
+      TRACKING_PUBLIC_HOST: ${TRACKING_PUBLIC_HOST:-${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production (https://track.apexmail.ee)}}
+      # ── SES SNS event callbacks (delivered/bounce/complaint) ─────────────
+      # POST /v1/ses/notifications rejects EVERY request with 503 while this
+      # allow-list is empty (crates/api-server/src/routes/ses_notifications.rs),
+      # so message status, auto-suppression and tenant webhooks silently die.
+      # Comma-separated topic ARNs from the AWS SNS setup.
+      SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:?SNS_ALLOWED_TOPIC_ARNS is required in production (comma-separated SNS topic ARNs)}
+      THREAT_INTEL_FEED_URLS: ${THREAT_INTEL_FEED_URLS:-}
+      THREAT_INTEL_FEED_TTL_SECS: ${THREAT_INTEL_FEED_TTL_SECS:-86400}
+      THREAT_INTEL_FEED_REFRESH_SECS: ${THREAT_INTEL_FEED_REFRESH_SECS:-3600}
+      # ── Dedicated IP provisioning (Hetzner Cloud floating IPs) ───────────
+      # crates/api-server/src/ip_provider.rs returns None when the token is
+      # unset, which turns the sold dedicated-IP add-on into a 503. Left
+      # optional in the baseline (an empty token keeps the integration
+      # disabled) but forwarded so the documented .env switch takes effect.
+      # The token is a provider API credential: keep the .env file 0600.
+      HETZNER_API_TOKEN: ${HETZNER_API_TOKEN:-}
+      HETZNER_DEFAULT_LOCATION: ${HETZNER_DEFAULT_LOCATION:-fsn1}
+      HETZNER_MTA_SERVER_ID: ${HETZNER_MTA_SERVER_ID:-}
       # HA data-plane fencing (audit SM10 F4): when TRUE, mutating requests are
       # refused with 503 while this node is fenced via the ha service
       # (Redis key ha:fenced:<node>). Default false = zero fence traffic.
@@ -420,6 +468,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-16}
       API_KEY_HASH_SECRET_FILE: /run/secrets/api_key_hash_secret
       # B3 public receipt verification: the PUBLIC half of the routing-receipt
       # Ed25519 key (base64 or hex, NOT a secret). Served at
@@ -447,6 +496,12 @@ services:
       CP_SESSION_SECRET_FILE: /run/secrets/cp_session_secret
       IMPERSONATION_SECRET_FILE: /run/secrets/impersonation_secret
       CSRF_SECRET_FILE: /run/secrets/csrf_secret
+      # At-rest key for stored MFA TOTP seeds and webhook signing secrets.
+      # Blanked so the load-secret-env.sh bridge above owns the value; in
+      # production secret_at_rest REFUSES plaintext without it. 32 bytes as
+      # exactly 64 hex characters.
+      MFA_SECRET_ENCRYPTION_KEY: ""
+      MFA_SECRET_ENCRYPTION_KEY_FILE: /run/secrets/mfa_secret_encryption_key
       DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE: /run/secrets/dkim_private_key_encryption_key
       # F9 (audit): caller side of the per-workload credential — the
       # analytics PDF export presents PDF_RENDERER_AUTH_TOKEN (exactly what
@@ -544,6 +599,7 @@ services:
       - aws_access_key_id
       - aws_secret_access_key
       - adyen_api_key
+      - mfa_secret_encryption_key
 
   # ===========================================================================
   # SALES AUTOPILOT (internal sales engine: CRM, campaigns, inbox, scheduler)
@@ -777,6 +833,16 @@ services:
       AI_MODEL_API_KEY: ""
       AI_MODEL_API_KEY_FILE: /run/secrets/ai_model_api_key
       AI_CHAT_RETENTION_DAYS: ${AI_CHAT_RETENTION_DAYS:-90}
+      # ── Draft-only mailbot (ai-service email_agent.rs) ────────────────────
+      # Both flags were documented but never forwarded. Explicit false
+      # defaults: generation and the mailbot are opt-in capabilities, and a
+      # production upgrade must not silently start an AI worker. When the
+      # agent IS enabled, AI_EMAIL_REQUIRE_APPROVAL MUST stay true — the
+      # agent refuses to start otherwise (direct sending is unsupported).
+      AI_EMAIL_AGENT_ENABLED: ${AI_EMAIL_AGENT_ENABLED:-false}
+      AI_EMAIL_REQUIRE_APPROVAL: ${AI_EMAIL_REQUIRE_APPROVAL:-false}
+      AI_REPLY_FROM: ${AI_REPLY_FROM:-ai@apexmail.ee}
+      AI_EMAIL_POLL_INTERVAL_SECS: ${AI_EMAIL_POLL_INTERVAL_SECS:-30}
       DATABASE_URL: ""
       DB_HOST: postgres
       DB_PORT: 5432
@@ -863,6 +929,9 @@ services:
       GDPR_EXPORT_BASE_URL: ${GDPR_EXPORT_BASE_URL:-}
       GDPR_VERIFY_BASE_URL: ${GDPR_VERIFY_BASE_URL:-}
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
+      # Mailboxes archive + journaling legal copy (mail_journal). 0 = retain
+      # indefinitely (the default: the journal is the sold legal record).
+      MAIL_JOURNAL_RETENTION_DAYS: ${MAIL_JOURNAL_RETENTION_DAYS:-0}
       # ClickHouse GDPR erasure is OFF unless explicitly enabled here.
       GDPR_CLICKHOUSE_ERASURE_ENABLED: ${GDPR_CLICKHOUSE_ERASURE_ENABLED:-false}
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -916,7 +985,25 @@ services:
   ha:
     image: ghcr.io/sbelakho2/apexmail/ha:latest
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "ha-server"]
+    # crates/ha's in-process backup service requires BACKUP_ENCRYPTION_KEY to
+    # be EXACTLY 32 bytes (backup.rs ENCRYPTION_KEY_SIZE) while the shared
+    # backup secret is an arbitrary >=32-byte passphrase used by the sidecar
+    # scripts. Derive a stable 32-byte key from the SAME secret file so the
+    # one secret drives both consumers and HA never crash-loops on a longer
+    # passphrase.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        _backup_key="$$(tr -d '\r\n' < /run/secrets/backup_encryption_key | head -c 32)"
+        if [ "$${#_backup_key}" -ne 32 ]; then
+          echo "[ha] backup_encryption_key secret must contain at least 32 bytes" >&2
+          exit 78
+        fi
+        export BACKUP_ENCRYPTION_KEY="$$_backup_key"
+        unset _backup_key
+        exec /bin/sh /opt/apexmail/entrypoint-wrapper.sh ha-server
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     depends_on:
@@ -957,11 +1044,15 @@ services:
       FAILOVER_ENABLED: ${FAILOVER_ENABLED:-true}
       DB_REPLICA_HOSTS: ${DB_REPLICA_HOSTS:-}
       APEXMAIL_HA_FENCING: ${APEXMAIL_HA_FENCING:-false}
+      # BACKUP_ENCRYPTION_KEY is exported by the entrypoint above (32-byte
+      # derivation from the backup_encryption_key secret) before the wrapper
+      # starts ha-server; it is deliberately not a plain env entry here.
     secrets:
       - postgres_password
       - redis_password
       - ha_internal_api_key
       - ha_admin_api_key
+      - backup_encryption_key
     ports: !override []  # internal-only; dev compose publishes 127.0.0.1:4300
     healthcheck:
       # Real health endpoint (GET /health is unauthenticated in the router).
@@ -1204,6 +1295,7 @@ services:
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
       DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-50}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       # gRPC endpoint of the mailstore service (inbound mailbox delivery)
@@ -1232,6 +1324,11 @@ services:
       MTA_ATTACHMENT_SCAN_ENABLED: "${MTA_ATTACHMENT_SCAN_ENABLED:?production must define the attachment-scan policy (managed baseline — true)}"
       MTA_IDS_ENABLED: "${MTA_IDS_ENABLED:?production must define the IDS policy (managed baseline — true)}"
       MTA_ATTACHMENT_SCAN_MODE: "${MTA_ATTACHMENT_SCAN_MODE:?production must define the attachment-scan action (flag | strip | reject — no default)}"
+      # Enforcement opt-ins (separate from inspection above). Explicit false
+      # defaults: tag-only spam and detection-only IDS are the managed
+      # baseline until the operator tunes them.
+      MTA_SPAM_REJECT_ENABLED: ${MTA_SPAM_REJECT_ENABLED:-false}
+      MTA_IDS_REFUSE: ${MTA_IDS_REFUSE:-false}
     secrets:
       - postgres_password
       - redis_password
@@ -1386,7 +1483,21 @@ services:
   mailstore:
     image: ghcr.io/sbelakho2/apexmail/mailstore:latest
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "mailstore"]
+    # Encryption at rest (mailstore-core/src/main.rs) enables the AES-256-GCM
+    # branch ONLY when ENCRYPTION_KEY_FILE names a readable regular file with
+    # mode 0600 and >= 32 bytes. Docker secret mounts are 0444, so the secret
+    # is copied to a 0600 temp file owned by the container user before the
+    # wrapper starts the binary; the plaintext copy lives only in tmpfs/rootfs
+    # for the process lifetime.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        umask 077
+        cp /run/secrets/mailstore_encryption_key /tmp/mailstore_encryption_key
+        chmod 600 /tmp/mailstore_encryption_key
+        exec /bin/sh /opt/apexmail/entrypoint-wrapper.sh mailstore
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
@@ -1399,6 +1510,10 @@ services:
       DB_NAME: ${POSTGRES_DB:-apexmail}
       DB_USER: ${POSTGRES_USER:-apexmail}
       DB_PASSWORD_FILE: /run/secrets/postgres_password
+      # Message bodies are encrypted at rest with this key (>= 32 bytes,
+      # 0600 — the entrypoint above materializes that file). This is the
+      # encryption-at-rest capability customers buy; keep it mounted.
+      ENCRYPTION_KEY_FILE: /tmp/mailstore_encryption_key
       # Bind all interfaces inside the container; the service is only reachable
       # on the internal apexmail_data_internal network. A shared bearer token is
       # mandatory for this non-loopback bind and supplied via Docker secret.
@@ -1407,6 +1522,7 @@ services:
     secrets:
       - postgres_password
       - internal_service_token
+      - mailstore_encryption_key
     depends_on:
       postgres:
         condition: service_healthy
@@ -1431,6 +1547,27 @@ services:
 
   enterprise:
     image: ghcr.io/sbelakho2/apexmail/enterprise:latest
+    # The base entrypoint (load-secret-env.sh) bridges DB/Redis/JWT secrets;
+    # this override keeps those pairs and adds the SSO encryption key. The
+    # /sso/configure path encrypts tenant OIDC client secrets with it and
+    # fails closed with a 503 when it is empty (enterprise routes.rs).
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/load-secret-env.sh
+      - DB_PASSWORD
+      - DB_PASSWORD_FILE
+      - REDIS_PASSWORD
+      - REDIS_PASSWORD_FILE
+      - JWT_PUBLIC_KEY_PEM
+      - JWT_PUBLIC_KEY_PEM_FILE
+      - JWT_PRIVATE_KEY_PEM
+      - JWT_PRIVATE_KEY_PEM_FILE
+      - SSO_ENCRYPTION_KEY
+      - SSO_ENCRYPTION_KEY_FILE
+      - --
+      - /usr/bin/tini
+      - --
+      - /usr/local/bin/enterprise-server
     environment:
       RUST_LOG: info
       # Production bind: kept explicit here so the container port can never
@@ -1452,6 +1589,12 @@ services:
       # Production validation refuses to start without this key (log-stream
       # destination credentials are encrypted at rest with it).
       LOG_STREAM_ENCRYPTION_KEY: ${LOG_STREAM_ENCRYPTION_KEY:?LOG_STREAM_ENCRYPTION_KEY must be set in production}
+      # SAML service-provider entity ID handed to tenant IdPs (enterprise
+      # config.rs reads SAML_ENTITY_ID; the default is the canonical URN).
+      SAML_ENTITY_ID: ${SAML_ENTITY_ID:-urn:apexmail:enterprise}
+      # DB pool sizing (enterprise config.rs). Base compose forwards it only
+      # for the dev stack; the prod overlay pins the production value.
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-50}
       # Enterprise SSO mints the canonical `am_session` console cookie with the
       # SHARED RS256 key (dogfood F8/report F5: the api-server already mounts
       # this secret; without it the SSO callback logged "JWT_PRIVATE_KEY_PEM is
@@ -1459,11 +1602,16 @@ services:
       # was dead). The same key as the api-server's, mounted read-only.
       JWT_PRIVATE_KEY_PEM_FILE: /run/secrets/jwt_private_key_pem
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
+      # Required before any tenant configures an OIDC client secret:
+      # /sso/configure encrypts it at rest and answers 503 when this is empty.
+      SSO_ENCRYPTION_KEY: ""
+      SSO_ENCRYPTION_KEY_FILE: /run/secrets/sso_encryption_key
     secrets:
       - postgres_password
       - redis_password
       - jwt_private_key_pem
       - jwt_public_key_pem
+      - sso_encryption_key
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       # F12 (audit): GET /health (enterprise routes.rs) instead of a bare TCP
@@ -1488,9 +1636,23 @@ services:
   worker:
     image: ghcr.io/sbelakho2/apexmail/worker:latest
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "worker"]
+    # The shared wrapper bridges the worker's Docker secrets. MFA/webhook
+    # secrets are decrypted at execution with MFA_SECRET_ENCRYPTION_KEY (the
+    # worker's webhook processor calls secret_at_rest::decrypt_at_rest), so
+    # load-secret-env.sh bridges that key first — the wrapper has no mapping
+    # for it.
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/load-secret-env.sh
+      - MFA_SECRET_ENCRYPTION_KEY
+      - MFA_SECRET_ENCRYPTION_KEY_FILE
+      - --
+      - /bin/sh
+      - /opt/apexmail/entrypoint-wrapper.sh
+      - worker
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -1549,6 +1711,19 @@ services:
       TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
       TRACKING_SECRET_KEY: ""
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
+      # Public tracking host used by the link rewriter (worker-processors
+      # common/config.rs prefers TRACKING_PUBLIC_HOST, then the legacy
+      # TRACKING_BASE_URL). nginx serves ONLY track.apexmail.ee; the old
+      # t.apexmail.ee fallback produced rewrite targets that answer 421.
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production (https://track.apexmail.ee)}
+      TRACKING_PUBLIC_HOST: ${TRACKING_PUBLIC_HOST:-${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production (https://track.apexmail.ee)}}
+      # ── AI reply classifier (layer 2 of the reply ladder) ─────────────────
+      # Opt-in only: explicit false here (the dev base defaults it on) so a
+      # production upgrade never starts shipping inbound replies to the AI
+      # service by default. The .env example turns it on for the managed
+      # baseline; failures still degrade to the audited Unknown/0.0 fallback.
+      WORKER_REPLY_CLASSIFIER_AI_ENABLED: ${WORKER_REPLY_CLASSIFIER_AI_ENABLED:-false}
+      WORKER_REPLY_CLASSIFIER_AI_URL: ${WORKER_REPLY_CLASSIFIER_AI_URL:-http://ai-service:3012}
       # ── Outbound DLP gate (crates/worker-processors email/dlp.rs) ─────────
       # Pre-send Data-Loss-Prevention scan on every prepared per-recipient
       # copy BEFORE the durable acceptance reservation. DEFAULT OFF (dev
@@ -1597,6 +1772,10 @@ services:
       # production without it). Same key api-server/billing/compliance use.
       AUDIT_SIGNING_KEY: ""
       AUDIT_SIGNING_KEY_FILE: /run/secrets/audit_signing_key
+      # At-rest key for stored webhook signing secrets (same key as
+      # api-server). Blanked so the load-secret-env.sh bridge owns it.
+      MFA_SECRET_ENCRYPTION_KEY: ""
+      MFA_SECRET_ENCRYPTION_KEY_FILE: /run/secrets/mfa_secret_encryption_key
     secrets:
       - postgres_password
       - redis_password
@@ -1610,6 +1789,7 @@ services:
       - verp_hmac_secret
       - audit_signing_key
       - receipt_signing_key
+      - mfa_secret_encryption_key
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       # F12 (audit): the worker serves GET /health on the SAME injected
@@ -1637,6 +1817,11 @@ services:
   # BILLING SERVICE (plans, metering, invoices, Adyen webhooks)
   # ===========================================================================
   billing-service:
+    # The base service is profile-gated (dev/full-stack) so a bare dev stack
+    # stays small; production ALWAYS deploys billing (Adyen webhooks, invoice
+    # rendering, overage sweep and the opt-in auto-pay retry loop). !override
+    # clears the inherited profiles so `docker compose config`/`up` include it.
+    profiles: !override []
     image: ghcr.io/sbelakho2/apexmail/billing-service:latest
     restart: unless-stopped
     # Same wrapper pattern as api-server/worker: Docker secrets (_FILE) are
@@ -1684,10 +1869,22 @@ services:
       # paths need the merchant account and a LIVE base URL too.
       ADYEN_MERCHANT_ACCOUNT: ${ADYEN_MERCHANT_ACCOUNT:?ADYEN_MERCHANT_ACCOUNT is required in production}
       ADYEN_API_BASE_URL: ${ADYEN_API_BASE_URL:?ADYEN_API_BASE_URL is required in production (https://checkout-live.adyen.com/v71)}
+      # FINANCIALLY SENSITIVE (crates/billing-service/src/maintenance.rs):
+      # when true, the maintenance loop retries OPEN invoices through Adyen
+      # auto-pay — it can move real money without an operator click. Explicit
+      # opt-in only; the production default is false. The billing-service
+      # reads this var directly (no secret).
+      AUTO_PAY_OPEN_INVOICES: ${AUTO_PAY_OPEN_INVOICES:-false}
       # Dedicated-IP auto-provisioning calls the api-server internal API
       # (prod api-server binds :3000 per this overlay).
       API_BASE_URL: ${BILLING_API_BASE_URL:-http://api-server:3000}
       PDF_RENDERER_URL: http://pdf-renderer:3004
+      # ── Overage policy (billing-service overage.rs) ───────────────────────
+      # Paid plans may send into an overage allowance; 0 = hard stop at the
+      # plan limit. The daily sweep can be disabled independently (enforcement
+      # is unaffected).
+      OVERAGE_ALLOWANCE_PERCENT: ${OVERAGE_ALLOWANCE_PERCENT:-100}
+      OVERAGE_INVOICING_ENABLED: ${OVERAGE_INVOICING_ENABLED:-true}
     secrets:
       - postgres_password
       - redis_password
@@ -2143,6 +2340,19 @@ secrets:
     file: ${PROD_ADYEN_API_KEY_FILE:?PROD_ADYEN_API_KEY_FILE is required in production}
   adyen_hmac_key:
     file: ${PROD_ADYEN_HMAC_KEY_FILE:?PROD_ADYEN_HMAC_KEY_FILE is required in production}
+  # ── Capability encryption keys (F1 prod wiring) ───────────────────────────
+  # At-rest key for MFA TOTP seeds + webhook signing secrets (api-server and
+  # worker). REQUIRED: under ENVIRONMENT=production secret_at_rest refuses to
+  # store plaintext without it. 32 bytes as exactly 64 hex chars.
+  mfa_secret_encryption_key:
+    file: ${PROD_MFA_SECRET_ENCRYPTION_KEY_FILE:?PROD_MFA_SECRET_ENCRYPTION_KEY_FILE is required in production}
+  # Enterprise SSO OIDC client-secret encryption key (/sso/configure).
+  sso_encryption_key:
+    file: ${PROD_SSO_ENCRYPTION_KEY_FILE:?PROD_SSO_ENCRYPTION_KEY_FILE is required in production}
+  # Mailstore message-body encryption-at-rest key (>= 32 bytes; the service
+  # entrypoint copies it to a 0600 file because Docker secret mounts are 0444).
+  mailstore_encryption_key:
+    file: ${PROD_MAILSTORE_ENCRYPTION_KEY_FILE:?PROD_MAILSTORE_ENCRYPTION_KEY_FILE is required in production}
   # Audit G — AWS SES credentials for api-server + worker.
   aws_access_key_id:
     file: ${PROD_AWS_ACCESS_KEY_ID_FILE:?PROD_AWS_ACCESS_KEY_ID_FILE is required in production}

@@ -633,6 +633,26 @@ impl MessageStorage {
     /// DI-006: Check for duplicate message_id within the same mailbox before inserting.
     ///         The UNIQUE index idx_mail_messages_dedup provides DB-level enforcement.
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
+        self.store_message_inner(message, false).await
+    }
+
+    /// Inbound mailbox persistence (`store_message` plus the journal copy).
+    ///
+    /// The journal row is written in the SAME transaction as the mailbox
+    /// insert: a journal failure rolls the mailbox copy back, so a paid
+    /// "archive + journaling" tenant can never accept mail without its
+    /// legal copy. Only an `inserted == true` store journals — an SMTP
+    /// redelivery that dedups onto the existing mailbox row already has the
+    /// copy from the first delivery.
+    pub async fn store_inbound_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
+        self.store_message_inner(message, true).await
+    }
+
+    async fn store_message_inner(
+        &self,
+        message: &StoredMessage,
+        journal_inbound: bool,
+    ) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
         let (id, uid, inserted) = self
             .insert_message_tx(&mut tx, message, &PendingBatchUsage::default())
@@ -644,6 +664,18 @@ impl MessageStorage {
                 .await?;
             self.update_account_usage_tx(&mut tx, &message.account_id, message.raw_size)
                 .await?;
+
+            // Migration 264: the inbox journal copy. The gate (recipient
+            // mailbox `archive_enabled` OR the tenant's active Mailboxes
+            // contract) and the insert both run inside this transaction; a
+            // gateway/insert failure aborts the mailbox insert too.
+            if journal_inbound {
+                if let Some(entry) =
+                    crate::journal::inbound_journal_entry_tx(&mut tx, message).await?
+                {
+                    crate::journal::insert_journal_entry_tx(&mut tx, &entry).await?;
+                }
+            }
         }
         tx.commit().await?;
         Ok((id, uid))

@@ -174,6 +174,11 @@ def main(argv: list[str]) -> int:
         content_type = content_type_for(path, args.format)
 
     url = build_url(args)
+    # urllib would accept file://; an operator-supplied endpoint must be http(s).
+    _scheme = urllib.parse.urlsplit(url).scheme
+    if _scheme not in ("http", "https"):
+        print(f"error: --url must be http(s), got {_scheme or '<none>'}", file=sys.stderr)
+        return 2
     request = urllib.request.Request(
         url,
         data=body,
@@ -181,7 +186,7 @@ def main(argv: list[str]) -> int:
         headers={"X-API-Key": args.api_key, "Content-Type": content_type},
     )
     try:
-        with urllib.request.urlopen(request, timeout=300) as response:
+        with urllib.request.urlopen(request, timeout=300) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             report = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")

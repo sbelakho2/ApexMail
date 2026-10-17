@@ -8,8 +8,8 @@
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
-use std::collections::HashMap;
+use sqlx::{PgPool, Postgres, QueryBuilder};
+use std::collections::{BTreeMap, HashMap};
 use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
@@ -40,6 +40,24 @@ fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
 const AUDIT_ENTRY_COLUMNS: &str = "id, tenant_id, user_id, session_id, action, resource, \
        resource_id, details, ip_address, user_agent, outcome, error_message, \
        timestamp, hash, previous_hash, signature";
+
+/// Rows per multi-row `audit_logs` INSERT. The insert binds 16 columns per
+/// row; 4,000 rows = 64,000 binds stays below PostgreSQL's 65,535-parameter
+/// ceiling.
+const AUDIT_BATCH_INSERT_CHUNK_ROWS: usize = 4_000;
+
+/// One entry for [`AuditLogger::log_batch`]. Same shape `log()` takes, but
+/// owned so a caller can build a whole consent-expiry batch up front.
+#[derive(Debug, Clone)]
+pub struct AuditBatchEntry {
+    pub action: AuditAction,
+    pub resource: AuditResource,
+    pub resource_id: Option<String>,
+    pub details: serde_json::Value,
+    pub outcome: AuditOutcome,
+    pub error_message: Option<String>,
+    pub context: LogContext,
+}
 
 pub struct AuditLogger {
     db: PgPool,
@@ -212,12 +230,16 @@ impl AuditLogger {
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("DB error: {e}"))?;
+        #[cfg(test)]
+        query_count::bump("audit.db.lock");
 
         // Authoritative chain head (live ∪ archive, F12) under the lock.
         // The VALIDATED tenant is used everywhere below — never the raw
         // context value (a padded value must not fork the chain key).
         let head: Option<(String, DateTime<Utc>)> =
             Self::chain_head(&mut tx, Some(tenant_id)).await?;
+        #[cfg(test)]
+        query_count::bump("audit.db.head");
         let previous_hash = head.as_ref().map(|(hash, _)| hash.clone());
 
         // Microsecond-precision, strictly-increasing per chain (see doc above).
@@ -277,6 +299,171 @@ impl AuditLogger {
         }
 
         Ok(entry)
+    }
+
+    /// Append a whole batch of audit entries with a BOUNDED number of
+    /// statements per tenant (P2): one advisory lock, one chain-head read
+    /// and one multi-row INSERT (chunked at
+    /// [`AUDIT_BATCH_INSERT_CHUNK_ROWS`]) — never one transaction/lock/head
+    /// read/INSERT per entry.
+    ///
+    /// Semantics are identical to calling [`Self::log`] once per entry, in
+    /// input order:
+    /// * entries are grouped by validated tenant and locked in sorted tenant
+    ///   order (no lock-order inversion between concurrent batches);
+    /// * the chain head is read ONCE per tenant after the lock, then hashes
+    ///   and HMAC signatures are chained in memory;
+    /// * timestamps stay microsecond-truncated and strictly increasing per
+    ///   chain, so `verify_chain`'s timestamp ordering can never disagree
+    ///   with the `previous_hash` links;
+    /// * ONE transaction covers every tenant's inserts (a failure rolls the
+    ///   whole batch back — the caller's best-effort audit policy decides
+    ///   what to do, exactly as with a failed single append).
+    ///
+    /// Returns the persisted entries in INPUT order. An empty batch is a
+    /// strict no-op (no transaction, no locks, no database access).
+    pub async fn log_batch(
+        &self,
+        entries: &[AuditBatchEntry],
+    ) -> Result<Vec<AuditLogEntry>, String> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // P1-SECURITY: every entry must be attributed; a missing/blank
+        // tenant fails the whole batch closed (same rule as `log`).
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let tenant_id = entry
+                .context
+                .tenant_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    "audit entries require a tenant context: per-tenant hash chains refuse unattributed appends".to_string()
+                })?;
+            groups.entry(tenant_id.to_string()).or_default().push(index);
+        }
+
+        // In-process per-chain locks, acquired in sorted tenant order.
+        let mut chain_locks = Vec::with_capacity(groups.len());
+        for tenant_id in groups.keys() {
+            chain_locks.push(self.chain_lock(tenant_id).await);
+        }
+        let mut chain_guards = Vec::with_capacity(chain_locks.len());
+        for lock in &chain_locks {
+            chain_guards.push(lock.lock().await);
+        }
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+        let mut output: Vec<Option<AuditLogEntry>> = vec![None; entries.len()];
+        let mut final_hashes: HashMap<String, String> = HashMap::new();
+
+        for (tenant_id, indices) in &groups {
+            // ONE cross-process advisory lock per tenant for the whole batch.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(format!("audit-chain:{tenant_id}"))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?;
+            #[cfg(test)]
+            query_count::bump("audit.db.lock");
+
+            // ONE authoritative chain-head read for the whole tenant group.
+            let head = Self::chain_head(&mut tx, Some(tenant_id)).await?;
+            #[cfg(test)]
+            query_count::bump("audit.db.head");
+            let mut previous_hash = head.as_ref().map(|(hash, _)| hash.clone());
+            let mut previous_timestamp = head.as_ref().map(|(_, timestamp)| *timestamp);
+
+            let mut tenant_entries: Vec<AuditLogEntry> = Vec::with_capacity(indices.len());
+            for &index in indices {
+                let input = &entries[index];
+                let id = Uuid::new_v4().to_string();
+
+                // Microsecond-truncated and strictly increasing per chain,
+                // exactly like `log()`.
+                let mut timestamp = truncate_to_micros(Utc::now());
+                if let Some(previous) = previous_timestamp {
+                    if timestamp <= previous {
+                        timestamp = previous + chrono::Duration::microseconds(1);
+                    }
+                }
+
+                let hash = self.compute_hash(
+                    &id,
+                    &Some(tenant_id.clone()),
+                    &input.context.user_id,
+                    &input.context.session_id,
+                    &input.action,
+                    &input.resource,
+                    &input.resource_id,
+                    &input.details,
+                    &input.context.ip_address,
+                    &input.context.user_agent,
+                    &input.outcome,
+                    &input.error_message,
+                    &timestamp,
+                    &previous_hash,
+                );
+                let signature = self.compute_signature(previous_hash.as_deref(), &hash)?;
+
+                let entry = AuditLogEntry {
+                    id,
+                    tenant_id: Some(tenant_id.clone()),
+                    user_id: input.context.user_id.clone(),
+                    session_id: input.context.session_id.clone(),
+                    action: input.action,
+                    resource: input.resource,
+                    resource_id: input.resource_id.clone(),
+                    details: input.details.clone(),
+                    ip_address: input.context.ip_address.clone(),
+                    user_agent: input.context.user_agent.clone(),
+                    outcome: input.outcome,
+                    error_message: input.error_message.clone(),
+                    timestamp,
+                    hash: hash.clone(),
+                    previous_hash: previous_hash.clone(),
+                    signature,
+                };
+
+                previous_hash = Some(hash);
+                previous_timestamp = Some(timestamp);
+                output[index] = Some(entry.clone());
+                tenant_entries.push(entry);
+            }
+
+            // ONE (chunked) multi-row INSERT per tenant.
+            for chunk in tenant_entries.chunks(AUDIT_BATCH_INSERT_CHUNK_ROWS) {
+                #[cfg(test)]
+                query_count::bump("audit.db.insert");
+                Self::persist_entries(&mut tx, chunk).await?;
+            }
+
+            if let Some(hash) = previous_hash {
+                final_hashes.insert(tenant_id.clone(), hash);
+            }
+        }
+
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
+
+        // Diagnostic mirror update, once per chain.
+        {
+            let mut map = self.last_hashes.write().await;
+            for (tenant_id, hash) in final_hashes {
+                map.insert(tenant_id, hash);
+            }
+        }
+
+        Ok(output
+            .into_iter()
+            .map(|entry| entry.expect("log_batch fills every validated input index"))
+            .collect())
     }
 
     /// The current chain head `(hash, timestamp)` for a tenant (or the
@@ -1142,6 +1329,8 @@ impl AuditLogger {
         tx: &mut sqlx::PgConnection,
         entry: &AuditLogEntry,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        query_count::bump("audit.db.insert");
         sqlx::query(
             "INSERT INTO audit_logs
                (id, tenant_id, user_id, session_id, action, resource, resource_id,
@@ -1169,6 +1358,44 @@ impl AuditLogger {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
+        Ok(())
+    }
+
+    /// Persist a whole chunk of entries in ONE multi-row INSERT, inside the
+    /// caller's transaction (the batch counterpart of [`Self::persist_entry`]).
+    async fn persist_entries(
+        tx: &mut sqlx::PgConnection,
+        entries: &[AuditLogEntry],
+    ) -> Result<(), String> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO audit_logs
+               (id, tenant_id, user_id, session_id, action, resource, resource_id,
+                details, ip_address, user_agent, outcome, error_message,
+                timestamp, hash, previous_hash, signature) ",
+        );
+        builder.push_values(entries, |mut row, entry| {
+            row.push_bind(&entry.id)
+                .push_bind(&entry.tenant_id)
+                .push_bind(&entry.user_id)
+                .push_bind(&entry.session_id)
+                .push_bind(entry.action.to_string())
+                .push_bind(entry.resource.to_string())
+                .push_bind(&entry.resource_id)
+                .push_bind(&entry.details)
+                .push_bind(&entry.ip_address)
+                .push_bind(&entry.user_agent)
+                .push_bind(entry.outcome.to_string())
+                .push_bind(&entry.error_message)
+                .push_bind(entry.timestamp)
+                .push_bind(&entry.hash)
+                .push_bind(&entry.previous_hash)
+                .push_bind(&entry.signature);
+        });
+        builder
+            .build()
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
         Ok(())
     }
 }
@@ -1344,6 +1571,31 @@ impl AuditRow {
             previous_hash: self.previous_hash,
             signature: self.signature,
         })
+    }
+}
+
+/// Test-only, thread-local counter of audit-log DB statements. Same contract
+/// as billing-service's `test_support::query_count`: one `#[tokio::test]`
+/// (current-thread runtime) per label namespace, compiled away in production.
+#[cfg(test)]
+pub(crate) mod query_count {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static COUNTS: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
+    }
+
+    pub(crate) fn bump(label: &'static str) {
+        COUNTS.with(|counts| *counts.borrow_mut().entry(label).or_insert(0) += 1);
+    }
+
+    pub(crate) fn reset() {
+        COUNTS.with(|counts| counts.borrow_mut().clear());
+    }
+
+    pub(crate) fn count(label: &'static str) -> usize {
+        COUNTS.with(|counts| counts.borrow().get(label).copied().unwrap_or(0))
     }
 }
 
@@ -2858,6 +3110,128 @@ mod db_tests {
                 .contains("Signature mismatch"),
             "{verdict:?}"
         );
+        pool.close().await;
+    }
+
+    // ── Batched append (P2) ─────────────────────────────────────────
+
+    fn batch_entry(tenant: &str, resource_id: &str) -> AuditBatchEntry {
+        AuditBatchEntry {
+            action: AuditAction::Update,
+            resource: AuditResource::Consent,
+            resource_id: Some(resource_id.to_string()),
+            details: json!({ "resource_id": resource_id }),
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            context: ctx(tenant),
+        }
+    }
+
+    /// `log_batch` must take ONE advisory lock, read ONE chain head and issue
+    /// ONE (chunked) multi-row INSERT PER TENANT — constant in the number of
+    /// entries — and every per-tenant chain must re-derive.
+    ///
+    /// Fail-before: per-entry `log()` -> (10 entries, 2 tenants) costs
+    /// (10, 10, 10), not (2, 2, 2).
+    #[tokio::test]
+    async fn log_batch_is_constant_per_tenant_and_chains_verify() {
+        let Some((pool, logger)) = logger("batch").await else {
+            return;
+        };
+        let tenant_a = test_support::unique_tenant();
+        let tenant_b = test_support::unique_tenant();
+
+        let mut entries = Vec::new();
+        for index in 0..5 {
+            entries.push(batch_entry(&tenant_a, &format!("a-{index}")));
+            entries.push(batch_entry(&tenant_b, &format!("b-{index}")));
+        }
+
+        query_count::reset();
+        let written = logger.log_batch(&entries).await.expect("log_batch");
+        assert_eq!(written.len(), 10);
+        assert_eq!(
+            (
+                query_count::count("audit.db.lock"),
+                query_count::count("audit.db.head"),
+                query_count::count("audit.db.insert"),
+            ),
+            (2, 2, 2),
+            "one lock/head/insert per tenant, not per entry"
+        );
+
+        // Output order matches input order (chain order is per tenant).
+        let returned: Vec<&str> = written
+            .iter()
+            .map(|entry| entry.resource_id.as_deref().expect("resource id"))
+            .collect();
+        let expected: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry.resource_id.as_deref().expect("resource id"))
+            .collect();
+        assert_eq!(returned, expected);
+
+        for tenant in [&tenant_a, &tenant_b] {
+            let validation = logger
+                .verify_chain(Some(tenant), None, None)
+                .await
+                .expect("verify chain");
+            assert!(validation.valid, "{tenant}: {validation:?}");
+            assert_eq!(validation.entries_checked, 5);
+        }
+
+        // 20 entries in ONE tenant: exactly the same statement count as 5
+        // (the chunk size is far above the fixture).
+        let tenant_c = test_support::unique_tenant();
+        let many: Vec<AuditBatchEntry> = (0..20)
+            .map(|index| batch_entry(&tenant_c, &format!("c-{index}")))
+            .collect();
+        query_count::reset();
+        let written = logger.log_batch(&many).await.expect("large batch");
+        assert_eq!(written.len(), 20);
+        assert_eq!(
+            (
+                query_count::count("audit.db.lock"),
+                query_count::count("audit.db.head"),
+                query_count::count("audit.db.insert"),
+            ),
+            (1, 1, 1),
+            "audit statement count is constant in the entry count"
+        );
+        let validation = logger
+            .verify_chain(Some(&tenant_c), None, None)
+            .await
+            .expect("verify large chain");
+        assert!(validation.valid, "{validation:?}");
+        assert_eq!(validation.entries_checked, 20);
+
+        pool.close().await;
+    }
+
+    /// An empty batch is a strict no-op: no transaction, locks, head reads or
+    /// INSERTs.
+    #[tokio::test]
+    async fn log_batch_empty_is_a_strict_noop() {
+        let Some((pool, logger)) = logger("batch_empty").await else {
+            return;
+        };
+        query_count::reset();
+        let written = logger.log_batch(&[]).await.expect("empty batch");
+        assert!(written.is_empty());
+        assert_eq!(
+            (
+                query_count::count("audit.db.lock"),
+                query_count::count("audit.db.head"),
+                query_count::count("audit.db.insert"),
+            ),
+            (0, 0, 0),
+            "an empty batch must not touch the database"
+        );
+        let audited: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .expect("audit rows");
+        assert_eq!(audited, 0);
         pool.close().await;
     }
 }
